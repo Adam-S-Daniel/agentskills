@@ -21,6 +21,24 @@ browser's authenticated session. No separate API key required — the
 `javascript_tool` runs in the browser context which already holds the
 session cookies.
 
+## Setup (one-time)
+
+Register the post-push reminder hook (requires git 2.54+):
+
+```bash
+bash ~/repos/agentskills/skills/sync-skills/setup.sh
+```
+
+On Windows (Git Bash / WSL):
+```bash
+bash "$USERPROFILE/repos/agentskills/skills/sync-skills/setup.sh"
+```
+
+This registers a global config-based hook so every push to any agentskills
+repo reminds you to run `sync-skills` if skill files changed.
+
+---
+
 ## Quick-start checklist
 
 1. Ensure a claude.ai tab is open in Chrome (any page will do).
