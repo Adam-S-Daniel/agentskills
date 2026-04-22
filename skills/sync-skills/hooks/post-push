@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# post-push hook: remind to sync skills if any skills/ folders changed.
+
+changed_skills=$(git diff --name-only HEAD@{push} HEAD 2>/dev/null \
+  | grep '^skills/' \
+  | awk -F/ '{print $2}' \
+  | sort -u)
+
+if [[ -n "$changed_skills" ]]; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  Skills changed — run 'sync-skills' in Claude to push to claude.ai"
+  echo "  Changed: $(echo "$changed_skills" | tr '\n' ' ')"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+fi
