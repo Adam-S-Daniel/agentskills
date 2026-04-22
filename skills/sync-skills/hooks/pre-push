@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# pre-push hook: remind to sync skills if any skills/ folders are being pushed.
+#
+# git pre-push hook interface:
+#   Receives on stdin one line per ref being pushed:
+#     <local-ref> <local-sha> <remote-ref> <remote-sha>
+#   A remote-sha of 40 zeros means the branch is new on the remote.
+#
+# This hook never blocks the push (always exits 0); it only prints a reminder.
+
+zero="0000000000000000000000000000000000000000"
+changed=""
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Skip deletions (local_sha all zeros).
+  [[ -z "${local_sha:-}" || "$local_sha" = "$zero" ]] && continue
+
+  if [[ "$remote_sha" = "$zero" ]]; then
+    # New branch on remote: list files in the tip commit.
+    new=$(git show --name-only --pretty=format: "$local_sha" 2>/dev/null \
+      | grep '^skills/' | awk -F/ '{print $2}')
+  else
+    # Existing branch: diff the commits being pushed.
+    new=$(git diff --name-only "$remote_sha..$local_sha" 2>/dev/null \
+      | grep '^skills/' | awk -F/ '{print $2}')
+  fi
+  changed+=$'\n'"$new"
+done
+
+changed=$(printf '%s' "$changed" | sort -u | sed '/^$/d')
+
+if [[ -n "$changed" ]]; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  Skills changed — run 'sync-skills' in Claude to push to claude.ai"
+  echo "  Changed: $(echo "$changed" | tr '\n' ' ')"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+fi
+
+exit 0

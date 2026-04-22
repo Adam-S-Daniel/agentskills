@@ -34,8 +34,11 @@ On Windows (Git Bash / WSL):
 bash "$USERPROFILE/repos/agentskills/skills/sync-skills/setup.sh"
 ```
 
-This registers a global config-based hook so every push to any agentskills
-repo reminds you to run `sync-skills` if skill files changed.
+This registers a global config-based `pre-push` hook so every push from
+any agentskills repo reminds you to run `sync-skills` if skill files
+are being pushed. (Note: git has no native `post-push` event, so the
+reminder fires just before the push — early enough to catch you before
+you switch contexts.)
 
 ---
 
