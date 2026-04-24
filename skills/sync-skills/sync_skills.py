@@ -123,13 +123,35 @@ def skill_hash(skill_path: Path) -> str:
     return h.hexdigest()[:16]
 
 
+_SKIP_DIRS = frozenset({"__pycache__", ".pytest_cache", ".git", ".venv", "node_modules"})
+_SKIP_EXTS = frozenset({".pyc", ".pyo", ".b64"})
+
+
+def _include_in_zip(path: Path, skill_root: Path) -> bool:
+    """Return True if this file should be included in the skill ZIP."""
+    rel = path.relative_to(skill_root)
+    for part in rel.parts:
+        if part in _SKIP_DIRS:
+            return False
+    if path.suffix in _SKIP_EXTS:
+        return False
+    return True
+
+
 def zip_skill(skill_path: Path) -> bytes:
-    """Return in-memory ZIP bytes; paths are relative (SKILL.md at root)."""
+    """Return in-memory ZIP bytes; paths are relative (SKILL.md at root).
+
+    Uses ZIP_STORED (no compression) for maximum server compatibility.
+    Path separators are normalised to forward-slashes as required by the
+    ZIP specification.  Build artefacts (``__pycache__``, ``*.pyc``, etc.)
+    are excluded.
+    """
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
         for f in sorted(skill_path.rglob("*")):
-            if f.is_file():
-                arcname = str(f.relative_to(skill_path))
+            if f.is_file() and _include_in_zip(f, skill_path):
+                # Ensure forward slashes regardless of OS
+                arcname = f.relative_to(skill_path).as_posix()
                 zf.write(str(f), arcname)
     return buf.getvalue()
 
