@@ -31,21 +31,22 @@ The script:
 1. Writes a timestamped backup of each file next to the original (`YYYYMMDD-HHMMSS-ET-settings.json.bak`). Timestamp is US/Eastern.
 2. Loads both as JSON (PowerShell 7+ `ConvertFrom-Json -AsHashtable`).
 3. Applies per-key merge rules (below).
-4. Re-serializes each side, **preserving the original newline style (CRLF vs LF) and UTF-8 BOM presence** of that file, and any trailing newline.
+4. Emits top-level and nested keys in a canonical order (known keys first, unknown keys alphabetical), and sorts `permissions.allow`/`deny` and `spinnerVerbs.verbs` ordinally — so both files come out byte-for-byte identical aside from per-file ignored keys.
+5. Re-serializes each side, **preserving the original newline style (CRLF vs LF) and UTF-8 BOM presence** of that file, and any trailing newline.
 
 ## Merge rules
 
 | Key | Rule |
 | --- | --- |
-| `permissions.allow` | Union of both sides' arrays (deduped). |
-| `permissions.deny` | Union of both sides' arrays (deduped). |
+| `permissions.allow` | Union of both sides' arrays (deduped, sorted ordinally). |
+| `permissions.deny` | Union of both sides' arrays (deduped, sorted ordinally). |
 | `permissions.defaultMode` | More-recently-modified side wins, or only-existing side wins — **prompt** for confirmation. |
 | `permissions.*` (other sub-keys) | **Prompt**. |
 | `statusLine` | Ignored — each file keeps its own value. |
 | `defaultShell` | Ignored — each file keeps its own value. |
 | `autoDreamEnabled` | Newer-wins, **prompt**. |
 | `showMessageTimestamps` | Newer-wins, no prompt. |
-| `spinnerVerbs.verbs` | Union of both sides' arrays (deduped). |
+| `spinnerVerbs.verbs` | Union of both sides' arrays (deduped, sorted ordinally). |
 | `spinnerVerbs.*` (other sub-keys) | **Prompt**. |
 | `effortLevel` | Newer-wins, **prompt**. |
 | `tui` | Newer-wins, **prompt**. |
