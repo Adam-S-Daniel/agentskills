@@ -220,7 +220,55 @@ function Get-UnionArray {
             }
         }
     }
-    return ,@($out.ToArray())
+    $arr = $out.ToArray()
+    # If every item is a string, sort ordinally so the two files get the same
+    # array order regardless of which side contributed which items.
+    if ($arr.Count -gt 1) {
+        $allStrings = $true
+        foreach ($x in $arr) { if ($x -isnot [string]) { $allStrings = $false; break } }
+        if ($allStrings) {
+            $typed = [string[]]$arr
+            [Array]::Sort($typed, [System.StringComparer]::Ordinal)
+            return ,@($typed)
+        }
+    }
+    return ,@($arr)
+}
+
+# Canonical key orders. Keys listed here are emitted first, in this order;
+# any unlisted keys fall through and are emitted alphabetically after.
+$script:CanonicalTopOrder = @(
+    'permissions',
+    'model',
+    'theme',
+    'tui',
+    'effortLevel',
+    'verbose',
+    'autoDreamEnabled',
+    'showMessageTimestamps',
+    'skipDangerousModePermissionPrompt',
+    'remoteControlAtStartup',
+    'agentPushNotifEnabled',
+    'statusLine',
+    'defaultShell',
+    'spinnerVerbs',
+    'extraKnownMarketplaces'
+)
+$script:CanonicalPermissionsOrder = @('allow','deny','defaultMode')
+$script:CanonicalSpinnerVerbsOrder = @('mode','verbs')
+
+function Sort-DictByCanonicalOrder {
+    param(
+        [Parameter(Mandatory)]$Dict,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$CanonicalOrder
+    )
+    $out = [ordered]@{}
+    foreach ($k in $CanonicalOrder) {
+        if ($Dict.Contains($k)) { $out[$k] = $Dict[$k] }
+    }
+    $remaining = @($Dict.Keys | Where-Object { $CanonicalOrder -notcontains $_ } | Sort-Object -Culture ([cultureinfo]::InvariantCulture))
+    foreach ($k in $remaining) { $out[$k] = $Dict[$k] }
+    return $out
 }
 
 function Resolve-ScalarConflict {
@@ -376,11 +424,13 @@ foreach ($key in $allKeys) {
             }
             else {
                 # Everything else under permissions (incl. defaultMode) -> prompt
+                $wpHas = $wp.Contains($pk)
+                $lpHas = $lp.Contains($pk)
+                $wpVal = if ($wpHas) { $wp[$pk] } else { $null }
+                $lpVal = if ($lpHas) { $lp[$pk] } else { $null }
                 $r = Resolve-ScalarConflict -KeyPath "permissions.$pk" `
-                        -WindowsValue (if ($wp.Contains($pk)) { $wp[$pk] } else { $null }) `
-                        -WindowsHasKey ($wp.Contains($pk)) `
-                        -WslValue (if ($lp.Contains($pk)) { $lp[$pk] } else { $null }) `
-                        -WslHasKey ($lp.Contains($pk)) `
+                        -WindowsValue $wpVal -WindowsHasKey $wpHas `
+                        -WslValue $lpVal -WslHasKey $lpHas `
                         -Policy 'prompt' -NewerSide $newerSide -NonInteractive:$AssumeYes
                 if ($r.Present -and -not ($r.PSObject.Properties.Name -contains 'Skip' -and $r.Skip)) {
                     $p[$pk] = $r.Value
@@ -388,7 +438,7 @@ foreach ($key in $allKeys) {
                 $log.Add("[permissions.$pk] -> $($r.Source)") | Out-Null
             }
         }
-        $merged[$key] = $p
+        $merged[$key] = Sort-DictByCanonicalOrder -Dict $p -CanonicalOrder $script:CanonicalPermissionsOrder
         continue
     }
 
@@ -408,11 +458,13 @@ foreach ($key in $allKeys) {
                 $log.Add("[spinnerVerbs.$sk] union (count=$(@($s[$sk]).Count))") | Out-Null
             }
             else {
+                $wsHas = $ws.Contains($sk)
+                $lsHas = $ls.Contains($sk)
+                $wsVal = if ($wsHas) { $ws[$sk] } else { $null }
+                $lsVal = if ($lsHas) { $ls[$sk] } else { $null }
                 $r = Resolve-ScalarConflict -KeyPath "spinnerVerbs.$sk" `
-                        -WindowsValue (if ($ws.Contains($sk)) { $ws[$sk] } else { $null }) `
-                        -WindowsHasKey ($ws.Contains($sk)) `
-                        -WslValue (if ($ls.Contains($sk)) { $ls[$sk] } else { $null }) `
-                        -WslHasKey ($ls.Contains($sk)) `
+                        -WindowsValue $wsVal -WindowsHasKey $wsHas `
+                        -WslValue $lsVal -WslHasKey $lsHas `
                         -Policy 'prompt' -NewerSide $newerSide -NonInteractive:$AssumeYes
                 if ($r.Present -and -not ($r.PSObject.Properties.Name -contains 'Skip' -and $r.Skip)) {
                     $s[$sk] = $r.Value
@@ -420,7 +472,7 @@ foreach ($key in $allKeys) {
                 $log.Add("[spinnerVerbs.$sk] -> $($r.Source)") | Out-Null
             }
         }
-        $merged[$key] = $s
+        $merged[$key] = Sort-DictByCanonicalOrder -Dict $s -CanonicalOrder $script:CanonicalSpinnerVerbsOrder
         continue
     }
 
@@ -472,8 +524,8 @@ function New-SideOutput {
     return $out
 }
 
-$winOut = New-SideOutput -Side 'windows'
-$wslOut = New-SideOutput -Side 'wsl'
+$winOut = Sort-DictByCanonicalOrder -Dict (New-SideOutput -Side 'windows') -CanonicalOrder $script:CanonicalTopOrder
+$wslOut = Sort-DictByCanonicalOrder -Dict (New-SideOutput -Side 'wsl')     -CanonicalOrder $script:CanonicalTopOrder
 
 Write-Host ""
 Write-Host "Merge decisions:" -ForegroundColor Cyan
