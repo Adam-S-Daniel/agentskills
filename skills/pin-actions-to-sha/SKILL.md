@@ -212,3 +212,40 @@ uses: {owner}/{repo}@{commit_sha} # {tag} ({release_date})
 
 After pinning workflow files, ensure the repository is configured to **require**
 SHA-pinned actions going forward. See the `github-actions-repo-settings` skill.
+
+### Dependabot interaction
+
+When the repo has Dependabot configured for the `github-actions` ecosystem with
+`cooldown.default-days: 7`, Dependabot will automatically bump SHA pins on the
+same 7-day cooling-off cadence this skill enforces manually. After a Dependabot
+PR lands:
+
+- The SHA and the version part of the trailing comment are updated correctly.
+- The `(YYYY-MM-DD)` release-date suffix is **not** refreshed — Dependabot
+  doesn't know the format. Re-run this skill on the affected files to pick up
+  the date drift.
+
+Drift is cosmetic: the SHA pin is still authoritative and the cooling-off check
+was already enforced by Dependabot's `cooldown` setting. Run this skill on a
+periodic basis (manual or `/schedule`d) rather than synchronously after every
+Dependabot bump.
+
+Example `dependabot.yml` snippet (paired with an auto-merge workflow that
+gates on the existing test matrix):
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+```
+
+Cooldown applies only to version updates — security advisories bypass it
+automatically.
