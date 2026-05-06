@@ -17,13 +17,13 @@ compatibility:
 # sync-skills
 
 Upload changed skill folders from local git repos to claude.ai using the
-browser's authenticated session. No separate API key required — the
+browser's authenticated session. No separate API key required - the
 `javascript_tool` runs in the browser context which already holds the
 session cookies.
 
 ## Setup (one-time)
 
-Register the post-push reminder hook (requires git 2.54+):
+Register the pre-push reminder hook (requires git 2.54+):
 
 ```bash
 bash ~/repos/agentskills/skills/sync-skills/setup.sh
@@ -37,7 +37,7 @@ bash "$USERPROFILE/repos/agentskills/skills/sync-skills/setup.sh"
 This registers a global config-based `pre-push` hook so every push from
 any agentskills repo reminds you to run `sync-skills` if skill files
 are being pushed. (Note: git has no native `post-push` event, so the
-reminder fires just before the push — early enough to catch you before
+reminder fires just before the push - early enough to catch you before
 you switch contexts.)
 
 ---
@@ -96,14 +96,18 @@ If `org_id_hint` is non-null, use it directly.
 Otherwise, retrieve it via `javascript_tool`:
 
 ```javascript
-// Returns an array of orgs; use the first active one
-const resp = await fetch('https://claude.ai/api/organizations', {credentials: 'include'});
-const orgs = await resp.json();
-return orgs.map(o => ({id: o.id, name: o.name}));
+// Returns an array of orgs; the upload-skill endpoint keys on UUID (o.uuid),
+// NOT the integer primary key (o.id). Always pick o.uuid.
+(async () => {
+  const resp = await fetch('https://claude.ai/api/organizations', {credentials: 'include'});
+  const orgs = await resp.json();
+  return orgs.map(o => ({uuid: o.uuid, name: o.name}));
+})()
 ```
 
-Pick the correct `org_id` from the list (usually only one). Confirm with
-the user if there are multiple.
+Pick the correct `uuid` from the list (usually only one) - that's the value
+to substitute for `ORG_ID` in step 3. Confirm with the user if there are
+multiple orgs.
 
 ---
 
@@ -112,36 +116,41 @@ the user if there are multiple.
 For each entry in `skills`, call `javascript_tool` with the following
 template. Substitute `ORG_ID`, `SKILL_NAME`, `OVERWRITE`, and `ZIP_B64`.
 
-- `OVERWRITE` = `"true"` when `is_update` is `true`, `"false"` otherwise.
+- `OVERWRITE` = `true` when `is_update` is `true`, `false` otherwise.
 
 ```javascript
 (async () => {
   const orgId   = "ORG_ID";
   const name    = "SKILL_NAME";
   const overwrite = OVERWRITE;   // true or false (boolean, not string)
-  const zipB64  = "ZIP_B64";    // full base64 string from the JSON
+  const zipB64  = "ZIP_B64";     // full base64 string from the JSON
 
   const url = `https://claude.ai/api/organizations/${orgId}/skills/upload-skill?overwrite=${overwrite}`;
 
-  // Decode base64 → Uint8Array → Blob
-  const binary  = atob(zipB64);
-  const bytes   = new Uint8Array(binary.length);
+  // Decode base64 -> Uint8Array -> Blob
+  const binary = atob(zipB64);
+  const bytes  = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const blob    = new Blob([bytes], {type: 'application/zip'});
+  const blob   = new Blob([bytes], {type: 'application/zip'});
 
-  const form    = new FormData();
+  const form   = new FormData();
   form.append('file', blob, `${name}.zip`);
 
-  const resp    = await fetch(url, {method: 'POST', body: form, credentials: 'include'});
-  const text    = await resp.text();
+  const resp   = await fetch(url, {method: 'POST', body: form, credentials: 'include'});
+  const text   = await resp.text();
   return {status: resp.status, ok: resp.ok, body: text.slice(0, 400)};
 })();
 ```
 
-**Expected success:** `status: 200` (or 201). If you get `409 Conflict`
-on a new upload, the skill already exists — retry with `overwrite=true`.
-If you get `404`, double-check the org_id. For any other error, surface the
-response body to the user.
+**Expected success:** HTTP 200 with a `skill` field in the response.
+Note: the server may return HTTP 200 with a `validation_errors` array
+instead - check the response body for `validation_errors` before
+treating the upload as successful. Common validation errors include
+`skill_upload_invalid_encoding` (SKILL.md is not valid UTF-8).
+
+If you get `409 Conflict` on a new upload, the skill already exists -
+retry with `overwrite=true`. If you get `404`, double-check the org_id.
+For any other error, surface the response body to the user.
 
 ---
 
@@ -211,9 +220,9 @@ After all uploads, summarise:
 
 ```
 Synced 3 skills:
-  ✓ fastmail          (updated)  agentskills
-  ✓ pin-actions-to-sha (new)     agentskills
-  ✗ some-skill        FAILED — status 403
+  [OK]  fastmail           (updated)  agentskills
+  [OK]  pin-actions-to-sha (new)      agentskills
+  [FAIL] some-skill        status 403
 ```
 
 If any skill failed, explain the error and suggest remedies (re-authenticate
