@@ -117,13 +117,15 @@ def skill_hash(skill_path: Path) -> str:
     """16-hex-char SHA-256 fingerprint of all files in a skill folder."""
     h = hashlib.sha256()
     for f in sorted(skill_path.rglob("*")):
-        if f.is_file():
+        if f.is_file() and _include_in_zip(f, skill_path):
             h.update(str(f.relative_to(skill_path)).encode())
             h.update(f.read_bytes())
     return h.hexdigest()[:16]
 
 
 _SKIP_DIRS = frozenset({"__pycache__", ".pytest_cache", ".git", ".venv", "node_modules"})
+# Prefixes — matches pytest-cache-files-<random>/ dirs pytest drops alongside the skill.
+_SKIP_DIR_PREFIXES = ("pytest-cache-files-",)
 _SKIP_EXTS = frozenset({".pyc", ".pyo", ".b64"})
 
 
@@ -132,6 +134,8 @@ def _include_in_zip(path: Path, skill_root: Path) -> bool:
     rel = path.relative_to(skill_root)
     for part in rel.parts:
         if part in _SKIP_DIRS:
+            return False
+        if any(part.startswith(p) for p in _SKIP_DIR_PREFIXES):
             return False
     if path.suffix in _SKIP_EXTS:
         return False
