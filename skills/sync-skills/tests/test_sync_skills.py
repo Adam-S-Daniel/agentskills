@@ -84,7 +84,6 @@ class TestZipSkill:
         assert zipfile.is_zipfile(io.BytesIO(decoded))
 
     def test_content_preserved(self, skill_dir):
-        # Compare raw bytes: zip_skill reads files in binary mode.
         original = (skill_dir / "SKILL.md").read_bytes()
         data = zip_skill(skill_dir)
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -101,6 +100,34 @@ class TestZipSkill:
         data = zip_skill(s)
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             assert "assets/icon.png" in zf.namelist()
+
+    def test_excludes_pytest_cache_files_dir(self, tmp_path):
+        """pytest creates pytest-cache-files-<random> dirs; these must be skipped."""
+        s = tmp_path / "my-skill"
+        s.mkdir()
+        (s / "SKILL.md").write_text("test")
+        junk = s / "pytest-cache-files-abc123xyz" / "v" / "cache"
+        junk.mkdir(parents=True)
+        (junk / "nodeids").write_text("cached")
+        data = zip_skill(s)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = zf.namelist()
+        assert not any("pytest-cache-files-" in n for n in names), (
+            f"pytest-cache-files-* should be excluded; got {names}"
+        )
+
+    def test_excludes_dot_pytest_cache(self, tmp_path):
+        """.pytest_cache is already excluded — regression test."""
+        s = tmp_path / "my-skill"
+        s.mkdir()
+        (s / "SKILL.md").write_text("test")
+        cache = s / ".pytest_cache" / "v"
+        cache.mkdir(parents=True)
+        (cache / "lastfailed").write_text("{}")
+        data = zip_skill(s)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = zf.namelist()
+        assert not any(n.startswith(".pytest_cache") for n in names)
 
 
 # ---------------------------------------------------------------------------
