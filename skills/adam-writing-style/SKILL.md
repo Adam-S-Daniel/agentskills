@@ -26,8 +26,8 @@ numbers when they're available.
 
 ### 1. Greet warmly, by name
 
-- `Hi Ms. Gelfand!`
-- `Hi Lisa,`
+- `Hi Ms. [LastName]!`
+- `Hi [FirstName],`
 - `Hey all —` for small group threads
 
 Skip it for tight back-and-forth replies inside an active thread. Avoid
@@ -48,12 +48,11 @@ a third email in a row.
 
 ### 3. Be specific. Cite, link, quote, and quantify.
 
-- Quote dollar amounts to the cent (`$24,015.95`).
+- Quote dollar amounts to the cent.
 - Paste IDs, payment confirmations, ticket numbers verbatim.
 - Hyperlink the page you're talking about, even if the recipient probably
   knows it.
-- When making a claim about policy or rules, link the source. ("...indicates
-  such holds are placed when payment is 60 days overdue.")
+- When making a claim about policy or rules, link the source.
 
 Specificity is doing the recipient's work for them.
 
@@ -62,8 +61,8 @@ Specificity is doing the recipient's work for them.
 Adam uses em dashes (`—`) generously, both for parenthetical asides and to
 break a long sentence at the right joint:
 
-> "the URL of the other bell schedule link — used on the Main Office,
-> Administration, and Start of School pages — includes \"2022-2023\""
+> "the URL of the other link — used on three other pages of the site —
+> includes a year that's now out of date"
 
 > "...building the standardized deployment scaffolding, secrets-remediation
 > pipeline, and CI/CD foundations its development teams now rely on..."
@@ -87,8 +86,8 @@ Standard closes, in rough order of formality:
 - `Thank you,` / `Thanks,` / `Thanks so much for your help!`
 - `Adam Daniel` (full name to people who don't know him well)
 - `Adam` (to people who do)
-- Phone number (`301-980-0344`) when extending a request that may need a
-  callback
+- Phone number, when extending a request that may need a callback (Adam
+  has it memorized; this skill deliberately does not record it)
 
 Skip "Best regards," "Warmest," "Sincerely," etc.
 
@@ -118,9 +117,9 @@ softeners. Keep:
 ### 9. Performance-eval register: first person, narrative, generous
 
 When writing self-appraisals or year-end summaries, Adam writes in
-paragraphs and bulleted accomplishments, takes credit for collaborators
-("Combined with build fixes made concurrently by Doug, ..."), and
-explicitly names the next year's goals at the end.
+paragraphs and bulleted accomplishments, takes credit alongside
+collaborators (e.g. "Combined with build fixes made concurrently by a
+coworker, ..."), and explicitly names the next year's goals at the end.
 
 ## Vocabulary preferences
 
@@ -169,6 +168,20 @@ If Adam (or a draft for Adam) reads like any of the below, rework it:
 - Closing with "Let me know if you have any questions!" without context.
   Either spell out what kind of follow-up makes sense or skip the line.
 
+## Privacy / public-output rule
+
+This skill lives in a public repository. Do not commit examples that
+contain other people's names (recipients, family members, coworkers),
+real institutional URLs tied to Adam, exact dollar amounts from real
+transactions, phone numbers, account numbers, or anything similarly
+identifying. Use placeholders like `[FirstName]`, `[School]`,
+`$X,XXX.XX`, `https://example.edu/...` in calibration examples. The
+patterns illustrate just as well without the personal detail attached.
+
+When generating content for Adam in a private session, real names and
+specifics are obviously fine — the rule is about what gets persisted
+into shared/public artifacts.
+
 ## Output checklist
 
 Before delivering writing in Adam's voice, verify:
@@ -186,16 +199,17 @@ Before delivering writing in Adam's voice, verify:
 
 ### Email — unsolicited, low-stakes flag
 
-> Hi Ms. Gelfand!
+> Hi Ms. [LastName]!
 >
 > I'm guessing you're the right person for this, but if not my apologies,
 > and feel free to forward.
 >
-> On the Bell Schedules page (https://...), the "Click here to be taken
-> to the updated Bell schedule" link currently 404s. The URL of the other
-> bell schedule link — used on the Main Office, Administration, and
-> Start of School pages — includes "2022-2023", making some users (me
-> anyway 😃) feel uncertain that it is still accurate.
+> On the Bell Schedules page (https://example.org/...), the "Click here
+> to be taken to the updated Bell schedule" link currently 404s. The URL
+> of the other bell schedule link — used on the Main Office,
+> Administration, and Start of School pages — includes "2022-2023",
+> making some users (me anyway 😃) feel uncertain that it is still
+> accurate.
 >
 > Not urgent, just a heads-up.
 >
@@ -204,10 +218,10 @@ Before delivering writing in Adam's voice, verify:
 
 ### Email — short follow-up to a transactional thread
 
-> Hi Lisa,
+> Hi [FirstName],
 >
 > Please find attached proof of the electronic payment in the amount of
-> $24,015.95.
+> $X,XXX.XX.
 >
 > Thank you,
 > Adam Daniel
@@ -216,32 +230,30 @@ Before delivering writing in Adam's voice, verify:
 
 > Sorry, one last note/question: Based on the payment plan ledger the
 > Friends and Family dashboard shows me, it appears the hold was placed
-> on Jonah's registration when the April payment was less than 14 days
-> past due. Do you know why that happened given that
-> https://financialservices.wustl.edu/student-accounts/late-fees-holds/
-> indicates such holds are placed when payment is 60 days overdue?
+> on the registration when the April payment was less than 14 days past
+> due. Do you know why that happened given that
+> https://example.edu/student-accounts/late-fees-holds/ indicates such
+> holds are placed when payment is 60 days overdue?
 >
 > Thanks so much for your help!
 >
 > Adam Daniel
-> 301-980-0344
 
 ### Proposal-bio paragraph
 
 > He started his career at Novigen Sciences and its successor Exponent
 > (1998–2005), writing data-management and probabilistic-modeling tools
-> for federal regulators and large industrial clients in public health,
-> food safety, and pesticide risk. Working alongside statisticians and
-> scientific staff, he designed stochastic models, built licensed
-> commercial desktop applications and Excel-based analytic tools, and
-> routinely normalized large, heterogeneous data sets — drawn from
-> federal agencies and private industry — into unified schemas suitable
-> for statistical analysis and risk modeling.
+> for federal regulators and large industrial clients. Working alongside
+> statisticians and scientific staff, he designed stochastic models,
+> built licensed commercial desktop applications and Excel-based
+> analytic tools, and routinely normalized large, heterogeneous data
+> sets — drawn from federal agencies and private industry — into
+> unified schemas suitable for statistical analysis and risk modeling.
 
 ### Performance-eval bullet
 
 > Built standardized cloud deployment repository, improving consistency
-> and reliability across Web Team and HI applications.
+> and reliability across multiple application teams.
 
 ## When in doubt
 
