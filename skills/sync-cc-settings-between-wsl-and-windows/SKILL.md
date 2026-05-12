@@ -1,10 +1,10 @@
 ---
-name: sync-claude-settings-between-wsl-and-windows
-description: Sync Claude Code settings.json between a Windows home and a WSL home. Triggers on requests to "sync Claude Code settings", "merge my settings.json", "keep WSL and Windows Claude settings in sync", or mentions of reconciling %USERPROFILE%\.claude\settings.json with ~/.claude/settings.json in WSL. Backs up both files with an Eastern-time-stamped prefix, then merges per property (union for permissions.allow/deny and spinnerVerbs.verbs; more-recently-modified-wins with optional prompt for scalars like theme, model, effortLevel, tui, verbose, etc.; statusLine and defaultShell are kept per-file). Preserves each file's native newline format (CRLF for Windows, LF for WSL) and UTF-8 BOM presence. Windows-only (needs PowerShell 7+ and access to \\wsl.localhost\<distro>\...). Use when the user wants the two settings.json files reconciled, not when they want a single file edited in place.
+name: sync-cc-settings-between-wsl-and-windows
+description: Sync Claude Code settings.json between a Windows home and a WSL home. Triggers on requests to "sync Claude Code settings", "merge my settings.json", "keep WSL and Windows Claude settings in sync", or mentions of reconciling %USERPROFILE%\.claude\settings.json with ~/.claude/settings.json in WSL. Backs up both files with an Eastern-time-stamped prefix, then merges per property (union for permissions.allow/deny and spinnerVerbs.verbs; more-recently-modified-wins with optional prompt for scalars like theme, model, effortLevel, tui, verbose, etc.; statusLine and defaultShell are kept per-file). Preserves each file's native newline format (CRLF for Windows, LF for WSL) and UTF-8 BOM presence. Windows-only (needs PowerShell 7+ and access to the WSL UNC share, e.g. \\wsl.localhost\Ubuntu\...). Use when the user wants the two settings.json files reconciled, not when they want a single file edited in place.
 license: MIT
 ---
 
-# sync-claude-settings-between-wsl-and-windows
+# sync-cc-settings-between-wsl-and-windows
 
 Keep a user's Claude Code `settings.json` in sync across their Windows host and a WSL distro, without clobbering per-environment preferences.
 
