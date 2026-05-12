@@ -191,28 +191,67 @@ python3 ~/repos/agentskills/skills/sync-skills/sync_skills.py --prepare --all \
 
 ---
 
-## 6. Fallback: upload a raw .md file
+## 6. Fallback: build the ZIP in-browser
 
-The endpoint also accepts a bare `.md` file (no ZIP required). If
-`javascript_tool` has trouble with ZIPs, upload just the `SKILL.md`:
+Earlier versions of this skill noted that the upload endpoint accepted a
+bare `.md` file. **That is no longer the case** — the server now rejects
+`text/markdown` uploads with `skill_upload_invalid_file_type` (only
+`.zip` or `.skill` extensions are accepted, and `.skill` is parsed as a
+ZIP container, not a single-file format).
+
+When you don't have `sync_skills.py --prepare` available locally (e.g.
+the local repo doesn't exist on this machine, or you only have the raw
+`SKILL.md` content in hand), build a minimal STORE-mode ZIP in the
+browser and upload that:
 
 ```javascript
 (async () => {
+  // ----- minimal CRC32 + STORE-mode ZIP builder -----
+  const tbl = (() => { const t=new Uint32Array(256); for(let i=0;i<256;i++){let c=i;for(let j=0;j<8;j++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);t[i]=c>>>0;} return t; })();
+  const crc32 = b => { let c=0xFFFFFFFF; for(let i=0;i<b.length;i++) c=tbl[(c^b[i])&0xFF]^(c>>>8); return (c^0xFFFFFFFF)>>>0; };
+  function makeZip(name, content) {
+    const enc = new TextEncoder(), nB = enc.encode(name), dB = enc.encode(content);
+    const crc = crc32(dB), sz = dB.length, nl = nB.length;
+    const lfh = new DataView(new ArrayBuffer(30));
+    lfh.setUint32(0,0x04034b50,true); lfh.setUint16(4,10,true); lfh.setUint16(12,0x0021,true);
+    lfh.setUint32(14,crc,true); lfh.setUint32(18,sz,true); lfh.setUint32(22,sz,true);
+    lfh.setUint16(26,nl,true);
+    const cdfh = new DataView(new ArrayBuffer(46));
+    cdfh.setUint32(0,0x02014b50,true); cdfh.setUint16(4,10,true); cdfh.setUint16(6,10,true);
+    cdfh.setUint16(14,0x0021,true); cdfh.setUint32(16,crc,true);
+    cdfh.setUint32(20,sz,true); cdfh.setUint32(24,sz,true); cdfh.setUint16(28,nl,true);
+    const eocd = new DataView(new ArrayBuffer(22));
+    eocd.setUint32(0,0x06054b50,true); eocd.setUint16(8,1,true); eocd.setUint16(10,1,true);
+    eocd.setUint32(12,46+nl,true); eocd.setUint32(16,30+nl+sz,true);
+    const out = new Uint8Array(30+nl+sz+46+nl+22); let p = 0;
+    out.set(new Uint8Array(lfh.buffer), p); p+=30; out.set(nB,p); p+=nl;
+    out.set(dB,p); p+=sz; out.set(new Uint8Array(cdfh.buffer), p); p+=46;
+    out.set(nB,p); p+=nl; out.set(new Uint8Array(eocd.buffer), p);
+    return out;
+  }
+
+  // ----- inputs (substitute) -----
   const orgId = "ORG_ID";
-  const overwrite = OVERWRITE;
-  const content = `SKILL_MD_CONTENT`;  // full text of SKILL.md
+  const overwrite = OVERWRITE;             // true | false
+  const skillName = "SKILL_NAME";          // e.g. "adam-writing-style"
+  const skillMd = `SKILL_MD_CONTENT`;       // full SKILL.md text
 
+  const zipBytes = makeZip(`${skillName}/SKILL.md`, skillMd);
   const url = `https://claude.ai/api/organizations/${orgId}/skills/upload-skill?overwrite=${overwrite}`;
-  const blob = new Blob([content], {type: 'text/markdown'});
   const form = new FormData();
-  form.append('file', blob, 'SKILL.md');
-
-  const resp = await fetch(url, {method: 'POST', body: form, credentials: 'include'});
-  return {status: resp.status, ok: resp.ok};
+  form.append('file', new Blob([zipBytes], {type:'application/zip'}), `${skillName}.zip`);
+  const resp = await fetch(url, { method:'POST', body: form, credentials:'include' });
+  return { status: resp.status, ok: resp.ok, body: (await resp.text()).slice(0, 800) };
 })();
 ```
 
----
+The path inside the ZIP **must** be `<skill-name>/SKILL.md` — the server
+keys the skill name on the directory prefix. Don't put the file at the
+ZIP root.
+
+This fallback is only for SKILL.md-only skills (no `references/`,
+`scripts/`, `assets/`). For multi-file skills, use the
+`sync_skills.py --prepare` path in section 1.
 
 ## 7. Reporting
 
