@@ -1,0 +1,5 @@
+{
+  "name": "fastmail",
+  "description": "Automate Fastmail email workflows (search, read, compose, reply) via a local Claude-in-Chrome browser session.",
+  "author": { "name": "Adam Daniel" }
+}

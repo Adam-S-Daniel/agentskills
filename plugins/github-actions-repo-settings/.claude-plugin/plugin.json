@@ -1,0 +1,5 @@
+{
+  "name": "github-actions-repo-settings",
+  "description": "Configure GitHub repository/org settings to enforce Actions security policies (SHA pinning, fork-PR approval).",
+  "author": { "name": "Adam Daniel" }
+}

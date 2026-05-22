@@ -1,0 +1,70 @@
+{
+  "name": "agentskills",
+  "owner": { "name": "Adam Daniel" },
+  "description": "Adam Daniel's reusable agent skills, packaged as installable Claude Code plugins.",
+  "plugins": [
+    {
+      "name": "adam-writing-style",
+      "source": "./plugins/adam-writing-style",
+      "description": "Write in Adam Daniel's voice — warm, direct, em-dash-friendly, free of corporate buzzwords.",
+      "category": "writing",
+      "keywords": ["writing", "voice", "ghostwrite", "tone"]
+    },
+    {
+      "name": "fastmail",
+      "source": "./plugins/fastmail",
+      "description": "Automate Fastmail email workflows (search, read, compose, reply) via a local Claude-in-Chrome browser session.",
+      "category": "email",
+      "keywords": ["fastmail", "email", "browser", "claude-in-chrome"]
+    },
+    {
+      "name": "github-actions-repo-settings",
+      "source": "./plugins/github-actions-repo-settings",
+      "description": "Configure GitHub repository/org settings to enforce Actions security policies (SHA pinning, fork-PR approval).",
+      "category": "ci-cd",
+      "keywords": ["github-actions", "security", "supply-chain", "gh"]
+    },
+    {
+      "name": "pin-actions-to-sha",
+      "source": "./plugins/pin-actions-to-sha",
+      "description": "Audit and pin every GitHub Actions `uses:` reference to a full commit SHA with a dated version comment.",
+      "category": "ci-cd",
+      "keywords": ["github-actions", "sha-pinning", "security", "supply-chain"]
+    },
+    {
+      "name": "rename-pdfs",
+      "source": "./plugins/rename-pdfs",
+      "description": "Rename already-searchable PDFs to descriptive, date-prefixed names proposed from each file's own content.",
+      "category": "documents",
+      "keywords": ["pdf", "rename", "ocr", "files"]
+    },
+    {
+      "name": "sync-cc-settings-between-wsl-and-windows",
+      "source": "./plugins/sync-cc-settings-between-wsl-and-windows",
+      "description": "Reconcile Claude Code settings.json between a Windows home and a WSL home, merging per property.",
+      "category": "claude-code",
+      "keywords": ["claude-code", "settings", "wsl", "windows", "sync"]
+    },
+    {
+      "name": "sync-skills",
+      "source": "./plugins/sync-skills",
+      "description": "Sync local skill folders to claude.ai via the upload-skill API using the browser's authenticated session.",
+      "category": "claude-code",
+      "keywords": ["skills", "claude-ai", "sync", "upload"]
+    },
+    {
+      "name": "wj-next-break",
+      "source": "./plugins/wj-next-break",
+      "description": "Answer questions about the current/next class period, break, lunch, or bell at Walter Johnson High School.",
+      "category": "personal",
+      "keywords": ["schedule", "school", "bell-schedule", "walter-johnson"]
+    },
+    {
+      "name": "workflow-path-audit",
+      "source": "./plugins/workflow-path-audit",
+      "description": "Audit GitHub Actions workflows for salient-path conditionals so they skip with success on irrelevant changes.",
+      "category": "ci-cd",
+      "keywords": ["github-actions", "ci-cost", "path-filter", "workflows"]
+    }
+  ]
+}
