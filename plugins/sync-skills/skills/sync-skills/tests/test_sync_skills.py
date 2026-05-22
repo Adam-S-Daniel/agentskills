@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from sync_skills import (  # noqa: E402
     _extract_skill_names,
+    _skill_dir,
     get_all_skills,
     get_changed_skills,
     load_state,
@@ -310,3 +311,58 @@ class TestMarkSynced:
     def test_load_state_returns_empty_dict_when_missing(self, monkeypatch, tmp_path):
         monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "no-such-file.json")
         assert load_state() == {}
+
+
+# ---------------------------------------------------------------------------
+# Plugin marketplace layout: plugins/<plugin>/skills/<skill>/SKILL.md
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def repo_plugin_layout(tmp_path):
+    """A fake repo using the plugins/<plugin>/skills/<skill> layout."""
+    repo = tmp_path / "repo"
+    for name in ("skill-a", "skill-b"):
+        p = repo / "plugins" / name / "skills" / name
+        p.mkdir(parents=True)
+        (p / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+        (p / "extra.txt").write_text("extra")
+    return repo
+
+
+class TestPluginLayout:
+    def test_skill_dir_legacy(self, repo_with_skills):
+        d = _skill_dir(repo_with_skills, "skill-a")
+        assert d is not None and d.name == "skill-a"
+        assert (d / "SKILL.md").exists()
+
+    def test_skill_dir_plugin(self, repo_plugin_layout):
+        d = _skill_dir(repo_plugin_layout, "skill-a")
+        assert d == repo_plugin_layout / "plugins" / "skill-a" / "skills" / "skill-a"
+
+    def test_skill_dir_missing(self, repo_plugin_layout):
+        assert _skill_dir(repo_plugin_layout, "nope") is None
+
+    def test_get_all_skills_plugin_layout(self, repo_plugin_layout):
+        assert set(get_all_skills(repo_plugin_layout)) == {"skill-a", "skill-b"}
+
+    def test_extract_skill_names_plugin_layout(self, repo_plugin_layout):
+        diff = (
+            "plugins/skill-a/skills/skill-a/SKILL.md\n"
+            "plugins/skill-b/skills/skill-b/SKILL.md"
+        )
+        names = _extract_skill_names(diff, repo_plugin_layout)
+        assert set(names) == {"skill-a", "skill-b"}
+
+    def test_extract_ignores_plugin_non_skill_paths(self, repo_plugin_layout):
+        diff = (
+            "plugins/skill-a/.claude-plugin/plugin.json\n"
+            ".claude-plugin/marketplace.json"
+        )
+        assert _extract_skill_names(diff, repo_plugin_layout) == []
+
+    def test_prepare_plugin_layout(self, repo_plugin_layout, monkeypatch, tmp_path):
+        monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
+        result = prepare([repo_plugin_layout], skill_names=["skill-a"])
+        assert len(result["skills"]) == 1
+        assert result["skills"][0]["name"] == "skill-a"

@@ -1,0 +1,5 @@
+{
+  "name": "workflow-path-audit",
+  "description": "Audit GitHub Actions workflows for salient-path conditionals so they skip with success on irrelevant changes.",
+  "author": { "name": "Adam Daniel" }
+}

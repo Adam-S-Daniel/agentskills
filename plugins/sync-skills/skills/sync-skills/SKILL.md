@@ -26,12 +26,12 @@ session cookies.
 Register the pre-push reminder hook (requires git 2.54+):
 
 ```bash
-bash ~/repos/agentskills/skills/sync-skills/setup.sh
+bash ~/repos/agentskills/plugins/sync-skills/skills/sync-skills/setup.sh
 ```
 
 On Windows (Git Bash / WSL):
 ```bash
-bash "$USERPROFILE/repos/agentskills/skills/sync-skills/setup.sh"
+bash "$USERPROFILE/repos/agentskills/plugins/sync-skills/skills/sync-skills/setup.sh"
 ```
 
 This registers a global config-based `pre-push` hook so every push from
@@ -57,14 +57,14 @@ you switch contexts.)
 Run the helper script to find changed skills and build base64-encoded ZIPs:
 
 ```bash
-python3 ~/repos/agentskills/skills/sync-skills/sync_skills.py --prepare
+python3 ~/repos/agentskills/plugins/sync-skills/skills/sync-skills/sync_skills.py --prepare
 ```
 
-On Windows the path is `%USERPROFILE%\repos\agentskills\skills\sync-skills\sync_skills.py`.
+On Windows the path is `%USERPROFILE%\repos\agentskills\plugins\sync-skills\skills\sync-skills\sync_skills.py`.
 Use `--all` to force-sync every skill regardless of git diff:
 
 ```bash
-python3 ~/repos/agentskills/skills/sync-skills/sync_skills.py --prepare --all
+python3 ~/repos/agentskills/plugins/sync-skills/skills/sync-skills/sync_skills.py --prepare --all
 ```
 
 The output is a JSON object:
@@ -160,7 +160,7 @@ After each successful upload, record it in the state file so future runs
 know to use `overwrite=true`:
 
 ```bash
-python3 ~/repos/agentskills/skills/sync-skills/sync_skills.py \
+python3 ~/repos/agentskills/plugins/sync-skills/skills/sync-skills/sync_skills.py \
   --mark-synced "SKILL_NAME:HASH"
 ```
 
@@ -173,19 +173,19 @@ Substitute the `name` and `hash` fields from the JSON payload.
 To preview what would be synced without uploading:
 
 ```bash
-python3 ~/repos/agentskills/skills/sync-skills/sync_skills.py --dry-run
+python3 ~/repos/agentskills/plugins/sync-skills/skills/sync-skills/sync_skills.py --dry-run
 ```
 
 To target a single skill:
 
 ```bash
-python3 ~/repos/agentskills/skills/sync-skills/sync_skills.py --skill fastmail
+python3 ~/repos/agentskills/plugins/sync-skills/skills/sync-skills/sync_skills.py --skill fastmail
 ```
 
 To include skills from both repos:
 
 ```bash
-python3 ~/repos/agentskills/skills/sync-skills/sync_skills.py --prepare --all \
+python3 ~/repos/agentskills/plugins/sync-skills/skills/sync-skills/sync_skills.py --prepare --all \
   --repos ~/repos/agentskills ~/repos/agentskills-private
 ```
 
