@@ -1,0 +1,5 @@
+{
+  "name": "sync-cc-settings-between-wsl-and-windows",
+  "description": "Reconcile Claude Code settings.json between a Windows home and a WSL home, merging per property.",
+  "author": { "name": "Adam Daniel" }
+}

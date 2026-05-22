@@ -68,22 +68,46 @@ def _git(args: List[str], cwd: Path) -> Optional[str]:
         return None
 
 
+def _skill_dir(repo_path: Path, name: str) -> Optional[Path]:
+    """Locate skill ``name`` on disk, supporting both repo layouts.
+
+    Legacy layout:  ``<repo>/skills/<name>/SKILL.md``
+    Plugin layout:  ``<repo>/plugins/<plugin>/skills/<name>/SKILL.md``
+
+    Returns the skill directory, or None if not found.
+    """
+    legacy = repo_path / "skills" / name
+    if (legacy / "SKILL.md").exists():
+        return legacy
+    plugins_dir = repo_path / "plugins"
+    if plugins_dir.is_dir():
+        for plugin in sorted(plugins_dir.iterdir()):
+            cand = plugin / "skills" / name
+            if (cand / "SKILL.md").exists():
+                return cand
+    return None
+
+
 def _extract_skill_names(diff_output: str, repo_path: Path) -> List[str]:
-    """Parse git diff --name-only output into unique skill folder names."""
+    """Parse git diff --name-only output into unique skill folder names.
+
+    Recognises both layouts: ``skills/<name>/...`` (legacy) and
+    ``plugins/<plugin>/skills/<name>/...`` (plugin marketplace).
+    """
     seen: set = set()
     result: List[str] = []
     for line in diff_output.splitlines():
         parts = Path(line.strip()).parts
+        name: Optional[str] = None
         if len(parts) >= 2 and parts[0] == "skills":
             name = parts[1]
-            skill_path = repo_path / "skills" / name
-            if (
-                name not in seen
-                and skill_path.is_dir()
-                and (skill_path / "SKILL.md").exists()
-            ):
-                seen.add(name)
-                result.append(name)
+        elif len(parts) >= 4 and parts[0] == "plugins" and parts[2] == "skills":
+            name = parts[3]
+        if not name or name in seen:
+            continue
+        if _skill_dir(repo_path, name) is not None:
+            seen.add(name)
+            result.append(name)
     return result
 
 
@@ -98,15 +122,22 @@ def get_changed_skills(repo_path: Path) -> List[str]:
 
 
 def get_all_skills(repo_path: Path) -> List[str]:
-    """Return all skill names present in the repo."""
+    """Return all skill names present in the repo (either layout)."""
+    names: set = set()
     skills_dir = repo_path / "skills"
-    if not skills_dir.is_dir():
-        return []
-    return sorted(
-        d.name
-        for d in skills_dir.iterdir()
-        if d.is_dir() and (d / "SKILL.md").exists()
-    )
+    if skills_dir.is_dir():
+        for d in skills_dir.iterdir():
+            if d.is_dir() and (d / "SKILL.md").exists():
+                names.add(d.name)
+    plugins_dir = repo_path / "plugins"
+    if plugins_dir.is_dir():
+        for plugin in plugins_dir.iterdir():
+            sk = plugin / "skills"
+            if sk.is_dir():
+                for d in sk.iterdir():
+                    if d.is_dir() and (d / "SKILL.md").exists():
+                        names.add(d.name)
+    return sorted(names)
 
 
 # ---------------------------------------------------------------------------
@@ -220,16 +251,13 @@ def prepare(
             continue
 
         if skill_names is not None:
-            names = [
-                n for n in skill_names
-                if (repo / "skills" / n / "SKILL.md").exists()
-            ]
+            names = [n for n in skill_names if _skill_dir(repo, n) is not None]
         else:
             names = get_changed_skills(repo)
 
         for name in names:
-            skill_path = repo / "skills" / name
-            if not (skill_path / "SKILL.md").exists():
+            skill_path = _skill_dir(repo, name)
+            if skill_path is None:
                 continue
             h = skill_hash(skill_path)
             zip_bytes = zip_skill(skill_path)
