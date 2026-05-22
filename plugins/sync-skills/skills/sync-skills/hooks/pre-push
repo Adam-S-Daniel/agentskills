@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# pre-push hook: remind to sync skills if any skills/ folders are being pushed.
+# pre-push hook: remind to sync skills if any skill folders are being pushed.
+# Recognises both layouts: legacy skills/<name>/ and plugins/<name>/skills/<name>/.
 #
 # git pre-push hook interface:
 #   Receives on stdin one line per ref being pushed:
@@ -18,11 +19,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [[ "$remote_sha" = "$zero" ]]; then
     # New branch on remote: list files in the tip commit.
     new=$(git show --name-only --pretty=format: "$local_sha" 2>/dev/null \
-      | grep '^skills/' | awk -F/ '{print $2}')
+      | awk -F/ '$1=="skills"{print $2} $1=="plugins" && $3=="skills"{print $4}')
   else
     # Existing branch: diff the commits being pushed.
     new=$(git diff --name-only "$remote_sha..$local_sha" 2>/dev/null \
-      | grep '^skills/' | awk -F/ '{print $2}')
+      | awk -F/ '$1=="skills"{print $2} $1=="plugins" && $3=="skills"{print $4}')
   fi
   changed+=$'\n'"$new"
 done

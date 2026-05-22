@@ -1,6 +1,16 @@
 ---
 name: adam-writing-style
-description: Write in Adam Daniel's voice — professional but warm, direct, em-dash-friendly, free of corporate buzzwords. Trigger whenever the user asks Claude to write something that will go out under Adam's name or be lifted into his materials: emails, replies, bios, proposal blurbs, cover letters, LinkedIn posts, performance self-appraisals, comments on other people's drafts, "ghostwrite this for me", or any "in my voice / sound like me" request. Also trigger when polishing or rewriting Adam's own draft. Do NOT trigger for generic third-party content the user is helping someone else produce (e.g. "draft a press release for the company") unless they ask for Adam's voice specifically.
+description: >
+  Write in Adam Daniel's voice — professional but warm, direct,
+  em-dash-friendly, free of corporate buzzwords. Trigger whenever the user
+  asks Claude to write something that will go out under Adam's name or be
+  lifted into his materials: emails, replies, bios, proposal blurbs, cover
+  letters, LinkedIn posts, performance self-appraisals, comments on other
+  people's drafts, "ghostwrite this for me", or any "in my voice / sound like
+  me" request. Also trigger when polishing or rewriting Adam's own draft. Do
+  NOT trigger for generic third-party content the user is helping someone else
+  produce (e.g. "draft a press release for the company") unless they ask for
+  Adam's voice specifically.
 ---
 
 # Writing in Adam Daniel's voice
