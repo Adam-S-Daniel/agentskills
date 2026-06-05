@@ -16,7 +16,15 @@
 #
 #   ~/.agents/skills             ~/.gemini/skills
 #   ~/.agent/skills              ~/.gemini/antigravity/skills
-#   ~/.claude/skills             ~/.cursor/skills
+#   ~/.cursor/skills
+#
+# Claude Code is intentionally NOT in that list. It is served by the plugin
+# marketplace (/plugin marketplace add Adam-S-Daniel/agentskills). Linking the
+# same skills into ~/.claude/skills as well would double-load them — once as a
+# namespaced marketplace plugin and once as a personal skill — which wastes
+# context and makes invocation ambiguous. This script removes any such links it
+# created in earlier versions (see dedup_claude_code_dir below). Background:
+# docs/2026-06-05-skill-discovery-and-centralized-strategy.md.
 #
 # Codex discovers skills in ~/.agents/skills, so that link is what makes
 # these skills installable to Codex.
@@ -66,7 +74,6 @@ echo ""
 HOMES=(
   ".agents/skills"
   ".agent/skills"
-  ".claude/skills"
   ".gemini/skills"
   ".gemini/antigravity/skills"
   ".cursor/skills"
@@ -115,6 +122,35 @@ migrate_legacy() {
     rm "$home_skills"
   fi
 }
+
+# dedup_claude_code_dir — earlier versions of this script also linked skills
+# into ~/.claude/skills. Claude Code is now served by the marketplace, so remove
+# any links we previously created there to avoid double-loading. Only links that
+# point back into THIS repo (plus a legacy whole-directory link) are removed;
+# real personal skills the user keeps in ~/.claude/skills are left untouched.
+dedup_claude_code_dir() {
+  local cc="$HOME/.claude/skills"
+  migrate_legacy "$cc"            # legacy whole-directory link at ~/.claude/skills
+  [[ -d "$cc" ]] || return 0
+  echo "=== $cc (de-dup: marketplace owns Claude Code) ==="
+  local sd link
+  for sd in "${SKILL_DIRS[@]}"; do
+    link="$cc/$(basename "$sd")"
+    if [[ "$PLATFORM" = "windows" ]]; then
+      local win; win="$(cygpath -w "$link")"
+      if MSYS_NO_PATHCONV=1 cmd.exe //c "fsutil reparsepoint query \"$win\"" >/dev/null 2>&1; then
+        echo "  UNLINK   $(basename "$link")"
+        MSYS_NO_PATHCONV=1 cmd.exe //c "rmdir \"$win\"" >/dev/null 2>&1
+      fi
+    elif [[ -L "$link" ]]; then
+      case "$(readlink "$link")" in
+        "$PLUGINS_DIR"/*) echo "  UNLINK   $(basename "$link")"; rm "$link" ;;
+      esac
+    fi
+  done
+}
+
+dedup_claude_code_dir
 
 for rel in "${HOMES[@]}"; do
   home_skills="$HOME/$rel"

@@ -15,7 +15,8 @@
       "source": "./plugins/fastmail",
       "description": "Automate Fastmail email workflows (search, read, compose, reply) via a local Claude-in-Chrome browser session.",
       "category": "email",
-      "keywords": ["fastmail", "email", "browser", "claude-in-chrome"]
+      "keywords": ["fastmail", "email", "browser", "claude-in-chrome"],
+      "defaultEnabled": false
     },
     {
       "name": "github-actions-repo-settings",
@@ -43,7 +44,8 @@
       "source": "./plugins/sync-cc-settings-between-wsl-and-windows",
       "description": "Reconcile Claude Code settings.json between a Windows home and a WSL home, merging per property.",
       "category": "claude-code",
-      "keywords": ["claude-code", "settings", "wsl", "windows", "sync"]
+      "keywords": ["claude-code", "settings", "wsl", "windows", "sync"],
+      "defaultEnabled": false
     },
     {
       "name": "sync-skills",
@@ -57,7 +59,8 @@
       "source": "./plugins/wj-next-break",
       "description": "Answer questions about the current/next class period, break, lunch, or bell at Walter Johnson High School.",
       "category": "personal",
-      "keywords": ["schedule", "school", "bell-schedule", "walter-johnson"]
+      "keywords": ["schedule", "school", "bell-schedule", "walter-johnson"],
+      "defaultEnabled": false
     },
     {
       "name": "workflow-path-audit",

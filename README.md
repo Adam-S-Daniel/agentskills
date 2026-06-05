@@ -53,12 +53,20 @@ It links every skill under `plugins/*/skills/*` into the standard skill homes:
 
 - `~/.agents/skills/` — Codex (and the generic agents dir)
 - `~/.agent/skills/`
-- `~/.claude/skills/`
 - `~/.gemini/skills/`, `~/.gemini/antigravity/skills/`
 - `~/.cursor/skills/`
 
+**Claude Code is deliberately not in that list** — it's served by the marketplace
+above. Linking the same skills into `~/.claude/skills` too would double-load them
+(once as a namespaced plugin, once as a personal skill), so `setup.sh` now removes
+any such links it created in earlier versions. Background and rationale:
+[`docs/2026-06-05-skill-discovery-and-centralized-strategy.md`](docs/2026-06-05-skill-discovery-and-centralized-strategy.md).
+
 On Windows it uses directory junctions (`mklink /J`) — no admin required. The script
 is idempotent and migrates the old whole-directory links left by earlier versions.
+
+After running `setup.sh`, you don't need to restart an open Claude Code session —
+run `/reload-skills` to re-scan the skill directories in place.
 
 > Codex reads `~/.agents/skills`; that link is what makes these skills available in
 > Codex. See the [Codex skills docs](https://developers.openai.com/codex/skills).
@@ -85,8 +93,13 @@ I put the following in Claude desktop app -> Settings -> Cowork -> Global instru
 > Each skill is a Claude Code plugin: add it under
 > `plugins/<name>/skills/<name>/SKILL.md` with a
 > `plugins/<name>/.claude-plugin/plugin.json` manifest, and add a matching entry to
-> `.claude-plugin/marketplace.json`. Push to `main` in
+> `.claude-plugin/marketplace.json`. Do **not** use `claude plugin init` — it
+> scaffolds into `.claude/skills`, which is not this repo's marketplace layout.
+> Mark niche/personal plugins `"defaultEnabled": false` in their marketplace entry
+> so they stay dormant until invoked. Push to `main` in
 > https://github.com/Adam-S-Daniel/agentskills. Then fetch and pull in WSL and Windows
 > under `~/repos` and `%USERPROFILE%\repos`, and run `bash setup.sh` in both WSL and
 > Windows Git Bash so the skills are linked into the standard locations
-> (`.agents/skills/`, `.claude/skills/`, `.gemini/skills/`, `.cursor/skills/`, etc.).
+> (`.agents/skills/`, `.gemini/skills/`, `.cursor/skills/`, etc.) — Claude Code itself
+> uses the marketplace, not `.claude/skills`. Run `/reload-skills` to pick up changes
+> without restarting the session.
