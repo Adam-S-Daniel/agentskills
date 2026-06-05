@@ -151,20 +151,47 @@ Code converging on a plain `.claude/skills` drop-zone of `SKILL.md`-bearing dirs
 makes Claude Code's behavior *more* like the other agents — the marketplace is now
 the value-add layer on top of a substrate that all the agents share.
 
-## Suggested concrete next steps (in priority order)
+## Decisions taken (2026-06-05)
 
-1. **De-duplicate the Claude Code path:** remove `~/.claude/skills` from
-   `setup.sh` (Option A above), so marketplace install and symlink don't collide.
-2. **Add context hygiene:** set `defaultEnabled: false` on the niche/personal
-   plugins.
-3. **Wire up reloads:** document `/reload-skills` after `setup.sh`; optionally add
-   a `SessionStart` hook that returns `reloadSkills: true`.
-4. **Guardrail the authoring flow:** note in the global instructions that
-   `claude plugin init` targets `.claude/skills` and shouldn't be used here.
-5. **Leave the marketplace as canonical** — it's now also the thing that powers
-   "suggested for this directory" discovery.
+All of the recommendations above were adopted and implemented in the same change
+that added this document. Status:
 
-None of these are urgent; the repo isn't broken by the change. They're about
-aligning with where Claude Code is heading: a shared `.claude/skills` substrate,
-directory-aware discovery, and explicit context budgeting — with the marketplace
-kept as the distribution and discovery layer on top.
+1. **De-duplicated the Claude Code path — DONE.** `~/.claude/skills` was removed
+   from `setup.sh`'s `HOMES` list (Option A), so the marketplace is the single
+   Claude Code channel. `setup.sh` also gained a `dedup_claude_code_dir` migration
+   that removes links *earlier* versions of the script created in
+   `~/.claude/skills` — but only links that point back into this repo (plus a
+   legacy whole-directory link). Personal skills the user keeps there are left
+   untouched. The migration is idempotent and was verified on a simulated legacy
+   link.
+2. **Context hygiene — DONE.** `wj-next-break`, `fastmail`, and
+   `sync-cc-settings-between-wsl-and-windows` are now `"defaultEnabled": false` in
+   `.claude-plugin/marketplace.json`. They install but stay dormant until invoked.
+   The broadly-useful plugins remain enabled by default.
+3. **Wire up reloads — DONE as documentation; SessionStart hook intentionally
+   omitted.** The README and the global instructions now tell you to run
+   `/reload-skills` after `setup.sh` instead of restarting. The *optional*
+   `SessionStart` hook returning `reloadSkills: true` was **not** added, and that
+   is a deliberate consequence of decision #1: now that Claude Code is served by
+   the marketplace and `setup.sh` no longer links into `~/.claude/skills`, a
+   `reloadSkills` hook would have nothing new to surface to Claude Code — it would
+   be a no-op. (`reloadSkills` only affects Claude Code's own skill scan, and the
+   only scanned dir we used to touch was `~/.claude/skills`.) Shipping a no-op hook
+   that runs in every contributor's session — and that would either do nothing or,
+   if it ran `setup.sh`, mutate their `$HOME` and install a git hook without
+   consent — is worse than not shipping it. If a future change reintroduces a
+   `~/.claude/skills` (or project `.claude/skills`) drop-zone, revisit this.
+4. **Guardrail the authoring flow — DONE.** The global instructions in the README
+   now say explicitly not to use `claude plugin init` (it scaffolds into
+   `.claude/skills`, not this repo's `plugins/<name>/` marketplace layout) and to
+   mark niche plugins `defaultEnabled: false`.
+5. **Marketplace stays canonical — DONE (decision recorded).** No code change
+   beyond the above; the `setup.sh` header and README now state the rule plainly.
+   The marketplace is what powers the new "suggested for this directory" discovery,
+   so keeping it is an asset, not legacy weight.
+
+The net effect: one clear Claude Code channel (the marketplace), a leaner default
+context footprint, no-restart reloads, and a documented authoring guardrail —
+aligned with where Claude Code is heading (a shared skills substrate,
+directory-aware discovery, explicit context budgeting) while keeping the
+marketplace as the distribution and discovery layer on top.
