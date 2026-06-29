@@ -1,0 +1,5 @@
+{
+  "name": "launch-wsl-claude-session",
+  "description": "Launch a detached, interactive Claude Code session inside WSL (in a chosen folder, optionally remote-controllable or seeded with an initial prompt), from a Windows host or from inside WSL.",
+  "author": { "name": "Adam Daniel" }
+}
