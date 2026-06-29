@@ -26,6 +26,14 @@
       "keywords": ["github-actions", "security", "supply-chain", "gh"]
     },
     {
+      "name": "launch-wsl-claude-session",
+      "source": "./plugins/launch-wsl-claude-session",
+      "description": "Launch a detached, interactive Claude Code session inside WSL — from a Windows host or from inside WSL — in a chosen folder, optionally remote-controllable or seeded with an initial prompt.",
+      "category": "claude-code",
+      "keywords": ["claude-code", "wsl", "windows", "remote-control", "session"],
+      "defaultEnabled": false
+    },
+    {
       "name": "pin-actions-to-sha",
       "source": "./plugins/pin-actions-to-sha",
       "description": "Audit and pin every GitHub Actions `uses:` reference to a full commit SHA with a dated version comment.",
