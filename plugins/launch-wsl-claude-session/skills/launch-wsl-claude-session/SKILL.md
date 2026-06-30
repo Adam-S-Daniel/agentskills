@@ -137,6 +137,14 @@ the script encodes them:
   `... -- <claude> "Stand by for instructions."` not `... <claude> Stand by for instructions.`
 - **Use the full path to the `claude` binary.** A non-login WSL shell may not have
   `~/.local/bin` on `PATH`. The script resolves the absolute path first.
+- **Run the session under a login shell so its *runtime* PATH is complete.** Resolving
+  the binary isn't enough: `wsl.exe -- <claude>` runs claude under WSL's reduced default
+  PATH, so the *running* agent's own subprocesses can't find tools that only live on the
+  login PATH — `pwsh` (`/snap/bin`), `bun` (`~/.bun/bin`), `dotnet`, `~/.npm-global/bin`.
+  A long agent job (e.g. a benchmark) then silently breaks with `pwsh: command not
+  found`. The scripts launch via `... -- bash -lic 'exec "$@"' bash <claude> <args>`:
+  the login+interactive shell rebuilds the full PATH, then `exec` replaces it with claude
+  (which inherits both the PATH and the ConPTY).
 - **`--cd <wsl-path>` sets the working directory** for the session; pass a WSL path
   (`/home/...`), not a Windows path.
 

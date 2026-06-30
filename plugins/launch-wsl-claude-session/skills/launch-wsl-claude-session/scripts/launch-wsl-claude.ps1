@@ -50,8 +50,13 @@ else {
   $mode = 'session-id'
 }
 
-# wsl.exe args: set the working dir, then run the resolved binary with its args.
-$wslArgs = @('-d', $Distro, '--cd', $Dir, '--', $claude) + $claudeArgs
+# wsl.exe args: set the working dir, then run claude under a login+interactive shell so
+# the new session gets the FULL login PATH (/snap/bin -> pwsh, ~/.bun/bin -> bun,
+# ~/.dotnet, ~/.npm-global/bin, ~/.local/bin, ...). Without `bash -lic`, `wsl.exe -- claude`
+# runs under WSL's reduced default PATH and the agent's subprocesses fail with
+# "pwsh: command not found" / "bun: not found". `exec "$@"` then replaces the shell with
+# claude, which inherits the PATH and the ConPTY.
+$wslArgs = @('-d', $Distro, '--cd', $Dir, '--', 'bash', '-lic', 'exec "$@"', 'bash', $claude) + $claudeArgs
 
 if ($NoWindowsTerminal) {
   # Bare wsl.exe gets a malformed TTY; initial-prompt sessions exit immediately here.
