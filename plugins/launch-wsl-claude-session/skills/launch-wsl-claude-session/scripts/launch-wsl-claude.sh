@@ -51,8 +51,14 @@ else
   MODE="session-id"
 fi
 
-# wt.exe -> wsl.exe (new session in the target distro/dir) -> claude. Real WSL bash does
-# NOT mangle POSIX paths the way Git Bash does, so /home/... args pass through cleanly.
-"$WT" wsl.exe -d "$DISTRO" --cd "$DIR" -- "$CLAUDE" "${claude_args[@]}" &
+# wt.exe -> wsl.exe (new session) -> a login+interactive shell -> claude.
+# The `bash -lic 'exec "$@"'` wrapper is what gives the new session the FULL login PATH
+# (/snap/bin -> pwsh, ~/.bun/bin -> bun, ~/.dotnet, ~/.npm-global/bin, ~/.local/bin, ...).
+# Without it, `wsl.exe -- claude` runs claude under WSL's reduced default PATH and the
+# agent's own subprocesses silently fail with "pwsh: command not found" / "bun: not
+# found". `exec "$@"` replaces the shell with claude, which inherits both the PATH and
+# the ConPTY. Real WSL bash does NOT mangle POSIX paths (unlike Git Bash), so the
+# /home/... args still pass through cleanly.
+"$WT" wsl.exe -d "$DISTRO" --cd "$DIR" -- bash -lic 'exec "$@"' bash "$CLAUDE" "${claude_args[@]}" &
 disown 2>/dev/null || true
 echo "Launched detached Claude ($MODE) in ${DISTRO}:${DIR}"
