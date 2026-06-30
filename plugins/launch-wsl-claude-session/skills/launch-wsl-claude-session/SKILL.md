@@ -137,14 +137,18 @@ the script encodes them:
   `... -- <claude> "Stand by for instructions."` not `... <claude> Stand by for instructions.`
 - **Use the full path to the `claude` binary.** A non-login WSL shell may not have
   `~/.local/bin` on `PATH`. The script resolves the absolute path first.
-- **Run the session under a login shell so its *runtime* PATH is complete.** Resolving
-  the binary isn't enough: `wsl.exe -- <claude>` runs claude under WSL's reduced default
-  PATH, so the *running* agent's own subprocesses can't find tools that only live on the
-  login PATH — `pwsh` (`/snap/bin`), `bun` (`~/.bun/bin`), `dotnet`, `~/.npm-global/bin`.
-  A long agent job (e.g. a benchmark) then silently breaks with `pwsh: command not
-  found`. The scripts launch via `... -- bash -lic 'exec "$@"' bash <claude> <args>`:
-  the login+interactive shell rebuilds the full PATH, then `exec` replaces it with claude
-  (which inherits both the PATH and the ConPTY).
+- **Inject the full login PATH via `env` — never via an interactive shell wrapper.**
+  Resolving the binary isn't enough: `wsl.exe -- <claude>` runs claude under WSL's reduced
+  default PATH, so the *running* agent's own subprocesses can't find tools that only live
+  on the login PATH — `pwsh` (`/snap/bin`), `bun` (`~/.bun/bin`), `dotnet`,
+  `~/.npm-global/bin`. A long agent job (e.g. a benchmark) then silently breaks with
+  `pwsh: command not found`. The scripts capture the login PATH from an **interactive**
+  login shell (`bash -lic` — `bun`/`~/.npm-global/bin` are added in `~/.bashrc`, which a
+  plain `-lc` skips) and inject it with `... -- env "PATH=<login-path>" <claude> <args>`.
+  Do **not** instead wrap claude in `bash -lic 'exec "$@"'`: an interactive bash grabs the
+  ConPTY's process group and the claude **TUI exits immediately**. `env` is a transparent
+  exec, so claude stays a direct child holding the ConPTY (like the working bare launch),
+  just with the right PATH.
 - **`--cd <wsl-path>` sets the working directory** for the session; pass a WSL path
   (`/home/...`), not a Windows path.
 

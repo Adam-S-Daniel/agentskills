@@ -50,13 +50,16 @@ else {
   $mode = 'session-id'
 }
 
-# wsl.exe args: set the working dir, then run claude under a login+interactive shell so
-# the new session gets the FULL login PATH (/snap/bin -> pwsh, ~/.bun/bin -> bun,
-# ~/.dotnet, ~/.npm-global/bin, ~/.local/bin, ...). Without `bash -lic`, `wsl.exe -- claude`
-# runs under WSL's reduced default PATH and the agent's subprocesses fail with
-# "pwsh: command not found" / "bun: not found". `exec "$@"` then replaces the shell with
-# claude, which inherits the PATH and the ConPTY.
-$wslArgs = @('-d', $Distro, '--cd', $Dir, '--', 'bash', '-lic', 'exec "$@"', 'bash', $claude) + $claudeArgs
+# Give the new session the FULL login PATH (/snap/bin -> pwsh, ~/.bun/bin -> bun,
+# ~/.npm-global/bin, ~/.dotnet, ~/.local/bin, ...) so the agent's subprocesses don't fail
+# with "pwsh: command not found". Capture it from an interactive login shell in the distro
+# (`bash -lic` — bun/npm-global are added in ~/.bashrc, which plain `-lc` skips) and inject
+# it with `env PATH=...`. Do NOT wrap claude in an interactive shell: that grabs the
+# ConPTY's process group and the claude TUI exits immediately. `env` is a transparent exec,
+# so claude stays a direct child holding the ConPTY (like the working bare-claude launch).
+$loginPath = (wsl.exe -d $Distro -- bash -lic 'printf %s "$PATH"' 2>$null | Select-Object -First 1)
+$pathArg = if ($loginPath) { "PATH=$loginPath" } else { "PATH=$env:PATH" }
+$wslArgs = @('-d', $Distro, '--cd', $Dir, '--', 'env', $pathArg, $claude) + $claudeArgs
 
 if ($NoWindowsTerminal) {
   # Bare wsl.exe gets a malformed TTY; initial-prompt sessions exit immediately here.
