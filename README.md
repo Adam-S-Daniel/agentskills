@@ -10,6 +10,10 @@ same `SKILL.md` files are consumed unchanged by Codex, Gemini, Cursor, and any o
 agent that reads the Agent Skills format — so a skill is authored once and installs
 everywhere.
 
+This repo is the **canonical upstream registry** for reusable skills. For where
+skills live across repos, the public/private rule, and how a skill graduates into
+this registry, see [`STRATEGY.md`](STRATEGY.md).
+
 ## Install — Claude Code
 
 Add the marketplace once, then install whichever skills you want:
