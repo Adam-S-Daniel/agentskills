@@ -51,14 +51,15 @@ else
   MODE="session-id"
 fi
 
-# wt.exe -> wsl.exe (new session) -> a login+interactive shell -> claude.
-# The `bash -lic 'exec "$@"'` wrapper is what gives the new session the FULL login PATH
-# (/snap/bin -> pwsh, ~/.bun/bin -> bun, ~/.dotnet, ~/.npm-global/bin, ~/.local/bin, ...).
-# Without it, `wsl.exe -- claude` runs claude under WSL's reduced default PATH and the
-# agent's own subprocesses silently fail with "pwsh: command not found" / "bun: not
-# found". `exec "$@"` replaces the shell with claude, which inherits both the PATH and
-# the ConPTY. Real WSL bash does NOT mangle POSIX paths (unlike Git Bash), so the
-# /home/... args still pass through cleanly.
-"$WT" wsl.exe -d "$DISTRO" --cd "$DIR" -- bash -lic 'exec "$@"' bash "$CLAUDE" "${claude_args[@]}" &
+# Give the new session the FULL login PATH (/snap/bin -> pwsh, ~/.bun/bin -> bun,
+# ~/.npm-global/bin, ~/.dotnet, ~/.local/bin, ...) so the agent's own subprocesses don't
+# fail with "pwsh: command not found". We capture it from an interactive login shell
+# (`bash -lic` — bun/npm-global are added in ~/.bashrc, so plain `-lc` misses them) and
+# inject it with `env PATH=...`. We must NOT wrap claude in an interactive shell to do
+# this: an interactive bash grabs the ConPTY's process group and the claude TUI then
+# exits immediately. `env` is a transparent exec, so claude stays a direct child holding
+# the ConPTY (exactly like the bare-claude launch that works) — just with the right PATH.
+LOGIN_PATH="$(bash -lic 'printf %s "$PATH"' 2>/dev/null)"
+"$WT" wsl.exe -d "$DISTRO" --cd "$DIR" -- env "PATH=${LOGIN_PATH:-$PATH}" "$CLAUDE" "${claude_args[@]}" &
 disown 2>/dev/null || true
 echo "Launched detached Claude ($MODE) in ${DISTRO}:${DIR}"
