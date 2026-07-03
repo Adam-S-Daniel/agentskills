@@ -9,9 +9,8 @@ description: >
   but unhelpful filenames. Triggers: "rename my pdfs", "clean up pdf filenames",
   "rename searchable pdfs", "give my pdfs descriptive names",
   "rename scanned pdfs", "tidy pdf names".
-tools:
-  - Bash
-  - Read
+allowed-tools: Bash Read
+compatibility: Requires Python 3 with pypdf (scripts/extract_pdf_context.py); PDFs must already have a text layer
 ---
 
 # Rename Searchable PDFs Interactively

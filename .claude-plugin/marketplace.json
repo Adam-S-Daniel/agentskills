@@ -11,6 +11,14 @@
       "keywords": ["writing", "voice", "ghostwrite", "tone"]
     },
     {
+      "name": "compare-pdfpairs",
+      "source": "./plugins/compare-pdfpairs",
+      "description": "Compare name.pdf + name<suffix>.pdf pairs for identical printouts and text diffs, to safely delete redundant duplicates.",
+      "category": "documents",
+      "keywords": ["pdf", "compare", "duplicates", "poppler", "powershell"],
+      "defaultEnabled": false
+    },
+    {
       "name": "debug-github-workflows",
       "source": "./plugins/debug-github-workflows",
       "description": "Diagnose GitHub Actions workflow failures: read real logs and annotations, catch false-success patterns, and fix common CI failure modes.",
