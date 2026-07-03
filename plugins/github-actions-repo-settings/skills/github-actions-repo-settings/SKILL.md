@@ -90,24 +90,22 @@ gh api "repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval"
 gh api "orgs/{org}/actions/permissions/fork-pr-contributor-approval"
 ```
 
-### Discover allowed values
+### Allowed values
 
-If unsure of the exact enum values accepted by the API, read the current value
-first with the GET call above. The response contains the current
-`approval_policy` string. Known values (verify against the latest API docs):
+Verified against the live API (2026-07; a 422 lists the accepted enum):
 
 | UI label | API value |
 |----------|-----------|
-| Require approval for first-time contributors who are new to GitHub | `require_approval_for_new_users` |
-| Require approval for first-time contributors | `require_approval_for_first_time_contributors` |
-| **Require approval for all outside collaborators** | `require_approval_for_all_outside_collaborators` |
+| Require approval for first-time contributors who are new to GitHub | `first_time_contributors_new_to_github` |
+| Require approval for first-time contributors | `first_time_contributors` |
+| **Require approval for all outside collaborators** | `all_external_contributors` |
 
 ### Enable for a single repository
 
 ```bash
 gh api "repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval" \
   --method PUT \
-  --input - <<< '{"approval_policy":"require_approval_for_all_outside_collaborators"}'
+  --input - <<< '{"approval_policy":"all_external_contributors"}'
 ```
 
 ### Enable at the organization level
@@ -115,7 +113,7 @@ gh api "repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval" \
 ```bash
 gh api "orgs/{org}/actions/permissions/fork-pr-contributor-approval" \
   --method PUT \
-  --input - <<< '{"approval_policy":"require_approval_for_all_outside_collaborators"}'
+  --input - <<< '{"approval_policy":"all_external_contributors"}'
 ```
 
 ### If the API value is different
@@ -155,7 +153,7 @@ for repo in $repos; do
   # Setting 2: Fork PR approval
   gh api "repos/$repo/actions/permissions/fork-pr-contributor-approval" \
     --method PUT \
-    --input - <<< '{"approval_policy":"require_approval_for_all_outside_collaborators"}' \
+    --input - <<< '{"approval_policy":"all_external_contributors"}' \
     2>/dev/null && echo "  Fork approval: OK" || echo "  Fork approval: FAILED"
 
 done
@@ -191,7 +189,7 @@ gh api "repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval" \
 Expected output:
 ```
 { "sha_pinning_required": true }
-require_approval_for_all_outside_collaborators
+all_external_contributors
 ```
 
 ### Bulk verification
