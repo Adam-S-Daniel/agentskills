@@ -1,0 +1,5 @@
+{
+  "name": "debug-github-workflows",
+  "description": "Diagnose GitHub Actions workflow failures: read real logs and annotations, catch false-success patterns, and fix common CI failure modes.",
+  "author": { "name": "Adam Daniel" }
+}

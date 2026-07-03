@@ -34,10 +34,13 @@ Available plugins:
 | Plugin | What it does |
 | --- | --- |
 | `adam-writing-style` | Write in Adam Daniel's voice |
+| `debug-github-workflows` | Diagnose GitHub Actions workflow failures |
 | `fastmail` | Automate Fastmail via a local Claude-in-Chrome session |
 | `github-actions-repo-settings` | Enforce GitHub Actions security settings |
+| `launch-wsl-claude-session` | Launch a detached Claude Code session inside WSL |
 | `pin-actions-to-sha` | Pin Actions `uses:` refs to full commit SHAs |
 | `rename-pdfs` | Rename searchable PDFs from their own content |
+| `review-bash-ci-reliability` | Review bash scripts for CI silent-failure patterns |
 | `sync-cc-settings-between-wsl-and-windows` | Reconcile Claude Code settings across WSL/Windows |
 | `sync-skills` | Sync skill folders to claude.ai |
 | `wj-next-break` | Walter Johnson HS bell schedule |
