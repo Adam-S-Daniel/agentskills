@@ -34,6 +34,7 @@ Available plugins:
 | Plugin | What it does |
 | --- | --- |
 | `adam-writing-style` | Write in Adam Daniel's voice |
+| `compare-pdfpairs` | Compare PDF pairs for identical printouts / text diffs |
 | `debug-github-workflows` | Diagnose GitHub Actions workflow failures |
 | `fastmail` | Automate Fastmail via a local Claude-in-Chrome session |
 | `github-actions-repo-settings` | Enforce GitHub Actions security settings |

@@ -9,10 +9,7 @@ description: >
   harden Actions security settings. Trigger on mentions of "actions settings",
   "repo security settings", "fork approval", "outside collaborators",
   "actions policy", or "harden repo".
-compatibility:
-  tools:
-    - GitHub CLI (gh)
-  environment: any
+compatibility: Requires the GitHub CLI (gh) authenticated with repository admin (or org admin) scope; any environment
 ---
 
 # GitHub Actions Repo Settings

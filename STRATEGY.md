@@ -84,6 +84,42 @@ When a skill graduates:
 Skills that are **inherently bound** to one repo's internals stay local — do not
 promote them just because they exist.
 
+## Conditional loading — how to say "local only" / "needs X"
+
+Researched 2026-07 across the Claude Code docs/changelog, the agentskills.io spec,
+and the Codex/Cursor/Gemini docs. The blunt findings:
+
+- **No first-class local-vs-cloud (or OS / tool-availability) gating exists**
+  anywhere. Claude Code has no `when:`/`environment:` field for plugins or
+  skills; the only enforced knob is `defaultEnabled` (static install-time
+  state). The marketplace `relevance` field only affects *suggestions*, not
+  loading.
+- The spec's **`compatibility` frontmatter field is a free-text string
+  (1–500 chars) and is machine-ignored by every consumer** (Claude Code, Codex,
+  Cursor, Gemini all parse only `name` + `description`; several strip the rest).
+  It is documentation for humans and, sometimes, the model.
+- The only load-bearing portability mechanisms are the **`description`** (every
+  consumer uses it for activation) and a **fail-fast preflight in the body or
+  bundled script**.
+
+Policy for skills in these registries, in priority order:
+
+1. **Constraint in `description`** — if a skill is environment-bound, the
+   description must say so and say when *not* to use it (e.g. "local only; do
+   NOT use in headless/cloud sessions"). `fastmail` is the model example.
+2. **Spec-valid `compatibility` string** — one sentence, ≤500 chars, never a
+   YAML map (maps are off-spec and were migrated away 2026-07).
+3. **Fail-fast preflight** — the body's first step or the bundled script checks
+   its requirements (`command -v …`) and stops with a clear error.
+4. **`defaultEnabled: false`** in the marketplace entry for niche or
+   environment-bound plugins, so they install dormant.
+5. If Claude Code ever ships real conditional loading (a `when:` for
+   plugins/skills, or environment-aware settings), revisit this section. The
+   closest supported workaround today is a `SessionStart` hook that checks
+   `CLAUDE_CODE_REMOTE` and returns `reloadSkills: true` / runs
+   `claude plugin enable|disable` — adopt only if the static approach proves
+   insufficient.
+
 ## Out of scope (for now)
 
 - `civic-platform-agents` — intentionally excluded from this consolidation.

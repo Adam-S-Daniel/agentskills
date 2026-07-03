@@ -7,11 +7,7 @@ description: >
   SKILL.md files locally. Requires a claude.ai tab open in Chrome (uses
   browser session cookies via javascript_tool). Works on Adam's computer
   where the agentskills repos live under ~/repos/ or %USERPROFILE%\repos\.
-compatibility:
-  tools:
-    - Claude in Chrome (browser automation)
-    - Bash / Python 3 (sync_skills.py helper)
-  environment: local-browser-only
+compatibility: Requires Claude in Chrome (browser automation) with a logged-in claude.ai tab, plus Bash/Python 3 for the sync_skills.py helper; local interactive execution only — not usable in headless or cloud sessions
 ---
 
 # sync-skills
