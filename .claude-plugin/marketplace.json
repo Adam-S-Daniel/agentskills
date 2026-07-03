@@ -11,6 +11,13 @@
       "keywords": ["writing", "voice", "ghostwrite", "tone"]
     },
     {
+      "name": "debug-github-workflows",
+      "source": "./plugins/debug-github-workflows",
+      "description": "Diagnose GitHub Actions workflow failures: read real logs and annotations, catch false-success patterns, and fix common CI failure modes.",
+      "category": "ci-cd",
+      "keywords": ["github-actions", "debugging", "ci-cd", "workflow-failures"]
+    },
+    {
       "name": "fastmail",
       "source": "./plugins/fastmail",
       "description": "Automate Fastmail email workflows (search, read, compose, reply) via a local Claude-in-Chrome browser session.",
@@ -46,6 +53,13 @@
       "description": "Rename already-searchable PDFs to descriptive, date-prefixed names proposed from each file's own content.",
       "category": "documents",
       "keywords": ["pdf", "rename", "ocr", "files"]
+    },
+    {
+      "name": "review-bash-ci-reliability",
+      "source": "./plugins/review-bash-ci-reliability",
+      "description": "Review bash scripts for CI reliability: silent-failure patterns, error propagation gaps, and environment assumptions.",
+      "category": "ci-cd",
+      "keywords": ["bash", "shell", "ci-cd", "reliability", "code-review"]
     },
     {
       "name": "sync-cc-settings-between-wsl-and-windows",
