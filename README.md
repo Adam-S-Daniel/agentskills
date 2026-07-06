@@ -39,6 +39,7 @@ Available plugins:
 | `fastmail` | Automate Fastmail via a local Claude-in-Chrome session |
 | `github-actions-repo-settings` | Enforce GitHub Actions security settings |
 | `launch-wsl-claude-session` | Launch a detached Claude Code session inside WSL |
+| `migrate-claude-memory` | Inventory, clean up, and migrate Claude Code auto-memory stores |
 | `pin-actions-to-sha` | Pin Actions `uses:` refs to full commit SHAs |
 | `rename-pdfs` | Rename searchable PDFs from their own content |
 | `review-bash-ci-reliability` | Review bash scripts for CI silent-failure patterns |
@@ -78,6 +79,25 @@ run `/reload-skills` to re-scan the skill directories in place.
 
 > Codex reads `~/.agents/skills`; that link is what makes these skills available in
 > Codex. See the [Codex skills docs](https://developers.openai.com/codex/skills).
+
+## Hosted agents — Claude Code on the web, claude.ai
+
+Hosted sessions get **nothing from `~/.claude`** (no user plugins, skills, or
+marketplace adds) — the repo clone is the only channel. What works where:
+
+- **Claude Code on the web / cloud sessions**: files committed to the repo being
+  worked on — `CLAUDE.md`, `AGENTS.md`, `.claude/settings.json`, `.claude/skills/`,
+  `.claude/memory/` — are all picked up. A consumer repo can auto-offer this
+  marketplace's plugins to hosted (and teammate) sessions by declaring
+  `extraKnownMarketplaces` + `enabledPlugins` in its committed
+  `.claude/settings.json` (users get a consent prompt).
+- **claude.ai chat**: skills upload as ZIPs via Settings → Capabilities; the
+  [`sync-skills`](plugins/sync-skills) plugin automates pushing this registry's
+  skills there.
+- **Memory**: hosted sessions see a repo's git-tracked `.claude/memory/` (see the
+  Memory section in [`STRATEGY.md`](STRATEGY.md) and the
+  [portable-memory guide](https://github.com/Adam-S-Daniel/claude-memory-map/blob/main/docs/portable-memory.md);
+  migrate existing machine-local stores with the `migrate-claude-memory` plugin).
 
 ## Repo layout
 

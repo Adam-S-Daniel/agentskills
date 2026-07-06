@@ -120,6 +120,35 @@ Policy for skills in these registries, in priority order:
    `claude plugin enable|disable` — adopt only if the static approach proves
    insufficient.
 
+## Memory — portable, in-repo (researched 2026-07)
+
+Claude Code auto memory defaults to `~/.claude/projects/<munged-absolute-path>/memory/`
+— keyed per machine, so the same project accumulates divergent stores on WSL vs
+Windows, stores orphan when workspaces are deleted, and hosted agents (Claude Code
+on the web, claude.ai) see none of it. The docs are explicit: auto memory is
+machine-local and "not shared across machines or cloud environments".
+
+Policy for repos in this ecosystem:
+
+1. **Redirect memory into the repo.** Committed `.claude/settings.json` sets
+   `"autoMemoryDirectory": "~/repos/<name>/.claude/memory"` (the setting accepts
+   only absolute or `~/` paths — this works because repos live at `~/repos/<name>`
+   on every machine, WSL and Windows alike). Memory is then git-tracked: it syncs
+   between machines through normal push/pull and rides into hosted-session clones.
+2. **CLAUDE.md points at it in prose** (not `@import`, which would double-load it
+   where auto memory is active) so harnesses without the setting can still find it.
+3. **Public repos publish their memory.** That is the accepted trade-off for
+   hosted availability — the MEMORY.md header says so, and memory diffs get
+   reviewed like any other change. A repo whose memory can't be public keeps the
+   default machine-local store, or moves to `agentskills-private`-style hosting.
+4. **Migration and hygiene** — the `migrate-claude-memory` plugin in this registry
+   inventories `~/.claude/projects/` stores, flags orphans, and migrates a store
+   into a repo. The portable-memory playbook lives in
+   [`claude-memory-map`](https://github.com/Adam-S-Daniel/claude-memory-map).
+5. `CLAUDE_MEMORY_STORES` (mounted team memory stores, changelog v2.1.172) may
+   eventually supersede this pattern for hosted sessions; it is undocumented as of
+   2026-07 — revisit when real docs land.
+
 ## Out of scope (for now)
 
 - `civic-platform-agents` — intentionally excluded from this consolidation.
