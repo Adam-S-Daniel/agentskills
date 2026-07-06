@@ -10,10 +10,7 @@ description: >
   attachment contents (including spreadsheets); compose and send new messages;
   or draft and send replies. Trigger on any mention of "Fastmail", "check my
   email", "search my inbox", "reply to", or similar email-management requests.
-compatibility:
-  tools:
-    - Claude in Chrome (browser automation)
-  environment: local-browser-only
+compatibility: Requires Claude in Chrome (browser automation) with a logged-in Fastmail session; local interactive execution only — not usable in headless or cloud sessions
 ---
 
 # Fastmail Skill
