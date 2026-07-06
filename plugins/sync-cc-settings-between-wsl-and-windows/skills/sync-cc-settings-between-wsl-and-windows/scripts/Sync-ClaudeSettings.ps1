@@ -14,6 +14,8 @@
         defaultShell                       : ignore (each file keeps its own)
         showMessageTimestamps              : more-recently-modified / only-existing wins (no prompt)
         spinnerVerbs.verbs                 : union
+        env.<key>                          : per-key merge (more-recently-modified / only-existing wins, PROMPT)
+        env.CCSTATUSLINE_WIDTH             : per-file (each file keeps its own; WSL auto-detects, Windows needs a fixed value)
         effortLevel                        : more-recently-modified / only-existing wins, PROMPT
         tui                                : more-recently-modified / only-existing wins, PROMPT
         skipDangerousModePermissionPrompt  : more-recently-modified / only-existing wins, PROMPT
@@ -239,6 +241,7 @@ function Get-UnionArray {
 # any unlisted keys fall through and are emitted alphabetically after.
 $script:CanonicalTopOrder = @(
     'permissions',
+    'env',
     'model',
     'theme',
     'tui',
@@ -372,6 +375,10 @@ $wsl = Read-JsonOrdered -Path $WslSettingsPath
 
 # Rule tables
 $ignoreKeys          = @('statusLine','defaultShell')
+# env sub-keys kept per-file (each side keeps its own; never copied across).
+# CCSTATUSLINE_WIDTH: WSL auto-detects terminal width and must NOT be pinned,
+# while Windows (win32) cannot auto-detect and needs a fixed value.
+$perFileEnvKeys      = @('CCSTATUSLINE_WIDTH')
 $autoScalarKeys      = @('showMessageTimestamps')           # merge w/o prompt
 $promptScalarKeys    = @(                                   # merge w/ prompt
     'autoDreamEnabled','effortLevel','tui','skipDangerousModePermissionPrompt',
@@ -439,6 +446,46 @@ foreach ($key in $allKeys) {
             }
         }
         $merged[$key] = Sort-DictByCanonicalOrder -Dict $p -CanonicalOrder $script:CanonicalPermissionsOrder
+        continue
+    }
+
+    # --- env: per-key merge; designated keys kept per-file ---
+    if ($key -eq 'env') {
+        $we = if ($wHas -and $wVal -is [System.Collections.IDictionary]) { $wVal } else { @{} }
+        $le = if ($lHas -and $lVal -is [System.Collections.IDictionary]) { $lVal } else { @{} }
+        $envKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($k in $we.Keys) { [void]$envKeys.Add($k) }
+        foreach ($k in $le.Keys) { [void]$envKeys.Add($k) }
+        $envWin = [ordered]@{}
+        $envWsl = [ordered]@{}
+        foreach ($ek in @($envKeys | Sort-Object -Culture ([cultureinfo]::InvariantCulture))) {
+            $weHas = $we.Contains($ek)
+            $leHas = $le.Contains($ek)
+            $weVal = if ($weHas) { $we[$ek] } else { $null }
+            $leVal = if ($leHas) { $le[$ek] } else { $null }
+            # per-file env keys: each side keeps its own; never copied across
+            if ($perFileEnvKeys -contains $ek) {
+                if ($weHas) { $envWin[$ek] = $weVal }
+                if ($leHas) { $envWsl[$ek] = $leVal }
+                $log.Add("[env.$ek] per-file (each file keeps its own value)") | Out-Null
+                continue
+            }
+            $r = Resolve-ScalarConflict -KeyPath "env.$ek" `
+                    -WindowsValue $weVal -WindowsHasKey $weHas `
+                    -WslValue $leVal -WslHasKey $leHas `
+                    -Policy 'prompt' -NewerSide $newerSide -NonInteractive:$AssumeYes
+            if ($r.Present -and -not ($r.PSObject.Properties.Name -contains 'Skip' -and $r.Skip)) {
+                $envWin[$ek] = $r.Value
+                $envWsl[$ek] = $r.Value
+            }
+            $log.Add("[env.$ek] -> $($r.Source)") | Out-Null
+        }
+        $merged[$key] = [pscustomobject]@{
+            __PerFile    = $true
+            WindowsValue = $envWin; WindowsHas = ($envWin.Count -gt 0)
+            WslValue     = $envWsl; WslHas     = ($envWsl.Count -gt 0)
+        }
+        $log.Add("[env] per-key merge (per-file: $($perFileEnvKeys -join ', '))") | Out-Null
         continue
     }
 
