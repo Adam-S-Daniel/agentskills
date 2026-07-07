@@ -15,3 +15,7 @@
   the in-repo pattern works because repos live at `~/repos/<name>` everywhere.
 - claude-memory-map: the `@sparticuz/chromium` serverless test path is broken in
   v131 (`.default` removed); CI uses `npm run setup:browser` instead.
+- sync.sh cannot recover a stale remote `agents-md-sync/update` branch (push is
+  non-fast-forward and it deliberately never force-pushes). Recovery: open a PR
+  from the stale branch and merge it (frees the name), then re-run sync. Do NOT
+  add --force to sync.sh — it could discard reviewer commits on open PRs.
