@@ -48,6 +48,12 @@
   writing the spec, and review of the subagent's diff before commit.
 - Escalate the model rather than ship a wrong diff when the task is genuinely
   subtle (cross-repo invariants, race conditions).
+- Don't assume the subagent sees this file: general-purpose and custom
+  subagents receive the full memory hierarchy (imports included), but
+  Explore/Plan-type agents and SDK harnesses with `settingSources: []` skip
+  repo guidance entirely. Restate load-bearing constraints (style, test
+  command, invariants) in the delegation prompt, and don't hand
+  guidance-sensitive work to agents that won't see it.
 - Give the subagent a precise spec — files, exact changes, house style, the
   test command to run. Subagent output is gated by the same test/CI proof as
   any other change.
