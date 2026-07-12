@@ -24,8 +24,10 @@ to send *as*. This skill finds those and adds them as sending identities.
 ## Auth
 
 Same as the `add-from-address` skill: a Fastmail API token with **read-write
-Mail** access, in `FASTMAIL_API_TOKEN` or `~/.fastmail_token`. See that skill for
-how to create it.
+Mail** access, supplied via `FASTMAIL_API_TOKEN`, a `FASTMAIL_TOKEN_CMD` that
+prints it, or `~/.fastmail_token`. See that skill for how to create the token and
+for the **"Running from Claude Code web"** setup (env-var config plus allowing
+network egress to `api.fastmail.com`).
 
 ## How it decides (three internal stages)
 

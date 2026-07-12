@@ -18,6 +18,7 @@ comes back with a pending verification state instead of being usable.
 import argparse
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 import urllib.error
@@ -33,12 +34,19 @@ USING = [
 def get_token():
     tok = os.environ.get("FASTMAIL_API_TOKEN")
     if not tok:
+        cmd = os.environ.get("FASTMAIL_TOKEN_CMD")
+        if cmd:
+            proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if proc.returncode != 0:
+                sys.exit("error: FASTMAIL_TOKEN_CMD failed: " + (proc.stderr.strip() or "exit %d" % proc.returncode))
+            tok = proc.stdout.strip()
+    if not tok:
         path = os.path.expanduser("~/.fastmail_token")
         if os.path.exists(path):
             with open(path) as fh:
                 tok = fh.read().strip()
     if not tok:
-        sys.exit("error: set FASTMAIL_API_TOKEN (or write the token to ~/.fastmail_token)")
+        sys.exit("error: no token. Set FASTMAIL_API_TOKEN, or FASTMAIL_TOKEN_CMD (a command that prints the token), or write the token to ~/.fastmail_token")
     return tok
 
 

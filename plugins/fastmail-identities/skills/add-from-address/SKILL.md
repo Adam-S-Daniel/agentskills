@@ -26,11 +26,32 @@ token, it needs no logged-in browser and runs anywhere.
    New API token**.
 2. Grant it **read-write access to Mail**. (Managing sending identities uses the
    JMAP `submission` capability, which the Mail scope covers.)
-3. Make the token available to the skill, either:
-   - `export FASTMAIL_API_TOKEN=fmu1-...` in the shell, or
+3. Make the token available to the skill, by any one of:
+   - `export FASTMAIL_API_TOKEN=fmu1-...` in the shell (also how Claude Code web
+     injects it — see below);
+   - set `FASTMAIL_TOKEN_CMD` to a command that prints the token, e.g.
+     `pass show fastmail/api-token` or `op read "op://Private/Fastmail/token"`
+     (keeps the token out of a plaintext file and out of a visible env config);
    - write the token (single line) to `~/.fastmail_token`.
 
-The token is read from the environment/file only; it is never printed or logged.
+The token is read from the environment/command/file only; it is never printed or
+logged.
+
+### Running from Claude Code web
+
+These skills also run in a hosted Claude Code web session, with two setup steps:
+
+1. **Provide the token.** In the cloud environment's **Configure your
+   environment** panel, add `FASTMAIL_API_TOKEN=...` (`.env` format, no quotes) —
+   or add a secret-manager bootstrap credential plus `FASTMAIL_TOKEN_CMD`. Note:
+   web env vars are **visible to anyone who can edit that environment and are not
+   masked** (there is no dedicated secret store yet), so use a tightly-scoped,
+   rotatable Mail-only token.
+2. **Allow network egress to Fastmail.** The default *Trusted* network policy
+   only reaches package registries and GitHub, so the JMAP calls will be blocked.
+   Set the environment's network access to **Full**, or a **Custom allowlist that
+   includes `api.fastmail.com`** (plus your secret-manager host if you use
+   `FASTMAIL_TOKEN_CMD`).
 
 ## Run
 
