@@ -60,10 +60,13 @@ Write-Host "Watching run $runId ..." -ForegroundColor Cyan
 & gh run watch $runId --repo $Repo --exit-status --interval 3
 $runExit = $LASTEXITCODE
 
-Write-Host "`n--- workflow report ---" -ForegroundColor Cyan
-$log = & gh run view $runId --repo $Repo --log 2>$null
-$log | Select-String -Pattern '(##\s|^\s*\*\*Mode|###\s|^\s*-\s|correspondent:|would-add|verification=|DRY RUN|APPLIED|stage \d|scanned )' |
-    ForEach-Object { ($_.Line -split "`t")[-1] }
-
-Write-Host "`nRun: https://github.com/$Repo/actions/runs/$runId"
+# For privacy, the workflow does NOT print the report (addresses, correspondents,
+# mailbox totals) to its public log — it emails the report to the configured
+# FASTMAIL_REPORT_TO address.
+if ($runExit -eq 0) {
+    Write-Host "`nDone. The report (funnel counts, candidate aliases with correspondents, and the added/would-add list) was emailed to your FASTMAIL_REPORT_TO address — check your inbox." -ForegroundColor Green
+} else {
+    Write-Host "`nThe run did not succeed. See the run for the (non-sensitive) status." -ForegroundColor Yellow
+}
+Write-Host "Run: https://github.com/$Repo/actions/runs/$runId"
 exit $runExit
