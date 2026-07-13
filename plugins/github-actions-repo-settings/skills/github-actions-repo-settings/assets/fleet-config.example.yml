@@ -1,0 +1,88 @@
+# Fleet config consumed by repo_settings.py (diff/apply) and the fan-out workflow.
+#
+# This is the actual applied desired-state for the Adam-S-Daniel + jodidaniel
+# fleet -- it doubles as a worked example. Adapt the `repos:` list for your own
+# fleet. Move this file (plus scripts/repo_settings.py and the fan-out workflow)
+# into the central repo that owns fleet settings; see SKILL.md.
+#
+# Dispositions below were chosen from an adversarial, per-repo workflow-safety
+# audit (see SKILL.md "How the fleet was classified"):
+#   * public + no workflow pushes to the default branch -> full baseline
+#   * private                                            -> SHA pinning only
+#   * scratch/experimental                               -> Actions hardening only
+#   * fork / owned by another settings system            -> excluded
+
+defaults:
+  actions:
+    sha_pinning_required: true
+    fork_pr_approval: all_external_contributors
+  ruleset:
+    enabled: true
+    name: "default branch protection"
+    enforcement: active
+    require_pull_request:
+      required_approving_review_count: 0
+      dismiss_stale_reviews: false
+    block_force_pushes: true
+    block_deletions: true
+    required_status_checks: []
+    admin_bypass: true
+
+repos:
+  # --- public, ruleset-safe (adversarially verified: no workflow pushes to main) ---
+  - name: Adam-S-Daniel/agentskills
+  - name: Adam-S-Daniel/tools
+  - name: Adam-S-Daniel/skills-evals
+  - name: Adam-S-Daniel/claude-memory-map
+  - name: Adam-S-Daniel/civic-azure-infra
+  - name: Adam-S-Daniel/civic-iac-policy
+  - name: Adam-S-Daniel/civic-platform-agents
+  - name: jodidaniel/squarespacetemp
+
+  # --- already protected via CLASSIC branch protection and already compliant on
+  #     the Actions settings: full no-op; do not layer a second ruleset on top ---
+  - name: Adam-S-Daniel/GHA-bench
+    overrides:
+      ruleset: { enabled: false }
+
+  # --- ruleset HELD: nightly drift-report.yml pushes drift-report.md to main as
+  #     github-actions[bot]; a PR-required ruleset would break it. Re-enable once
+  #     that workflow is converted to open a PR (e.g. peter-evans/create-pull-request). ---
+  - name: Adam-S-Daniel/_agent-guidance
+    overrides:
+      ruleset: { enabled: false }
+
+  # --- private: only SHA pinning applies (fork approval 422, rulesets 403) ---
+  - name: Adam-S-Daniel/rss-inator
+    overrides: { ruleset: { enabled: false } }
+  - name: Adam-S-Daniel/jc
+    overrides: { ruleset: { enabled: false } }
+  - name: Adam-S-Daniel/agentskills-private
+    overrides: { ruleset: { enabled: false } }
+  - name: Adam-S-Daniel/4A
+    overrides: { ruleset: { enabled: false } }
+
+  # --- scratch/experimental: Actions hardening only, no ruleset ---
+  - name: Adam-S-Daniel/scratch-jules-001
+    overrides: { ruleset: { enabled: false } }
+  - name: Adam-S-Daniel/scratch-claude-001
+    overrides: { ruleset: { enabled: false } }
+  - name: jodidaniel/scratch-claude-002
+    overrides: { ruleset: { enabled: false } }
+
+  # --- forks: excluded (upstream workflows should not be hardened downstream) ---
+  - name: Adam-S-Daniel/OctopusDeploy-Api
+    manage: false
+  - name: Adam-S-Daniel/SonosAmpJuicePi
+    manage: false
+
+  # --- cms-platform + its consumers: owned by the platform's OWN settings-as-code
+  #     (repo-settings.yml manifest + rulesets, via cms-platform PR #168).
+  #     Excluded here to avoid a competing source of truth -- classic/ruleset
+  #     protection from two systems would be enforced as the union. ---
+  - name: Adam-S-Daniel/cms-platform
+    manage: false
+  - name: Adam-S-Daniel/adamdaniel.ai
+    manage: false
+  - name: jodidaniel/jodidaniel.com
+    manage: false
