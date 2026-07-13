@@ -44,9 +44,9 @@
     {
       "name": "github-actions-repo-settings",
       "source": "./plugins/github-actions-repo-settings",
-      "description": "Configure GitHub repository/org settings to enforce Actions security policies (SHA pinning, fork-PR approval).",
+      "description": "Enforce GitHub repo security settings as code (SHA pinning, fork-PR approval, default-branch ruleset) with generate/diff/apply drift detection and a central fan-out workflow.",
       "category": "ci-cd",
-      "keywords": ["github-actions", "security", "supply-chain", "gh"]
+      "keywords": ["github-actions", "security", "supply-chain", "gh", "settings-as-code", "drift", "rulesets", "branch-protection"]
     },
     {
       "name": "launch-wsl-claude-session",

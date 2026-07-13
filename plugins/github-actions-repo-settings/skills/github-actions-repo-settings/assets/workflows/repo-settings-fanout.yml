@@ -1,0 +1,106 @@
+# Central fan-out workflow: enforce repo-settings-as-code across many repos, in
+# BOTH accounts, using a GitHub App (not a stored PAT).
+#
+# Why an App: a fine-grained PAT is scoped to ONE resource owner, so it cannot
+# administer repos in a second account/org. One GitHub App installed on both
+# `Adam-S-Daniel` (user) and `jodidaniel` (org) mints a fresh, short-lived
+# (~1h) installation token per owner at runtime -- least privilege, nothing to
+# rotate, and it reaches both. The engine already accepts `--owner`, so each
+# matrix leg processes only its owner's repos with that owner's token.
+#
+# Place this in the central repo that owns fleet settings (e.g. a dedicated
+# `repo-settings` repo), alongside:
+#   scripts/repo_settings.py     (copied from the github-actions-repo-settings skill)
+#   repo-settings/fleet.yml      (your fleet config -- see repo-settings.schema.md)
+#
+# One-time setup (must be done by a human -- creating an App and its key cannot
+# be automated):
+#   1. Create a GitHub App (Settings > Developer settings > GitHub Apps) with
+#      repository permissions: Administration: Read & write, Actions: Read &
+#      write, Metadata: Read-only. No webhook needed.
+#   2. Generate a private key; install the App on BOTH `Adam-S-Daniel` and the
+#      `jodidaniel` org, granting access to the repos in fleet.yml.
+#   3. In THIS repo, add: variable `REPO_SETTINGS_APP_ID`, secret
+#      `REPO_SETTINGS_APP_PRIVATE_KEY`.
+#
+# Behavior:
+#   * pull_request touching config/script -> drift report only (fails on drift)
+#   * push to main / weekly schedule / manual dispatch -> apply
+
+name: repo-settings
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview changes without applying"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - "repo-settings/fleet.yml"
+      - "scripts/repo_settings.py"
+      - ".github/workflows/repo-settings.yml"
+  pull_request:
+    paths:
+      - "repo-settings/fleet.yml"
+      - "scripts/repo_settings.py"
+      - ".github/workflows/repo-settings.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-settings
+  cancel-in-progress: false
+
+jobs:
+  repo-settings:
+    runs-on: ubuntu-latest
+    # Skip cleanly until the GitHub App is configured (avoids a failing run on a
+    # repo that is still awaiting its one-time credential setup).
+    if: ${{ vars.REPO_SETTINGS_APP_ID != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        owner: [Adam-S-Daniel, jodidaniel]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2 (2024-10-23)
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0 (2024-10-31)
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Mint GitHub App token for ${{ matrix.owner }}
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (2026-05-12)
+        with:
+          app-id: ${{ vars.REPO_SETTINGS_APP_ID }}
+          private-key: ${{ secrets.REPO_SETTINGS_APP_PRIVATE_KEY }}
+          owner: ${{ matrix.owner }}
+
+      - name: Drift report (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: python scripts/repo_settings.py diff --config repo-settings/fleet.yml --owner ${{ matrix.owner }}
+
+      - name: Apply (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: python scripts/repo_settings.py apply --config repo-settings/fleet.yml --owner ${{ matrix.owner }} --dry-run
+
+      - name: Apply
+        if: github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: python scripts/repo_settings.py apply --config repo-settings/fleet.yml --owner ${{ matrix.owner }}

@@ -1,45 +1,229 @@
 ---
 name: github-actions-repo-settings
 description: >
-  Configure GitHub repository and organization settings to enforce Actions
-  security policies: require actions to be pinned to full-length commit SHAs
-  and require approval for all outside collaborators' fork pull-request
-  workflow runs. Trigger when: setting up a new repo, running a security
-  audit, onboarding a repo to org standards, or when asked to configure or
+  Configure and enforce GitHub repository security settings as code: require
+  actions to be pinned to full-length commit SHAs, require approval for all
+  outside collaborators' fork pull-request workflow runs, and protect the
+  default branch via a repository ruleset. Includes a generate/diff/apply engine
+  (introspect current state -> emit YAML; detect drift; apply desired state) and
+  a central fan-out workflow to enforce a baseline across many repos. Trigger
+  when: setting up a new repo, running a security audit, onboarding a repo to org
+  standards, enforcing settings across a fleet, or when asked to configure or
   harden Actions security settings. Trigger on mentions of "actions settings",
-  "repo security settings", "fork approval", "outside collaborators",
-  "actions policy", or "harden repo".
-compatibility: Requires the GitHub CLI (gh) authenticated with repository admin (or org admin) scope; any environment
+  "repo security settings", "repo settings as code", "settings drift", "fork
+  approval", "outside collaborators", "actions policy", "branch protection",
+  "ruleset", or "harden repo".
+compatibility:
+  tools:
+    - GitHub CLI (gh)
+    - Python 3 with PyYAML (for the settings-as-code engine)
+  environment: any
 ---
 
 # GitHub Actions Repo Settings
 
-Configure repository-level and organization-level GitHub Actions security
-settings via the GitHub REST API.
+Configure and enforce GitHub repository security settings. Two ways to use this:
 
-## 1. Settings to enforce
+1. **Settings-as-code (recommended)** -- describe desired state in a YAML file
+   and let `scripts/repo_settings.py` introspect, diff, and apply it, for a
+   single repo or a whole fleet. See section 1.
+2. **Manual API recipes** -- one-off `gh api` calls for each setting, plus a UI
+   fallback. See sections 3-6.
 
-| # | Setting | Purpose |
-|---|---------|---------|
-| 1 | **Require actions to be pinned to a full-length commit SHA** | Prevents mutable tag references; mitigates supply-chain attacks |
-| 2 | **Require approval for all outside collaborators** | Requires manual approval before fork PRs from non-collaborators can run workflows |
+## Settings enforced
 
-## 2. Setting 1 -- Require SHA pinning
+| # | Setting | Purpose | API |
+|---|---------|---------|-----|
+| 1 | **Require actions pinned to a full-length SHA** | Prevents mutable tag refs; mitigates supply-chain attacks | `repos/{repo}/actions/permissions` |
+| 2 | **Require approval for all outside collaborators** | Manual approval before fork PRs from non-collaborators run workflows | `.../actions/permissions/fork-pr-contributor-approval` |
+| 3 | **Default-branch protection (ruleset)** | Require PRs, block force-push/deletion on the default branch | `repos/{repo}/rulesets` |
 
-### Check current state
+Setting 3 uses a **repository ruleset** rather than classic branch protection,
+so the fleet speaks the same primitive as repos managed by other ruleset-based
+systems (e.g. cms-platform).
 
+## Key API facts (verified against the live API)
+
+- **Fork-PR approval enum values are the short forms** returned by the GET:
+  `first_time_contributors` and **`all_external_contributors`** (= the UI's
+  "all outside collaborators"). Older docs showing
+  `require_approval_for_all_outside_collaborators` are **wrong**.
+- **Private repos** cannot use fork-PR approval (API `422`) and cannot use
+  rulesets/branch protection without GitHub Pro (API `403`). Only SHA pinning
+  applies to a private repo on a free plan.
+- **`Adam-S-Daniel` is a user account; `jodidaniel` is an organization.** We
+  still apply everything **per-repo** (we don't rely on org-level rulesets), but
+  the account/org split matters for automation auth: a fine-grained PAT is
+  scoped to a **single** owner, so one PAT cannot administer both. Cross-account
+  automation should use a **GitHub App installed on both** (see section 2).
+- Writing any of these needs **repo-admin** (fine-grained PAT with
+  "Administration: read and write" + "Actions: read and write", or a GitHub App
+  with the same permissions). The default Actions `GITHUB_TOKEN` **cannot**
+  change repo settings.
+
+---
+
+## 1. Settings-as-code engine
+
+`scripts/repo_settings.py` drives everything through `gh` (so it uses your local
+`gh auth`, or `GH_TOKEN` in CI). Install the one dependency once:
+
+```bash
+pip install pyyaml
+```
+
+### Generate -- introspect current state into a config
+
+```bash
+python scripts/repo_settings.py generate --repo Adam-S-Daniel/agentskills > repo-settings.yml
+```
+
+Emits a YAML document (single-repo shape) describing the repo's current SHA
+pinning, fork-PR approval, and default-branch ruleset. Edit it to describe the
+**desired** state, then diff/apply.
+
+### Diff -- drift report (no changes)
+
+```bash
+python scripts/repo_settings.py diff --config repo-settings.yml
+# exit 0 = no drift, 1 = drift, 2 = error
+```
+
+Prints, per setting, `ok` / `DRIFT` (with `from:` -> `to:`) / `skip` (with the
+reason, e.g. private-repo downgrade) / `ERROR`.
+
+### Apply -- converge to desired state
+
+```bash
+python scripts/repo_settings.py apply --config repo-settings.yml            # apply
+python scripts/repo_settings.py apply --config repo-settings.yml --dry-run  # preview
+```
+
+Applies only the settings that drift; prints `CHANGED` for each. The managed
+ruleset is idempotent **by name**: apply creates it if absent, updates it in
+place if present, and never touches other rulesets. Re-running a converged
+config is a clean no-op.
+
+### Config schema
+
+See [assets/repo-settings.schema.md](assets/repo-settings.schema.md) for the
+full schema. Two shapes:
+
+- **Single-repo** -- top-level `actions:` / `ruleset:` blocks (+ optional
+  `repo:`), for one repo.
+- **Fleet** -- a `repos:` list with a shared `defaults:` baseline, per-repo
+  `overrides:` (deep-merged), and `manage: false` to exclude a repo.
+
+The engine **auto-downgrades**: on a private repo it skips fork-PR approval and
+the ruleset (with a logged reason), so one `defaults:` baseline targets public
+and private repos alike.
+
+---
+
+## 2. Enforcing a baseline across a fleet (central fan-out)
+
+For managing many repos from one place, use the fleet config shape plus the
+fan-out workflow. Worked example: [assets/fleet-config.example.yml](assets/fleet-config.example.yml)
+(the live Adam-S-Daniel + jodidaniel fleet).
+
+### Local one-shot
+
+```bash
+python scripts/repo_settings.py diff  --config fleet.yml   # audit the whole fleet
+python scripts/repo_settings.py apply --config fleet.yml   # enforce it
+```
+
+### Ongoing enforcement in CI
+
+Copy into a **dedicated `repo-settings` repo** (keeps the repo-admin credential
+isolated from unrelated code/CI):
+
+```
+scripts/repo_settings.py                        # from this skill
+repo-settings/fleet.yml                          # your fleet config
+.github/workflows/repo-settings.yml              # from assets/workflows/repo-settings-fanout.yml
+```
+
+**Authenticate with a GitHub App, not a PAT.** A fine-grained PAT is scoped to a
+single owner, so it cannot administer repos across both `Adam-S-Daniel` and the
+`jodidaniel` org. Create one GitHub App (repository permissions: Administration
+R/W, Actions R/W, Metadata R), install it on **both** accounts, and store its
+`REPO_SETTINGS_APP_ID` (variable) + `REPO_SETTINGS_APP_PRIVATE_KEY` (secret) in
+the repo-settings repo. The workflow
+([assets/workflows/repo-settings-fanout.yml](assets/workflows/repo-settings-fanout.yml))
+mints a fresh, short-lived installation token **per owner** (matrix over owner)
+and runs the engine with `--owner` so each account is handled with its own
+least-privilege token — nothing to rotate. It:
+
+- **pull_request** touching the config/script -> drift report only, fails the
+  check if there is drift (so review shows what would change);
+- **push to main** / **weekly schedule** / **manual dispatch** -> apply.
+
+(Creating the App and its private key is a one-time human step — it can't be
+automated. An interim lower-risk option is to run **audit-only** in CI with a
+per-owner read-only token and keep `apply` on an operator's machine.)
+
+### How the fleet was classified
+
+Non-standard settings are sometimes deliberate, so the fleet was classified with
+an adversarial, per-repo workflow-safety audit before applying the ruleset. The
+one failure mode that matters for the PR-required ruleset: a workflow step where
+`github-actions[bot]` / `GITHUB_TOKEN` (a non-admin) pushes/force-pushes/deletes
+on the repo's **own default branch** -- that push is blocked and the job fails.
+Rules of thumb used:
+
+- **public, no workflow pushes to the default branch** -> full baseline;
+- **private** -> SHA pinning only (fork approval + ruleset unavailable);
+- **scratch/experimental** -> Actions hardening only, no ruleset;
+- **fork, or owned by another settings system** -> excluded (`manage: false`);
+- **a workflow pushes to its own default branch** -> hold the ruleset until the
+  workflow is converted to open a PR (e.g. `peter-evans/create-pull-request`).
+  (In this fleet, `_agent-guidance`'s nightly `drift-report.yml` triggered this
+  hold.)
+
+---
+
+## 3. CMS platform (cms-platform) and its consumers
+
+`cms-platform` and the sites that consume it (`adamdaniel.ai`,
+`jodidaniel.com`) manage their **own** settings-as-code from the platform: a
+`repo-settings.yml` manifest + `scripts/audit-repo-settings.js`, propagated to
+consumers when sites are scaffolded/re-synced, using **rulesets** (landing via
+cms-platform PR #168, `feat/109-repo-settings-as-code`).
+
+**These repos are excluded from the fan-out** (`manage: false`). Reason: the
+fan-out and the platform would otherwise be two independent sources of truth for
+branch protection, and GitHub enforces the **union** of all rulesets/protections
+-- so a second system layering its own ruleset would create drift the platform's
+audit is blind to. Branch protection for these three repos is owned by the
+platform.
+
+**Known gap to close in the platform:** PR #168 manages repo flags +
+branch-protection rulesets but **not** the two Actions-permissions settings this
+skill enforces (`sha_pinning_required`, fork-PR approval). To make the platform
+the single source of truth, add an `actions_permissions` block to its
+`repo-settings.yml` and the matching GET/PUT (`actions/permissions` and
+`.../fork-pr-contributor-approval`, guarding the fork endpoint against 422 on
+private repos) to `audit-repo-settings.js`, plus fixtures/lints. Do **not** let
+the fan-out manage these repos to cover the gap.
+
+**Divergence to be aware of:** the platform's `main` ruleset uses
+`bypass_actors: []` (nobody, not even the owner, direct-pushes to main -- safe
+there because every change lands via PR + auto-merge). The fan-out default uses
+`admin_bypass: true` (owner can still direct-push). Both use
+`required_approving_review_count: 0`, which is **required** -- the platform's bot
+auto-merge chain deadlocks if any approval is required.
+
+---
+
+## 4. Manual recipe -- Setting 1 (SHA pinning)
+
+### Check
 ```bash
 gh api "repos/{owner}/{repo}/actions/permissions" --jq '.sha_pinning_required'
 ```
 
-Returns `true` or `false`. For an organization:
-
-```bash
-gh api "orgs/{org}/actions/permissions" --jq '.sha_pinning_required'
-```
-
-### Enable for a single repository
-
+### Enable (repo)
 ```bash
 gh api "repos/{owner}/{repo}/actions/permissions" \
   --method PUT \
@@ -48,182 +232,102 @@ gh api "repos/{owner}/{repo}/actions/permissions" \
   --field sha_pinning_required=true
 ```
 
-**Important:** You must include the `enabled` and `allowed_actions` fields in
-the PUT body -- they are required. Set `allowed_actions` to the repo's current
-value (check with GET first) to avoid changing it unintentionally. Common
-values: `"all"`, `"local_only"`, `"selected"`.
-
-To read the current `allowed_actions` value before writing:
+`enabled` and `allowed_actions` are **required** in the PUT body -- read them
+first and preserve them to avoid unintended changes:
 
 ```bash
 gh api "repos/{owner}/{repo}/actions/permissions" \
-  --jq '{enabled: .enabled, allowed_actions: .allowed_actions}'
+  --jq '{enabled, allowed_actions}'
 ```
 
-### Enable at the organization level
+## 5. Manual recipe -- Setting 2 (fork-PR approval)
 
+### Check
 ```bash
-gh api "orgs/{org}/actions/permissions" \
-  --method PUT \
-  --field enabled_repositories=all \
-  --field allowed_actions=all \
-  --field sha_pinning_required=true
-```
-
-As with repo-level, preserve the current `enabled_repositories` and
-`allowed_actions` values. Read them first:
-
-```bash
-gh api "orgs/{org}/actions/permissions" \
-  --jq '{enabled_repositories: .enabled_repositories, allowed_actions: .allowed_actions}'
-```
-
-## 3. Setting 2 -- Require approval for all outside collaborators
-
-### Check current state
-
-```bash
-# Repository level
-gh api "repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval"
-
-# Organization level
-gh api "orgs/{org}/actions/permissions/fork-pr-contributor-approval"
-```
-
-### Allowed values
-
-Verified against the live API (2026-07; a 422 lists the accepted enum):
-
-| UI label | API value |
-|----------|-----------|
-| Require approval for first-time contributors who are new to GitHub | `first_time_contributors_new_to_github` |
-| Require approval for first-time contributors | `first_time_contributors` |
-| **Require approval for all outside collaborators** | `all_external_contributors` |
-
-### Enable for a single repository
-
-```bash
-gh api "repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval" \
-  --method PUT \
-  --input - <<< '{"approval_policy":"all_external_contributors"}'
-```
-
-### Enable at the organization level
-
-```bash
-gh api "orgs/{org}/actions/permissions/fork-pr-contributor-approval" \
-  --method PUT \
-  --input - <<< '{"approval_policy":"all_external_contributors"}'
-```
-
-### If the API value is different
-
-If the PUT call fails with a validation error, the error message typically
-lists the allowed enum values. Read the error, pick the correct value, and
-retry. You can also check the current value on a repo that already has the
-setting enabled (via the GitHub UI) to discover the correct API string.
-
-## 4. Apply across all repos in an organization
-
-### Step-by-step
-
-```bash
-# 1. List all repos in the org
-repos=$(gh repo list {org} --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner')
-
-# 2. For each repo, apply both settings
-for repo in $repos; do
-  echo "Configuring $repo ..."
-
-  # Read current allowed_actions to preserve it
-  current=$(gh api "repos/$repo/actions/permissions" \
-    --jq '{enabled: .enabled, allowed_actions: .allowed_actions}' 2>/dev/null)
-
-  enabled=$(echo "$current" | jq -r '.enabled // true')
-  allowed=$(echo "$current" | jq -r '.allowed_actions // "all"')
-
-  # Setting 1: SHA pinning
-  gh api "repos/$repo/actions/permissions" \
-    --method PUT \
-    --field enabled="$enabled" \
-    --field allowed_actions="$allowed" \
-    --field sha_pinning_required=true \
-    2>/dev/null && echo "  SHA pinning: OK" || echo "  SHA pinning: FAILED"
-
-  # Setting 2: Fork PR approval
-  gh api "repos/$repo/actions/permissions/fork-pr-contributor-approval" \
-    --method PUT \
-    --input - <<< '{"approval_policy":"all_external_contributors"}' \
-    2>/dev/null && echo "  Fork approval: OK" || echo "  Fork approval: FAILED"
-
-done
-```
-
-### Rate limiting
-
-If you hit rate limits, add a delay:
-
-```bash
-sleep 1  # between repos
-```
-
-Check remaining quota:
-
-```bash
-gh api rate_limit --jq '.resources.core.remaining'
-```
-
-## 5. Verification
-
-After applying settings, verify they took effect:
-
-```bash
-# For a single repo
-gh api "repos/{owner}/{repo}/actions/permissions" \
-  --jq '{sha_pinning_required: .sha_pinning_required}'
-
 gh api "repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval" \
   --jq '.approval_policy'
 ```
 
-Expected output:
-```
-{ "sha_pinning_required": true }
-all_external_contributors
+### Enable "all outside collaborators" (repo)
+```bash
+gh api "repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval" \
+  --method PUT \
+  --input - <<< '{"approval_policy":"all_external_contributors"}'
 ```
 
-### Bulk verification
+Returns `422` on a private repo (not applicable). Valid values:
+`first_time_contributors`, `all_external_contributors`.
+
+## 6. Manual recipe -- Setting 3 (default-branch ruleset)
+
+### Check
+```bash
+gh api "repos/{owner}/{repo}/rulesets" --jq '.[]|{id,name,target,enforcement}'
+gh api "repos/{owner}/{repo}/rulesets/{id}"   # full rule detail
+```
+
+### Create a default-branch protection ruleset
+```bash
+gh api "repos/{owner}/{repo}/rulesets" --method POST --input - <<'JSON'
+{
+  "name": "default branch protection",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false
+      } }
+  ],
+  "bypass_actors": [
+    { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
+  ]
+}
+JSON
+```
+
+Returns `403` "Upgrade to GitHub Pro" on a private repo (not available).
+`actor_id: 5` is the Admin repository role (owner keeps direct-push); use an
+empty `bypass_actors: []` for no bypass.
+
+## 7. Bulk verification
 
 ```bash
-repos=$(gh repo list {org} --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner')
+python scripts/repo_settings.py diff --config fleet.yml   # preferred
+```
 
+Or manually:
+
+```bash
+repos=$(gh repo list {owner} --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner')
 for repo in $repos; do
-  sha_pin=$(gh api "repos/$repo/actions/permissions" --jq '.sha_pinning_required' 2>/dev/null)
-  fork_policy=$(gh api "repos/$repo/actions/permissions/fork-pr-contributor-approval" --jq '.approval_policy' 2>/dev/null)
-  echo "$repo: sha_pinning=$sha_pin fork_approval=$fork_policy"
+  sha=$(gh api "repos/$repo/actions/permissions" --jq '.sha_pinning_required' 2>/dev/null)
+  fork=$(gh api "repos/$repo/actions/permissions/fork-pr-contributor-approval" --jq '.approval_policy' 2>/dev/null)
+  rs=$(gh api "repos/$repo/rulesets" --jq '[.[].name]|join(",")' 2>/dev/null)
+  echo "$repo: sha=$sha fork=$fork rulesets=[$rs]"
 done
 ```
 
-## 6. Fallback -- GitHub UI
+## 8. Fallback -- GitHub UI
 
-If API endpoints change or return errors, configure via the UI:
+If API endpoints change: **Settings > Actions > General** for settings 1-2;
+**Settings > Rules > Rulesets** for setting 3.
 
-1. Go to the repo on github.com
-2. **Settings** > **Actions** > **General**
-3. Under **Actions permissions**, check **Require actions to be pinned to a
-   full-length commit SHA**
-4. Under **Fork pull request workflows** > **Approval for running fork pull
-   request workflows from outside collaborators**, select **Require approval
-   for all outside collaborators**
-5. Click **Save**
+## 9. Permissions required
 
-## 7. Permissions required
+- **Repository settings**: `repo` scope (PAT) or repository admin access.
+- **GitHub App**: `administration` (write) for rulesets, `actions` (write) for
+  Actions permissions.
 
-- **Repository settings**: `repo` scope (PAT) or repository admin access
-- **Organization settings**: `admin:org` scope (PAT) or organization owner/admin role
-- **GitHub App**: `actions` permission with `write` access
+## 10. Related
 
-## 8. Related
-
-After enabling the SHA pinning requirement, existing workflows with unpinned
-actions will fail. Audit and fix them using the `pin-actions-to-sha` skill.
+- After enabling SHA pinning, existing workflows with unpinned actions will
+  fail -- audit and fix them with the **`pin-actions-to-sha`** skill.
+- **`workflow-path-audit`** -- ensure workflows only run on salient path changes.
