@@ -6,7 +6,7 @@
 
 .DESCRIPTION
   Thin wrapper over `gh`. The workflow does the JMAP work using the repo's
-  FASTMAIL_API_KEY secret; this script never handles the token. Applies by
+  FASTMAIL_API_TOKEN secret; this script never handles the token. Applies by
   default (explicit addresses = explicit intent); pass -WhatIf to preview.
 
 .EXAMPLE

@@ -5,7 +5,7 @@ description: >
   to send from, and add them as "From" identities, by triggering the
   add-received-from-addresses GitHub Actions workflow in the
   Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the
-  FASTMAIL_API_KEY repo secret). It scans every message for distinct
+  FASTMAIL_API_TOKEN repo secret). It scans every message for distinct
   X-Delivered-To addresses, keeps only those you actually correspond through,
   drops any that are already identities, and adds the rest. Trigger when the user
   wants to "add From addresses for aliases I actually use", "find alias addresses
@@ -13,7 +13,7 @@ description: >
   mail". Supports a dry-run (whatif) preview. To add a specific known address, use
   the add-from-address skill instead.
 allowed-tools: Bash Read
-compatibility: Requires the GitHub CLI (gh) authenticated with workflow scope, and the Adam-S-Daniel/fastmail-actions repo with its FASTMAIL_API_KEY secret configured. Optionally pwsh 7 to use the bundled trigger.ps1 helper.
+compatibility: Requires the GitHub CLI (gh) authenticated with workflow scope, and the Adam-S-Daniel/fastmail-actions repo with its FASTMAIL_API_TOKEN secret configured. Optionally pwsh 7 to use the bundled trigger.ps1 helper.
 ---
 
 # Add "From" addresses for aliases you actually correspond through (via GitHub Actions)
@@ -21,12 +21,12 @@ compatibility: Requires the GitHub CLI (gh) authenticated with workflow scope, a
 This skill is a thin wrapper. The discovery + JMAP work lives in the
 [**fastmail-actions**](https://github.com/Adam-S-Daniel/fastmail-actions) repo as
 the **`add-received-from-addresses.yml`** workflow, which reads the Fastmail token
-from the repository secret **`FASTMAIL_API_KEY`**. This skill dispatches that
+from the repository secret **`FASTMAIL_API_TOKEN`**. This skill dispatches that
 workflow, waits for it, and shows its report. Nothing here touches the token.
 
 ## Prerequisites (one-time)
 
-1. The `Adam-S-Daniel/fastmail-actions` repo exists and its `FASTMAIL_API_KEY`
+1. The `Adam-S-Daniel/fastmail-actions` repo exists and its `FASTMAIL_API_TOKEN`
    secret is set (see that repo's README).
 2. `gh` is authenticated with the `workflow` scope (`gh auth status`).
 

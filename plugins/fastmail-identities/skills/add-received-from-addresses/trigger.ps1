@@ -6,7 +6,7 @@
 
 .DESCRIPTION
   Thin wrapper over `gh`. The workflow does the discovery + JMAP work using the
-  repo's FASTMAIL_API_KEY secret; this script never handles the token. Defaults
+  repo's FASTMAIL_API_TOKEN secret; this script never handles the token. Defaults
   to a dry run; pass -Apply to actually create the identities.
 
 .EXAMPLE

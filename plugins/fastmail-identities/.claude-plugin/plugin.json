@@ -1,5 +1,5 @@
 {
   "name": "fastmail-identities",
-  "description": "Add Fastmail sending identities (\"From\" addresses) by triggering the fastmail-actions GitHub Actions workflows (which do the JMAP work with the FASTMAIL_API_KEY repo secret).",
+  "description": "Add Fastmail sending identities (\"From\" addresses) by triggering the fastmail-actions GitHub Actions workflows (which do the JMAP work with the FASTMAIL_API_TOKEN repo secret).",
   "author": { "name": "Adam Daniel" }
 }
