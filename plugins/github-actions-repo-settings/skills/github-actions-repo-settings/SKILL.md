@@ -51,11 +51,15 @@ systems (e.g. cms-platform).
 - **Private repos** cannot use fork-PR approval (API `422`) and cannot use
   rulesets/branch protection without GitHub Pro (API `403`). Only SHA pinning
   applies to a private repo on a free plan.
-- **`Adam-S-Daniel` and `jodidaniel` are user accounts, not orgs** -- there are
-  no org-level settings to configure; everything is repo-level.
+- **`Adam-S-Daniel` is a user account; `jodidaniel` is an organization.** We
+  still apply everything **per-repo** (we don't rely on org-level rulesets), but
+  the account/org split matters for automation auth: a fine-grained PAT is
+  scoped to a **single** owner, so one PAT cannot administer both. Cross-account
+  automation should use a **GitHub App installed on both** (see section 2).
 - Writing any of these needs **repo-admin** (fine-grained PAT with
-  "Administration: read and write", classic PAT with `repo`, or a GitHub App).
-  The default Actions `GITHUB_TOKEN` **cannot** change repo settings.
+  "Administration: read and write" + "Actions: read and write", or a GitHub App
+  with the same permissions). The default Actions `GITHUB_TOKEN` **cannot**
+  change repo settings.
 
 ---
 
@@ -131,8 +135,8 @@ python scripts/repo_settings.py apply --config fleet.yml   # enforce it
 
 ### Ongoing enforcement in CI
 
-Copy into the **central repo** you choose to own fleet settings (a `.github`
-repo or a dedicated `repo-settings` repo):
+Copy into a **dedicated `repo-settings` repo** (keeps the repo-admin credential
+isolated from unrelated code/CI):
 
 ```
 scripts/repo_settings.py                        # from this skill
@@ -140,12 +144,24 @@ repo-settings/fleet.yml                          # your fleet config
 .github/workflows/repo-settings.yml              # from assets/workflows/repo-settings-fanout.yml
 ```
 
-Store a repo-admin PAT/App token as the `REPO_ADMIN_TOKEN` secret. The workflow
-([assets/workflows/repo-settings-fanout.yml](assets/workflows/repo-settings-fanout.yml)):
+**Authenticate with a GitHub App, not a PAT.** A fine-grained PAT is scoped to a
+single owner, so it cannot administer repos across both `Adam-S-Daniel` and the
+`jodidaniel` org. Create one GitHub App (repository permissions: Administration
+R/W, Actions R/W, Metadata R), install it on **both** accounts, and store its
+`REPO_SETTINGS_APP_ID` (variable) + `REPO_SETTINGS_APP_PRIVATE_KEY` (secret) in
+the repo-settings repo. The workflow
+([assets/workflows/repo-settings-fanout.yml](assets/workflows/repo-settings-fanout.yml))
+mints a fresh, short-lived installation token **per owner** (matrix over owner)
+and runs the engine with `--owner` so each account is handled with its own
+least-privilege token — nothing to rotate. It:
 
 - **pull_request** touching the config/script -> drift report only, fails the
   check if there is drift (so review shows what would change);
 - **push to main** / **weekly schedule** / **manual dispatch** -> apply.
+
+(Creating the App and its private key is a one-time human step — it can't be
+automated. An interim lower-risk option is to run **audit-only** in CI with a
+per-owner read-only token and keep `apply` on an operator's machine.)
 
 ### How the fleet was classified
 

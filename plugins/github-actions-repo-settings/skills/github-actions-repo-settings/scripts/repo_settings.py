@@ -518,9 +518,19 @@ def cmd_generate(args) -> int:
 # --------------------------------------------------------------------------- #
 # diff / apply
 # --------------------------------------------------------------------------- #
+def _filter_owner(targets: list[dict], owner: str | None) -> list[dict]:
+    """Keep only targets under `owner` (the part before '/'). Used by the
+    fan-out workflow to run one pass per account with that account's
+    short-lived GitHub App installation token."""
+    if not owner:
+        return targets
+    o = owner.lower()
+    return [t for t in targets if t["repo"].split("/", 1)[0].lower() == o]
+
+
 def cmd_diff(args) -> int:
     cfg = load_config(args.config)
-    targets = resolve_targets(cfg, args.repo)
+    targets = _filter_owner(resolve_targets(cfg, args.repo), getattr(args, "owner", None))
     any_drift = any_error = False
     for t in targets:
         if not t["manage"]:
@@ -537,7 +547,7 @@ def cmd_diff(args) -> int:
 
 def cmd_apply(args) -> int:
     cfg = load_config(args.config)
-    targets = resolve_targets(cfg, args.repo)
+    targets = _filter_owner(resolve_targets(cfg, args.repo), getattr(args, "owner", None))
     any_error = False
     for t in targets:
         if not t["manage"]:
@@ -572,11 +582,13 @@ def main() -> int:
     d = sub.add_parser("diff", help="drift report; exit 1 if drift")
     d.add_argument("--config", required=True)
     d.add_argument("--repo", help="override/set target for single-repo config")
+    d.add_argument("--owner", help="only process repos under this owner (account)")
     d.set_defaults(func=cmd_diff)
 
     a = sub.add_parser("apply", help="apply desired settings")
     a.add_argument("--config", required=True)
     a.add_argument("--repo", help="override/set target for single-repo config")
+    a.add_argument("--owner", help="only process repos under this owner (account)")
     a.add_argument("--dry-run", action="store_true", help="preview only")
     a.set_defaults(func=cmd_apply)
 

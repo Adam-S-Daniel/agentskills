@@ -1,17 +1,10 @@
 # Fleet config consumed by repo_settings.py (diff/apply) and the fan-out workflow.
+# This is the live desired-state for the Adam-S-Daniel + jodidaniel fleet (it
+# lives for real in the Adam-S-Daniel/repo-settings repo) and doubles as a worked
+# example -- adapt the `repos:` list for your own fleet. Dispositions come from an
+# adversarial per-repo workflow-safety audit (see SKILL.md "How the fleet was
+# classified").
 #
-# This is the actual applied desired-state for the Adam-S-Daniel + jodidaniel
-# fleet -- it doubles as a worked example. Adapt the `repos:` list for your own
-# fleet. Move this file (plus scripts/repo_settings.py and the fan-out workflow)
-# into the central repo that owns fleet settings; see SKILL.md.
-#
-# Dispositions below were chosen from an adversarial, per-repo workflow-safety
-# audit (see SKILL.md "How the fleet was classified"):
-#   * public + no workflow pushes to the default branch -> full baseline
-#   * private                                            -> SHA pinning only
-#   * scratch/experimental                               -> Actions hardening only
-#   * fork / owned by another settings system            -> excluded
-
 defaults:
   actions:
     sha_pinning_required: true
@@ -39,28 +32,22 @@ repos:
   - name: Adam-S-Daniel/civic-platform-agents
   - name: jodidaniel/squarespacetemp
 
-  # --- already protected via CLASSIC branch protection and already compliant on
-  #     the Actions settings: full no-op; do not layer a second ruleset on top ---
+  # --- GHA-bench: migrated from classic branch protection to a ruleset (the
+  #     fleet standard). Now managed like the other public repos. ---
   - name: Adam-S-Daniel/GHA-bench
-    overrides:
-      ruleset: { enabled: false }
 
-  # --- ruleset HELD: nightly drift-report.yml pushes drift-report.md to main as
-  #     github-actions[bot]; a PR-required ruleset would break it. Re-enable once
-  #     that workflow is converted to open a PR (e.g. peter-evans/create-pull-request). ---
+  # --- _agent-guidance: ruleset enabled. Previously held because drift-report.yml
+  #     pushed to main as the Actions bot; fixed in _agent-guidance PR #20
+  #     (drift report now lands via create-pull-request), so a PR-required
+  #     ruleset no longer breaks it. ---
   - name: Adam-S-Daniel/_agent-guidance
-    overrides:
-      ruleset: { enabled: false }
 
-  # --- private: only SHA pinning applies (fork approval 422, rulesets 403) ---
+  # --- private: only SHA pinning applies. fork-PR approval (422) and rulesets
+  #     (403, needs Pro) are auto-skipped by the engine with an explicit reason. ---
   - name: Adam-S-Daniel/rss-inator
-    overrides: { ruleset: { enabled: false } }
   - name: Adam-S-Daniel/jc
-    overrides: { ruleset: { enabled: false } }
   - name: Adam-S-Daniel/agentskills-private
-    overrides: { ruleset: { enabled: false } }
   - name: Adam-S-Daniel/4A
-    overrides: { ruleset: { enabled: false } }
 
   # --- scratch/experimental: Actions hardening only, no ruleset ---
   - name: Adam-S-Daniel/scratch-jules-001
@@ -76,10 +63,9 @@ repos:
   - name: Adam-S-Daniel/SonosAmpJuicePi
     manage: false
 
-  # --- cms-platform + its consumers: owned by the platform's OWN settings-as-code
-  #     (repo-settings.yml manifest + rulesets, via cms-platform PR #168).
-  #     Excluded here to avoid a competing source of truth -- classic/ruleset
-  #     protection from two systems would be enforced as the union. ---
+  # --- cms-platform + consumers: owned by the platform's OWN settings-as-code
+  #     (repo-settings.yml manifest + rulesets). Excluded to avoid a competing
+  #     source of truth (GitHub enforces the union of rulesets). ---
   - name: Adam-S-Daniel/cms-platform
     manage: false
   - name: Adam-S-Daniel/adamdaniel.ai
