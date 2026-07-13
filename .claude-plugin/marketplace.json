@@ -106,6 +106,13 @@
       "description": "Audit GitHub Actions workflows for salient-path conditionals so they skip with success on irrelevant changes.",
       "category": "ci-cd",
       "keywords": ["github-actions", "ci-cost", "path-filter", "workflows"]
+    },
+    {
+      "name": "writing-adrs",
+      "source": "./plugins/writing-adrs",
+      "description": "Write lightweight Nygard-style Architecture Decision Records under docs/decisions/, bootstrapping the folder, template, and index when missing.",
+      "category": "documentation",
+      "keywords": ["adr", "architecture-decision-record", "documentation", "decisions"]
     }
   ]
 }
