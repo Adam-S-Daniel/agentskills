@@ -1,75 +1,88 @@
 ---
 name: add-received-from-addresses
 description: >
-  Discover which of a Fastmail account's own alias addresses are worth being
-  able to send from, and add them as "From" identities. It scans every message
-  for distinct X-Delivered-To addresses (the aliases mail was delivered to),
-  keeps only those you actually correspond through (at least one sender you have
-  also emailed), drops any that are already sending identities, and adds the
-  rest. Uses the JMAP API with a Fastmail API token — no browser needed, runs
-  headless. Trigger when the user wants to "add From addresses for aliases I
-  actually use", "find alias addresses worth sending from", "set up identities
-  for the addresses that receive my mail", or similar. To add a specific known
-  address, use the add-from-address skill instead.
+  Discover which of a Fastmail account's own alias addresses are worth being able
+  to send from, and add them as "From" identities, by triggering the
+  add-received-from-addresses GitHub Actions workflow in the
+  Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the
+  FASTMAIL_API_TOKEN repo secret). It scans every message for distinct
+  X-Delivered-To addresses, keeps only those you actually correspond through,
+  drops any that are already identities, and adds the rest. Trigger when the user
+  wants to "add From addresses for aliases I actually use", "find alias addresses
+  worth sending from", or "set up identities for the addresses that receive my
+  mail". Supports a dry-run (whatif) preview. To add a specific known address, use
+  the add-from-address skill instead.
 allowed-tools: Bash Read
-compatibility: Requires Python 3 (stdlib only) and a Fastmail API token with read-write Mail access in FASTMAIL_API_TOKEN (or ~/.fastmail_token)
+compatibility: Requires the GitHub CLI (gh) authenticated with workflow scope, and the Adam-S-Daniel/fastmail-actions repo with its FASTMAIL_API_TOKEN secret configured. Optionally pwsh 7 to use the bundled trigger.ps1 helper.
 ---
 
-# Add "From" addresses for aliases you actually correspond through
+# Add "From" addresses for aliases you actually correspond through (via GitHub Actions)
 
-Personal mail often arrives at many alias addresses (`X-Delivered-To`), but only
-some are aliases you have real two-way correspondence through and would ever want
-to send *as*. This skill finds those and adds them as sending identities.
+This skill is a thin wrapper. The discovery + JMAP work lives in the
+[**fastmail-actions**](https://github.com/Adam-S-Daniel/fastmail-actions) repo as
+the **`add-received-from-addresses.yml`** workflow, which reads the Fastmail token
+from the repository secret **`FASTMAIL_API_TOKEN`**. This skill dispatches that
+workflow, waits for it, and shows its report. Nothing here touches the token.
 
-## Auth
+## Prerequisites (one-time)
 
-Same as the `add-from-address` skill: a Fastmail API token with **read-write
-Mail** access, supplied via `FASTMAIL_API_TOKEN`, a `FASTMAIL_TOKEN_CMD` that
-prints it, or `~/.fastmail_token`. See that skill for how to create the token and
-for the **"Running from Claude Code web"** setup (env-var config plus allowing
-network egress to `api.fastmail.com`).
+1. The `Adam-S-Daniel/fastmail-actions` repo exists and its `FASTMAIL_API_TOKEN`
+   secret is set (see that repo's README).
+2. `gh` is authenticated with the `workflow` scope (`gh auth status`).
 
-## How it decides (three internal stages)
+## How it decides (three stages, inside the workflow)
 
 1. **Distinct delivered-to.** Every distinct `X-Delivered-To` address across all
-   messages in the account.
+   messages.
 2. **Known correspondents.** Keep an alias only if at least one message delivered
-   to it came from a sender you have *also sent mail to*. This drops aliases that
-   only ever received one-way mail (newsletters, signup-only addresses). *(If you
-   ever want the stricter "every sender must be known" rule instead, that is a
-   one-line change in `filter_known_correspondents`.)*
+   to it came from a sender you have *also sent mail to* — dropping one-way
+   addresses (newsletters, signup-only).
 3. **Not already set up.** Drop any that are already sending identities.
 
-The survivors are added via the same `Identity/set` call as `add-from-address`.
+## whatif (dry run)
+
+The workflow takes a **`whatif`** input, and this discovery skill **defaults to a
+dry run**: it lists the pre-existing From addresses and the aliases that **would
+be added** (each annotated with the correspondent that qualified it). Show that
+list to the user and confirm, then re-run with whatif off to apply — after which
+it lists what was already present and what was **newly added**.
 
 ## Run
 
-Preview (default — makes no changes):
+Preferred — the bundled helper dispatches, waits, and prints the report:
 
 ```
-python3 ~/repos/agentskills/plugins/fastmail-identities/skills/add-received-from-addresses/discover_and_add.py
+# preview (default)
+pwsh trigger.ps1
+
+# apply after confirming
+pwsh trigger.ps1 -Apply
+
+# quick sample of the newest N messages
+pwsh trigger.ps1 -Max 2000
 ```
 
-It prints stage counts and the exact list it would add, each annotated with the
-correspondent that qualified it. **Show this list to the user and confirm**, then
-apply:
+Or drive `gh` directly:
 
 ```
-python3 ~/repos/agentskills/plugins/fastmail-identities/skills/add-received-from-addresses/discover_and_add.py --apply
+gh workflow run add-received-from-addresses.yml --repo Adam-S-Daniel/fastmail-actions -f whatif=true
+gh run list  --workflow=add-received-from-addresses.yml --repo Adam-S-Daniel/fastmail-actions --limit 1
+gh run watch <run-id> --repo Adam-S-Daniel/fastmail-actions --exit-status
+gh run view  <run-id> --repo Adam-S-Daniel/fastmail-actions --log
 ```
 
-Options:
+## Inputs
 
-| Flag | Effect |
-|---|---|
-| `--apply` | Actually create the identities (default is a dry run). |
-| `--name "Full Name"` | Display name for new identities. Defaults to an existing identity's name. |
-| `--max N` | Scan only the newest N messages (quick sample). Prints a WARNING that results are not exhaustive. |
+| Input | Maps to | Notes |
+|---|---|---|
+| `-Apply` | `whatif=false` | Actually create the identities (default is a dry run). |
+| `-Name "…"` | `name` | Display name; defaults to an existing identity's name. |
+| `-Max N` | `max` | Scan only the newest N messages (quick sample). |
 
 ## Notes
 
 - Scans **all** mail (including Junk/Trash); the correspondent filter removes
   aliases that only ever got junk, so this is safe.
 - Idempotent: re-running skips anything already added.
-- Output verification states read the same as in `add-from-address` — own-domain
-  aliases come back `autoverified` and are usable immediately.
+- Own-domain aliases come back `verification=autoverified` and are usable
+  immediately.

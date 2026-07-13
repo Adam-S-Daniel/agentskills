@@ -36,9 +36,9 @@
     {
       "name": "fastmail-identities",
       "source": "./plugins/fastmail-identities",
-      "description": "Add Fastmail sending identities (\"From\" addresses) via the JMAP API with an API token — add given addresses, or auto-discover alias addresses you actually correspond through and add those.",
+      "description": "Add Fastmail sending identities (\"From\" addresses) by triggering the fastmail-actions GitHub Actions workflows — add given addresses, or auto-discover alias addresses you actually correspond through and add those.",
       "category": "email",
-      "keywords": ["fastmail", "email", "jmap", "identities", "from-address", "api-token"],
+      "keywords": ["fastmail", "email", "jmap", "identities", "from-address", "github-actions", "workflow"],
       "defaultEnabled": false
     },
     {
