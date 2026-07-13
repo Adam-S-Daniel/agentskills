@@ -24,8 +24,9 @@ waits for it, and shows its report. Nothing here touches the token.
 ## Prerequisites (one-time)
 
 1. The `Adam-S-Daniel/fastmail-actions` repo exists and its `FASTMAIL_API_TOKEN`
-   secret is set (see that repo's README — create a read-write Mail API token in
-   Fastmail and `gh secret set FASTMAIL_API_TOKEN --repo Adam-S-Daniel/fastmail-actions`).
+   secret is set (see that repo's README — create a Fastmail API token with both
+   **Mail** (read-write) and **Email Submission** scopes, then
+   `gh secret set FASTMAIL_API_TOKEN --repo Adam-S-Daniel/fastmail-actions`).
 2. `gh` is authenticated with the `workflow` scope (`gh auth status`).
 
 ## whatif (dry run)
