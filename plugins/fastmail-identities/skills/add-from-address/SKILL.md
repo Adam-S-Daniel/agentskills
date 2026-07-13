@@ -27,20 +27,32 @@ waits for it, and shows its report. Nothing here touches the token.
    secret is set (see that repo's README — create a Fastmail API token with both
    **Mail** (read-write) and **Email Submission** scopes, then
    `gh secret set FASTMAIL_API_TOKEN --repo Adam-S-Daniel/fastmail-actions`).
-2. `gh` is authenticated with the `workflow` scope (`gh auth status`).
+2. Report routing secrets `FASTMAIL_REPORT_FROM` / `FASTMAIL_REPORT_TO` are set
+   (both to an existing sending identity). The workflow **emails** the report to
+   `FASTMAIL_REPORT_TO`; it never prints addresses to the public run log.
+3. `gh` is authenticated with the `workflow` scope (`gh auth status`).
+
+## Privacy — the report is emailed, not logged
+
+The fastmail-actions repo is public, so its run logs are public. The workflow
+therefore never prints the report (which contains addresses). It **emails** the
+result to `FASTMAIL_REPORT_TO`; the run log shows only a one-line confirmation.
+Tell the user to check that inbox for the details.
 
 ## whatif (dry run)
 
-The workflow takes a **`whatif`** input. In whatif mode it lists the pre-existing
-From addresses and the ones that **would be added**, changing nothing. Otherwise
-it adds them and lists what was already present and what was **newly added**.
+The workflow takes a **`whatif`** input. In whatif mode it emails a report of the
+pre-existing From addresses and the ones that **would be added**, changing
+nothing. Otherwise it adds them and emails what was already present and what was
+**newly added**.
 
 Because the user is giving explicit addresses (explicit intent), this skill
 **applies by default**. Pass whatif when the user wants a preview first.
 
 ## Run
 
-Preferred — the bundled helper dispatches, waits, and prints the report:
+Preferred — the bundled helper dispatches, waits, and reports run success (the
+detailed report is emailed, not printed):
 
 ```
 # apply (default)
@@ -61,7 +73,7 @@ gh workflow run add-from-address.yml --repo Adam-S-Daniel/fastmail-actions \
 # then find the run and watch it:
 gh run list --workflow=add-from-address.yml --repo Adam-S-Daniel/fastmail-actions --limit 1
 gh run watch <run-id> --repo Adam-S-Daniel/fastmail-actions --exit-status
-gh run view  <run-id> --repo Adam-S-Daniel/fastmail-actions --log
+# The run log holds only a status line; the report is emailed to FASTMAIL_REPORT_TO.
 ```
 
 ## Inputs
@@ -74,10 +86,10 @@ gh run view  <run-id> --repo Adam-S-Daniel/fastmail-actions --log
 
 ## Reading the output
 
-The workflow prints (and writes to the run's job summary) a report with two
-sections that always appear: **Pre-existing From addresses** and either **Would
-be added** (dry run) or **Added** (applied), plus **Skipped** for addresses that
-were already identities. An added address shows `verification=autoverified` when
-it is an alias on a domain you control (usable immediately) or a pending/failed
-state otherwise — in which case add it as a Fastmail alias/domain first and
-re-run.
+The run log shows only a one-line status. The full report is **emailed** to
+`FASTMAIL_REPORT_TO`, with two sections that always appear: **Pre-existing From
+addresses** and either **Would be added** (dry run) or **Added** (applied), plus
+**Skipped** for addresses that were already identities. An added address shows
+`verification=autoverified` when it is an alias on a domain you control (usable
+immediately) or a pending/failed state otherwise — in which case add it as a
+Fastmail alias/domain first and re-run. Tell the user to check that inbox.

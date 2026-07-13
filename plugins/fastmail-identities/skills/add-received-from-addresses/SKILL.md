@@ -27,8 +27,12 @@ workflow, waits for it, and shows its report. Nothing here touches the token.
 ## Prerequisites (one-time)
 
 1. The `Adam-S-Daniel/fastmail-actions` repo exists and its `FASTMAIL_API_TOKEN`
-   secret is set (see that repo's README).
-2. `gh` is authenticated with the `workflow` scope (`gh auth status`).
+   secret is set (Fastmail API token with **Mail** read-write **+ Email
+   Submission** scopes — see that repo's README).
+2. Report routing secrets `FASTMAIL_REPORT_FROM` / `FASTMAIL_REPORT_TO` are set.
+   The workflow **emails** the report there; it never prints addresses,
+   correspondents, or mailbox totals to the public run log.
+3. `gh` is authenticated with the `workflow` scope (`gh auth status`).
 
 ## How it decides (three stages, inside the workflow)
 
@@ -42,14 +46,15 @@ workflow, waits for it, and shows its report. Nothing here touches the token.
 ## whatif (dry run)
 
 The workflow takes a **`whatif`** input, and this discovery skill **defaults to a
-dry run**: it lists the pre-existing From addresses and the aliases that **would
-be added** (each annotated with the correspondent that qualified it). Show that
-list to the user and confirm, then re-run with whatif off to apply — after which
-it lists what was already present and what was **newly added**.
+dry run**: it emails a report of the pre-existing From addresses and the aliases
+that **would be added** (each annotated with the correspondent that qualified
+it). Review that email and confirm, then re-run with whatif off to apply — after
+which it emails what was already present and what was **newly added**.
 
 ## Run
 
-Preferred — the bundled helper dispatches, waits, and prints the report:
+Preferred — the bundled helper dispatches, waits, and reports run success (the
+detailed report is emailed to `FASTMAIL_REPORT_TO`, not printed):
 
 ```
 # preview (default)
@@ -68,7 +73,7 @@ Or drive `gh` directly:
 gh workflow run add-received-from-addresses.yml --repo Adam-S-Daniel/fastmail-actions -f whatif=true
 gh run list  --workflow=add-received-from-addresses.yml --repo Adam-S-Daniel/fastmail-actions --limit 1
 gh run watch <run-id> --repo Adam-S-Daniel/fastmail-actions --exit-status
-gh run view  <run-id> --repo Adam-S-Daniel/fastmail-actions --log
+# The run log holds only a status line; the report is emailed to FASTMAIL_REPORT_TO.
 ```
 
 ## Inputs
@@ -81,6 +86,10 @@ gh run view  <run-id> --repo Adam-S-Daniel/fastmail-actions --log
 
 ## Notes
 
+- **Privacy:** the report (funnel counts, candidate aliases, correspondents,
+  mailbox totals) is emailed to `FASTMAIL_REPORT_TO` — never printed to the
+  public run log. This workflow takes no address input, so nothing about your
+  addresses reaches any GitHub surface.
 - Scans **all** mail (including Junk/Trash); the correspondent filter removes
   aliases that only ever got junk, so this is safe.
 - Idempotent: re-running skips anything already added.
