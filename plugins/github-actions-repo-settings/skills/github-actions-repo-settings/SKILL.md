@@ -52,8 +52,12 @@ systems (e.g. cms-platform).
   rulesets/branch protection without GitHub Pro (API `403`). Only SHA pinning
   applies to a private repo on a free plan.
 - **`Adam-S-Daniel` is a user account; `jodidaniel` is an organization.** We
-  still apply everything **per-repo** (we don't rely on org-level rulesets), but
-  the account/org split matters for automation auth: a fine-grained PAT is
+  still apply everything **per-repo** (we don't rely on org-level rulesets),
+  though on the `jodidaniel` **org** an owner *can* also set org-level Actions
+  policies and rulesets that layer on top of — and may override or further
+  restrict — the per-repo settings; on the `Adam-S-Daniel` user account there is
+  no such org layer, so it's purely repo-level. The account/org split also
+  matters for automation auth: a fine-grained PAT is
   scoped to a **single** owner, so one PAT cannot administer both. Cross-account
   automation should use a **GitHub App installed on both** (see section 2).
 - Writing any of these needs **repo-admin** (fine-grained PAT with
