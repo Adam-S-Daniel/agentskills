@@ -117,6 +117,16 @@ def iter_skill_dirs(plugin_dir: Path) -> List[Path]:
     return sorted(p.parent for p in skills_dir.glob("*/SKILL.md"))
 
 
+def _first_sentence(text: str) -> str:
+    """Collapse whitespace, then truncate to the first sentence: up to and
+    including the first '.', '!', or '?' that is followed by whitespace or
+    end-of-string. Falls back to the whole (collapsed) text if no such
+    terminator is found."""
+    collapsed = " ".join(text.split())
+    m = re.search(r"[.!?](?=\s|$)", collapsed)
+    return collapsed[: m.end()] if m else collapsed
+
+
 def build_rows() -> List[str]:
     marketplace = json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8"))
     rows: List[str] = []
@@ -126,7 +136,7 @@ def build_rows() -> List[str]:
         for skill_dir in iter_skill_dirs(PLUGINS_DIR / plugin_name):
             frontmatter = parse_frontmatter((skill_dir / "SKILL.md").read_text(encoding="utf-8"))
             skill_name = skill_dir.name
-            description = frontmatter.get("description") or fallback_desc
+            description = _first_sentence(frontmatter.get("description") or fallback_desc)
             invocation = f"`/{plugin_name}:{skill_name}`"
             rows.append(f"| `{plugin_name}` | {invocation} | {_one_line(description)} |")
     return rows
