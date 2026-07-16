@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0 (2025-10-14)
+        with:
+          node-version: '22'
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate marketplace and plugins
+        run: claude plugin validate .
+
+  consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
+        with:
+          python-version: '3.12'
+      - name: Check marketplace/filesystem consistency
+        run: python3 scripts/check_consistency.py
+      - name: Check README plugin table is up to date
+        run: python3 scripts/generate_readme_table.py --check
+
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
+        with:
+          python-version: '3.12'
+      - name: Install pytest
+        run: python3 -m pip install pytest
+      - name: Run sync-skills tests
+        run: python3 -m pytest plugins/*/skills/sync-skills/tests/
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run shellcheck
+        run: |
+          # -S error: two SC2088 (tilde-in-quotes) *warnings* exist today in
+          # plugins/migrate-claude-memory/skills/migrate-claude-memory/scripts/memory-migrate.sh
+          # (lines 90, 93) — pre-existing, out of scope for this change. Errors still fail CI.
+          shellcheck -S error setup.sh
+          find plugins -name '*.sh' -print0 | xargs -0 --no-run-if-empty shellcheck -S error

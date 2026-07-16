@@ -31,22 +31,27 @@ Update later with `/plugin marketplace update agentskills`.
 
 Available plugins:
 
-| Plugin | What it does |
-| --- | --- |
-| `adam-writing-style` | Write in Adam Daniel's voice |
-| `compare-pdfpairs` | Compare PDF pairs for identical printouts / text diffs |
-| `debug-github-workflows` | Diagnose GitHub Actions workflow failures |
-| `fastmail` | Automate Fastmail via a local Claude-in-Chrome session |
-| `github-actions-repo-settings` | Enforce GitHub Actions security settings |
-| `launch-wsl-claude-session` | Launch a detached Claude Code session inside WSL |
-| `migrate-claude-memory` | Inventory, clean up, and migrate Claude Code auto-memory stores |
-| `pin-actions-to-sha` | Pin Actions `uses:` refs to full commit SHAs |
-| `rename-pdfs` | Rename searchable PDFs from their own content |
-| `review-bash-ci-reliability` | Review bash scripts for CI silent-failure patterns |
-| `sync-cc-settings-between-wsl-and-windows` | Reconcile Claude Code settings across WSL/Windows |
-| `sync-skills` | Sync skill folders to claude.ai |
-| `wj-next-break` | Walter Johnson HS bell schedule |
-| `workflow-path-audit` | Audit workflows for salient-path conditionals |
+<!-- BEGIN GENERATED PLUGIN TABLE -->
+| Plugin | Invocation | Description |
+| --- | --- | --- |
+| `adam-writing-style` | `/adam-writing-style:adam-writing-style` | Write in Adam Daniel's voice — professional but warm, direct, em-dash-friendly, free of corporate buzzwords. |
+| `compare-pdfpairs` | `/compare-pdfpairs:compare-pdfpairs` | Compare pairs of PDFs (name.pdf + name<suffix>.pdf in the same folder) to determine whether they would produce identical printouts and whether their embedded text differs — e.g. to safely delete redundant "-signed" or "-needsocr" duplicates. |
+| `debug-github-workflows` | `/debug-github-workflows:debug-github-workflows` | Debugging GitHub Actions workflow failures. |
+| `fastmail` | `/fastmail:fastmail` | Automate Fastmail email workflows via a local browser session. |
+| `fastmail-identities` | `/fastmail-identities:add-from-address` | Add one or more email addresses to a Fastmail account as selectable "From" (sending) identities by triggering the add-from-address GitHub Actions workflow in the Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the FASTMAIL_API_TOKEN repo secret). |
+| `fastmail-identities` | `/fastmail-identities:add-received-from-addresses` | Discover which of a Fastmail account's own alias addresses are worth being able to send from, and add them as "From" identities, by triggering the add-received-from-addresses GitHub Actions workflow in the Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the FASTMAIL_API_TOKEN repo secret). |
+| `github-actions-repo-settings` | `/github-actions-repo-settings:github-actions-repo-settings` | Configure and enforce GitHub repository security settings as code: require actions to be pinned to full-length commit SHAs, require approval for all outside collaborators' fork pull-request workflow runs, and protect the default branch via a repository ruleset. |
+| `launch-wsl-claude-session` | `/launch-wsl-claude-session:launch-wsl-claude-session` | Launch a detached, interactive Claude Code session inside WSL from a Windows Claude Code session — in a specific repo/folder, optionally remote-controllable and optionally seeded with an initial prompt. |
+| `migrate-claude-memory` | `/migrate-claude-memory:migrate-claude-memory` | Inventory, clean up, and migrate Claude Code auto-memory stores found under ~/.claude/projects/<munged-path>/memory/ on this machine. |
+| `pin-actions-to-sha` | `/pin-actions-to-sha:pin-actions-to-sha` | Audit and fix GitHub Actions workflow files to ensure every `uses` reference is pinned to a full-length commit SHA (40 hex characters) with a version comment that includes the release date. |
+| `rename-pdfs` | `/rename-pdfs:rename-pdfs` | Rename already-searchable PDFs in a specified folder to descriptive, date-prefixed names, proposing each name from the PDF's own content and prompting for per-file confirmation or edit before applying. |
+| `review-bash-ci-reliability` | `/review-bash-ci-reliability:review-bash-ci-reliability` | Review bash scripts for CI/CD reliability issues. |
+| `sync-cc-settings-between-wsl-and-windows` | `/sync-cc-settings-between-wsl-and-windows:sync-cc-settings-between-wsl-and-windows` | Sync Claude Code settings.json between a Windows home and a WSL home. |
+| `sync-skills` | `/sync-skills:sync-skills` | Sync local skill folders from git repos to Claude.ai (and other agent targets) via the upload-skill API. |
+| `wj-next-break` | `/wj-next-break:wj-next-break` | Answer questions about the current or next class period, break, passing period, lunch, or bell at Walter Johnson High School (WJ / WJHS, Bethesda MD). |
+| `workflow-path-audit` | `/workflow-path-audit:workflow-path-audit` | Audit GitHub Actions workflows for salient-path conditionals — every workflow that triggers on pull_request or push must filter on the files and directories its steps actually depend on, and skip with success when nothing salient changed. |
+| `writing-adrs` | `/writing-adrs:writing-adrs` | Write a lightweight Nygard-style Architecture Decision Record under `docs/decisions/` when a non-obvious decision needs context that won't fit in a code comment and would rot if left only in a PR description. |
+<!-- END GENERATED PLUGIN TABLE -->
 
 ## Install — Codex, Gemini, Cursor, and local use
 
