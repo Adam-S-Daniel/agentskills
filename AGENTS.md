@@ -30,6 +30,41 @@
 - Use parameterized queries, shell arrays, and context-aware escaping respectively.
 - Do not disable TLS verification, authentication, or CSRF protection.
 
+## Data exposure in CI and public repos
+
+Treat CI run logs, job summaries, artifacts, workflow run pages, and git history
+as **public** on a public repo. (Real incident: a workflow printed the owner's
+email addresses and their correspondents' into a public Actions log.)
+
+- **Never print personal or sensitive data to a log** — no emails, contacts,
+  names, IDs, mailbox sizes/counts, tokens, or anything "useful to an attacker or
+  scammer." Deliver sensitive results out-of-band (e.g. email the account itself,
+  write to a private store) and log only a non-identifying status line.
+- **Don't interpolate `${{ inputs.* }}` / `${{ github.event.* }}` into a `run:`
+  block** — the rendered command is echoed to the log. Read inputs from
+  `$GITHUB_EVENT_PATH` inside the script and `::add-mask::` sensitive values
+  before use. `::add-mask::` only scrubs the log *stream*, not other surfaces.
+- **Put sensitive config in secrets, not plaintext inputs or `vars`.** Only
+  secret *values* are masked in logs.
+- **Sanitize error output** — never dump an API/HTTP response body on failure (it
+  can quote personal data); reduce it to a status code + machine error type, and
+  keep the data-bearing serialization/call inside the try/catch.
+- **Least privilege:** set `permissions:` to the minimum (usually
+  `contents: read`) and require approval for outside-collaborator fork PRs.
+- **Test fixtures use reserved `example.com` / `example.net` domains only** —
+  never a real address; fixtures get committed and logged.
+
+### git history & metadata
+- **Sanitize before the first commit.** Fixing the current file does not remove
+  data from history. If sensitive data was committed, rewrite history to drop the
+  commits, delete every ref that points at them (branches, tags, **PRs**), and
+  force-push. GitHub garbage-collects unreachable objects on its own schedule
+  (days to weeks) — until then they remain reachable *by SHA* — and you can ask
+  GitHub Support to expedite for a public repo. (This is the deliberate exception
+  to "don't force-push"; it is a security remediation.)
+- **Commit with the GitHub `…@users.noreply.github.com` identity** on public
+  repos so a real email is not baked into commit author/committer metadata.
+
 ## Testing
 
 - Run the existing test suite before considering a task complete.
