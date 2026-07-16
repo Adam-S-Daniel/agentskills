@@ -117,14 +117,25 @@ def iter_skill_dirs(plugin_dir: Path) -> List[Path]:
     return sorted(p.parent for p in skills_dir.glob("*/SKILL.md"))
 
 
+# Abbreviations whose internal '.' must not be mistaken for a sentence
+# terminator when scanning for the first real sentence boundary.
+_ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.")
+
+
 def _first_sentence(text: str) -> str:
     """Collapse whitespace, then truncate to the first sentence: up to and
     including the first '.', '!', or '?' that is followed by whitespace or
-    end-of-string. Falls back to the whole (collapsed) text if no such
-    terminator is found."""
+    end-of-string, skipping terminators that are actually the trailing '.'
+    of a known abbreviation (see _ABBREVIATIONS) so those aren't mistaken
+    for sentence ends. Falls back to the whole (collapsed) text if no real
+    sentence terminator is found."""
     collapsed = " ".join(text.split())
-    m = re.search(r"[.!?](?=\s|$)", collapsed)
-    return collapsed[: m.end()] if m else collapsed
+    for m in re.finditer(r"[.!?](?=\s|$)", collapsed):
+        prefix = collapsed[: m.end()]
+        if any(prefix.lower().endswith(abbr) for abbr in _ABBREVIATIONS):
+            continue
+        return prefix
+    return collapsed
 
 
 def build_rows() -> List[str]:

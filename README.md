@@ -35,7 +35,7 @@ Available plugins:
 | Plugin | Invocation | Description |
 | --- | --- | --- |
 | `adam-writing-style` | `/adam-writing-style:adam-writing-style` | Write in Adam Daniel's voice — professional but warm, direct, em-dash-friendly, free of corporate buzzwords. |
-| `compare-pdfpairs` | `/compare-pdfpairs:compare-pdfpairs` | Compare pairs of PDFs (name.pdf + name<suffix>.pdf in the same folder) to determine whether they would produce identical printouts and whether their embedded text differs — e.g. |
+| `compare-pdfpairs` | `/compare-pdfpairs:compare-pdfpairs` | Compare pairs of PDFs (name.pdf + name<suffix>.pdf in the same folder) to determine whether they would produce identical printouts and whether their embedded text differs — e.g. to safely delete redundant "-signed" or "-needsocr" duplicates. |
 | `debug-github-workflows` | `/debug-github-workflows:debug-github-workflows` | Debugging GitHub Actions workflow failures. |
 | `fastmail` | `/fastmail:fastmail` | Automate Fastmail email workflows via a local browser session. |
 | `fastmail-identities` | `/fastmail-identities:add-from-address` | Add one or more email addresses to a Fastmail account as selectable "From" (sending) identities by triggering the add-from-address GitHub Actions workflow in the Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the FASTMAIL_API_TOKEN repo secret). |
