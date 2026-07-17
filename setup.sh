@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # setup.sh — one-time setup for the agentskills repo.
 #
-# This repo is a Claude Code *plugin marketplace*: every skill ships as a
-# plugin under plugins/<name>/. Claude Code users can install skills with
+# This repo is a Claude Code *plugin marketplace*: skills ship in bundle
+# plugins under plugins/<bundle>/skills/<skill>/. Claude Code users can
+# install a bundle with
 #
 #   /plugin marketplace add Adam-S-Daniel/agentskills
-#   /plugin install <skill>@agentskills
+#   /plugin install adam@agentskills
 #
+# invoke its skills as /<bundle>:<skill> (e.g. /adam:pin-actions-to-sha),
 # and don't need this script at all.
 #
 # This script is for the *other* agent tools (Codex, Gemini, Cursor, the
@@ -79,11 +81,49 @@ HOMES=(
   ".cursor/skills"
 )
 
+# remove_stale_repo_link <link-path> — if <link> is a link/junction whose
+# target lies under $PLUGINS_DIR but no longer exists (stale after a repo
+# restructure moved the skill to a new bundle path), remove it so link_one
+# can recreate it against the new path. Links pointing anywhere outside
+# $PLUGINS_DIR are NEVER touched, even when dangling — they're the user's.
+# Returns 0 if a stale link was removed, 1 otherwise.
+remove_stale_repo_link() {
+  local link="$1" existing
+  if [[ "$PLATFORM" = "windows" ]]; then
+    local win_path; win_path="$(cygpath -w "$link")"
+    # Junction/reparse point exists…
+    MSYS_NO_PATHCONV=1 cmd.exe //c "fsutil reparsepoint query \"$win_path\"" >/dev/null 2>&1 || return 1
+    existing="$(readlink "$link" 2>/dev/null || true)"
+    case "$existing" in
+      "$PLUGINS_DIR"/*)
+        # …its target is ours, and the target directory is gone → stale.
+        if [[ ! -e "$existing" ]]; then
+          echo "  RELINK   $(basename "$link") (stale plugins/ target)"
+          MSYS_NO_PATHCONV=1 cmd.exe //c "rmdir \"$win_path\"" >/dev/null 2>&1
+          return 0
+        fi ;;
+    esac
+  elif [[ -L "$link" ]]; then
+    existing="$(readlink "$link")"
+    case "$existing" in
+      "$PLUGINS_DIR"/*)
+        if [[ ! -e "$link" ]]; then
+          echo "  RELINK   $(basename "$link") (stale plugins/ target)"
+          rm "$link"
+          return 0
+        fi ;;
+    esac
+  fi
+  return 1
+}
+
 # link_one <link-path> <target-dir> — create one skill link, idempotently.
 link_one() {
   local link="$1" target="$2" parent
   parent="$(dirname "$link")"
   [[ -d "$parent" ]] || mkdir -p "$parent"
+
+  remove_stale_repo_link "$link" || true
 
   if [[ -L "$link" ]]; then
     echo "  ALREADY  $(basename "$link")"
@@ -164,7 +204,20 @@ done
 
 echo ""
 echo "=== Registering sync-skills pre-push hook ==="
-bash "$REPO_ROOT/plugins/sync-skills/skills/sync-skills/setup.sh"
+# Resolve the sync-skills setup script by glob so this file doesn't hardcode
+# which bundle plugin the skill lives in.
+SYNC_SKILLS_SETUP=""
+for candidate in "$PLUGINS_DIR"/*/skills/sync-skills/setup.sh; do
+  if [[ -f "$candidate" ]]; then
+    SYNC_SKILLS_SETUP="$candidate"
+    break
+  fi
+done
+if [[ -z "$SYNC_SKILLS_SETUP" ]]; then
+  echo "ERROR: sync-skills setup.sh not found under $PLUGINS_DIR/*/skills/sync-skills/" >&2
+  exit 1
+fi
+bash "$SYNC_SKILLS_SETUP"
 
 echo ""
 echo "Setup complete."

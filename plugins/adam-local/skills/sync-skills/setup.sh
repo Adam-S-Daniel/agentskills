@@ -2,7 +2,7 @@
 # setup.sh — register pre-push git hooks via git config (git 2.54+).
 #
 # Usage:
-#   bash plugins/sync-skills/skills/sync-skills/setup.sh
+#   bash plugins/adam-local/skills/sync-skills/setup.sh
 #
 # Registers a global config-based hook so every push in any repo fires
 # the reminder. Cleans up legacy file-based hooks and any stale post-push
@@ -48,10 +48,17 @@ for private_repo in "${PRIVATE_REPOS[@]}"; do
   [[ ! -d "$private_repo/.git" ]] && continue
 
   # The private repo may use either the legacy skills/ layout or the newer
-  # plugins/<name>/skills/<name>/ layout; prefer whichever hook exists.
-  private_hook_plugin="$private_repo/plugins/sync-skills/skills/sync-skills/hooks/pre-push"
+  # plugins/<plugin>/skills/sync-skills/ layout (any plugin — resolve by
+  # glob so this doesn't hardcode the bundle name); prefer whichever exists.
+  private_hook_plugin=""
+  for candidate in "$private_repo"/plugins/*/skills/sync-skills/hooks/pre-push; do
+    if [[ -f "$candidate" ]]; then
+      private_hook_plugin="$candidate"
+      break
+    fi
+  done
   private_hook_legacy="$private_repo/skills/sync-skills/hooks/pre-push"
-  if [[ -f "$private_hook_plugin" ]]; then
+  if [[ -n "$private_hook_plugin" ]]; then
     target_hook="$private_hook_plugin"
   elif [[ -f "$private_hook_legacy" ]]; then
     target_hook="$private_hook_legacy"
