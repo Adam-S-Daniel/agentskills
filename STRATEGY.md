@@ -39,9 +39,13 @@ A skill's repo is decided by **sensitivity, not by how personal it is**:
   secrets, credentials, tokens, private endpoints, or personal/identifying data;
   or that you simply don't want disclosed.
 
-Both repos use the **same** plugin + marketplace structure (`plugins/<name>/`,
-`.claude-plugin/marketplace.json`, `defaultEnabled`, the `setup.sh` de-dup), so the
-installer and `sync-skills` behave identically across them (Phase 2 in issue #18).
+Both repos use the **same** plugin + marketplace structure
+(`plugins/<bundle>/skills/<skill>/`, `.claude-plugin/marketplace.json`,
+`defaultEnabled`, the `setup.sh` de-dup), so the installer and `sync-skills`
+behave identically across them (Phase 2 in issue #18). The public registry
+groups its skills into three bundle plugins — `adam` (cloud-safe,
+default-enabled), `adam-local` (machine-bound, opt-in), `fastmail` (opt-in) —
+see [ADR 0001](docs/decisions/0001-consolidate-plugins-into-bundles.md).
 
 ### Placement audit (2026-06-05)
 
@@ -73,11 +77,21 @@ this registry** when either is true:
 
 When a skill graduates:
 
-1. Move it into `plugins/<name>/skills/<name>/SKILL.md` with a
-   `plugins/<name>/.claude-plugin/plugin.json` manifest.
-2. Add a matching entry to `.claude-plugin/marketplace.json` (set
-   `"defaultEnabled": false` if it is niche).
-3. Validate with `claude plugin validate .`.
+1. Add it as a directory under the right bundle's skills/ —
+   `plugins/adam/skills/<skill>/SKILL.md` if it works in a headless cloud
+   session of an arbitrary repo, `plugins/adam-local/skills/<skill>/` if it is
+   machine-bound, `plugins/fastmail/skills/<skill>/` for the Fastmail domain.
+   No new plugin.json or marketplace entry is needed — the bundle already has
+   both. Skill directory basenames must be unique across the repo and must
+   never change afterwards (they key `setup.sh` symlinks and claude.ai
+   uploads).
+2. Creating a **new bundle** is the rare, deliberate exception — it means a
+   new `plugins/<bundle>/` manifest, a new marketplace entry, and (if any
+   plugin is renamed away) entries in the marketplace `renames` map, which is
+   **append-only forever**: users may update from any old version, so every
+   historical name must keep resolving.
+3. Validate with `claude plugin validate .` and run
+   `python3 scripts/check_consistency.py`.
 4. Replace the consumer-repo copy with the installed/marketplace version so there
    is only one source.
 
