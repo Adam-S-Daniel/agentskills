@@ -30,6 +30,41 @@
 - Use parameterized queries, shell arrays, and context-aware escaping respectively.
 - Do not disable TLS verification, authentication, or CSRF protection.
 
+## Data exposure in CI and public repos
+
+Treat CI run logs, job summaries, artifacts, workflow run pages, and git history
+as **public** on a public repo. (Real incident: a workflow printed the owner's
+email addresses and their correspondents' into a public Actions log.)
+
+- **Never print personal or sensitive data to a log** — no emails, contacts,
+  names, IDs, mailbox sizes/counts, tokens, or anything "useful to an attacker or
+  scammer." Deliver sensitive results out-of-band (e.g. email the account itself,
+  write to a private store) and log only a non-identifying status line.
+- **Don't interpolate `${{ inputs.* }}` / `${{ github.event.* }}` into a `run:`
+  block** — the rendered command is echoed to the log. Read inputs from
+  `$GITHUB_EVENT_PATH` inside the script and `::add-mask::` sensitive values
+  before use. `::add-mask::` only scrubs the log *stream*, not other surfaces.
+- **Put sensitive config in secrets, not plaintext inputs or `vars`.** Only
+  secret *values* are masked in logs.
+- **Sanitize error output** — never dump an API/HTTP response body on failure (it
+  can quote personal data); reduce it to a status code + machine error type, and
+  keep the data-bearing serialization/call inside the try/catch.
+- **Least privilege:** set `permissions:` to the minimum (usually
+  `contents: read`) and require approval for outside-collaborator fork PRs.
+- **Test fixtures use reserved `example.com` / `example.net` domains only** —
+  never a real address; fixtures get committed and logged.
+
+### git history & metadata
+- **Sanitize before the first commit.** Fixing the current file does not remove
+  data from history. If sensitive data was committed, rewrite history to drop the
+  commits, delete every ref that points at them (branches, tags, **PRs**), and
+  force-push. GitHub garbage-collects unreachable objects on its own schedule
+  (days to weeks) — until then they remain reachable *by SHA* — and you can ask
+  GitHub Support to expedite for a public repo. (This is the deliberate exception
+  to "don't force-push"; it is a security remediation.)
+- **Commit with the GitHub `…@users.noreply.github.com` identity** on public
+  repos so a real email is not baked into commit author/committer metadata.
+
 ## Testing
 
 - Run the existing test suite before considering a task complete.
@@ -57,6 +92,22 @@
 - Give the subagent a precise spec — files, exact changes, house style, the
   test command to run. Subagent output is gated by the same test/CI proof as
   any other change.
+
+## Skills ecosystem
+
+- The canonical skills registry is `github.com/Adam-S-Daniel/agentskills`,
+  organized as three bundle plugins — `adam` (general-purpose, cloud-safe;
+  default-on), `adam-local` (machine-bound), and `fastmail` — each holding
+  `skills/<skill>/` directories.
+- In Claude Code with the marketplace installed, invoke a skill as
+  `/adam:<skill>` (e.g. `/adam:pin-actions-to-sha`).
+- Local machines get the marketplace plus per-agent symlinks via that repo's
+  `setup.sh`.
+- Cloud sessions currently get **no** plugins from repo-declared settings — a
+  known Claude Code limitation (see agentskills' `docs/decisions/0001`) — so
+  don't assume bundle skills are available there.
+- New reusable skills graduate **into** the registry (sensitive ones into
+  `agentskills-private`) rather than living on in a consumer repo.
 
 ## Git practices
 
