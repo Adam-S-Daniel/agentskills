@@ -56,7 +56,7 @@ Run the helper script to find changed skills and build base64-encoded ZIPs:
 python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --prepare
 ```
 
-On Windows the path is `%USERPROFILE%\repos\agentskills\plugins\sync-skills\skills\sync-skills\sync_skills.py`.
+On Windows the path is `%USERPROFILE%\repos\agentskills\plugins\adam-local\skills\sync-skills\sync_skills.py`.
 Use `--all` to force-sync every skill regardless of git diff:
 
 ```bash

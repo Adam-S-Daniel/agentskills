@@ -46,6 +46,16 @@ That map is **append-only forever** — JSON has no comments, so it's said here:
 never delete or repoint an entry, because users may update from any old
 version and every historical name must keep resolving.
 
+**Migrating an existing machine:** re-run `bash setup.sh` immediately after
+pulling this restructure — the global sync-skills pre-push hook still points
+at the old path and **blocks every `git push` from any repo** until
+re-registered (setup.sh also relinks the now-dangling per-agent skill links).
+If you had both `fastmail` and `fastmail-identities` installed, the merged
+`fastmail` keeps its previous enabled/disabled state and a version-pinned
+cache lacks the two migrated-in skills — run
+`claude plugin update fastmail@agentskills` (and
+`claude plugin enable fastmail@agentskills` if it ended up disabled).
+
 Available skills:
 
 <!-- BEGIN GENERATED PLUGIN TABLE -->

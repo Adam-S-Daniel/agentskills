@@ -49,11 +49,21 @@ version.
   to its own plugin (via a new `renames` entry).
 - **The `renames` map is a permanent, growing artifact.** Every future plugin
   rename or removal adds an entry; none may ever be deleted.
-- **One-time reinstall touch per machine.** Old per-agent symlinks dangle at
-  the old paths after pulling the restructure; `setup.sh` now detects links
-  under `plugins/` whose target vanished and relinks them (foreign links are
-  never touched). Claude Code installs migrate via `renames` on
+- **One-time reinstall touch per machine — re-run `bash setup.sh` immediately
+  after pulling.** Two things break until then: (1) the global sync-skills
+  pre-push git hook still points at the old absolute path, so **every
+  `git push` from any repo on the machine fails** until setup.sh re-registers
+  it; (2) old per-agent symlinks dangle at the old paths — setup.sh detects
+  links under `plugins/` whose target vanished and relinks them (foreign
+  links are never touched). Claude Code installs migrate via `renames` on
   `/plugin marketplace update agentskills`.
+- **Merged plugins keep the survivor's enabled state (first-wins).** A user
+  with both `fastmail` and `fastmail-identities` installed keeps `fastmail`'s
+  prior enabled/disabled state after migration, so previously-enabled
+  identities skills can end up silently disabled — and a version-pinned
+  `fastmail` cache lacks the two migrated-in skills until
+  `claude plugin update fastmail@agentskills` (plus
+  `claude plugin enable fastmail@agentskills` if it was disabled).
 - Invocations change from `/<skill>:<skill>` to `/<bundle>:<skill>`
   (e.g. `/adam:pin-actions-to-sha`).
 
