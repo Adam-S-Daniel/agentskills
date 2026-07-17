@@ -1,5 +1,5 @@
 {
-  "name": "sync-skills",
-  "description": "Sync local skill folders to claude.ai via the upload-skill API using the browser's authenticated session.",
+  "name": "adam-local",
+  "description": "Adam's machine-bound skills that need local resources (WSL/Windows homes, local files, a signed-in browser): PDF tooling, Claude Code session/settings/memory management, skill sync, school bell schedule.",
   "author": { "name": "Adam Daniel" }
 }

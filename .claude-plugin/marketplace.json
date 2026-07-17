@@ -4,123 +4,44 @@
   "description": "Adam Daniel's reusable agent skills, packaged as installable Claude Code plugins.",
   "plugins": [
     {
-      "name": "adam-writing-style",
-      "source": "./plugins/adam-writing-style",
-      "description": "Write in Adam Daniel's voice — warm, direct, em-dash-friendly, free of corporate buzzwords.",
-      "category": "writing",
-      "keywords": ["writing", "voice", "ghostwrite", "tone"]
+      "name": "adam",
+      "source": "./plugins/adam",
+      "description": "Adam's general-purpose skills, safe anywhere including cloud sessions: writing voice, GitHub Actions debugging and hardening, ADRs.",
+      "category": "productivity",
+      "keywords": ["writing", "voice", "github-actions", "ci-cd", "debugging", "security", "supply-chain", "sha-pinning", "settings-as-code", "bash", "code-review", "adr", "documentation"]
     },
     {
-      "name": "compare-pdfpairs",
-      "source": "./plugins/compare-pdfpairs",
-      "description": "Compare name.pdf + name<suffix>.pdf pairs for identical printouts and text diffs, to safely delete redundant duplicates.",
-      "category": "documents",
-      "keywords": ["pdf", "compare", "duplicates", "poppler", "powershell"],
+      "name": "adam-local",
+      "source": "./plugins/adam-local",
+      "description": "Adam's machine-bound skills that need local resources (WSL/Windows homes, local files, a signed-in browser): PDF tooling, Claude Code session/settings/memory management, skill sync, school bell schedule.",
+      "category": "claude-code",
+      "keywords": ["claude-code", "wsl", "windows", "sync", "settings", "memory", "skills", "claude-ai", "pdf", "ocr", "schedule"],
       "defaultEnabled": false
-    },
-    {
-      "name": "debug-github-workflows",
-      "source": "./plugins/debug-github-workflows",
-      "description": "Diagnose GitHub Actions workflow failures: read real logs and annotations, catch false-success patterns, and fix common CI failure modes.",
-      "category": "ci-cd",
-      "keywords": ["github-actions", "debugging", "ci-cd", "workflow-failures"]
     },
     {
       "name": "fastmail",
       "source": "./plugins/fastmail",
-      "description": "Automate Fastmail email workflows (search, read, compose, reply) via a local Claude-in-Chrome browser session.",
+      "description": "Fastmail email skills: browser-driven email workflows (search, read, compose, reply) and sending-identity management via the fastmail-actions workflows.",
       "category": "email",
-      "keywords": ["fastmail", "email", "browser", "claude-in-chrome"],
+      "keywords": ["fastmail", "email", "jmap", "identities", "from-address", "browser", "claude-in-chrome"],
       "defaultEnabled": false
-    },
-    {
-      "name": "fastmail-identities",
-      "source": "./plugins/fastmail-identities",
-      "description": "Add Fastmail sending identities (\"From\" addresses) by triggering the fastmail-actions GitHub Actions workflows — add given addresses, or auto-discover alias addresses you actually correspond through and add those.",
-      "category": "email",
-      "keywords": ["fastmail", "email", "jmap", "identities", "from-address", "github-actions", "workflow"],
-      "defaultEnabled": false
-    },
-    {
-      "name": "github-actions-repo-settings",
-      "source": "./plugins/github-actions-repo-settings",
-      "description": "Enforce GitHub repo security settings as code (SHA pinning, fork-PR approval, default-branch ruleset) with generate/diff/apply drift detection and a central fan-out workflow.",
-      "category": "ci-cd",
-      "keywords": ["github-actions", "security", "supply-chain", "gh", "settings-as-code", "drift", "rulesets", "branch-protection"]
-    },
-    {
-      "name": "launch-wsl-claude-session",
-      "source": "./plugins/launch-wsl-claude-session",
-      "description": "Launch a detached, interactive Claude Code session inside WSL — from a Windows host or from inside WSL — in a chosen folder, optionally remote-controllable or seeded with an initial prompt.",
-      "category": "claude-code",
-      "keywords": ["claude-code", "wsl", "windows", "remote-control", "session"],
-      "defaultEnabled": false
-    },
-    {
-      "name": "migrate-claude-memory",
-      "source": "./plugins/migrate-claude-memory",
-      "description": "Inventory, clean up, and migrate Claude Code auto-memory stores between machines and into git-tracked repos.",
-      "category": "claude-code",
-      "keywords": ["claude-code", "memory", "migration", "cleanup", "portability"],
-      "defaultEnabled": false
-    },
-    {
-      "name": "pin-actions-to-sha",
-      "source": "./plugins/pin-actions-to-sha",
-      "description": "Audit and pin every GitHub Actions `uses:` reference to a full commit SHA with a dated version comment.",
-      "category": "ci-cd",
-      "keywords": ["github-actions", "sha-pinning", "security", "supply-chain"]
-    },
-    {
-      "name": "rename-pdfs",
-      "source": "./plugins/rename-pdfs",
-      "description": "Rename already-searchable PDFs to descriptive, date-prefixed names proposed from each file's own content.",
-      "category": "documents",
-      "keywords": ["pdf", "rename", "ocr", "files"]
-    },
-    {
-      "name": "review-bash-ci-reliability",
-      "source": "./plugins/review-bash-ci-reliability",
-      "description": "Review bash scripts for CI reliability: silent-failure patterns, error propagation gaps, and environment assumptions.",
-      "category": "ci-cd",
-      "keywords": ["bash", "shell", "ci-cd", "reliability", "code-review"]
-    },
-    {
-      "name": "sync-cc-settings-between-wsl-and-windows",
-      "source": "./plugins/sync-cc-settings-between-wsl-and-windows",
-      "description": "Reconcile Claude Code settings.json between a Windows home and a WSL home, merging per property.",
-      "category": "claude-code",
-      "keywords": ["claude-code", "settings", "wsl", "windows", "sync"],
-      "defaultEnabled": false
-    },
-    {
-      "name": "sync-skills",
-      "source": "./plugins/sync-skills",
-      "description": "Sync local skill folders to claude.ai via the upload-skill API using the browser's authenticated session.",
-      "category": "claude-code",
-      "keywords": ["skills", "claude-ai", "sync", "upload"]
-    },
-    {
-      "name": "wj-next-break",
-      "source": "./plugins/wj-next-break",
-      "description": "Answer questions about the current/next class period, break, lunch, or bell at Walter Johnson High School.",
-      "category": "personal",
-      "keywords": ["schedule", "school", "bell-schedule", "walter-johnson"],
-      "defaultEnabled": false
-    },
-    {
-      "name": "workflow-path-audit",
-      "source": "./plugins/workflow-path-audit",
-      "description": "Audit GitHub Actions workflows for salient-path conditionals so they skip with success on irrelevant changes.",
-      "category": "ci-cd",
-      "keywords": ["github-actions", "ci-cost", "path-filter", "workflows"]
-    },
-    {
-      "name": "writing-adrs",
-      "source": "./plugins/writing-adrs",
-      "description": "Write lightweight Nygard-style Architecture Decision Records under docs/decisions/, bootstrapping the folder, template, and index when missing.",
-      "category": "documentation",
-      "keywords": ["adr", "architecture-decision-record", "documentation", "decisions"]
     }
-  ]
+  ],
+  "renames": {
+    "adam-writing-style": "adam",
+    "debug-github-workflows": "adam",
+    "github-actions-repo-settings": "adam",
+    "pin-actions-to-sha": "adam",
+    "review-bash-ci-reliability": "adam",
+    "workflow-path-audit": "adam",
+    "writing-adrs": "adam",
+    "compare-pdfpairs": "adam-local",
+    "launch-wsl-claude-session": "adam-local",
+    "migrate-claude-memory": "adam-local",
+    "rename-pdfs": "adam-local",
+    "sync-cc-settings-between-wsl-and-windows": "adam-local",
+    "sync-skills": "adam-local",
+    "wj-next-break": "adam-local",
+    "fastmail-identities": "fastmail"
+  }
 }

@@ -10,9 +10,11 @@ hardcoded):
     every plugins/*/.claude-plugin/plugin.json has a matching marketplace
     entry (both directions);
   - every plugins/*/skills/*/ directory contains a SKILL.md;
-  - if marketplace.json has a "renames" array, every renames[].to names an
-    existing plugin entry (there are none today — this future-proofs a
-    later restructure);
+  - if marketplace.json has a "renames" map ({old-name: new-name-or-null},
+    append-only forever — users may update from any old version), every
+    chain of values terminates at an existing plugin entry or at null
+    (= plugin removed), with no cycles, no self-mappings, and no key that
+    shadows a current plugin name;
   - skill directory basenames are unique across the whole repo, since they
     key setup.sh's per-agent symlinks and claude.ai skill uploads;
   - optionally, that no skill basename collides with one in another repo
@@ -87,14 +89,45 @@ def check_skill_md_present(errors: List[str]) -> None:
 
 
 def check_renames(marketplace: dict, errors: List[str]) -> None:
+    """Validate the marketplace "renames" map: {old-name: new-name-or-null}.
+
+    Claude Code (verified against 2.1.211) resolves an installed old plugin
+    name by looking it up as a key and following the chain of values until it
+    reaches a name that is not itself a key; that terminal name must be a
+    current plugins[].name. A null value means "removed". The map is
+    append-only forever — users may update from any historical version.
+    """
     renames = marketplace.get("renames")
-    if not renames:
+    if renames is None:
+        return
+    if not isinstance(renames, dict):
+        errors.append(
+            "marketplace.json 'renames' must be a JSON object mapping "
+            "old plugin name -> new plugin name (or null for removed)"
+        )
         return
     plugin_names = {entry.get("name") for entry in marketplace.get("plugins", [])}
-    for entry in renames:
-        to = entry.get("to")
-        if to not in plugin_names:
-            errors.append(f"renames entry {entry} has 'to': '{to}', which is not a marketplace.json plugin")
+    for old, new in renames.items():
+        if old in plugin_names:
+            errors.append(f"renames key '{old}' collides with a current plugin name")
+        if new == old:
+            errors.append(f"renames entry '{old}' maps to itself")
+    for old in renames:
+        # Follow the value chain; bounded by the visited set, so cycle-safe.
+        seen = {old}
+        target = renames[old]
+        while target is not None and target in renames:
+            if target in seen:
+                errors.append(f"renames chain starting at '{old}' contains a cycle")
+                break
+            seen.add(target)
+            target = renames[target]
+        else:
+            if target is not None and target not in plugin_names:
+                errors.append(
+                    f"renames chain from '{old}' ends at '{target}', "
+                    "which is not a marketplace.json plugin"
+                )
 
 
 def check_unique_skill_basenames(errors: List[str]) -> None:

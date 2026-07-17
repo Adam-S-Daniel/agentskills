@@ -1,5 +1,5 @@
 {
-  "name": "adam-writing-style",
-  "description": "Write in Adam Daniel's voice — warm, direct, em-dash-friendly, free of corporate buzzwords.",
+  "name": "adam",
+  "description": "Adam's general-purpose skills, safe anywhere including cloud sessions: writing voice, GitHub Actions debugging and hardening, ADRs.",
   "author": { "name": "Adam Daniel" }
 }
