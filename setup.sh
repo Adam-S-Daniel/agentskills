@@ -220,4 +220,95 @@ fi
 bash "$SYNC_SKILLS_SETUP"
 
 echo ""
+echo "=== Converging ~/.claude/settings.json (marketplace + plugin enablement) ==="
+PYTHON_BIN=""
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+fi
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "  WARNING  no python3/python on PATH — skipping settings.json convergence"
+else
+  "$PYTHON_BIN" - <<'PYEOF'
+import copy
+import io
+import json
+import os
+
+SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
+
+# Marketplace registration + bundle enablement every machine should converge
+# on. autoUpdate is a real (optional) boolean field on marketplace entries —
+# verified against the claude 2.1.211 binary's zod schema.
+TARGET_MARKETPLACES = {
+    "agentskills": {
+        "source": {"source": "github", "repo": "Adam-S-Daniel/agentskills"},
+        "autoUpdate": True,
+    },
+    "agentskills-private": {
+        "source": {"source": "github", "repo": "Adam-S-Daniel/agentskills-private"},
+        "autoUpdate": True,
+    },
+}
+TARGET_ENABLED_PLUGINS = {"adam@agentskills": True}
+
+
+def deep_merge(dst, src):
+    """Merge src into dst in place, recursing into nested dicts and
+    overwriting only the leaf keys src specifies. Keys in dst that src
+    doesn't mention (sibling marketplaces, other plugins, extra fields
+    like installLocation) are left alone."""
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            deep_merge(dst[key], value)
+        else:
+            dst[key] = copy.deepcopy(value)
+
+
+settings = {}
+if os.path.exists(SETTINGS_PATH):
+    with io.open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+        raw = f.read()
+    if raw.strip():
+        try:
+            loaded = json.loads(raw)
+        except ValueError as exc:
+            print("settings: WARNING invalid JSON in %s (%s) - left untouched" % (SETTINGS_PATH, exc))
+            settings = None
+        else:
+            if isinstance(loaded, dict):
+                settings = loaded
+            else:
+                print("settings: WARNING %s does not contain a JSON object - left untouched" % SETTINGS_PATH)
+                settings = None
+
+if settings is not None:
+    original = copy.deepcopy(settings)
+
+    settings.setdefault("extraKnownMarketplaces", {})
+    deep_merge(settings["extraKnownMarketplaces"], TARGET_MARKETPLACES)
+
+    settings.setdefault("enabledPlugins", {})
+    deep_merge(settings["enabledPlugins"], TARGET_ENABLED_PLUGINS)
+
+    if settings == original:
+        print("settings: unchanged")
+    else:
+        settings_dir = os.path.dirname(SETTINGS_PATH)
+        if settings_dir and not os.path.isdir(settings_dir):
+            os.makedirs(settings_dir)
+        tmp_path = SETTINGS_PATH + ".tmp"
+        with io.open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(settings, indent=2))
+            f.write("\n")
+        if os.path.exists(SETTINGS_PATH):
+            os.remove(SETTINGS_PATH)
+        os.rename(tmp_path, SETTINGS_PATH)
+        print("settings: updated")
+PYEOF
+fi
+
+echo ""
 echo "Setup complete."
