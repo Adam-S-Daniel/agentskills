@@ -1,5 +1,9 @@
 # agentskills
 
+[![pin-actions-to-sha eval](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FAdam-S-Daniel%2Fskills-evals%2Fmain%2Fbadges%2Fpin-actions-to-sha.json)](https://github.com/Adam-S-Daniel/skills-evals)
+
+Measures the `pin-actions-to-sha` skill's with-vs-without eval, run weekly.
+
 Adam Daniel's reusable agent skills, packaged as **Claude Code plugins** and as
 cross-agent skills that follow the
 [Agent Skills specification](https://agentskills.io/specification).
