@@ -1,5 +1,0 @@
-{
-  "name": "pin-actions-to-sha",
-  "description": "Audit and pin every GitHub Actions `uses:` reference to a full commit SHA with a dated version comment.",
-  "author": { "name": "Adam Daniel" }
-}

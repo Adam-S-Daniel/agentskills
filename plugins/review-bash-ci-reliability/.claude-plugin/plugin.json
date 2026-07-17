@@ -1,5 +1,0 @@
-{
-  "name": "review-bash-ci-reliability",
-  "description": "Review bash scripts for CI reliability: silent-failure patterns, error propagation gaps, and environment assumptions.",
-  "author": { "name": "Adam Daniel" }
-}

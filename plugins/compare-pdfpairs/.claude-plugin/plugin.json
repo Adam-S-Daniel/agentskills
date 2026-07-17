@@ -1,5 +1,0 @@
-{
-  "name": "compare-pdfpairs",
-  "description": "Compare name.pdf + name<suffix>.pdf pairs for identical printouts and text diffs, to safely delete redundant duplicates.",
-  "author": { "name": "Adam Daniel" }
-}

@@ -1,5 +1,0 @@
-{
-  "name": "writing-adrs",
-  "description": "Write lightweight Nygard-style Architecture Decision Records under docs/decisions/, bootstrapping the folder, template, and index when they don't exist yet.",
-  "author": { "name": "Adam Daniel" }
-}
