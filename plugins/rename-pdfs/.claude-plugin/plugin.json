@@ -1,5 +1,0 @@
-{
-  "name": "rename-pdfs",
-  "description": "Rename already-searchable PDFs to descriptive, date-prefixed names proposed from each file's own content.",
-  "author": { "name": "Adam Daniel" }
-}

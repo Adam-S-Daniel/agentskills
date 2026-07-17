@@ -54,7 +54,7 @@ jobs:
       - name: Run shellcheck
         run: |
           # -S error: two SC2088 (tilde-in-quotes) *warnings* exist today in
-          # plugins/migrate-claude-memory/skills/migrate-claude-memory/scripts/memory-migrate.sh
+          # plugins/adam-local/skills/migrate-claude-memory/scripts/memory-migrate.sh
           # (lines 90, 93) — pre-existing, out of scope for this change. Errors still fail CI.
           shellcheck -S error setup.sh
           find plugins -name '*.sh' -print0 | xargs -0 --no-run-if-empty shellcheck -S error

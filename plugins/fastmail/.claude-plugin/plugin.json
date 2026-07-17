@@ -1,5 +1,5 @@
 {
   "name": "fastmail",
-  "description": "Automate Fastmail email workflows (search, read, compose, reply) via a local Claude-in-Chrome browser session.",
+  "description": "Fastmail email skills: browser-driven email workflows (search, read, compose, reply) and sending-identity management via the fastmail-actions workflows.",
   "author": { "name": "Adam Daniel" }
 }

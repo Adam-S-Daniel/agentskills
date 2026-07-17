@@ -1,5 +1,0 @@
-{
-  "name": "sync-skills",
-  "description": "Sync local skill folders to claude.ai via the upload-skill API using the browser's authenticated session.",
-  "author": { "name": "Adam Daniel" }
-}

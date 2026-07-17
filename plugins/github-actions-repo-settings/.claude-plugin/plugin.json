@@ -1,5 +1,0 @@
-{
-  "name": "github-actions-repo-settings",
-  "description": "Enforce GitHub repo security settings as code (SHA pinning, fork-PR approval, default-branch ruleset) with generate/diff/apply drift detection and a central fan-out workflow.",
-  "author": { "name": "Adam Daniel" }
-}

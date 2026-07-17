@@ -1,5 +1,0 @@
-{
-  "name": "migrate-claude-memory",
-  "description": "Inventory, clean up, and migrate Claude Code auto-memory stores between machines and into git-tracked repos.",
-  "author": { "name": "Adam Daniel" }
-}

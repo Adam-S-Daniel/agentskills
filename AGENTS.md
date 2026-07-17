@@ -68,3 +68,13 @@
 ## Repo-specific additions
 
 <!-- Add your repo-specific agent guidance below this line -->
+
+### Architecture Decision Records
+
+ADRs live in [`docs/decisions/`](docs/decisions/README.md) (index +
+[`0001-consolidate-plugins-into-bundles.md`](docs/decisions/0001-consolidate-plugins-into-bundles.md)).
+Skills are grouped into three bundle plugins — `plugins/adam/` (cloud-safe),
+`plugins/adam-local/` (machine-bound), `plugins/fastmail/` — each holding many
+`skills/<skill>/` dirs; skill directory basenames must stay unique and never
+change (they key `setup.sh` symlinks and claude.ai uploads), and the
+marketplace `renames` map is append-only.
