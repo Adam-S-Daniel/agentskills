@@ -91,15 +91,19 @@ remove_stale_repo_link() {
   local link="$1" existing
   if [[ "$PLATFORM" = "windows" ]]; then
     local win_path; win_path="$(cygpath -w "$link")"
+    # Every cmd.exe call here must be `/c` (not `//c`) because
+    # MSYS_NO_PATHCONV=1 disables the path mangling that `//c` compensates
+    # for — a literal `//c` makes cmd.exe ignore the switch and drop into an
+    # interactive prompt that hangs eating stdin. </dev/null is the backstop.
     # Junction/reparse point exists…
-    MSYS_NO_PATHCONV=1 cmd.exe //c "fsutil reparsepoint query \"$win_path\"" >/dev/null 2>&1 || return 1
+    MSYS_NO_PATHCONV=1 cmd.exe /c "fsutil reparsepoint query \"$win_path\"" </dev/null >/dev/null 2>&1 || return 1
     existing="$(readlink "$link" 2>/dev/null || true)"
     case "$existing" in
       "$PLUGINS_DIR"/*)
         # …its target is ours, and the target directory is gone → stale.
         if [[ ! -e "$existing" ]]; then
           echo "  RELINK   $(basename "$link") (stale plugins/ target)"
-          MSYS_NO_PATHCONV=1 cmd.exe //c "rmdir \"$win_path\"" >/dev/null 2>&1
+          MSYS_NO_PATHCONV=1 cmd.exe /c "rmdir \"$win_path\"" </dev/null >/dev/null 2>&1
           return 0
         fi ;;
     esac
@@ -138,7 +142,7 @@ link_one() {
     local link_win target_win
     link_win="$(cygpath -w "$link")"
     target_win="$(cygpath -w "$target")"
-    MSYS_NO_PATHCONV=1 cmd.exe //c "mklink /J \"$link_win\" \"$target_win\"" >/dev/null 2>&1
+    MSYS_NO_PATHCONV=1 cmd.exe /c "mklink /J \"$link_win\" \"$target_win\"" </dev/null >/dev/null 2>&1
     if [[ -d "$link" ]]; then echo "  JUNCTION $(basename "$link")"; else echo "  FAILED   $(basename "$link")"; fi
   else
     ln -s "$target" "$link"
@@ -153,9 +157,9 @@ migrate_legacy() {
   local home_skills="$1"
   if [[ "$PLATFORM" = "windows" ]]; then
     local win_path; win_path="$(cygpath -w "$home_skills")"
-    if MSYS_NO_PATHCONV=1 cmd.exe //c "fsutil reparsepoint query \"$win_path\"" >/dev/null 2>&1; then
+    if MSYS_NO_PATHCONV=1 cmd.exe /c "fsutil reparsepoint query \"$win_path\"" </dev/null >/dev/null 2>&1; then
       echo "  MIGRATE  removing legacy junction"
-      MSYS_NO_PATHCONV=1 cmd.exe //c "rmdir \"$win_path\"" >/dev/null 2>&1
+      MSYS_NO_PATHCONV=1 cmd.exe /c "rmdir \"$win_path\"" </dev/null >/dev/null 2>&1
     fi
   elif [[ -L "$home_skills" ]]; then
     echo "  MIGRATE  removing legacy directory symlink"
@@ -178,9 +182,9 @@ dedup_claude_code_dir() {
     link="$cc/$(basename "$sd")"
     if [[ "$PLATFORM" = "windows" ]]; then
       local win; win="$(cygpath -w "$link")"
-      if MSYS_NO_PATHCONV=1 cmd.exe //c "fsutil reparsepoint query \"$win\"" >/dev/null 2>&1; then
+      if MSYS_NO_PATHCONV=1 cmd.exe /c "fsutil reparsepoint query \"$win\"" </dev/null >/dev/null 2>&1; then
         echo "  UNLINK   $(basename "$link")"
-        MSYS_NO_PATHCONV=1 cmd.exe //c "rmdir \"$win\"" >/dev/null 2>&1
+        MSYS_NO_PATHCONV=1 cmd.exe /c "rmdir \"$win\"" </dev/null >/dev/null 2>&1
       fi
     elif [[ -L "$link" ]]; then
       case "$(readlink "$link")" in
