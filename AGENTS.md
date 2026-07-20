@@ -16,6 +16,16 @@
 - Prefer editing existing files over creating new ones.
 - Never commit secrets, credentials, or .env files.
 
+## Workstation layout
+
+Repo locations are host-specific — match the convention of the machine you're on
+(on Windows, check `$env:COMPUTERNAME`).
+
+- **`ZENDA`** (Windows): local clones live under `D:\repos\<github-owner-or-org>\<repo>`
+  (for example `D:\repos\adam-s-daniel\wsl-automation`). Clone new repos there, and
+  assume existing repos live there rather than under the user profile
+  (`C:\Users\<user>\...`).
+
 ## Code quality
 
 - Follow the idioms and style already established in this repo.
