@@ -20,11 +20,33 @@ defaults:
     block_deletions: true
     required_status_checks: []
     admin_bypass: true
+    # Fleet-standard bot writers only (each with a justifying comment) -- the
+    # narrow exception to "declare bypass actors per-repo": these bots write
+    # the same managed file(s) to every fleet repo, so the grant IS the fleet
+    # default. Repo-specific bots go in that repo's overrides instead.
+    bypass_actors:
+      # agents-md-sync GitHub App (App id 4268639): pushes the managed
+      # AGENTS.md (+ CLAUDE.md bridge) directly to default branches. The
+      # PR-per-repo alternative produced unmergeable bot-PR spam fleet-wide
+      # (18 open PRs at the time of ADR 0001).
+      - actor_type: Integration
+        actor_id: 4268639
+        bypass_mode: always
+
+# Bot-write policy (issue #5; docs/decisions/0001): generated data (badges, run
+# summaries, dashboards) goes to a dedicated UNPROTECTED results branch -- the
+# model is skills-evals' `eval-results` -- never to the protected default
+# branch. The rare bot that truly must write to a default branch gets a
+# `bypass_actors` grant declared HERE (auditable, drift-checked): per-repo
+# overrides for repo-specific bots, `defaults:` only for a fleet-standard bot
+# that writes to every managed repo (currently agents-md-sync). Never a
+# hand-granted UI bypass. PR + auto-merge is not a sanctioned bot-write path in
+# this fleet (the cms-platform-managed repos, excluded here, use it by their
+# own design).
 
 repos:
   # --- public, ruleset-safe (adversarially verified: no workflow pushes to main) ---
   - name: Adam-S-Daniel/agentskills
-  - name: Adam-S-Daniel/tools
   - name: Adam-S-Daniel/skills-evals
   - name: Adam-S-Daniel/claude-memory-map
   - name: Adam-S-Daniel/civic-azure-infra
