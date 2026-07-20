@@ -81,6 +81,44 @@ HOMES=(
   ".cursor/skills"
 )
 
+# PowerShell parses its own quoting sanely (unlike cmd.exe, which cannot
+# digest the \"-escaped inner quotes MSYS builds into the command line —
+# live-debugged 2026-07-17: `MSYS_NO_PATHCONV=1 cmd.exe /c "mklink /J
+# \"C:\path\" \"C:\path\""` fails with "The filename, directory name, or
+# volume label syntax is incorrect", but the identical command with the
+# inner quotes stripped succeeds — the quoting layering was the bug, not the
+# operation). Single quotes inside the -Command string below are safe
+# because Windows paths in this repo's layout never contain single quotes or
+# apostrophes. -LiteralPath + -Force also sees BOTH reparse point flavors
+# (Junction and SymbolicLink), which the old fsutil-based detection missed —
+# legacy links created from Git Bash/WSL can be POSIX-style symlinks, not
+# junctions. Uses powershell.exe (Windows PowerShell 5.1), not pwsh, since a
+# stock Windows install isn't guaranteed to have PowerShell 7.
+
+# win_link_type <msys-path> — echoes Junction/SymbolicLink/empty; rc 0 iff reparse point
+win_link_type() {
+  local p; p="$(cygpath -w "$1")"
+  local t
+  t=$(MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command \
+    "try { (Get-Item -LiteralPath '$p' -Force -ErrorAction Stop).LinkType } catch { '' }" 2>/dev/null </dev/null | tr -d '\r')
+  [[ -n "$t" ]] && { echo "$t"; return 0; } || return 1
+}
+
+# win_remove_link <msys-path> — removes the reparse point itself, never recursing into the target
+win_remove_link() {
+  local p; p="$(cygpath -w "$1")"
+  MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command \
+    "[System.IO.Directory]::Delete('$p')" </dev/null >/dev/null 2>&1
+}
+
+# win_make_junction <msys-link> <msys-target> — rc 0 iff the junction exists afterwards
+win_make_junction() {
+  local l t; l="$(cygpath -w "$1")"; t="$(cygpath -w "$2")"
+  MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command \
+    "New-Item -ItemType Junction -Path '$l' -Target '$t' | Out-Null" </dev/null >/dev/null 2>&1
+  [[ -d "$1" ]]
+}
+
 # remove_stale_repo_link <link-path> — if <link> is a link/junction whose
 # target lies under $PLUGINS_DIR but no longer exists (stale after a repo
 # restructure moved the skill to a new bundle path), remove it so link_one
@@ -90,20 +128,18 @@ HOMES=(
 remove_stale_repo_link() {
   local link="$1" existing
   if [[ "$PLATFORM" = "windows" ]]; then
-    local win_path; win_path="$(cygpath -w "$link")"
-    # Every cmd.exe call here must be `/c` (not `//c`) because
-    # MSYS_NO_PATHCONV=1 disables the path mangling that `//c` compensates
-    # for — a literal `//c` makes cmd.exe ignore the switch and drop into an
-    # interactive prompt that hangs eating stdin. </dev/null is the backstop.
-    # Junction/reparse point exists…
-    MSYS_NO_PATHCONV=1 cmd.exe /c "fsutil reparsepoint query \"$win_path\"" </dev/null >/dev/null 2>&1 || return 1
+    # Reparse point exists (junction or symlink)…
+    win_link_type "$link" >/dev/null || return 1
     existing="$(readlink "$link" 2>/dev/null || true)"
+    # MSYS can't always read a junction's target; when it can't, leave the
+    # link untouched rather than guess (same conservative posture as unix).
+    [[ -n "$existing" ]] || return 1
     case "$existing" in
       "$PLUGINS_DIR"/*)
         # …its target is ours, and the target directory is gone → stale.
         if [[ ! -e "$existing" ]]; then
           echo "  RELINK   $(basename "$link") (stale plugins/ target)"
-          MSYS_NO_PATHCONV=1 cmd.exe /c "rmdir \"$win_path\"" </dev/null >/dev/null 2>&1
+          win_remove_link "$link"
           return 0
         fi ;;
     esac
@@ -133,17 +169,24 @@ link_one() {
     echo "  ALREADY  $(basename "$link")"
     return
   fi
+  # MSYS does not report junctions as symlinks (-L is false for them), so a
+  # healthy junction from a prior run would otherwise fall through to
+  # CONFLICT below — check reparse-point-ness explicitly on Windows first.
+  if [[ "$PLATFORM" = "windows" ]] && [[ -e "$link" ]] && win_link_type "$link" >/dev/null; then
+    echo "  ALREADY  $(basename "$link")"
+    return
+  fi
   if [[ -e "$link" ]]; then
     echo "  CONFLICT $(basename "$link") (exists, not a symlink — skipping)"
     return
   fi
 
   if [[ "$PLATFORM" = "windows" ]]; then
-    local link_win target_win
-    link_win="$(cygpath -w "$link")"
-    target_win="$(cygpath -w "$target")"
-    MSYS_NO_PATHCONV=1 cmd.exe /c "mklink /J \"$link_win\" \"$target_win\"" </dev/null >/dev/null 2>&1
-    if [[ -d "$link" ]]; then echo "  JUNCTION $(basename "$link")"; else echo "  FAILED   $(basename "$link")"; fi
+    if win_make_junction "$link" "$target"; then
+      echo "  JUNCTION $(basename "$link")"
+    else
+      echo "  FAILED   $(basename "$link")"
+    fi
   else
     ln -s "$target" "$link"
     echo "  SYMLINK  $(basename "$link")"
@@ -156,10 +199,9 @@ link_one() {
 migrate_legacy() {
   local home_skills="$1"
   if [[ "$PLATFORM" = "windows" ]]; then
-    local win_path; win_path="$(cygpath -w "$home_skills")"
-    if MSYS_NO_PATHCONV=1 cmd.exe /c "fsutil reparsepoint query \"$win_path\"" </dev/null >/dev/null 2>&1; then
-      echo "  MIGRATE  removing legacy junction"
-      MSYS_NO_PATHCONV=1 cmd.exe /c "rmdir \"$win_path\"" </dev/null >/dev/null 2>&1
+    if win_link_type "$home_skills" >/dev/null; then
+      echo "  MIGRATE  removing legacy reparse point"
+      win_remove_link "$home_skills"
     fi
   elif [[ -L "$home_skills" ]]; then
     echo "  MIGRATE  removing legacy directory symlink"
@@ -181,10 +223,9 @@ dedup_claude_code_dir() {
   for sd in "${SKILL_DIRS[@]}"; do
     link="$cc/$(basename "$sd")"
     if [[ "$PLATFORM" = "windows" ]]; then
-      local win; win="$(cygpath -w "$link")"
-      if MSYS_NO_PATHCONV=1 cmd.exe /c "fsutil reparsepoint query \"$win\"" </dev/null >/dev/null 2>&1; then
+      if win_link_type "$link" >/dev/null; then
         echo "  UNLINK   $(basename "$link")"
-        MSYS_NO_PATHCONV=1 cmd.exe /c "rmdir \"$win\"" </dev/null >/dev/null 2>&1
+        win_remove_link "$link"
       fi
     elif [[ -L "$link" ]]; then
       case "$(readlink "$link")" in
