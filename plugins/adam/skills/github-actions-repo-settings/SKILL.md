@@ -120,7 +120,9 @@ full schema. Two shapes:
 
 The engine **auto-downgrades**: on a private repo it skips fork-PR approval and
 the ruleset (with a logged reason), so one `defaults:` baseline targets public
-and private repos alike.
+and private repos alike. The `ruleset.bypass_actors` list declares service
+identities (e.g. a GitHub App) allowed through the PR-only rule -- the
+auditable alternative to hand-granted UI bypasses.
 
 ---
 
@@ -183,7 +185,10 @@ Rules of thumb used:
 - **a workflow pushes to its own default branch** -> hold the ruleset until the
   workflow is converted to open a PR (e.g. `peter-evans/create-pull-request`).
   (In this fleet, `_agent-guidance`'s nightly `drift-report.yml` triggered this
-  hold.)
+  hold.) For a fleet-standard bot that must keep writing to every managed
+  default branch, the sanctioned alternative is a declared `bypass_actors`
+  entry in the fleet config (see the schema) -- the agents-md-sync App is the
+  standing example (repo-settings ADR 0001).
 
 ---
 

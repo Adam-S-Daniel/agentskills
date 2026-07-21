@@ -63,6 +63,19 @@ ruleset:
   #         bot) are forced through PRs.
   # false = nobody bypasses (stricter; matches the cms-platform `main` ruleset).
   admin_bypass: true
+
+  # Extra bypass actors beyond the Admin-role toggle above. This is the
+  # sanctioned path for the RARE bot that genuinely must write to the protected
+  # default branch (repo-settings' ADR 0001): declare its service identity here so
+  # the grant is auditable and drift-checked -- never hand-grant bypass in the
+  # GitHub UI (the drift report will flag it). Each entry:
+  #   actor_type:  Integration | Team | RepositoryRole | OrganizationAdmin | DeployKey
+  #   actor_id:    numeric id (for Integration, the GitHub App's id)
+  #   bypass_mode: always | pull_request   (default: always)
+  # Omit or leave empty for no extra actors -- the default AND the policy
+  # default: generated data belongs on an unprotected results branch instead.
+  # In fleet configs, a defaults-level entry is reserved for fleet-standard bots.
+  bypass_actors: []
 ```
 
 ## Fleet / fan-out shape
