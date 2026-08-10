@@ -8,13 +8,41 @@
 > Edit only below the `## Repo-specific additions` header.
 > Everything above it will be overwritten on the next sync.
 
-## General guidelines
+This block is deliberately short. It carries the things that are **specific to
+this account and learned the hard way** — incidents, fleet policy, machine
+layout. It does not restate general engineering practice, and it does not
+describe anything you can learn by reading the repo. Depth lives in each repo's
+`docs/` and in the skills registry; follow the pointers when the work touches
+that area.
 
-- Read existing code before modifying it. Understand the patterns already in use.
-- Keep changes minimal and focused — fix what was asked, nothing more.
-- Do not add speculative features, premature abstractions, or unused helpers.
-- Prefer editing existing files over creating new ones.
-- Never commit secrets, credentials, or .env files.
+## Working in these repos
+
+- Fix what was asked. No speculative features, premature abstractions, or
+  unused helpers.
+- Prefer editing an existing file over creating a new one.
+- Every public interface change updates the corresponding tests.
+- Run the existing test suite before calling a task complete, and say plainly
+  what you ran. New behaviour gets a test; a bug fix gets a regression test.
+- Tests must be deterministic — no sleeps, no network, no reliance on
+  wall-clock time.
+
+## Finding your unknowns
+
+Output quality on a non-trivial task is bounded by how well the ambiguities got
+resolved — and most of them surface *during* implementation, not before it. So
+treat unknown-hunting as part of the work, not a phase that ends at the plan:
+
+- Before building: name what you don't know. Prefer a reference in **code** — an
+  existing implementation to mirror, a failing test, a rubric, an HTML mockup —
+  over a prose description of the same thing.
+- While building: keep a running note of decisions that departed from the plan
+  and edge cases you hit. Surface them; don't silently absorb them.
+- After building: be able to explain what changed and why it is correct.
+
+The full workflow (blind-spot pass, self-interview, implementation notes,
+post-hoc explainer) is the **`finding-unknowns`** skill in the registry. Reach
+for it on unfamiliar code, a new domain, or anything with subjective acceptance
+criteria.
 
 ## Workstation layout
 
@@ -26,19 +54,17 @@ Repo locations are host-specific — match the convention of the machine you're 
   assume existing repos live there rather than under the user profile
   (`C:\Users\<user>\...`).
 
-## Code quality
-
-- Follow the idioms and style already established in this repo.
-- Write code that is clear enough to not need comments; add comments only when intent is non-obvious.
-- Avoid introducing new dependencies unless strictly necessary.
-- Every public interface change should include corresponding test updates.
-
 ## Security
 
-- Validate all external input (user input, API responses, file contents).
-- Never construct SQL, shell commands, or HTML by string concatenation with untrusted data.
-- Use parameterized queries, shell arrays, and context-aware escaping respectively.
-- Do not disable TLS verification, authentication, or CSRF protection.
+Standard practice applies without being restated here. These are the ones with
+teeth in this account:
+
+- Validate anything that crosses a trust boundary — user input, API responses,
+  file contents.
+- Never build SQL, shell commands, or HTML by string-concatenating untrusted
+  data. Use parameterized queries, shell arrays, and context-aware escaping.
+- Never commit secrets, credentials, or `.env` files.
+- Never disable TLS verification, authentication, or CSRF protection.
 
 ## Data exposure in CI and public repos
 
@@ -93,11 +119,20 @@ Fleet repos enforce PR-only default branches via ruleset, managed as code in
   cms-platform-managed repos (outside the fleet ruleset) use it by their own
   design.
 
-## Testing
+## Dependency updates
 
-- Run the existing test suite before considering a task complete.
-- New behavior requires new tests; bug fixes require regression tests.
-- Tests should be deterministic — no sleeping, no network calls, no reliance on wall-clock time.
+Dependabot runs with a **minimum package age** (`cooldown`) so an unattended
+merge still gets a cooling-off period: `default-days: 7`, `semver-major-days: 30`.
+Two things about that setting are easy to get wrong:
+
+- It applies to **version** updates only. A security advisory bypasses cooldown
+  entirely and opens immediately — the wait never delays a vulnerability fix.
+- An unset `cooldown` is **not** "no wait": GitHub applies an implicit 3-day
+  minimum age to version updates. Writing 7 is a raise from 3, not from zero.
+
+`semver-minor-days` / `semver-patch-days` are deliberately left undefined —
+they fall back to `default-days`, and spelling them out only invites drift.
+Pinning and bumping third-party action SHAs is the `pin-actions-to-sha` skill.
 
 ## Subagent delegation (model routing)
 
@@ -106,20 +141,22 @@ Fleet repos enforce PR-only default branches via ruleset, managed as code in
   Claude Code; skip if the harness has no subagent support).
 - Route by mechanicalness: smallest model (haiku-class) for exactly-specified
   edits — pin bumps, renames, config/doc tweaks; mid-tier (sonnet-class) for
-  normal implementation from a clear spec.
+  normal implementation from a clear spec. Escalate rather than ship a wrong
+  diff when the task is genuinely subtle (cross-repo invariants, race
+  conditions).
 - The main loop keeps root-cause investigation, architectural decisions,
   writing the spec, and review of the subagent's diff before commit.
-- Escalate the model rather than ship a wrong diff when the task is genuinely
-  subtle (cross-repo invariants, race conditions).
+- Delegated work is done when a **verifier exits 0**, not when the report reads
+  as finished. Name the exact command in the spec and require its exit code
+  back. A subagent that cannot run it reports BLOCKED; a count that disagrees
+  with the spec's stated expectation is a stop-and-report condition, never a
+  rounding difference.
 - Don't assume the subagent sees this file: general-purpose and custom
   subagents receive the full memory hierarchy (imports included), but
   Explore/Plan-type agents and SDK harnesses with `settingSources: []` skip
   repo guidance entirely. Restate load-bearing constraints (style, test
   command, invariants) in the delegation prompt, and don't hand
   guidance-sensitive work to agents that won't see it.
-- Give the subagent a precise spec — files, exact changes, house style, the
-  test command to run. Subagent output is gated by the same test/CI proof as
-  any other change.
 
 ## Skills ecosystem
 
@@ -135,7 +172,8 @@ Fleet repos enforce PR-only default branches via ruleset, managed as code in
   known Claude Code limitation (see agentskills' `docs/decisions/0001`) — so
   don't assume bundle skills are available there.
 - New reusable skills graduate **into** the registry (sensitive ones into
-  `agentskills-private`) rather than living on in a consumer repo.
+  `agentskills-private`) rather than living on in a consumer repo. A long skill
+  splits across files rather than growing into one wall of text.
 
 ## Git practices
 
