@@ -6,9 +6,9 @@
     {
       "name": "adam",
       "source": "./plugins/adam",
-      "description": "Adam's general-purpose skills, safe anywhere including cloud sessions: writing voice, GitHub Actions debugging and hardening, ADRs.",
+      "description": "Adam's general-purpose skills, safe anywhere including cloud sessions: writing voice, GitHub Actions debugging and hardening, ADRs, resolving task ambiguity.",
       "category": "productivity",
-      "keywords": ["writing", "voice", "github-actions", "ci-cd", "debugging", "security", "supply-chain", "sha-pinning", "settings-as-code", "bash", "code-review", "adr", "documentation"]
+      "keywords": ["writing", "voice", "github-actions", "ci-cd", "debugging", "security", "supply-chain", "sha-pinning", "settings-as-code", "bash", "code-review", "adr", "documentation", "requirements", "ambiguity", "planning"]
     },
     {
       "name": "adam-local",

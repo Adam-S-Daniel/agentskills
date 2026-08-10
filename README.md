@@ -67,6 +67,7 @@ Available skills:
 | --- | --- | --- |
 | `adam` | `/adam:adam-writing-style` | Write in Adam Daniel's voice — professional but warm, direct, em-dash-friendly, free of corporate buzzwords. |
 | `adam` | `/adam:debug-github-workflows` | Debugging GitHub Actions workflow failures. |
+| `adam` | `/adam:finding-unknowns` | Surface and resolve the ambiguities in a task before, during, and after implementation — the blind-spot pass, the self-interview, reference-driven specs, implementation notes, and a post-hoc explainer or quiz. |
 | `adam` | `/adam:github-actions-repo-settings` | Configure and enforce GitHub repository security settings as code: require actions to be pinned to full-length commit SHAs, require approval for all outside collaborators' fork pull-request workflow runs, and protect the default branch via a repository ruleset. |
 | `adam` | `/adam:pin-actions-to-sha` | Audit and fix GitHub Actions workflow files to ensure every `uses` reference is pinned to a full-length commit SHA (40 hex characters) with a version comment that includes the release date. |
 | `adam` | `/adam:review-bash-ci-reliability` | Review bash scripts for CI/CD reliability issues. |
