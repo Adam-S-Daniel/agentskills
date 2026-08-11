@@ -23,14 +23,13 @@
 #   3. In THIS repo, add: variable `REPO_SETTINGS_APP_CLIENT_ID` (the App's
 #      Client ID, on its settings page), secret `REPO_SETTINGS_APP_PRIVATE_KEY`.
 #
-# The action's `app-id` input is deprecated in favour of `client-id`, but they
-# are the SAME input: the bundle reads
-# `getInput("client-id") || getInput("app-id")` with no format validation, and
-# the value becomes the JWT `iss` claim, which GitHub accepts as either an App
-# ID or a Client ID. `client-id` below therefore falls back to the older
-# REPO_SETTINGS_APP_ID variable, so an existing installation keeps working and
-# switches over whenever the Client ID variable is added -- with no window
-# where the gate goes false and the fleet audit silently stops.
+# Use the App's Client ID, not its numeric App ID. The action's `app-id` input
+# is deprecated in favour of `client-id`; the two are the same input under the
+# hood (the bundle reads `getInput("client-id") || getInput("app-id")`, and the
+# value becomes the JWT `iss` claim, which GitHub accepts as either), so an
+# EXISTING deployment can migrate without a flag day by temporarily writing
+# `${{ vars.REPO_SETTINGS_APP_CLIENT_ID || vars.REPO_SETTINGS_APP_ID }}`. A
+# fresh install has no legacy variable, so it just uses the Client ID.
 #
 # Behavior:
 #   * pull_request touching config/script -> drift report only (fails on drift)
@@ -71,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     # Skip cleanly until the GitHub App is configured (avoids a failing run on a
     # repo that is still awaiting its one-time credential setup).
-    if: ${{ vars.REPO_SETTINGS_APP_CLIENT_ID != '' || vars.REPO_SETTINGS_APP_ID != '' }}
+    if: ${{ vars.REPO_SETTINGS_APP_CLIENT_ID != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -92,7 +91,7 @@ jobs:
         id: token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 (2026-05-12)
         with:
-          client-id: ${{ vars.REPO_SETTINGS_APP_CLIENT_ID || vars.REPO_SETTINGS_APP_ID }}
+          client-id: ${{ vars.REPO_SETTINGS_APP_CLIENT_ID }}
           private-key: ${{ secrets.REPO_SETTINGS_APP_PRIVATE_KEY }}
           owner: ${{ matrix.owner }}
 
