@@ -154,8 +154,13 @@ repo-settings/fleet.yml                          # your fleet config
 single owner, so it cannot administer repos across both `Adam-S-Daniel` and the
 `jodidaniel` org. Create one GitHub App (repository permissions: Administration
 R/W, Actions R/W, Metadata R), install it on **both** accounts, and store its
-`REPO_SETTINGS_APP_ID` (variable) + `REPO_SETTINGS_APP_PRIVATE_KEY` (secret) in
-the repo-settings repo. The workflow
+`REPO_SETTINGS_APP_CLIENT_ID` (variable — the App's Client ID) +
+`REPO_SETTINGS_APP_PRIVATE_KEY` (secret) in the repo-settings repo. The
+action's `app-id` input is deprecated in favour of `client-id`, but the two are
+the same input with no format validation — the value becomes the JWT `iss`
+claim, which accepts either an App ID or a Client ID — so the workflow reads
+`client-id` with a fallback to a legacy `REPO_SETTINGS_APP_ID` variable rather
+than requiring a flag-day rename. The workflow
 ([assets/workflows/repo-settings-fanout.yml](assets/workflows/repo-settings-fanout.yml))
 mints a fresh, short-lived installation token **per owner** (matrix over owner)
 and runs the engine with `--owner` so each account is handled with its own
