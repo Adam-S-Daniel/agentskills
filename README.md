@@ -76,6 +76,8 @@ Available skills:
 | `adam-local` | `/adam-local:compare-pdfpairs` | Compare pairs of PDFs (name.pdf + name<suffix>.pdf in the same folder) to determine whether they would produce identical printouts and whether their embedded text differs — e.g. to safely delete redundant "-signed" or "-needsocr" duplicates. |
 | `adam-local` | `/adam-local:launch-wsl-claude-session` | Launch a detached, interactive Claude Code session inside WSL from a Windows Claude Code session — in a specific repo/folder, optionally remote-controllable and optionally seeded with an initial prompt. |
 | `adam-local` | `/adam-local:migrate-claude-memory` | Inventory, clean up, and migrate Claude Code auto-memory stores found under ~/.claude/projects/<munged-path>/memory/ on this machine. |
+| `adam-local` | `/adam-local:ocr-pdfs` | Batch-OCR scanned PDFs flagged as needing OCR, then visually review results with a WPF side-by-side comparison tool. |
+| `adam-local` | `/adam-local:pdf-ocr-audit` | Audit PDF files to determine whether OCR (optical character recognition) is needed to make them fully text-searchable. |
 | `adam-local` | `/adam-local:rename-pdfs` | Rename already-searchable PDFs in a specified folder to descriptive, date-prefixed names, proposing each name from the PDF's own content and prompting for per-file confirmation or edit before applying. |
 | `adam-local` | `/adam-local:sync-cc-settings-between-wsl-and-windows` | Sync Claude Code settings.json between a Windows home and a WSL home. |
 | `adam-local` | `/adam-local:sync-skills` | Sync local skill folders from git repos to Claude.ai (and other agent targets) via the upload-skill API. |
