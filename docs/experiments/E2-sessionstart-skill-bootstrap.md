@@ -338,3 +338,39 @@ against *expecting it to do work yet*, and against any plan that treats it as th
 mechanism rather than the declaration. Note the compatible-clients page lists
 "ChatGPT & Codex" with an Agent Skills check; that check is about loading `skills/`,
 which is exactly what was observed — it is not a claim that the manifest is read.
+
+## C10 — correction to C9: Codex 0.147.0 DOES read the root manifest
+
+C9 concluded that the portable root `plugin.json` is inert for Codex and that the
+only genuinely cross-client portable core is the `skills/` directory convention.
+**That conclusion was version-bound and is now wrong.** Re-running the same two
+fixtures on `codex-cli 0.147.0` (published 2026-08-07 — one day after Agent Plugins
+v1.0.0):
+
+| Fixture | Manifest | 0.146.1 | 0.147.0 |
+|---|---|---|---|
+| `demo-codexnative` | `.codex-plugin/plugin.json` | version `0.1.0` | version `0.1.0` |
+| `demo-portable` | root `plugin.json` (declares `9.9.9`) | version **`local`** | version **`9.9.9`** |
+
+On 0.147.0 the portable plugin caches to `…/demo-portable/9.9.9`, **no
+`.codex-plugin/plugin.json` is synthesised**, and the only description present in
+the cache is `ROOT-MANIFEST-DESC` — not the marketplace entry's
+`MARKETPLACE-ENTRY-DESC`, which is what 0.146.1 fell back to. The root manifest is
+the manifest of record: name, version and description all come from it.
+
+So **Codex is a true Agent Plugins v1 client as of 0.147.0**, and Agent Plugins
+support shipped there within a day of the spec's release.
+
+Revised conclusion for the non-Claude arm: adding the root `plugin.json` is not
+merely forward-looking — it is **load-bearing for Codex today**, and Claude Code is
+the holdout among the fleet's targets rather than the norm.
+
+### Method note worth keeping
+
+C9's wrong conclusion came from testing `0.146.1` instead of `0.147.0`, chosen
+because 0.147.0 was 6 days old and the repo's dependency convention imposes a 7-day
+cooling-off. That convention is right for **adopting** a dependency and wrong for
+**measuring** a capability: a week-old release is exactly where new standard support
+lands. Probe the newest version to learn what is true; pin an older one to ship.
+Conflating the two nearly produced an architectural decision based on a capability
+gap that had already been closed.
