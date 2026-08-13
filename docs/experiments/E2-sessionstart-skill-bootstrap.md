@@ -374,3 +374,26 @@ cooling-off. That convention is right for **adopting** a dependency and wrong fo
 lands. Probe the newest version to learn what is true; pin an older one to ship.
 Conflating the two nearly produced an architectural decision based on a capability
 gap that had already been closed.
+
+### C10 independently replicated
+
+C9 → C10 is a reversal, so C10 was re-run from scratch with **freshly authored
+fixtures** (different files, different marker strings, isolated `CODEX_HOME` per
+version) rather than re-reading the originals. Same verdict:
+
+```
+0.146.1  Installed plugin root: …/cache/probe/demo-portable/local
+         …/local/.codex-plugin/plugin.json   ← SYNTHESISED by Codex
+           { "description": "MARKETPLACE-ENTRY-DESC", "name": "demo-portable" }
+
+0.147.0  Installed plugin root: …/cache/probe/demo-portable/9.9.9
+         (no .codex-plugin/plugin.json anywhere in the cache)
+           { "name": "demo-portable", "version": "9.9.9", "description": "ROOT-MANIFEST-DESC" }
+```
+
+The portable fixture carried **only** a root `plugin.json`, and its marketplace
+entry's description deliberately differed from the manifest's, so "which description
+survives" discriminates cleanly. On 0.146.1 the marketplace entry wins and a native
+manifest is fabricated; on 0.147.0 the root manifest wins and none is. Corroborating
+the timeline: `npm view @openai/codex time` gives `0.146.1 → 2026-08-05`,
+`0.147.0 → 2026-08-07` — the day after Agent Plugins v1.0.0.
