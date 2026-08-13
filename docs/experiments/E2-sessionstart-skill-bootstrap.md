@@ -92,3 +92,109 @@ Limits this experiment does **not** clear: it says nothing about claude.ai chat,
 Cowork, or any surface that does not run Claude Code hooks; and fetching
 instruction text at session start is a supply-chain surface that wants an immutable
 pinned ref plus integrity checking, not `main`.
+
+---
+
+# Companion measurements (same container, 2026-08-13, CLI 2.1.231)
+
+Five further results taken while validating E2. Each is reproducible with the
+harness shape in Part 1 (`--setting-sources user,project`, `Skill` left allowed,
+positive control first).
+
+## C1 — `reloadSkills` re-scans skill DIRECTORIES, not installed plugins
+
+A hook that runs `claude plugin marketplace add` + `claude plugin install` succeeds
+(the install log confirms it) but the plugin's skills are **absent** from that same
+session's listing, even with `reloadSkills` emitted in both shapes:
+
+```
+--- hook log:  √ Successfully installed plugin: adam@agentskills (scope: user)
+--- model saw: NONE
+```
+
+Consequence for design: on a **one-shot** surface (cloud session, CI runner) the
+bootstrap must copy skills into a *skill directory*. `claude plugin install` only
+pays off on a **durable** machine, where the next session picks it up.
+
+## C2 — plugin install itself works fine at runtime in a cloud session
+
+This narrows E1's finding considerably. What is broken in cloud is the
+**declarative boot-time** install of repo-declared `extraKnownMarketplaces` /
+`enabledPlugins` — *not* the plugin machinery:
+
+```
+$ claude plugin marketplace add Adam-S-Daniel/agentskills   → √ Successfully added
+$ claude plugin install adam@agentskills                    → √ Successfully installed (scope: user)
+$ claude -p '…list matching skills…'   (fresh, empty, unrelated workspace)
+adam:finding-unknowns
+adam:writing-adrs
+adam:debug-github-workflows
+adam:review-bash-ci-reliability
+```
+
+Note the `adam:` namespace, and that `installed_plugins.json` pins
+`gitCommitSha: 65893a10ad16…` — plugin delivery is namespaced and version-pinned;
+copying loose skill dirs is neither.
+
+## C3 — precedence: personal `~/.claude/skills/` SHADOWS project `.claude/skills/`
+
+One skill name, three homes, distinct description markers, asked which description
+the model sees:
+
+| Present in | Model saw |
+|---|---|
+| `synced/` only | **ABSENT** |
+| `synced/` + personal | `PERSONALWINS` |
+| `synced/` + personal + project | `PERSONALWINS` |
+| project only *(control)* | `PROJECTWINS` |
+| project + personal *(re-add)* | `PERSONALWINS` |
+
+Two consequences:
+
+1. **A fleet skill installed into `~/.claude/skills/` silently overrides a
+   same-named skill the repo owns.** Any bootstrap that writes there needs either
+   namespacing or a lint forbidding name collisions with repo-owned skills.
+2. **Writing a directory into `~/.claude/skills/synced/` does nothing.** That store
+   is manifest-gated, so the account channel cannot be simulated locally — it can
+   only be observed from a session actually signed in to the account.
+
+## C4 — a marketplace can publish a plugin that lives in another repo
+
+```json
+{ "name": "adam-remote",
+  "source": { "source": "github", "repo": "Adam-S-Daniel/agentskills", "path": "plugins/adam" } }
+```
+
+Validates, adds, and installs (`√ Successfully installed plugin: adam-remote@fedtest`),
+caching to `~/.claude/plugins/cache/fedtest/adam-remote/65893a10ad16`. So one
+marketplace can federate bundles owned by several repos — a repo keeps its skills,
+its release cadence and its review path, and still ships through the single registry.
+
+## C5 — dual-format packaging, and the limit of it
+
+`claude plugin validate` on a directory carrying **both** `.claude-plugin/plugin.json`
+and an Agent Plugins v1 root `plugin.json`: passes, reading only the Claude manifest.
+The same directory with **only** the root `plugin.json`:
+
+```
+× directory: No manifest found in directory.
+  Expected .claude-plugin/marketplace.json or .claude-plugin/plugin.json
+```
+
+So the portable root manifest is free to add and Claude Code ignores it — but Claude
+Code is **not** an Agent Plugins v1 client, and a pure-portable layout is unloadable
+by it. Adopt the standard additively, exactly as its own migration guide prescribes.
+
+## C6 — measured always-on token cost
+
+`claude plugin details adam` reports the cost of carrying a bundle:
+
+```
+Projected token cost
+  Always-on:   ~1,479 tok   added to every session      (8 skills, ~185 tok/skill)
+```
+
+At that rate adamdaniel.ai's 18 vendored skills cost roughly **3.3k tokens of every
+session's context**. Material, and a reason to scope bundles per repo rather than
+ship everything everywhere. `claude plugin details` also gives a first-party
+per-skill breakdown, so this is measurable rather than estimated.
