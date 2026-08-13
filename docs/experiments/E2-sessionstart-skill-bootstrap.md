@@ -278,3 +278,63 @@ So the reason account delivery can't replace repo-scoped skills is **structural,
 precedential**. Name precedence (C3) is the reason usually reached for first; it is
 also the weaker one, since it could be engineered around by renaming. This cannot.
 That makes it the right thing to record in ADR 0001.
+
+## C9 — Codex: install is scriptable from 0.146.x, but the root manifest is inert
+
+Two questions about the non-Claude arm, both answered on the laptop.
+
+### The tooling block is gone — upgrade Codex
+
+`codex-cli 0.129.0` exposes only `codex plugin marketplace {add,upgrade,remove}` —
+no install, no list, so plugin installation was TUI-only and unscriptable.
+**0.146.1 adds `codex plugin {add,list,remove}`.** Both steps are now headless:
+
+```
+$ codex plugin marketplace add <root>       # root must contain .agents/plugins/marketplace.json
+$ codex plugin add <plugin>@<marketplace>   # bare <plugin> errors: "requires --marketplace"
+$ codex plugin list --json                  # machine-readable, incl. installed/enabled/version
+```
+
+State lands in `~/.codex/config.toml` as `[marketplaces.<name>]` and
+`[plugins."<plugin>@<marketplace>"] enabled = true`, with the payload cached under
+`~/.codex/plugins/cache/<marketplace>/<plugin>/<version>/`. So the retirement of
+`~/.agents/skills` for Codex is unblocked; it was a CLI-surface gap, not a design
+one. (0.147.0 was skipped as 6 days old, inside the repo's 7-day cooling-off.)
+
+### But Codex does not read the Agent Plugins root manifest
+
+Two fixtures published through identical marketplaces — one plugin carrying **only**
+a portable root `plugin.json`, one carrying **only** `.codex-plugin/plugin.json`.
+Both install and enable, and **both plugins' skills materialise**. The discriminator
+is the version column:
+
+| Fixture | Manifest present | STATUS | VERSION | cache path |
+|---|---|---|---|---|
+| `demo-codexnative` | `.codex-plugin/plugin.json` | installed, enabled | `0.1.0` | `…/demo-codexnative/0.1.0` |
+| `demo-portable` | root `plugin.json` only | installed, enabled | **`local`** | `…/demo-portable/local` |
+
+The portable plugin's version is `local`, not the `0.1.0` its root manifest
+declares. And Codex **synthesised** a native manifest for it:
+
+```
+$ cat …/probe-portable/demo-portable/local/.codex-plugin/plugin.json     # written by Codex
+{ "description": "manifest-discovery probe", "name": "demo-portable" }
+```
+
+That description is the **marketplace entry's**, not the root manifest's
+(`"PORTABLE-ROOT-MANIFEST-ONLY"`). The root `plugin.json` is copied through as an
+inert file and never parsed.
+
+### What this means for the design
+
+**The portable core that actually works across clients today is the `skills/<name>/SKILL.md`
+directory convention — not the manifest.** As of 2026-08-13, neither Claude Code
+(measured, C5) nor Codex reads the Agent Plugins root `plugin.json`; each takes its
+metadata from its own channel (`.claude-plugin/plugin.json`; the marketplace entry).
+
+That does not argue against adding the root manifest — it is spec-prescribed, costs
+one file, and is what makes the package conformant as clients catch up. It argues
+against *expecting it to do work yet*, and against any plan that treats it as the
+mechanism rather than the declaration. Note the compatible-clients page lists
+"ChatGPT & Codex" with an Agent Skills check; that check is about loading `skills/`,
+which is exactly what was observed — it is not a claim that the manifest is read.
