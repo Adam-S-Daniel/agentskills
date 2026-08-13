@@ -1,3 +1,10 @@
 {
-  "autoMemoryDirectory": "~/repos/agentskills/.claude/memory"
+  "autoMemoryDirectory": "~/repos/agentskills/.claude/memory",
+  "extraKnownMarketplaces": {
+    "agentskills": {
+      "source": { "source": "github", "repo": "Adam-S-Daniel/agentskills" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": { "adam@agentskills": true }
 }
