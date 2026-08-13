@@ -20,6 +20,7 @@ from sync_skills import (  # noqa: E402
     mark_synced,
     prepare,
     skill_hash,
+    verify,
     zip_skill,
 )
 
@@ -282,6 +283,69 @@ class TestPrepare:
 
 
 # ---------------------------------------------------------------------------
+# verify
+# ---------------------------------------------------------------------------
+
+class TestVerify:
+    def test_reports_ok_when_account_copy_matches(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """Path sets must match; content must NOT be compared — account
+        copies are known to be CRLF while the registry is LF, so this
+        locks in that the comparison stays path-only."""
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+
+        skill_account = account_dir / "skill-a"
+        skill_account.mkdir(parents=True)
+        (skill_account / "SKILL.md").write_text("---\nname: skill-a\n---\ncontent differs on purpose\n")
+        (skill_account / "extra.txt").write_text("also different content on purpose\n")
+
+        ok = verify([repo_with_skills], skill_names=["skill-a"])
+
+        assert ok is True
+        out = capsys.readouterr().out
+        assert "OK" in out
+        assert "skill-a" in out
+
+    def test_reports_mismatch_and_fails_on_missing_payload(self, monkeypatch, tmp_path, capsys):
+        """The exact live bug: SKILL.md present on the account copy, scripts/* absent."""
+        repo = tmp_path / "repo"
+        skill = repo / "skills" / "sync-skills"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: sync-skills\n---\n")
+        scripts = skill / "scripts"
+        scripts.mkdir()
+        (scripts / "helper.py").write_text("print('hi')\n")
+
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        skill_account = account_dir / "sync-skills"
+        skill_account.mkdir(parents=True)
+        (skill_account / "SKILL.md").write_text("---\nname: sync-skills\n---\n")
+        # scripts/helper.py deliberately absent on the account copy.
+
+        ok = verify([repo], skill_names=["sync-skills"])
+
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "MISMATCH" in out
+        assert "scripts/helper.py" in out
+
+    def test_handles_absent_account_directory(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "does-not-exist")
+
+        ok = verify([repo_with_skills], skill_names=["skill-a"])
+
+        assert ok is True
+        out = capsys.readouterr().out
+        assert "skill-a" in out
+        assert "not uploaded" in out
+
+
+# ---------------------------------------------------------------------------
 # mark_synced / load_state
 # ---------------------------------------------------------------------------
 
@@ -366,3 +430,27 @@ class TestPluginLayout:
         result = prepare([repo_plugin_layout], skill_names=["skill-a"])
         assert len(result["skills"]) == 1
         assert result["skills"][0]["name"] == "skill-a"
+
+
+# ---------------------------------------------------------------------------
+# SKILL.md section 6 — pure-text guard-regression lint
+# ---------------------------------------------------------------------------
+
+class TestSkillMdSection6Guard:
+    """Section 6 documents a hand-built single-file ZIP fallback that has
+    already caused real payload loss (SKILL.md uploaded, everything else
+    silently dropped) for three skills. These assertions keep the fix —
+    the expectedFileCount hard guard, and the removal of the refuted
+    ZIP-root claim — from being silently edited away later.
+    """
+
+    def test_guard_present_and_false_claim_removed(self):
+        skill_md = Path(__file__).parent.parent / "SKILL.md"
+        text = skill_md.read_text(encoding="utf-8")
+
+        assert "expectedFileCount" in text, (
+            "SKILL.md section 6 must keep the expectedFileCount hard guard"
+        )
+        assert "Don't put the file at the ZIP root" not in text, (
+            "SKILL.md must not reintroduce the refuted ZIP-root-prefix claim"
+        )
