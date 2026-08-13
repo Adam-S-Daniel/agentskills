@@ -198,3 +198,41 @@ At that rate adamdaniel.ai's 18 vendored skills cost roughly **3.3k tokens of ev
 session's context**. Material, and a reason to scope bundles per repo rather than
 ship everything everywhere. `claude plugin details` also gives a first-party
 per-skill breakdown, so this is measurable rather than estimated.
+
+## C7 — subagents do NOT fire SessionStart hooks, and do not need to
+
+The open risk carried into `#54`/`#56` was: if a subagent never fires the bootstrap
+hook, delegated work is starved of the skills the delegation relies on — and fleet
+policy routes implementation to subagents. Tested directly.
+
+A workspace whose `SessionStart` hook logs every invocation (including whether the
+stdin payload carries `agent_id` / `agent_type`) and installs one canary skill. The
+top-level agent is asked to launch a **general-purpose** Task subagent and relay,
+verbatim, which `zz-*` skills that subagent can see. `Read,Glob,Grep,Bash` are
+disallowed for the whole run so the subagent cannot forage the answer off disk;
+`Task` and `Skill` stay allowed.
+
+| Arm | Hook | Subagent reported |
+|---|---|---|
+| negative control | disabled | `NONE` |
+| test | enabled | `zz-subagent-canary` |
+
+```
+hook fire log (test arm, entire contents):
+    FIRE event=SessionStart agent_id=None agent_type=None
+```
+
+**One fire, for the top-level session only** — no second invocation carrying
+`agent_id`/`agent_type`. So the hook does not run per-subagent. But the subagent
+still sees the skill, because subagent skill discovery reads the same
+`~/.claude/skills/` the hook already populated at session start.
+
+Conclusion: hook-delivered skills reach subagents. The blocker is retired. The
+ordering it depends on is worth stating, though, because it is the real
+constraint: **the hook must complete before the subagent is spawned.** That holds
+for `SessionStart` by construction, and it is why an installer that runs later
+(say, from a tool call mid-session) would not carry the same guarantee.
+
+Not tested: whether `Explore`/`Plan`-type agents behave the same. They skip repo
+guidance by design, so they should be assumed unreliable for skill-dependent work
+regardless — which is already fleet policy.
