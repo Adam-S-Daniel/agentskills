@@ -75,7 +75,7 @@ All four. Registry clone cost: **1.19 s** shallow.
 
 ## Part 3 — the real cloud-session boot path
 
-See `E2-CLOUD-RESULT.md` (written by a fresh Claude Code on the web session spawned
+See [`E2-cloud-session-result.md`](E2-cloud-session-result.md) (written by a fresh Claude Code on the web session spawned
 against this branch). Part 1 and 2 ran the same binary but through `claude -p`
 inside an already-booted container; a spawned session exercises the actual boot
 path, including whatever hook-trust behaviour applies there.
