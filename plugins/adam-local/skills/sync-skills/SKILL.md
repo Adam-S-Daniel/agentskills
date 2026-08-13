@@ -44,7 +44,9 @@ you switch contexts.)
 2. Run `sync_skills.py --prepare` (via Bash) to get the JSON payload.
 3. For each skill in the payload, call `javascript_tool` to POST the ZIP.
 4. Mark each successfully uploaded skill with `--mark-synced`.
-5. Report results to the user.
+5. Refresh the account-copy mirror and run `--verify`; a sync isn't done
+   until it reports OK for every skill you just uploaded.
+6. Report results to the user.
 
 ---
 
@@ -187,7 +189,22 @@ python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py
 
 ---
 
-## 6. Fallback: build the ZIP in-browser
+## 6. Fallback: single-file skills only (no local repo)
+
+**Precondition — read before using this path.** This fallback uploads
+**only `SKILL.md`.** If the skill folder has a `scripts/`, `references/`,
+or `assets/` directory — or any file besides `SKILL.md` — this path
+silently truncates the upload: the server-side overwrite replaces the
+whole skill with just the one file, and there is no error to catch it.
+If the repo is available locally, section 1/3 (`sync_skills.py
+--prepare`) is **mandatory** instead — it zips the whole folder, not
+just one file. This exact mistake already cost three skills their
+payloads: `sync-skills`, `sync-cc-settings-between-wsl-and-windows`, and
+`github-actions-repo-settings` were each reduced to a bare `SKILL.md` on
+claude.ai after being pushed through this fallback. Only reach for this
+path when the repo genuinely isn't available locally **and** you've
+confirmed — by counting the files in the skill folder — that `SKILL.md`
+really is the only one.
 
 Earlier versions of this skill noted that the upload endpoint accepted a
 bare `.md` file. **That is no longer the case** — the server now rejects
@@ -197,8 +214,8 @@ ZIP container, not a single-file format).
 
 When you don't have `sync_skills.py --prepare` available locally (e.g.
 the local repo doesn't exist on this machine, or you only have the raw
-`SKILL.md` content in hand), build a minimal STORE-mode ZIP in the
-browser and upload that:
+`SKILL.md` content in hand) and you've confirmed the skill has no other
+files, build a minimal STORE-mode ZIP in the browser and upload that:
 
 ```javascript
 (async () => {
@@ -231,6 +248,20 @@ browser and upload that:
   const overwrite = OVERWRITE;             // true | false
   const skillName = "SKILL_NAME";          // e.g. "adam-writing-style"
   const skillMd = `SKILL_MD_CONTENT`;       // full SKILL.md text
+  const expectedFileCount = N;             // the total number of files in the skill folder — count them before filling this in
+
+  // ----- hard guard: this fallback can only ever upload one file -----
+  // If the skill folder has more than SKILL.md, this path silently
+  // truncates the upload and wipes those files from the account copy.
+  // See the precondition above and sections 1/3 for anything with
+  // scripts/, references/, or assets/.
+  if (expectedFileCount !== 1) {
+    throw new Error(
+      `sync-skills fallback refused: skill has ${expectedFileCount} files, ` +
+      `not 1 — this path only uploads SKILL.md and would silently drop the ` +
+      `rest. Use section 1/3 (sync_skills.py --prepare) instead.`
+    );
+  }
 
   const zipBytes = makeZip(`${skillName}/SKILL.md`, skillMd);
   const url = `https://claude.ai/api/organizations/${orgId}/skills/upload-skill?overwrite=${overwrite}`;
@@ -241,15 +272,48 @@ browser and upload that:
 })();
 ```
 
-The path inside the ZIP **must** be `<skill-name>/SKILL.md` — the server
-keys the skill name on the directory prefix. Don't put the file at the
-ZIP root.
+`sync_skills.py --prepare` (sections 1/3) uploads with `SKILL.md` at the
+ZIP root, and the server keys the skill name correctly regardless —
+evidenced by `rename-pdfs`, which was uploaded that way and landed on
+claude.ai under the right name with its full payload intact (`SKILL.md`,
+`scripts/extract_pdf_context.py`, `scripts/test_extract_pdf_context.py`,
+all present and correct). So a root-relative ZIP layout is fine. The
+`<skill-name>/SKILL.md` prefix form this fallback builds above also
+works. Neither form is required over the other.
 
-This fallback is only for SKILL.md-only skills (no `references/`,
-`scripts/`, `assets/`). For multi-file skills, use the
-`sync_skills.py --prepare` path in section 1.
+## 7. Verify
 
-## 7. Reporting
+A sync is **not complete** until this passes — for every upload path,
+not just section 6's fallback. The known failure mode (`SKILL.md`
+uploaded, everything else silently dropped) returns no HTTP error, so
+the only way to catch it is to check what actually landed on the
+account afterward.
+
+First, refresh the local mirror of the account store. This is what
+populates `~/.claude/skills/synced/`, and it's stale until you run it:
+
+```bash
+CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'
+```
+
+Then run:
+
+```bash
+python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --verify
+```
+
+It prints one line per skill checked — `OK` when the account copy's file
+set matches what `zip_skill()` would upload, `MISMATCH` (with the
+missing/extra paths listed) when it doesn't, `SKIP ... not uploaded` when
+the skill has no account copy yet — and exits non-zero if anything
+mismatched. It checks the same skill set you just synced (git-changed by
+default; pass `--all` or `--skill NAME` if that's what you used to sync).
+
+If `--verify` reports a `MISMATCH`, treat the sync as failed: re-upload
+that skill through section 1/3 (never section 6 — that's what causes
+this), then re-run `--verify` before reporting success to the user.
+
+## 8. Reporting
 
 After all uploads, summarise:
 

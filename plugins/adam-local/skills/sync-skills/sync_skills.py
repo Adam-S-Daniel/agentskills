@@ -3,7 +3,7 @@
 
 Usage:
   python sync_skills.py [--prepare] [--all] [--skill NAME] [--dry-run]
-                        [--mark-synced NAME:HASH] [--repos PATH ...]
+                        [--verify] [--mark-synced NAME:HASH] [--repos PATH ...]
 """
 
 import argparse
@@ -21,7 +21,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 STATE_FILE = Path.home() / ".sync-skills-state.json"
 
@@ -29,6 +29,10 @@ DEFAULT_REPOS: List[Path] = [
     Path.home() / "repos" / "agentskills",
     Path.home() / "repos" / "agentskills-private",
 ]
+
+# Local mirror of the claude.ai skill registry, refreshed by running
+# ``CLAUDE_CODE_SYNC_SKILLS=1 claude -p ...`` — what --verify checks against.
+ACCOUNT_SKILLS_DIR = Path.home() / ".claude" / "skills" / "synced"
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +279,90 @@ def prepare(
 
 
 # ---------------------------------------------------------------------------
+# Verify (account-copy drift check)
+# ---------------------------------------------------------------------------
+
+def skill_files(skill_path: Path) -> Set[str]:
+    """Return the relative paths ``zip_skill()`` would upload for this skill.
+
+    Reads the names back out of the actual ZIP bytes rather than re-walking
+    the directory, so the exclusion rules in ``_include_in_zip`` can never
+    drift out of sync with what a real upload would contain.
+    """
+    with zipfile.ZipFile(io.BytesIO(zip_skill(skill_path))) as zf:
+        return set(zf.namelist())
+
+
+def account_skill_files(name: str) -> Optional[Set[str]]:
+    """Return relative file paths under the local account-copy mirror.
+
+    Reads ``ACCOUNT_SKILLS_DIR / name``. Returns None if that directory
+    doesn't exist (skill was never uploaded, or the mirror hasn't been
+    refreshed since).
+    """
+    account_dir = ACCOUNT_SKILLS_DIR / name
+    if not account_dir.is_dir():
+        return None
+    return {
+        f.relative_to(account_dir).as_posix()
+        for f in account_dir.rglob("*")
+        if f.is_file()
+    }
+
+
+def verify(repos: List[Path], skill_names: Optional[List[str]] = None) -> bool:
+    """Compare each skill's expected ZIP contents against its account copy.
+
+    Mirrors ``prepare()``'s skill selection: an explicit ``skill_names``
+    list is used as-is, otherwise each repo's changed skills (via
+    ``get_changed_skills``) are checked. Prints one line per skill — OK,
+    MISMATCH (with missing/extra paths), or SKIP when never uploaded —
+    comparing path sets only, never file content: account copies are known
+    to be CRLF while the registry is LF, so a content hash would
+    false-positive almost every time. Returns True iff no skill mismatched
+    (skills not yet uploaded don't count as failures).
+    """
+    all_ok = True
+
+    for repo in repos:
+        if not repo.is_dir():
+            continue
+
+        if skill_names is not None:
+            names = [n for n in skill_names if _skill_dir(repo, n) is not None]
+        else:
+            names = get_changed_skills(repo)
+
+        for name in names:
+            skill_path = _skill_dir(repo, name)
+            if skill_path is None:
+                continue
+
+            expected = skill_files(skill_path)
+            actual = account_skill_files(name)
+
+            if actual is None:
+                print(f"  SKIP      {name}  ({repo.name})  not uploaded")
+                continue
+
+            if expected == actual:
+                print(f"  OK        {name}  ({repo.name})")
+                continue
+
+            all_ok = False
+            missing = sorted(expected - actual)
+            extra = sorted(actual - expected)
+            detail = []
+            if missing:
+                detail.append(f"missing: {', '.join(missing)}")
+            if extra:
+                detail.append(f"extra: {', '.join(extra)}")
+            print(f"  MISMATCH  {name}  ({repo.name})  {'  '.join(detail)}")
+
+    return all_ok
+
+
+# ---------------------------------------------------------------------------
 # State mutation
 # ---------------------------------------------------------------------------
 
@@ -310,6 +398,10 @@ def main() -> None:
     parser.add_argument(
         "--dry-run", action="store_true",
         help="List what would be synced without building ZIPs",
+    )
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="Compare account copies (~/.claude/skills/synced) against expected ZIP contents",
     )
     parser.add_argument(
         "--mark-synced", metavar="NAME:HASH",
@@ -362,6 +454,11 @@ def main() -> None:
         if not any_found:
             print("No changed skills found. Use --all to sync everything.")
         return
+
+    # --verify
+    if args.verify:
+        ok = verify(repos, skill_names)
+        sys.exit(0 if ok else 1)
 
     # Default: --prepare / JSON output
     result = prepare(repos, skill_names)
