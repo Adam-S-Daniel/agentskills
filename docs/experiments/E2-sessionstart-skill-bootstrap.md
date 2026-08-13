@@ -236,3 +236,45 @@ for `SessionStart` by construction, and it is why an installer that runs later
 Not tested: whether `Explore`/`Plan`-type agents behave the same. They skip repo
 guidance by design, so they should be assumed unreliable for skill-dependent work
 regardless — which is already fleet policy.
+
+## C8 — account-uploaded skills cannot be scoped to a repo, structurally
+
+`#54` listed this as browser-only homework and as the potentially "durable reason"
+account delivery can't replace repo skills. It is answerable from the client side,
+and the answer is **no** — for two independent reasons, neither of which is a
+settings gap that could be closed later.
+
+**1. The synced manifest has nowhere to put scope.** Every per-skill record in
+`~/.claude/skills/synced/manifest.json` carries exactly five fields:
+
+```
+per-skill keys (union across all skills): description, name, skillId, source, updatedAt
+anything scope-shaped: NONE
+```
+
+Whatever claude.ai might express server-side, Claude Code has no channel to receive
+it on. A client cannot honour a scope it is never told.
+
+**2. The store does not vary by project.** Running
+`CLAUDE_CODE_SYNC_SKILLS=1` from two different repos and diffing the resulting
+store:
+
+```
+adamdaniel.ai  → 20 skills
+agentskills    → 20 skills
+diff           → IDENTICAL — store does not vary by project
+```
+
+The sync is keyed to `$HOME`, not to a working directory. There is one account
+store per machine, and every session on that machine sees all of it.
+
+**The word "project" is doing two jobs**, which is what makes this question feel
+open longer than it is. A claude.ai **Project** is a chat container; a Claude Code
+**project** is a repo directory. Even if per-Project skill attachment exists in the
+chat product — worth checking for Cowork/chat use — it is a different axis and
+cannot scope a Claude Code session in a git repo.
+
+So the reason account delivery can't replace repo-scoped skills is **structural, not
+precedential**. Name precedence (C3) is the reason usually reached for first; it is
+also the weaker one, since it could be engineered around by renaming. This cannot.
+That makes it the right thing to record in ADR 0001.
