@@ -121,8 +121,10 @@ run `/reload-skills` to re-scan the skill directories in place.
 
 ## Hosted agents — Claude Code on the web, claude.ai
 
-Hosted sessions get **nothing from `~/.claude`** (no user plugins, skills, or
-marketplace adds) — the repo clone is the only channel. What works where:
+Hosted sessions start with **nothing in `~/.claude`** (no user plugins, skills,
+or marketplace adds), and the repo clone is the only thing they arrive with —
+but the clone can *write* into `~/.claude`. That is the delivery channel for
+ephemeral surfaces. What works where:
 
 - **Claude Code on the web / cloud sessions**: files committed to the repo being
   worked on — `CLAUDE.md`, `AGENTS.md`, `.claude/settings.json`, `.claude/skills/`,
@@ -131,6 +133,23 @@ marketplace adds) — the repo clone is the only channel. What works where:
   they do **not** install anything in cloud sessions (verified by experiment —
   see [ADR 0001](docs/decisions/0001-consolidate-plugins-into-bundles.md),
   "Experiment evidence"; matches anthropics/claude-code#32606).
+- **The bootstrap hook** — [`.claude/hooks/skills-bootstrap.sh`](.claude/hooks/skills-bootstrap.sh),
+  armed as a `SessionStart` hook in `.claude/settings.json`. It fetches the
+  registry and copies the bundle's skill directories into `~/.claude/skills`, so
+  the skills are live for **turn one** of a hosted session and are inherited by
+  any subagent that session spawns. A committed hook, not a vendored mirror, is
+  therefore all a consumer repo needs (experiment
+  [E2](docs/experiments/E2-sessionstart-skill-bootstrap.md), incl. why
+  `claude plugin install` is *not* a substitute).
+  What it installs is pinned and integrity-checked by
+  [`skills.lock`](skills.lock) — registry, an immutable commit SHA, and a sha256
+  per skill — because fetching instruction text at session start is a
+  supply-chain surface; regenerate it with
+  `python3 scripts/generate_skills_lock.py`. The hook is a no-op on a durable
+  machine (the marketplace install is authoritative there), it skips any skill
+  the project already owns in `.claude/skills/` (personal skills shadow project
+  ones), and it always exits 0 — a failure downgrades to a one-line
+  `skills: DEGRADED — …` notice naming the knob to fix.
 - **claude.ai chat**: skills upload as ZIPs via Settings → Capabilities; the
   [`sync-skills`](plugins/adam-local/skills/sync-skills) skill (in the
   `adam-local` bundle) automates pushing this registry's skills there.
