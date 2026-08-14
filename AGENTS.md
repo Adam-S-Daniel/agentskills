@@ -168,9 +168,21 @@ Pinning and bumping third-party action SHAs is the `pin-actions-to-sha` skill.
   `/adam:<skill>` (e.g. `/adam:pin-actions-to-sha`).
 - Local machines get the marketplace plus per-agent symlinks via that repo's
   `setup.sh`.
-- Cloud sessions currently get **no** plugins from repo-declared settings — a
-  known Claude Code limitation (see agentskills' `docs/decisions/0001`) — so
-  don't assume bundle skills are available there.
+- Cloud/ephemeral sessions still get **no** plugins from repo-declared
+  settings — that Claude Code limitation (agentskills' `docs/decisions/0001`)
+  is unchanged. What changed is that it now has a fix: a repo carrying its own
+  `skills.lock` plus the `skills-bootstrap` SessionStart hook installs the
+  bundles that lock names directly into those sessions, verified against a
+  pinned commit and per-skill digests. Such a session opens with a `skills:`
+  verdict naming what loaded, or why nothing did — read it instead of guessing.
+- **That adoption is opt-in and per-repo; most repos have not adopted.**
+  Delivery is allowlisted in `_agent-guidance`'s `repos.yml` *and* requires the
+  repo to have committed a `skills.lock` of its own first — the fleet sync
+  never writes one, because the lock is each repo's own declaration of which
+  bundles it installs (some federate several registries). So in an unfamiliar
+  repo, look for `skills.lock` rather than assuming either way. Bundles cost
+  always-on context in every session that carries them, which is why this is a
+  deliberate per-repo decision and not a fleet default.
 - New reusable skills graduate **into** the registry (sensitive ones into
   `agentskills-private`) rather than living on in a consumer repo. A long skill
   splits across files rather than growing into one wall of text.
