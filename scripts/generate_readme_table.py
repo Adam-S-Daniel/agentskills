@@ -18,7 +18,9 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
@@ -30,17 +32,20 @@ END_MARKER = "<!-- END GENERATED PLUGIN TABLE -->"
 
 
 # ---------------------------------------------------------------------------
-# Minimal frontmatter parsing (stdlib only — no PyYAML dependency)
+# Frontmatter parsing (PyYAML)
 # ---------------------------------------------------------------------------
 
-def parse_frontmatter(text: str) -> Dict[str, str]:
-    """Parse a SKILL.md's leading '---' YAML frontmatter into a flat dict.
+def parse_frontmatter(text: str) -> Dict[str, Any]:
+    """Parse a SKILL.md's leading '---' YAML frontmatter into a dict.
 
-    Handles the subset of YAML this repo's SKILL.md files actually use:
-    plain scalars, quoted scalars, and folded/literal block scalars
-    (`>`, `>-`, `|`, `|-`). Nested mappings (e.g. a structured
-    `compatibility:` block) are recognised and skipped, not parsed, since
-    only `name` and `description` are needed here. Not a general YAML parser.
+    Only the delimiters are located here — finding the leading `---` … `---`
+    block is line handling, not format parsing. Everything inside the block
+    goes to PyYAML's `yaml.safe_load`, so the whole YAML grammar is supported
+    (quoted scalars, folded/literal block scalars, nested mappings, lists)
+    rather than the subset a hand-rolled parser happened to cover.
+
+    Returns {} for a file with no frontmatter, an unterminated block, or
+    content that does not parse as a mapping.
     """
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -52,52 +57,21 @@ def parse_frontmatter(text: str) -> Dict[str, str]:
             break
     if end is None:
         return {}
-    body = lines[1:end]
 
-    result: Dict[str, str] = {}
-    i = 0
-    while i < len(body):
-        line = body[i]
-        if not line.strip() or line[:1] in (" ", "\t"):
-            i += 1
-            continue
-        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
-        if not m:
-            i += 1
-            continue
-        key, rest = m.group(1), m.group(2).strip()
+    try:
+        data = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError:
+        # Swallowed on purpose: this script renders the README table, it does not
+        # validate. scripts/check_skills.py owns frontmatter validation and fails
+        # the build loudly on a malformed file.
+        return {}
+    if not isinstance(data, dict):
+        return {}
 
-        if rest in (">", ">-", "|", "|-"):
-            fold = rest[0] == ">"
-            block_lines: List[str] = []
-            i += 1
-            while i < len(body) and (body[i][:1] in (" ", "\t") or not body[i].strip()):
-                block_lines.append(body[i])
-                i += 1
-            indents = [len(l) - len(l.lstrip(" ")) for l in block_lines if l.strip()]
-            indent = min(indents) if indents else 0
-            dedented = [l[indent:] if len(l) >= indent else l.lstrip() for l in block_lines]
-            if fold:
-                value = " ".join(l.strip() for l in dedented if l.strip())
-            else:
-                value = "\n".join(dedented).rstrip("\n")
-            result[key] = value.strip()
-            continue
-
-        if rest == "":
-            # Nested mapping (e.g. a structured `compatibility:` block) — not
-            # needed here, skip its indented lines.
-            i += 1
-            while i < len(body) and (body[i][:1] in (" ", "\t")):
-                i += 1
-            continue
-
-        if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
-            rest = rest[1:-1]
-        result[key] = rest
-        i += 1
-
-    return result
+    # PyYAML keeps the trailing newline of a folded/literal block scalar
+    # (`>`, `>-`, `|`, `|-`) where the previous parser stripped it — strip so
+    # the values callers see are unchanged.
+    return {k: v.strip() if isinstance(v, str) else v for k, v in data.items()}
 
 
 # ---------------------------------------------------------------------------

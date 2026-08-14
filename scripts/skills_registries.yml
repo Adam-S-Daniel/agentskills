@@ -1,0 +1,38 @@
+# Registries covered by the skills conformance census (agentskills#55).
+# `path:` is resolved relative to the repo root unless absolute; override at runtime with
+# --registry NAME=PATH. A registry that cannot be resolved is an ERROR unless optional+reason.
+#
+# `payload_dirs:` feeds the dangling-payload-ref check, which deliberately trades RECALL
+# for PRECISION: only a path token inside a FENCED code block can fail the build. Prose
+# mentions a payload path for plenty of reasons that are not "this skill ships this file"
+# — naming another skill's script, a path in a different repo, an illustrative example —
+# and gating on those ran a ~4-in-5 false-positive rate, which is how a lint gets muted.
+# Nothing is hidden by the trade: every candidate given up is listed by
+# `check_skills.py --list-findings` under "prose-only (not in a fenced block)", so the
+# recall gap stays inspectable.
+required_fields: [name, description]
+name_pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+max_lengths:
+  name: 64
+  description: 1024
+known_fields: [name, description, license, allowed-tools, compatibility, version, metadata, tools, triggers]
+payload_dirs: [scripts, references, assets, templates, hooks, tests, examples]
+registries:
+  - name: agentskills
+    path: .
+    layout: "plugins/*/skills/*/SKILL.md"
+  - name: cms-platform
+    path: ../cms-platform
+    layout: "skills/*/SKILL.md"
+    optional: true
+    reason: "not checked out in every environment; CI clones it explicitly"
+  - name: adamdaniel.ai
+    path: ../adamdaniel.ai
+    layout: ".claude/skills/*/SKILL.md"
+    optional: true
+    reason: "not checked out in every environment; CI clones it explicitly"
+  - name: agentskills-private
+    path: ../agentskills-private
+    layout: "plugins/*/skills/*/SKILL.md"
+    optional: true
+    reason: "private repo; public-repo CI has no token to clone it"
