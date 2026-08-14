@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "fastmail",
+  "version": "1.0.0",
+  "description": "Fastmail email skills: browser-driven email workflows (search, read, compose, reply) and sending-identity management via the fastmail-actions workflows.",
+  "author": { "name": "Adam Daniel" },
+  "repository": "https://github.com/Adam-S-Daniel/agentskills",
+  "keywords": [
+    "fastmail",
+    "email",
+    "jmap",
+    "identities",
+    "from-address",
+    "browser",
+    "claude-in-chrome"
+  ]
+}

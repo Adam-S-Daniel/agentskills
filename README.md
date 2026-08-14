@@ -11,7 +11,7 @@ cross-agent skills that follow the
 Skills are grouped into three **bundle plugins** under `plugins/<bundle>/skills/<skill>/`,
 and the repo root is a Claude Code **plugin marketplace**
 (`.claude-plugin/marketplace.json`). The exact same `SKILL.md` files are consumed
-unchanged by Codex, Gemini, Cursor, and any other agent that reads the Agent Skills
+unchanged by Codex, Cursor, VS Code, and any other agent that reads the Agent Skills
 format — so a skill is authored once and installs everywhere.
 
 This repo is the **canonical upstream registry** for reusable skills. For where
@@ -88,7 +88,7 @@ Available skills:
 | `fastmail` | `/fastmail:fastmail` | Automate Fastmail email workflows via a local browser session. |
 <!-- END GENERATED PLUGIN TABLE -->
 
-## Install — Codex, Gemini, Cursor, and local use
+## Install — Codex, Cursor, and local use
 
 These tools discover skills from per-agent directories rather than a marketplace.
 Run `setup.sh` once **in each environment** (Windows Git Bash *and* WSL — they have
@@ -102,7 +102,6 @@ It links every skill under `plugins/*/skills/*` into the standard skill homes:
 
 - `~/.agents/skills/` — Codex (and the generic agents dir)
 - `~/.agent/skills/`
-- `~/.gemini/skills/`, `~/.gemini/antigravity/skills/`
 - `~/.cursor/skills/`
 
 **Claude Code is deliberately not in that list** — it's served by the marketplace
@@ -110,6 +109,19 @@ above. Linking the same skills into `~/.claude/skills` too would double-load the
 (once as a namespaced plugin, once as a personal skill), so `setup.sh` now removes
 any such links it created in earlier versions. Background and rationale:
 [`docs/2026-06-05-skill-discovery-and-centralized-strategy.md`](docs/2026-06-05-skill-discovery-and-centralized-strategy.md).
+
+> **Gemini / Antigravity was retired as a target (2026-08-14).** That is an owner
+> **scope decision, not** a finding that those paths were dead — Gemini/Antigravity is
+> four separately-versioned products, three of which read skills from three
+> *different* directories, and the Antigravity IDE genuinely does read
+> `~/.gemini/antigravity/skills`. So this removes a link that was doing real work.
+> Because un-listing a home leaves the old links behind — still feeding an
+> unmanaged copy of the skill set, and dangling as soon as a skill is renamed —
+> `setup.sh` also **sweeps** `~/.gemini/skills/` and
+> `~/.gemini/antigravity/skills/`: it removes only links that resolve into this
+> repo's `plugins/` tree, then removes each directory only if that left it empty.
+> Your own files and links there are untouched. Re-run `bash setup.sh` on any
+> machine set up before this change.
 
 On Windows it uses directory junctions (`mklink /J`) — no admin required. The script
 is idempotent and migrates the old whole-directory links left by earlier versions.
@@ -119,6 +131,57 @@ run `/reload-skills` to re-scan the skill directories in place.
 
 > Codex reads `~/.agents/skills`; that link is what makes these skills available in
 > Codex. See the [Codex skills docs](https://developers.openai.com/codex/skills).
+
+### Agent Plugins v1 — the root `plugin.json`
+
+Each bundle ships **two** manifests, on purpose:
+
+| File | Read by |
+| --- | --- |
+| `plugins/<bundle>/plugin.json` | [Agent Plugins 1.0.0](https://agent-plugins.org) clients — Codex, VS Code, Cursor, GitHub Copilot |
+| `plugins/<bundle>/.claude-plugin/plugin.json` | Claude Code |
+
+Claude Code is **not** an Agent Plugins conformant client and is absent from the
+spec's client roster, so it keeps its own manifest; the two coexist rather than
+one replacing the other. Neither declares the skills — the spec discovers them
+by convention at `<plugin-root>/skills/`, which this repo's layout already
+satisfies. Because both are shipped, both can drift, so
+`scripts/check_agent_plugins.py` validates the root manifests against the
+schema **vendored** at `schemas/agent-plugins-1.0.0-plugin.schema.json` (the
+spec repo publishes no tags or releases, so there is nothing to pin a fetch to)
+and cross-checks `name` + `version` between each pair. It runs in CI.
+
+The schema is closed, and requires only `$schema` and `name`. The
+marketplace-only keys `category` and `defaultEnabled` are **invalid** in a root
+manifest, and there is no `skills` key at all.
+
+Measured minimum client versions:
+
+- **Codex ≥ 0.147.0** — established by source-diffing release tags
+  `rust-v0.146.0` vs `rust-v0.147.0`. It accepts **only** the exact canonical
+  `$schema` string; anything else is rejected as "unsupported Agent Plugins
+  schema".
+- **VS Code ≥ 1.131.0** — established by tag-bisecting
+  `src/vs/platform/agentPlugins/common/agentPluginParser.ts`. Never announced
+  in the release notes.
+- **Cursor** — reads it (verified in the newest CLI build); no changelog names
+  it and no minimum is established.
+- **GitHub Copilot** — has read a root `plugin.json` as its own long-standing
+  format; declaring `$schema` is what opts into Agent Plugins v1 semantics
+  (GA 2026-08-12). No minimum established; measured working on 1.0.79 and 1.0.80.
+
+**Codex needs no extra marketplace file.** Its marketplace search path includes
+`.claude-plugin/marketplace.json` alongside `.agents/plugins/marketplace.json`,
+so the file this repo already has is the one it reads — verified live
+(`codex plugin add adam@agentskills` installed every skill).
+
+<!-- Do NOT add .agents/plugins/marketplace.json. Codex 0.147.0's
+     MARKETPLACE_MANIFEST_RELATIVE_PATHS is [".agents/plugins/marketplace.json",
+     ".agents/plugins/api_marketplace.json", ".claude-plugin/marketplace.json",
+     ".cursor-plugin/marketplace.json"] — this repo's existing
+     .claude-plugin/marketplace.json is already read. A second marketplace file
+     would create a second source of truth for zero gain. -->
+
 
 ## Hosted agents — Claude Code on the web, claude.ai
 
@@ -165,8 +228,10 @@ ephemeral surfaces. What works where:
 .claude-plugin/marketplace.json       # marketplace catalog (3 bundles + renames map)
 plugins/
   <bundle>/                           # adam | adam-local | fastmail
-    .claude-plugin/plugin.json        # bundle manifest
+    plugin.json                       # Agent Plugins 1.0.0 manifest
+    .claude-plugin/plugin.json        # Claude Code bundle manifest
     skills/<skill>/SKILL.md           # one dir per skill (+ scripts/, tests/, hooks/)
+schemas/                              # vendored Agent Plugins schema (pinned by sha256)
 docs/decisions/                       # ADRs (see 0001 for the bundle restructure)
 setup.sh                              # link skills into per-agent dirs (non-Claude-Code)
 ```
@@ -190,6 +255,6 @@ I put the following in Claude desktop app -> Settings -> Cowork -> Global instru
 > https://github.com/Adam-S-Daniel/agentskills. Then fetch and pull in WSL and Windows
 > under `~/repos` and `%USERPROFILE%\repos`, and run `bash setup.sh` in both WSL and
 > Windows Git Bash so the skills are linked into the standard locations
-> (`.agents/skills/`, `.gemini/skills/`, `.cursor/skills/`, etc.) — Claude Code itself
+> (`.agents/skills/`, `.agent/skills/`, `.cursor/skills/`) — Claude Code itself
 > uses the marketplace, not `.claude/skills`. Run `/reload-skills` to pick up changes
 > without restarting the session.

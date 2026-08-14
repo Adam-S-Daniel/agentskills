@@ -1,0 +1,26 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "adam",
+  "version": "1.0.0",
+  "description": "Adam's general-purpose skills, safe anywhere including cloud sessions: writing voice, GitHub Actions debugging and hardening, ADRs, resolving task ambiguity.",
+  "author": { "name": "Adam Daniel" },
+  "repository": "https://github.com/Adam-S-Daniel/agentskills",
+  "keywords": [
+    "writing",
+    "voice",
+    "github-actions",
+    "ci-cd",
+    "debugging",
+    "security",
+    "supply-chain",
+    "sha-pinning",
+    "settings-as-code",
+    "bash",
+    "code-review",
+    "adr",
+    "documentation",
+    "requirements",
+    "ambiguity",
+    "planning"
+  ]
+}

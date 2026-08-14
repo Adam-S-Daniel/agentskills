@@ -11,14 +11,20 @@
 # invoke its skills as /<bundle>:<skill> (e.g. /adam:pin-actions-to-sha),
 # and don't need this script at all.
 #
-# This script is for the *other* agent tools (Codex, Gemini, Cursor, the
-# generic .agents/.agent dirs) and for using the skills locally without
-# installing the marketplace. It links every skill found under
-# plugins/*/skills/* into the standard per-agent skill directories:
+# This script is for the *other* agent tools (Codex, Cursor, the generic
+# .agents/.agent dirs) and for using the skills locally without installing the
+# marketplace. It links every skill found under plugins/*/skills/* into the
+# standard per-agent skill directories:
 #
-#   ~/.agents/skills             ~/.gemini/skills
-#   ~/.agent/skills              ~/.gemini/antigravity/skills
+#   ~/.agents/skills             ~/.agent/skills
 #   ~/.cursor/skills
+#
+# Gemini / Antigravity was RETIRED as a supported target (owner decision,
+# 2026-08-14). That is a scope decision, not a finding that those paths were
+# dead — Antigravity's IDE really does read ~/.gemini/antigravity/skills, so
+# this drops a link that was doing real work. Machines that ran an earlier
+# version of this script still have those links; sweep_retired_homes below
+# removes the ones we created and leaves everything else alone.
 #
 # Claude Code is intentionally NOT in that list. It is served by the plugin
 # marketplace (/plugin marketplace add Adam-S-Daniel/agentskills). Linking the
@@ -76,9 +82,17 @@ echo ""
 HOMES=(
   ".agents/skills"
   ".agent/skills"
+  ".cursor/skills"
+)
+
+# Homes this script used to populate and no longer does. Un-listing a home is
+# not enough on a machine that has already run an earlier version: the links
+# are still there, still feeding an unmanaged copy of the skill set to that
+# agent, and they dangle the moment a skill is renamed. sweep_retired_homes
+# reaps them.
+RETIRED_HOMES=(
   ".gemini/skills"
   ".gemini/antigravity/skills"
-  ".cursor/skills"
 )
 
 # PowerShell parses its own quoting sanely (unlike cmd.exe, which cannot
@@ -214,6 +228,72 @@ migrate_legacy() {
 # any links we previously created there to avoid double-loading. Only links that
 # point back into THIS repo (plus a legacy whole-directory link) are removed;
 # real personal skills the user keeps in ~/.claude/skills are left untouched.
+# retired_link_target <path> — echo <path>'s link target; rc 0 only when
+# <path> really is a symlink/junction AND we could read where it points. A
+# regular file or a real directory gives rc 1, and so does a junction MSYS
+# cannot read: guessing there would risk deleting something that isn't ours.
+retired_link_target() {
+  local p="$1" t
+  if [[ "$PLATFORM" = "windows" ]]; then
+    win_link_type "$p" >/dev/null || return 1
+  else
+    [[ -L "$p" ]] || return 1
+  fi
+  t="$(readlink "$p" 2>/dev/null || true)"
+  [[ -n "$t" ]] || return 1
+  echo "$t"
+}
+
+# sweep_retired_homes — remove the links this script created in RETIRED_HOMES.
+#
+# Deliberately conservative, because these are directories inside a user's
+# $HOME that we no longer manage: a link is removed ONLY if it resolves into
+# $PLUGINS_DIR. A regular file, a real directory, or a link pointing anywhere
+# else belongs to the user and is left untouched — and because the directory
+# is then removed with rmdir, which refuses a non-empty directory, one such
+# bystander keeps the whole directory alive too. Silent when there is nothing
+# to do, and never fails the script if the paths don't exist.
+sweep_retired_homes() {
+  local rel dir link target name dir_removed
+  local -a removed
+  for rel in "${RETIRED_HOMES[@]}"; do
+    dir="$HOME/$rel"
+    [[ -d "$dir" ]] || continue
+
+    removed=()
+    for link in "$dir"/*; do
+      # An unmatched glob expands to the literal pattern, which is neither a
+      # symlink nor a junction, so retired_link_target rejects it.
+      target="$(retired_link_target "$link")" || continue
+      case "$target" in
+        "$PLUGINS_DIR"/*) ;;
+        *) continue ;;
+      esac
+      if [[ "$PLATFORM" = "windows" ]]; then
+        win_remove_link "$link"
+      else
+        rm "$link"
+      fi
+      removed+=("$(basename "$link")")
+    done
+
+    dir_removed=0
+    if rmdir "$dir" 2>/dev/null; then
+      dir_removed=1
+    fi
+
+    if [[ ${#removed[@]} -gt 0 ]] || [[ "$dir_removed" -eq 1 ]]; then
+      echo "=== $dir (retired home — Gemini/Antigravity no longer a target) ==="
+      for name in "${removed[@]}"; do
+        echo "  UNLINK   $name"
+      done
+      if [[ "$dir_removed" -eq 1 ]]; then
+        echo "  RMDIR    (nothing left in it)"
+      fi
+    fi
+  done
+}
+
 dedup_claude_code_dir() {
   local cc="$HOME/.claude/skills"
   migrate_legacy "$cc"            # legacy whole-directory link at ~/.claude/skills
@@ -236,6 +316,7 @@ dedup_claude_code_dir() {
 }
 
 dedup_claude_code_dir
+sweep_retired_homes
 
 for rel in "${HOMES[@]}"; do
   home_skills="$HOME/$rel"
