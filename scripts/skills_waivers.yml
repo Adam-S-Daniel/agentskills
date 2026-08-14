@@ -1,0 +1,159 @@
+# Declared exemptions for scripts/check_skills.py (agentskills#55).
+#
+# Every entry here is a KNOWN defect or a KNOWN duplication that the census has
+# seen and that we have consciously decided not to fail the build on *yet*. The
+# point of the file is that nothing is hidden: a waived finding is still printed
+# in every run, under WAIVED, with this reason and issue attached.
+#
+# Two properties make this safe to have at all:
+#
+#   1. A waiver that matches NO finding in a run is itself an error
+#      ("stale-waiver") and fails the build. So waivers cannot rot. When
+#      cms-platform#250 retires the vendored mirror, all fourteen `mirror`
+#      declarations below stop matching and CI will force their deletion —
+#      the census becomes the thing that proves the mirror is gone.
+#   2. Nothing here is waived because it is inconvenient. Each entry names the
+#      repo that must change; none of these defects can be fixed from
+#      agentskills, which is the only reason they are waived rather than fixed.
+#
+# Adding a waiver for a defect in THIS repo requires a reason better than "it is
+# red" — see the wj-next-break entries, which carry an explicit owner decision.
+
+waivers:
+  # --- agentskills: descoped by the owner -----------------------------------
+  # `wj-next-break` instructs the agent to run two scripts that have never
+  # existed in its directory. Owner directive, 2026-08-14: "Forget the WJ bell
+  # schedule skill" — do not research the bell times, do not write the payload.
+  # The skill is NOT deleted: it also exists in the claude.ai account store,
+  # which has no delete API, so removing it from git would re-orphan the account
+  # copy — exactly the unversioned-orphan problem PR #62 just fixed. It stays
+  # under version control, visibly broken, tracked by #63.
+  - klass: dangling-payload-ref
+    registry: agentskills
+    path: plugins/adam-local/skills/wj-next-break/SKILL.md
+    match: "scripts/next_break.py"
+    reason: >-
+      Descoped by owner directive 2026-08-14. Skill retained in git so the
+      claude.ai account copy stays version-controlled (no account delete API).
+    issue: https://github.com/Adam-S-Daniel/agentskills/issues/63
+  - klass: dangling-payload-ref
+    registry: agentskills
+    path: plugins/adam-local/skills/wj-next-break/SKILL.md
+    match: "scripts/test_next_break.py"
+    reason: >-
+      Descoped by owner directive 2026-08-14. Skill retained in git so the
+      claude.ai account copy stays version-controlled (no account delete API).
+    issue: https://github.com/Adam-S-Daniel/agentskills/issues/63
+
+  # --- cms-platform: repo-relative payload paths ----------------------------
+  # Both of these name a script that exists at cms-platform's REPO ROOT but not
+  # inside the skill directory. That is issue #55's third defect class: the
+  # reference resolves in cms-platform and dangles the moment the skill is
+  # copied anywhere else. The adamdaniel.ai rows below are the same references
+  # after the copy, where the scripts exist nowhere at all.
+  - klass: dangling-payload-ref
+    registry: cms-platform
+    path: skills/admin-config-render/SKILL.md
+    match: "scripts/render-decap-config.rb"
+    reason: Repo-relative payload path; fix belongs to cms-platform.
+    issue: https://github.com/Adam-S-Daniel/cms-platform/issues/250
+  - klass: dangling-payload-ref
+    registry: cms-platform
+    path: skills/editorial-label-audit/SKILL.md
+    match: "scripts/audit-editorial-labels.js"
+    reason: Repo-relative payload path; fix belongs to cms-platform.
+    issue: https://github.com/Adam-S-Daniel/cms-platform/issues/250
+  - klass: yaml-parse
+    registry: cms-platform
+    path: skills/cms-platform-secrets/SKILL.md
+    reason: >-
+      Unquoted ': ' inside the description makes the frontmatter unparseable.
+      Fix belongs to cms-platform; this repo cannot edit it.
+    issue: https://github.com/Adam-S-Daniel/cms-platform/issues/250
+
+  # --- adamdaniel.ai: the vendored mirror, carrying the defects downstream ---
+  - klass: dangling-payload-ref
+    registry: adamdaniel.ai
+    path: .claude/skills/admin-config-render/SKILL.md
+    match: "scripts/render-decap-config.rb"
+    reason: Inherited from the cms-platform mirror; retired by dropping the mirror.
+    issue: https://github.com/Adam-S-Daniel/adamdaniel.ai/issues/3104
+  - klass: dangling-payload-ref
+    registry: adamdaniel.ai
+    path: .claude/skills/editorial-label-audit/SKILL.md
+    match: "scripts/audit-editorial-labels.js"
+    reason: >-
+      Inherited from the cms-platform mirror. Note the referenced script exists
+      nowhere in adamdaniel.ai at all, so this instruction is unrunnable there.
+    issue: https://github.com/Adam-S-Daniel/adamdaniel.ai/issues/3104
+  - klass: yaml-parse
+    registry: adamdaniel.ai
+    path: .claude/skills/cms-platform-secrets/SKILL.md
+    reason: >-
+      Byte-identical mirror of the cms-platform defect above; retired by
+      dropping the mirror.
+    issue: https://github.com/Adam-S-Daniel/adamdaniel.ai/issues/3104
+
+  # --- the fork -------------------------------------------------------------
+  # `workflow-path-audit` exists in three registries with two distinct bodies:
+  # agentskills (8892 B) is its own version, while cms-platform (9808 B) and the
+  # adamdaniel.ai mirror are identical to each other. Issue #55 reported four
+  # locations and three bodies; the fourth was the claude.ai account store,
+  # which is not observable from CI, so the census can only confirm three.
+  - klass: undeclared-duplicate
+    registry: agentskills
+    path: workflow-path-audit
+    reason: >-
+      Genuine fork, not a mirror. agentskills owns one body; cms-platform and
+      its adamdaniel.ai mirror share a different one. Reconciling them is
+      cms-platform#250's job.
+    issue: https://github.com/Adam-S-Daniel/cms-platform/issues/250
+
+  # --- the vendored mirror, declared skill by skill -------------------------
+  # Fourteen skills that cms-platform rsyncs into adamdaniel.ai. Each is a
+  # verified byte-identical mirror after CRLF normalisation. These are declared
+  # rather than fixed because the mirror's retirement is cms-platform#250 /
+  # adamdaniel.ai#3104 — and when it lands, every one of these goes stale and
+  # CI will require deleting it.
+  - {klass: undeclared-duplicate, registry: cms-platform, path: admin-config-render,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: aws-bootstrap,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: browser-testing,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: ci-watcher-loops,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: cms-platform-secrets,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: cms-stuck-pr-triage,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: code-quality,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: editorial-label-audit,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: github-actions-sha-pinning,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: platform-release-and-bump,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: post-failure-comment,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: preview-environments,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: sveltia-cms-playwright-demo,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
+  - {klass: undeclared-duplicate, registry: cms-platform, path: test-canary,
+     reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
+     issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
