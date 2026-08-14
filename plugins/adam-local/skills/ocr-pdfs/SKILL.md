@@ -1,19 +1,10 @@
 ---
 name: ocr-pdfs
-version: 1.0.0
 description: Batch-OCR scanned PDFs flagged as needing OCR, then visually review results with a WPF side-by-side comparison tool.
-tools:
-  - Bash
-  - Read
-  - Write
-  - WebSearch
-triggers:
-  - "ocr my pdfs"
-  - "run OCR on scanned PDFs"
-  - "batch OCR pipeline"
-  - "process scanned documents"
-  - "make PDFs searchable"
-  - "ocr-pdfs"
+metadata:
+  version: "1.0.0"
+  tools: "Bash, Read, Write, WebSearch"
+  triggers: "ocr my pdfs; run OCR on scanned PDFs; batch OCR pipeline; process scanned documents; make PDFs searchable; ocr-pdfs"
 ---
 
 # OCR PDF Batch Pipeline

@@ -7,8 +7,10 @@ pytest's `tmp_path`, and the tool is exercised through its public functions
 sleeps, no wall-clock dependence.
 
 The test config deliberately declares its OWN field list, limits and pattern rather than
-reading `skills_registries.yml`: the shipped values are provisional, and nothing here may
-break when they are re-tuned.
+reading `skills_registries.yml`, so re-tuning a shipped value cannot break a test of the
+machinery. The exception is the "shipped config" section at the bottom, which reads
+`skills_registries.yml` on purpose — those tests exist to pin the CONTRACT itself (the six
+spec fields, the shapes they must take) rather than the code that enforces it.
 
 Run: python3 -m pytest scripts/test_check_skills.py -q
 """
@@ -62,7 +64,9 @@ def write_config(path: Path, registries, **extra) -> Path:
         "required_fields": ["name", "description"],
         "name_pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
         "max_lengths": {"name": 64, "description": 200},
-        "known_fields": ["name", "description", "compatibility"],
+        "known_fields": ["name", "description", "compatibility", "metadata"],
+        "field_types": {"name": "str", "description": "str", "compatibility": "str",
+                        "metadata": "map-of-str"},
         "payload_dirs": ["scripts", "references", "assets", "templates", "hooks",
                          "tests", "examples"],
         "registries": list(registries),
@@ -207,6 +211,113 @@ def test_non_spec_field(tmp_path, local_registry):
     fired = [f for f in report.errors if f.klass == check_skills.K_NON_SPEC_FIELD]
     assert [f.path for f in fired] == ["skills/extra/SKILL.md"]
     assert "bogus" in fired[0].message
+
+
+# =================================================================================
+# field-type — the spec fixes a SHAPE for each field, not just a name
+# =================================================================================
+
+def frontmatter_with(name: str, extra: str = "") -> str:
+    """Well-formed `name`/`description` frontmatter plus whatever `extra` YAML is under
+    test. `extra` must be a complete, newline-terminated block."""
+    return f"---\nname: {name}\ndescription: A well formed skill.\n{extra}---\n"
+
+
+NESTED_COMPATIBILITY = "compatibility:\n  tools:\n    - gh\n  environment: any\n"
+
+
+def test_field_type_fires_when_a_mapping_is_given_for_a_string_field(tmp_path, local_registry):
+    write_skill(tmp_path, "skills/good-skill")
+    write_skill(tmp_path, "skills/nested-compat",
+                frontmatter=frontmatter_with("nested-compat", NESTED_COMPATIBILITY))
+    report = run_tool(tmp_path, local_registry)
+    fired = [f for f in report.errors if f.klass == check_skills.K_FIELD_TYPE]
+    assert [f.path for f in fired] == ["skills/nested-compat/SKILL.md"]
+    # The actual type is what makes the message actionable, not just "must be a string".
+    assert "compatibility" in fired[0].message
+    assert "dict" in fired[0].message and "expected a string" in fired[0].message
+
+
+def test_field_type_fires_when_a_list_is_given_for_a_string_field(tmp_path, local_registry):
+    write_skill(tmp_path, "skills/listy-compat", frontmatter=frontmatter_with(
+        "listy-compat", "compatibility:\n  - gh\n  - git\n"))
+    report = run_tool(tmp_path, local_registry)
+    fired = [f for f in report.errors if f.klass == check_skills.K_FIELD_TYPE]
+    assert len(fired) == 1
+    assert "list" in fired[0].message and "expected a string" in fired[0].message
+
+
+def test_field_type_silent_for_a_conforming_string(tmp_path, local_registry):
+    write_skill(tmp_path, "skills/flat-compat", frontmatter=frontmatter_with(
+        "flat-compat", "compatibility: Requires the GitHub CLI (gh). Runs anywhere.\n"))
+    report = run_tool(tmp_path, local_registry)
+    assert report.errors == []
+
+
+def test_field_type_fires_for_a_non_string_value_inside_metadata(tmp_path, local_registry):
+    # `version: 1.0` is a YAML float, which is exactly how an unquoted version string
+    # silently stops being a string.
+    write_skill(tmp_path, "skills/meta-float",
+                frontmatter=frontmatter_with("meta-float", "metadata:\n  version: 1.0\n"))
+    report = run_tool(tmp_path, local_registry)
+    fired = [f for f in report.errors if f.klass == check_skills.K_FIELD_TYPE]
+    assert len(fired) == 1
+    assert "metadata" in fired[0].message
+    assert "version" in fired[0].message and "float" in fired[0].message
+
+
+def test_field_type_fires_when_metadata_is_not_a_mapping_at_all(tmp_path, local_registry):
+    write_skill(tmp_path, "skills/meta-list",
+                frontmatter=frontmatter_with("meta-list", "metadata:\n  - version\n"))
+    report = run_tool(tmp_path, local_registry)
+    fired = [f for f in report.errors if f.klass == check_skills.K_FIELD_TYPE]
+    assert len(fired) == 1
+    assert "list" in fired[0].message and "expected a mapping" in fired[0].message
+
+
+def test_field_type_silent_for_metadata_of_all_strings(tmp_path, local_registry):
+    write_skill(tmp_path, "skills/meta-ok", frontmatter=frontmatter_with(
+        "meta-ok", 'metadata:\n  version: "1.0.0"\n  tools: "Bash, Read, Write"\n'))
+    report = run_tool(tmp_path, local_registry)
+    assert report.errors == []
+
+
+def test_a_non_string_field_does_not_also_emit_a_bogus_length_limit(tmp_path, local_registry):
+    """A character limit measured against a mapping reports its ENTRY COUNT as though it
+    were a character count. The limit of 1 below is under that count on purpose: before
+    length checks were restricted to strings, this fixture produced a second, meaningless
+    `length-limit` finding stacked on top of the real one."""
+    write_skill(tmp_path, "skills/nested-compat",
+                frontmatter=frontmatter_with("nested-compat", NESTED_COMPATIBILITY))
+    report = run_tool(tmp_path, local_registry, max_lengths={"compatibility": 1})
+    assert klasses(report) == [check_skills.K_FIELD_TYPE]
+
+
+def test_field_types_are_config_driven_not_hardcoded(tmp_path, local_registry):
+    """A field absent from `field_types:` is not type-checked; adding it there — and
+    nowhere in the .py — is what turns the check on."""
+    write_skill(tmp_path, "skills/listy-license",
+                frontmatter=frontmatter_with("listy-license", "license:\n  - MIT\n"))
+    fields = ["name", "description", "license"]
+    unchecked = run_tool(tmp_path, local_registry, known_fields=fields,
+                         field_types={"name": "str"})
+    assert check_skills.K_FIELD_TYPE not in klasses(unchecked)
+    checked = run_tool(tmp_path, local_registry, known_fields=fields,
+                       field_types={"name": "str", "license": "str"})
+    assert check_skills.K_FIELD_TYPE in klasses(checked)
+
+
+def test_a_declared_field_absent_from_the_file_is_not_a_finding(tmp_path, local_registry):
+    write_skill(tmp_path, "skills/minimal")     # no compatibility, no metadata
+    report = run_tool(tmp_path, local_registry)
+    assert report.errors == []
+
+
+def test_an_unknown_declared_shape_is_a_usage_error_not_a_silent_no_op(tmp_path,
+                                                                      local_registry):
+    write_skill(tmp_path, "skills/good-skill")
+    with pytest.raises(SystemExit):
+        run_tool(tmp_path, local_registry, field_types={"compatibility": "strr"})
 
 
 # =================================================================================
@@ -718,3 +829,54 @@ def test_shipped_config_and_waivers_are_loadable(tmp_path):
     assert present is True
     assert findings == []
     assert isinstance(waivers, list)
+
+
+# The six fields https://agentskills.io/specification recognises — the whole contract.
+SPEC_FIELDS = ("name", "description", "license", "compatibility", "metadata", "allowed-tools")
+
+
+def _shipped_contract() -> dict:
+    config = check_skills.load_yaml_mapping(check_skills.DEFAULT_CONFIG, "config")
+    return {key: config[key] for key in ("known_fields", "field_types", "max_lengths")}
+
+
+def test_shipped_known_fields_are_exactly_the_six_spec_fields():
+    assert sorted(_shipped_contract()["known_fields"]) == sorted(SPEC_FIELDS)
+
+
+def test_a_key_outside_the_spec_six_fires_non_spec_field(tmp_path, local_registry):
+    """The regression this locks in: `version`, `tools` and `triggers` were once listed as
+    known_fields, which silently exempted the only skill that used them. Run against the
+    SHIPPED contract, so re-adding any of them here would fail."""
+    write_skill(tmp_path, "skills/legacy", frontmatter=frontmatter_with(
+        "legacy", "version: 1.0.0\ntools:\n  - Bash\ntriggers:\n  - do the thing\n"))
+    report = run_tool(tmp_path, local_registry, **_shipped_contract())
+    fired = messages(report, check_skills.K_NON_SPEC_FIELD)
+    assert klasses(report) == [check_skills.K_NON_SPEC_FIELD] * 3
+    for key in ("version", "tools", "triggers"):
+        assert any(f"'{key}'" in message for message in fired), key
+
+
+def test_every_spec_field_is_accepted_in_its_spec_shape(tmp_path, local_registry):
+    """The other direction: a skill using all six fields, each in the shape the spec
+    requires, is clean. Note `allowed-tools` is a space-separated STRING, not a list."""
+    write_skill(tmp_path, "skills/full", frontmatter=(
+        "---\nname: full\ndescription: Uses every field the spec defines.\n"
+        "license: MIT\ncompatibility: Runs in any environment.\n"
+        "allowed-tools: Bash Read Write\n"
+        'metadata:\n  version: "1.0.0"\n---\n'))
+    report = run_tool(tmp_path, local_registry, **_shipped_contract())
+    assert report.errors == []
+
+
+def test_every_length_limited_field_is_also_declared_a_string():
+    """Length checks skip non-strings, so a `max_lengths:` entry on a field that is not
+    declared `str` would silently stop being enforced with nothing else reporting it."""
+    contract = _shipped_contract()
+    for name in contract["max_lengths"]:
+        assert contract["field_types"].get(name) == check_skills.TYPE_STR, name
+
+
+def test_shipped_field_types_declare_only_recognised_shapes():
+    for name, shape in _shipped_contract()["field_types"].items():
+        assert shape in check_skills.KNOWN_FIELD_TYPES, (name, shape)
