@@ -15,7 +15,30 @@ name_pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
 max_lengths:
   name: 64
   description: 1024
-known_fields: [name, description, license, allowed-tools, compatibility, version, metadata, tools, triggers]
+  compatibility: 500
+# Source of truth: https://agentskills.io/specification — the Agent Skills spec, which
+# `anthropics/skills`' own `spec/agent-skills-spec.md` now redirects to and which
+# agent-plugins.org §7.1 defers to entirely for "the SKILL.md format, frontmatter fields,
+# and directory layout". It recognises EXACTLY these six frontmatter fields; anything else
+# is a `non-spec-field` finding here.
+#
+# Claude Code's *loader* is laxer — it recognises roughly two dozen keys and silently
+# ignores the rest — but this gate is deliberately authored to the stricter spec
+# (agentskills#55's explicit instruction). A skill that only validates against one vendor's
+# permissive loader is not portable, and a key that vendor ignores is a key that does
+# nothing: the gate's job is to say so out loud rather than let it accumulate.
+known_fields: [name, description, license, compatibility, metadata, allowed-tools]
+# Value shapes for the same six fields. `str` = the parsed YAML value must be a string;
+# `map-of-str` = a mapping whose keys and values are all strings. A field omitted here is
+# not type-checked. Note `allowed-tools` is a SPACE-SEPARATED STRING per the spec, not a
+# YAML list — the shape most often got wrong.
+field_types:
+  name: str
+  description: str
+  license: str
+  compatibility: str
+  allowed-tools: str
+  metadata: map-of-str
 payload_dirs: [scripts, references, assets, templates, hooks, tests, examples]
 registries:
   - name: agentskills

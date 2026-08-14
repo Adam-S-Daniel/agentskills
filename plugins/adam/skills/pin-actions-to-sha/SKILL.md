@@ -9,11 +9,8 @@ description: >
   touch workflow files, or when asked to pin, audit, or harden actions.
   Trigger on mentions of "pin actions", "SHA pinning", "actions security",
   "supply chain", or "harden workflows".
-compatibility:
-  tools:
-    - GitHub CLI (gh)
-    - Git CLI
-  environment: any
+compatibility: >-
+  Requires the GitHub CLI (gh) and the Git CLI. Runs in any environment.
 ---
 
 # Pin Actions to SHA

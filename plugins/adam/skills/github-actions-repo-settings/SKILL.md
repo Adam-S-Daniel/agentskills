@@ -13,11 +13,9 @@ description: >
   "repo security settings", "repo settings as code", "settings drift", "fork
   approval", "outside collaborators", "actions policy", "branch protection",
   "ruleset", or "harden repo".
-compatibility:
-  tools:
-    - GitHub CLI (gh)
-    - Python 3 with PyYAML (for the settings-as-code engine)
-  environment: any
+compatibility: >-
+  Requires the GitHub CLI (gh) and Python 3 with PyYAML for the settings-as-code
+  engine. Runs in any environment.
 ---
 
 # GitHub Actions Repo Settings

@@ -19,7 +19,8 @@ Finding classes
   missing-field         a `required_fields:` key is absent or empty/whitespace
   name-dir-mismatch     frontmatter `name` != the skill directory basename
   name-pattern          `name` does not match `name_pattern:`
-  length-limit          a field exceeds its `max_lengths:` entry
+  field-type            a field's value is not the shape `field_types:` declares
+  length-limit          a string field exceeds its `max_lengths:` entry
   non-spec-field        a frontmatter key outside `known_fields:`
   dangling-payload-ref  a code block runs `<payload_dir>/…` that is not on disk
                         (prose-only mentions deliberately do not gate — see PROSE_ONLY_RULE)
@@ -66,6 +67,7 @@ K_FRONTMATTER_NOT_MAP = "frontmatter-not-map"
 K_MISSING_FIELD = "missing-field"
 K_NAME_DIR_MISMATCH = "name-dir-mismatch"
 K_NAME_PATTERN = "name-pattern"
+K_FIELD_TYPE = "field-type"
 K_LENGTH_LIMIT = "length-limit"
 K_NON_SPEC_FIELD = "non-spec-field"
 K_DANGLING_PAYLOAD_REF = "dangling-payload-ref"
@@ -412,11 +414,45 @@ def _is_empty(value: Any) -> bool:
     return False
 
 
-def _value_length(value: Any) -> int:
-    try:
-        return len(value)
-    except TypeError:
-        return len(str(value))
+# --- field-type -------------------------------------------------------------------
+# The shapes `field_types:` may declare. Nothing here names a frontmatter field: which
+# field must be which shape is the config's business, not this module's.
+TYPE_STR = "str"
+TYPE_MAP_OF_STR = "map-of-str"
+KNOWN_FIELD_TYPES = (TYPE_STR, TYPE_MAP_OF_STR)
+
+
+def _type_violation(value: Any, expected: str) -> Optional[str]:
+    """Describe how `value` fails to be `expected`, or None when it conforms.
+
+    The message always names the ACTUAL Python type, because "compatibility must be a
+    string" is not actionable on its own — knowing it currently parses as a `dict` is what
+    tells the author they wrote a nested mapping where the spec wants one flat sentence.
+
+    A value that is present but null counts as a violation: `compatibility:` with nothing
+    after it is not a string, and for an optional field no other check would ever mention
+    it. (For a *required* field this doubles up with `missing-field`, which is acceptable:
+    two true statements about one defect, on a file that is already red.)
+    """
+    if expected == TYPE_STR:
+        if isinstance(value, str):
+            return None
+        return f"is a {type(value).__name__}, expected a string"
+    if expected == TYPE_MAP_OF_STR:
+        if not isinstance(value, dict):
+            return (f"is a {type(value).__name__}, expected a mapping of string keys to "
+                    f"string values")
+        offenders = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                offenders.append(f"key {key!r} is a {type(key).__name__}, expected a string")
+            elif not isinstance(item, str):
+                offenders.append(
+                    f"value of '{key}' is a {type(item).__name__}, expected a string")
+        if offenders:
+            return "is a mapping, but " + "; ".join(offenders)
+        return None
+    return None
 
 
 # =================================================================================
@@ -592,6 +628,7 @@ def check_skill(skill: Skill, config: Dict[str, Any]) -> Tuple[List[Finding], Li
     """Run every per-file check against one SKILL.md."""
     required_fields = config.get("required_fields")
     name_pattern = config.get("name_pattern")
+    field_types = config.get("field_types")
     max_lengths = config.get("max_lengths")
     known_fields = config.get("known_fields")
     payload_dirs = config.get("payload_dirs")
@@ -632,6 +669,16 @@ def check_skill(skill: Skill, config: Dict[str, Any]) -> Tuple[List[Finding], Li
                     skill.registry, skill.rel_path, K_MISSING_FIELD,
                     f"required frontmatter field '{name}' is absent or empty"))
 
+    if isinstance(field_types, dict):
+        for name, expected in field_types.items():
+            if name not in parsed:
+                continue                      # absence is `required_fields`' business
+            violation = _type_violation(parsed[name], str(expected))
+            if violation is not None:
+                findings.append(Finding(
+                    skill.registry, skill.rel_path, K_FIELD_TYPE,
+                    f"frontmatter field '{name}' {violation}"))
+
     name_value = parsed.get("name")
     if not _is_empty(name_value):
         name_text = name_value if isinstance(name_value, str) else str(name_value)
@@ -649,11 +696,18 @@ def check_skill(skill: Skill, config: Dict[str, Any]) -> Tuple[List[Finding], Li
 
     if isinstance(max_lengths, dict):
         for name, limit in max_lengths.items():
-            if name not in parsed or parsed[name] is None:
+            # A character limit is only meaningful for a string. Measuring a list or a
+            # mapping here would report `len()` of its ENTRY COUNT as though it were a
+            # character count — a bogus number layered on top of the real defect, which
+            # `field-type` already names. Nothing is lost by skipping, because in the
+            # shipped config every `max_lengths:` key also declares `str` in
+            # `field_types:` — so a non-string value is still a finding, just the accurate
+            # one. That pairing is asserted by the shipped-config test, not assumed.
+            if not isinstance(parsed.get(name), str):
                 continue
             if not isinstance(limit, int):
                 continue
-            length = _value_length(parsed[name])
+            length = len(parsed[name])
             if length > limit:
                 findings.append(Finding(
                     skill.registry, skill.rel_path, K_LENGTH_LIMIT,
@@ -769,6 +823,17 @@ def run(
             re.compile(pattern)
         except re.error as exc:
             sys.exit(f"ERROR: config name_pattern is not a valid regex: {exc}")
+    # A typo in a declared shape must be loud. Left to the per-field check it would be an
+    # unrecognised string that silently matches nothing, quietly disabling the type check
+    # for that field — the exact failure mode this whole change exists to correct.
+    field_types = config.get("field_types")
+    if field_types is not None:
+        if not isinstance(field_types, dict):
+            sys.exit("ERROR: config 'field_types:' must be a mapping of field name -> shape")
+        for name, expected in field_types.items():
+            if str(expected) not in KNOWN_FIELD_TYPES:
+                sys.exit(f"ERROR: config field_types['{name}'] declares unknown shape "
+                         f"{expected!r}; expected one of: {', '.join(KNOWN_FIELD_TYPES)}")
     waivers, waiver_findings, waivers_present = load_waivers(waivers_path)
     registries, findings, skips = resolve_registries(config, overrides, repo_root)
     findings = list(findings) + waiver_findings
