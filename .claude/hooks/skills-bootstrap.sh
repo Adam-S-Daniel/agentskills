@@ -68,6 +68,13 @@
 # verified separately, and one unreachable registry degrades only its own
 # skills — the rest of the session still gets the rest of the fleet.
 #
+# What it installs, it also REMOVES when the lock stops naming it — driven by a
+# RECORD of this hook's own installs (~/.claude/skills/.skills-bootstrap-installed.json),
+# never by "delete whatever I do not recognise": that directory is the user's
+# own, and the claude.ai account-sync channel writes into it too. See "skills
+# that have LEFT the lock" near the bottom for the four conditions a removal
+# needs and the one contention case this deliberately does not resolve.
+#
 # Fails SOFT within its own execution: every failure path below emits a verdict
 # naming the exact file or binary at fault and exits 0, because a hook that
 # exits non-zero can block a session. The guarantee stops at the environment
@@ -517,6 +524,29 @@ _write_records(
     [(key, digest, index, relpath, "dup" if seen[name] > 1 else "install")
      for key, digest, index, relpath, name in rows],
 )
+# The (registry, bundle) pairs THIS lock declares — the exact scope in which the
+# orphan prune at the bottom is allowed to delete. Written from `claim`, the
+# routing map, rather than from `rows`, so that a bundle this lock still declares
+# but has emptied of skills reaps its old skills instead of silently keeping
+# them: no row would name that bundle at all.
+#
+# NARROWED WITH THE ROWS, and that is the decision AGENTSKILLS_BUNDLE turns on:
+# narrowing means "install a subset", never "this subset is now the whole truth".
+# A run narrowed to one bundle claims authority over that bundle only, so a debug
+# flag can never reap the bundles it deliberately skipped.
+#
+# The planner reaches that same answer one step earlier — it short-circuits an
+# out-of-scope entry into a NAMED "narrowed" outcome before it ever consults this
+# set — so dropping this filter alone changes no behaviour today, and no test can
+# isolate it. Kept for two reasons anyway: it is what makes the stream MEAN what
+# its name says (the scope this run claims), and it is the guard left standing if
+# that branch is ever reordered or dropped. Reverting BOTH is what reaps another
+# bundle, and that is the mutation the narrowing test fails on.
+_write_records(
+    os.path.join(out_dir, "claims.nul"),
+    [(sources[claim[bundle]]["url"], bundle) for bundle in sorted(claim)
+     if not only_bundle or bundle == only_bundle],
+)
 # The verifiable python<->bash contract: the counts bash must read back. If
 # bash reads a different number of COMPLETE records, the stream was truncated
 # or desynced and every skill's source index is suspect.
@@ -877,6 +907,14 @@ while IFS= read -r -d '' key \
   got="$(digest_dir "$DEST/$name")"
   if [ "$got" = "$want" ]; then
     ok=$((ok + 1))
+    # The install record's raw material: what this hook put there, which
+    # (registry, bundle) it came from, and the digest it had at install — the
+    # one just VERIFIED, so it is the digest of the bytes now on disk rather
+    # than a second measurement of them. Read on the NEXT run to tell "this
+    # hook installed it and nobody has touched it since" (safe to remove once
+    # the lock stops naming it) from "somebody else's, or edited" (never).
+    printf '%s\0%s\0%s\0%s\0' \
+      "$name" "${SRC_URL[$index]}" "${key%%/*}" "$want" >>"$tmp/installed.nul"
   else
     # Integrity FAILED: leave nothing behind. The unverified bytes must not
     # stay in ~/.claude/skills for the model to load on turn one.
@@ -892,6 +930,266 @@ if [ "$total" -ne "$NSKILLS" ]; then
   # rows were even meant to exist, so none of it is trustworthy now.
   purge_locked_destinations
   emit "skills: DEGRADED — could not read $LOCK (skill framing mismatch: $NSKILLS declared, $total read; see $LOG)"
+fi
+
+# --- skills that have LEFT the lock ----------------------------------------
+# `purge_locked_destinations` removes what the lock NAMES. Nothing removed what
+# it no longer names, and nothing ran on the success path at all: a skill
+# dropped from the lock — withdrawn, renamed, or retired BECAUSE it was wrong —
+# stayed live in ~/.claude/skills indefinitely while the verdict read
+# `skills: N/N … — OK`, and a rename left BOTH names loaded. Reproduced before
+# this was written: run 1 with a two-skill lock, run 2 with a one-skill lock,
+# and the dropped skill's body still sat there under `skills: 1/1 … — OK`.
+#
+# The obvious fix — delete whatever in $DEST the lock does not name — would be a
+# far worse bug than the leak. ~/.claude/skills is the USER's directory: a
+# developer populates it by hand, and the claude.ai account-sync channel writes
+# into `synced/`. So removal is driven by a RECORD OF THIS HOOK'S OWN INSTALLS,
+# and a directory is removed only when ALL FOUR of these hold:
+#
+#   * the record says this hook installed it, under that exact name;
+#   * its bytes are still EXACTLY what this hook installed (digest unchanged);
+#   * the lock still declares the (registry, bundle) it was installed from; and
+#   * the lock no longer names it.
+#
+# Everything else is left alone, and the two cases a reader would otherwise have
+# to guess at get named in the verdict: a skill left in place because it was
+# EDITED since install — the user has taken ownership, and deleting their work
+# to satisfy a lock they may not control is the worse failure — and skills left
+# alone because AGENTSKILLS_BUNDLE narrowed this run away from their bundle.
+#
+# SCOPED PER (registry, bundle) because two repos on one machine SHARE
+# ~/.claude/skills: unscoped, repo B's run reaps every skill repo A installed,
+# since none of A's names appear in B's lock. KNOWN RESIDUAL, deliberately not
+# resolved: two repos declaring the SAME (registry, bundle) at different pinned
+# refs with different skill sets still contend, each run removing what the other
+# installed. Neither lock is more authoritative than the other, so a tiebreak
+# here could only be invented — the limit is stated rather than guessed at.
+RECORD="$DEST/.skills-bootstrap-installed.json"
+removed=()
+left=()
+narrowed=()
+record_unreadable=0
+record_unwritable=0
+
+# The plan, computed where the JSON already is: which recorded installs are
+# candidates for removal, which are carried forward untouched, and which this
+# run is deliberately not deciding about. Written NUL-framed into $tmp like
+# every other python->bash stream here, so no field's content can forge a
+# record.
+#
+# DEGRADES TO PRUNING NOTHING, never to pruning everything. A missing record is
+# a first run (no entries, exit 0). A record that is unreadable, is not JSON, or
+# is not the shape this writes exits 3 and produces no plan at all. A truncated
+# stream drops trailing records, which can only mean FEWER removals. And a
+# single malformed entry is skipped rather than failing the file, for the same
+# reason in miniature: an entry that cannot be validated can never be shown safe
+# to delete.
+#
+# `-I` (isolated): see the header. As exposed as the lock reader — a `json.py`
+# in the project directory would otherwise be what decides which of the user's
+# directories this hook is about to `rm -rf`.
+if ! RECORD_PATH="$RECORD" TMP_DIR="$tmp" python3 -I - >>"$LOG" 2>&1 <<'PLAN_PY'
+import json, os, re, sys
+
+record_path = os.environ["RECORD_PATH"]
+tmp_dir = os.environ["TMP_DIR"]
+# Read straight from the environment, and used ONLY to compare against a
+# recorded bundle name — never echoed into a verdict, never part of a path.
+only_bundle = os.environ.get("AGENTSKILLS_BUNDLE") or ""
+
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+DIGEST = re.compile(r"[0-9a-f]{64}")
+CONTROL = re.compile(r"[\s\x00-\x1f\x7f]")
+
+
+def read_records(path, width):
+    """The NUL-framed records in `path`, as `width`-field tuples.
+
+    A trailing INCOMPLETE record is dropped rather than padded — bash's
+    `read -r -d ''` chain ends on a short record the same way, and reading too
+    little can only prune too little.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            fields = handle.read().split("\0")
+    except OSError:
+        return []
+    if fields and fields[-1] == "":
+        fields.pop()                    # the NUL terminating the final field
+    return [tuple(fields[at:at + width])
+            for at in range(0, len(fields) - width + 1, width)]
+
+
+# What the lock names right now (post-narrowing: exactly the rows the install
+# loop just processed) and which (registry, bundle) pairs it declares.
+locked = {key.rsplit("/", 1)[-1]
+          for key, _digest, _index, _relpath, _status
+          in read_records(os.path.join(tmp_dir, "skills.nul"), 5)}
+claims = set(read_records(os.path.join(tmp_dir, "claims.nul"), 2))
+
+try:
+    with open(record_path, encoding="utf-8") as handle:
+        record = json.load(handle)
+except FileNotFoundError:
+    record = {"installed": []}          # first run: nothing was ever recorded
+except (OSError, ValueError):
+    sys.exit(3)
+if not isinstance(record, dict) or not isinstance(record.get("installed"), list):
+    sys.exit(3)
+
+plan = []
+for entry in record["installed"]:
+    if not isinstance(entry, dict):
+        continue
+    name = entry.get("name")
+    registry = entry.get("registry")
+    bundle = entry.get("bundle")
+    digest = entry.get("digest")
+    if not all(isinstance(field, str) for field in (name, registry, bundle, digest)):
+        continue
+    # The lock reader's charsets, applied again on the way OUT of a file that
+    # sits in a directory anyone with the user's shell can write. A registry is
+    # only compared and re-recorded — never fetched from here — so it needs no
+    # URL shape, but it must not carry a NUL or it could forge records below.
+    if not NAME.fullmatch(name) or not NAME.fullmatch(bundle):
+        continue
+    if not DIGEST.fullmatch(digest) or CONTROL.search(registry):
+        continue
+    if name in locked:
+        # The lock still names it, so the install loop above already decided
+        # what happens to that directory; bash records THIS run's outcome for
+        # it, and a stale record of an earlier one must not outlive that.
+        continue
+    if only_bundle and bundle != only_bundle:
+        plan.append(("narrowed", name, registry, bundle, digest))
+    elif (registry, bundle) in claims:
+        plan.append(("candidate", name, registry, bundle, digest))
+    else:
+        # Another repo's lock installed it, or this lock never declared that
+        # bundle. Not ours to remove, and not ours to forget either.
+        plan.append(("keep", name, registry, bundle, digest))
+
+with open(os.path.join(tmp_dir, "plan.nul"), "w", encoding="utf-8") as handle:
+    for row in plan:
+        for field in row:
+            handle.write(field)
+            handle.write("\0")
+PLAN_PY
+then
+  record_unreadable=1
+fi
+
+if [ "$record_unreadable" -eq 0 ] && [ -f "$tmp/plan.nul" ]; then
+  while IFS= read -r -d '' action \
+     && IFS= read -r -d '' name \
+     && IFS= read -r -d '' registry \
+     && IFS= read -r -d '' bundle \
+     && IFS= read -r -d '' digest; do
+    if [ "$action" != "candidate" ]; then
+      if [ "$action" = "narrowed" ]; then narrowed+=("$name"); fi
+      printf '%s\0%s\0%s\0%s\0' "$name" "$registry" "$bundle" "$digest" >>"$tmp/keep.nul"
+      continue
+    fi
+    # The same rule `purge_locked_destinations` follows, for the same reason: a
+    # name reaching a destructive op is re-validated in bash immediately before
+    # it, and a '.'/'..'/empty or non-matching one is SKIPPED, never removed —
+    # its `$DEST/$name` would be the install dir or its parent. This name comes
+    # out of a JSON file rather than off the wire, which is no reason to trust
+    # it more.
+    case "$name" in "" | . | .. ) continue ;; esac
+    if ! [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then continue; fi
+    # `synced/` is the claude.ai account-sync channel's own directory. Nothing
+    # this hook installs is ever called that, so a record saying otherwise is
+    # wrong by construction — and the account store is not ours to delete under
+    # any lock.
+    if [ "$name" = "synced" ]; then continue; fi
+    # Already gone — removed by hand, or by an earlier run. Nothing to remove,
+    # and nothing left to keep a record of.
+    if [ ! -d "$DEST/$name" ]; then continue; fi
+    got="$(digest_dir "$DEST/$name")"
+    # `-n "$digest"` is not redundant with the equality: `digest_dir` prints
+    # NOTHING when it fails, so two empty strings would compare EQUAL and delete
+    # a directory nothing was ever measured against.
+    if [ -n "$digest" ] && [ "$got" = "$digest" ]; then
+      rm -rf "${DEST:?}/$name" >>"$LOG" 2>&1
+      removed+=("$name")
+      continue
+    fi
+    # EDITED since this hook installed it (or unmeasurable, which gets the same
+    # answer): the user owns it now, so it stays and is NAMED instead. The
+    # record keeps the ORIGINAL install digest on purpose — re-recording the
+    # edited one would make the next run's comparison succeed and delete the
+    # user's work one run later, and the notice would fall silent after one run
+    # while the withdrawn skill stayed loaded.
+    left+=("$name")
+    printf '%s\0%s\0%s\0%s\0' "$name" "$registry" "$bundle" "$digest" >>"$tmp/keep.nul"
+  done < "$tmp/plan.nul"
+fi
+
+# Rewritten from what is true NOW: this run's verified installs plus the entries
+# carried forward untouched. Keyed by NAME, because the install dir is FLAT — a
+# name is one directory with one owner, the same rule that makes two lock rows
+# sharing a destination an error — and this run's install wins the key, since it
+# is what just wrote those bytes.
+#
+# Staged in $DEST and moved into place with os.replace: a crashed or half-written
+# run leaves the PREVIOUS record intact rather than a truncated one, and the
+# write can never follow a symlink left at that path. Carries no timestamp —
+# two runs installing the same thing must produce a byte-identical file, or
+# every session start would rewrite it for nothing.
+#
+# It is rewritten even when the record could not be READ, which is what makes
+# that state self-healing in one run. The cost is that entries from before the
+# corruption are forgotten, so a skill that left the lock during that window is
+# left alone forever rather than removed — the safe direction of the same rule:
+# what this hook cannot show it installed, it does not delete.
+if ! RECORD_PATH="$RECORD" TMP_DIR="$tmp" python3 -I - >>"$LOG" 2>&1 <<'RECORD_PY'
+import json, os, tempfile
+
+record_path = os.environ["RECORD_PATH"]
+tmp_dir = os.environ["TMP_DIR"]
+
+
+def read_records(path, width):
+    """As in the planner above — two processes, so no module to share it."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            fields = handle.read().split("\0")
+    except OSError:
+        return []
+    if fields and fields[-1] == "":
+        fields.pop()
+    return [tuple(fields[at:at + width])
+            for at in range(0, len(fields) - width + 1, width)]
+
+
+entries = {}
+# Carried-forward first, this run's installs second, so a name claimed by both
+# resolves to the run that actually wrote the directory.
+for name, registry, bundle, digest in (
+        read_records(os.path.join(tmp_dir, "keep.nul"), 4)
+        + read_records(os.path.join(tmp_dir, "installed.nul"), 4)):
+    entries[name] = {"name": name, "registry": registry,
+                     "bundle": bundle, "digest": digest}
+
+payload = {"version": 1, "installed": [entries[name] for name in sorted(entries)]}
+directory = os.path.dirname(record_path) or "."
+staged_fd, staged = tempfile.mkstemp(
+    dir=directory, prefix=".skills-bootstrap-installed.", suffix=".tmp")
+try:
+    with os.fdopen(staged_fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2) + "\n")
+    os.replace(staged, record_path)
+except BaseException:
+    try:
+        os.unlink(staged)
+    except OSError:
+        pass
+    raise
+RECORD_PY
+then
+  record_unwritable=1
 fi
 
 # --- verdict ---------------------------------------------------------------
@@ -929,10 +1227,45 @@ fi
 if [ "${#absent[@]}" -gt 0 ]; then
   problems+=("${#absent[@]} not installed ($(join_names "${absent[@]}"))")
 fi
+# A skill still LIVE that the lock no longer names is exactly the condition this
+# file exists to make knowable — "content that should not be there is, and
+# nothing says so" — so it DEGRADES the verdict rather than riding along as a
+# footnote. A removal does not: once it has happened the installed set matches
+# the lock, which is the clean state, and the note below is the record of the
+# action that got there.
+if [ "${#left[@]}" -gt 0 ]; then
+  problems+=("${#left[@]} $(plural "${#left[@]}" skill skills) no longer in the lock left in place, edited since install ($(join_names "${left[@]}"))")
+fi
+# Reported for the same reason an unreachable registry nobody needed is: this
+# run could not tell whether stale skills are live, and staying quiet about that
+# is the bug the section above was written to end.
+if [ "$record_unreadable" -eq 1 ]; then
+  problems+=("could not read the install record $RECORD, so no stale skill could be removed this run (see $LOG)")
+fi
+if [ "$record_unwritable" -eq 1 ]; then
+  problems+=("could not write the install record $RECORD, so a later run cannot remove what this one installed (see $LOG)")
+fi
+
+# Notes, not problems: something this run DID, or deliberately did not do, on a
+# run that is otherwise exactly as healthy as its counts say. They are appended
+# after the OK/DEGRADED word, and only when non-empty, so the ordinary all-clear
+# case — nothing removed, nothing narrowed — still ends at `— OK` with nothing
+# extra to read.
+notes=()
+if [ "${#removed[@]}" -gt 0 ]; then
+  notes+=("removed ${#removed[@]} $(plural "${#removed[@]}" skill skills) no longer in the lock ($(join_names "${removed[@]}"))")
+fi
+if [ "${#narrowed[@]}" -gt 0 ]; then
+  notes+=("AGENTSKILLS_BUNDLE narrowed this run to one bundle, leaving ${#narrowed[@]} other-bundle $(plural "${#narrowed[@]}" skill skills) alone ($(join_names "${narrowed[@]}"))")
+fi
+suffix=""
+if [ "${#notes[@]}" -gt 0 ]; then
+  for note in "${notes[@]}"; do suffix="$suffix; $note"; done
+fi
 
 echo "installed=$ok/$total sources=$(join_names "${FROM[@]}") dest=$DEST" >>"$LOG"
 
 if [ "${#problems[@]}" -eq 0 ]; then
-  emit "skills: $ok/$total from $(join_names "${FROM[@]}") — OK"
+  emit "skills: $ok/$total from $(join_names "${FROM[@]}") — OK$suffix"
 fi
-emit "skills: $ok/$total from $(join_names "${FROM[@]}") — DEGRADED: $(join_names "${problems[@]}")"
+emit "skills: $ok/$total from $(join_names "${FROM[@]}") — DEGRADED: $(join_names "${problems[@]}")$suffix"
