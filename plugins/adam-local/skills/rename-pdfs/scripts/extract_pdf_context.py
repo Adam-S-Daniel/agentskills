@@ -27,10 +27,11 @@ from datetime import datetime
 try:
     import pypdf
 except ImportError:
-    sys.stderr.write(
-        "Missing pypdf. Install with: pip install pypdf --break-system-packages\n"
-    )
-    sys.exit(2)
+    # Checked in main() instead of exiting here: a module-level sys.exit()
+    # aborts the whole pytest session rather than skipping one file, and the
+    # find_dates() tests need no pypdf — so this module stays importable
+    # without it.
+    pypdf = None
 
 
 # Each pattern returns (year, month, day) from match.groups(); 'long' uses the
@@ -111,6 +112,14 @@ def extract_text(path, max_pages):
 
 
 def main():
+    # First statement, ahead of argparse, so behaviour is unchanged from when
+    # this ran at import time: even `--help` exits 2 when pypdf is missing.
+    if pypdf is None:
+        sys.stderr.write(
+            "Missing pypdf. Install with: pip install pypdf --break-system-packages\n"
+        )
+        sys.exit(2)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("pdf")
     ap.add_argument("--pages", type=int, default=3)
