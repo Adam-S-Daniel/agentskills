@@ -116,6 +116,23 @@ Order of operations this creates: change bundle content -> commit -> regenerate
 the lock, pinning THAT commit -> commit the lock. The lock commit only touches
 `skills.lock`, so the bundle content at the pinned commit stays current.
 
+A re-pin is an assertion — "the tree at this ref is what the lock now
+describes" — and it holds only while nothing else touches a locked skill
+between the content commit and the re-pin. A base that has already moved is
+worth checking before a merge, not after one goes wrong.
+
+Two measured outcomes fall out of that, and only one merges silently. When
+both branches carry a proper pair (content plus its own re-pin), `skills.lock`
+conflicts on every merge, because both sides rewrite the same `ref` and
+`generated_from` lines, and a human is forced to look — true whether the two
+pairs touch the same skill or different ones. A clean merge instead needs
+`main` to already be sitting between a content commit and its re-pin — already
+red on `--check-current` — before the merge lands; merging a different locked
+skill's pair into that state merges cleanly, and the result is red, naming the
+newly pinned ref. The merge itself never manufactures a red check out of two
+green branches; it carries an already-red `main` past the point where someone
+was looking, and relabels which ref the complaint names.
+
 The digest
 ----------
 Per skill, sha256 over a manifest built from the skill directory: for every
@@ -893,6 +910,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       "pins — nothing added or changed since then reaches an ephemeral "
                       "surface. Re-pin it (after committing the content) with:")
                 print("  python3 scripts/generate_skills_lock.py")
+                print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
+                print("  before another commit touched a locked skill: the lock is still faithful")
+                print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
                 for line in differences:
                     print(f"  - {line}")
                 status = 1

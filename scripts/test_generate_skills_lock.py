@@ -989,6 +989,23 @@ def test_check_current_failure_names_the_re_pin_command(registry, tmp_path):
     assert "scripts/generate_skills_lock.py" in proc.stdout
 
 
+def test_check_current_failure_names_the_merge_cause(registry, tmp_path):
+    """The local cause is obvious from the tree; the merge cause is not.
+
+    On a freshly merged branch nothing the reader edited explains the red, and
+    the old wording offered no reason to go and look at the base sha.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "gamma" / "SKILL.md", "gamma\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 1
+    assert "merged" in proc.stdout
+
+
 def test_ignored_paths_reports_a_git_failure_rather_than_returning_nothing(tmp_path):
     """Failing open here would be a silent downgrade, not a safe default.
 
@@ -1102,6 +1119,112 @@ def test_check_current_on_an_unreachable_pinned_ref_errors_cleanly(registry, tmp
     assert proc.returncode != 0
     assert "Traceback" not in proc.stderr
     assert "0" * 40 in proc.stderr
+
+
+# --------------------------------------------------------------------------
+# the merge race (issue #80)
+#
+# A re-pin asserts "the tree at ref X is what this lock describes", and the
+# assertion can be falsified by `main` moving rather than by either branch
+# being wrong. These two pin which shapes merge silently and which do not.
+# --------------------------------------------------------------------------
+
+def _repin(root: Path, message: str) -> None:
+    """Regenerate `root`'s committed lock against its own HEAD and commit that."""
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    assert run_generator("--repo", str(root), "--ref", head,
+                         "-o", str(root / "skills.lock")).returncode == 0
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", message)
+
+
+def _edit_and_commit(root: Path, skill: str) -> None:
+    _write(root / "plugins" / "adam" / "skills" / skill / "SKILL.md",
+           f"---\nname: {skill}\n---\n{skill} body, edited\n")
+    _git(root, "commit", "-q", "-am", f"edit {skill}")
+
+
+def _base_repo_with_a_committed_lock(tmp_path: Path) -> Path:
+    """A registry whose two edited skills sit FAR APART in the lock's skills map.
+
+    Deliberately eight skills rather than two: `alpha` and `theta` are five
+    lines apart once the map is serialized, so their digest lines are separate
+    diff hunks and merge cleanly on their own. That leaves `ref` and
+    `generated_from` as the only lines both re-pins rewrite — which is the
+    mechanism `test_two_repinned_branches_conflict_in_the_lock` is about. With
+    two adjacent skills the merge conflicts either way and the test would pass
+    without binding anything.
+    """
+    root = tmp_path / "registry"
+    names = ("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta")
+    make_registry(root, {f"adam/{name}": {"SKILL.md": f"---\nname: {name}\n---\n{name} body\n"}
+                         for name in names})
+    _repin(root, "pin the base")
+    return root
+
+
+def _merge(root: Path, branch: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(root), "merge", "--no-edit", branch],
+                          capture_output=True, text=True)
+
+
+def test_a_merge_can_leave_the_lock_stale_with_no_conflict(tmp_path):
+    """The one shape that merges silently: `main` between a content commit and its re-pin.
+
+    The branch is green on both flags when it is cut and still green when it
+    lands; what changed underneath it is `main`. Nothing conflicts, so nobody
+    is prompted, and the first anyone hears is CI on `main`.
+    """
+    root = _base_repo_with_a_committed_lock(tmp_path)
+    lock = root / "skills.lock"
+
+    _git(root, "checkout", "-q", "-b", "feature")
+    _edit_and_commit(root, "alpha")
+    _repin(root, "re-pin to the alpha edit")
+    assert run_generator("--repo", str(root), "--check", "-o", str(lock)).returncode == 0
+    assert run_generator("--repo", str(root), "--check-current",
+                         "-o", str(lock)).returncode == 0
+
+    # `main` moves onto a DIFFERENT locked skill, and its own re-pin has not
+    # landed yet — so `main` is already red here, before the merge.
+    _git(root, "checkout", "-q", "main")
+    _edit_and_commit(root, "theta")
+
+    merged = _merge(root, "feature")
+    assert merged.returncode == 0, merged.stdout + merged.stderr
+
+    assert run_generator("--repo", str(root), "--check", "-o", str(lock)).returncode == 0
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(lock))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "adam/theta" in proc.stdout
+
+
+def test_two_repinned_branches_conflict_in_the_lock(tmp_path):
+    """And the shape that does NOT merge silently, which is why this is not urgent.
+
+    When both sides follow the documented order, both re-pins rewrite the same
+    `ref` and `generated_from` lines, so `skills.lock` conflicts even though
+    the two branches touched different skills — a human is forced to look.
+    """
+    root = _base_repo_with_a_committed_lock(tmp_path)
+
+    _git(root, "checkout", "-q", "-b", "feature")
+    _edit_and_commit(root, "alpha")
+    _repin(root, "re-pin to the alpha edit")
+
+    _git(root, "checkout", "-q", "main")
+    _edit_and_commit(root, "theta")
+    _repin(root, "re-pin to the theta edit")
+
+    merged = _merge(root, "feature")
+    assert merged.returncode != 0, merged.stdout + merged.stderr
+    conflicted = subprocess.run(
+        ["git", "-C", str(root), "diff", "--name-only", "--diff-filter=U"],
+        check=True, capture_output=True, text=True).stdout.split()
+    assert "skills.lock" in conflicted
+    # The skills themselves merge cleanly; it is the lock that catches it.
+    assert not [path for path in conflicted if path.startswith("plugins/")]
 
 
 def test_check_on_a_missing_lock_errors_cleanly(tmp_path):
