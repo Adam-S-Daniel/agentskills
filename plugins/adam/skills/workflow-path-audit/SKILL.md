@@ -55,7 +55,7 @@ Things almost never salient (good `paths-ignore` candidates):
 
 ### 3. Pick the right pattern
 
-**Workflow-level `paths:` (positive list)** — when the salient list is short and self-contained. Example: `visual-regression.yml` only cares about Jekyll site source plus a few pipeline scripts.
+**Workflow-level `paths:` (positive list)** — when the salient list is short and self-contained: a workflow whose only inputs are one test directory plus the couple of scripts that drive it, and nothing else. Also the right pattern for **non-required** checks, where skipping the runner allocation entirely beats spending ~20 s booting a job just to emit a green check — cheaper than always-run + early-skip whenever the named check isn't gating merges. Confirm that before switching: `gh api repos/<owner>/<repo>/rules/branches/main` reports the rules actually in force on `main`, including which checks are required.
 
 **Workflow-level `paths-ignore:` (negative list)** — when the workflow cares about *almost everything* and only a small set of paths are clearly irrelevant. Example: `deploy-production.yml` deploys whatever Jekyll builds, so the negative list is shorter than enumerating every site path.
 
@@ -145,6 +145,8 @@ GitHub blocks the merge when a required status check is *missing* — including 
 - DO list the named check (job ID, or `<job_id> (<matrix value>)` for matrix jobs) in `.github/rulesets/main.json` and apply via `gh api -X PUT`.
 
 When promoting an existing path-filtered workflow to required, refactor it to always-run + early-skip in the same change.
+
+The concrete shape of the fix: the required workflow's trigger carries no `paths:` / `paths-ignore:` at all, so it fires on every PR, and the salience decision moves *inside* it. An always-run `detect` job computes the changed files and passes them through a salience predicate — an inline `grep -qE` over the diff, or a small script the repo owns — and only a salient result runs the heavy job downstream; the required check reports a status either way.
 
 ## Output
 

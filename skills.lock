@@ -1,6 +1,6 @@
 {
   "registry": "Adam-S-Daniel/agentskills",
-  "ref": "5f34825f0f402d7bede89810b5ffebda00b8b27a",
+  "ref": "9d024c34fe6ea55daaf372e16eddf698bd95991d",
   "bundles": [
     "adam"
   ],
@@ -12,8 +12,8 @@
     "adam/pin-actions-to-sha": "024a5700be8310504da906220b3fca643747ada4ca8518982de88cb30b2f4042",
     "adam/review-bash-ci-reliability": "1e1c2993689cfe79b6f1345de09101ff7d3b4b902a34ae5b458ee86e3f28f8b9",
     "adam/skills-doctor": "daf38b04be2596c85992f41afee102927ea1b1add6722cf1b73940b20eda1d93",
-    "adam/workflow-path-audit": "1dc1f8194b9cd171ac2f6a75bf13c2f36a93854b7b5d4452ed78bae2843fe149",
+    "adam/workflow-path-audit": "0184dec4c31eb20aea274d6b5f83bd725390c500e5e3beabe488e5a16a794c5e",
     "adam/writing-adrs": "4e9a4b9472bd3d92501bf0d7f882544ba66e8b03aa48bac7fa1689c45d903820"
   },
-  "generated_from": "5f34825f0f402d7bede89810b5ffebda00b8b27a"
+  "generated_from": "9d024c34fe6ea55daaf372e16eddf698bd95991d"
 }
