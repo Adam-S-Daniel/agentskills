@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "adam-local",
+  "version": "1.0.0",
+  "description": "Adam's machine-bound skills that need local resources (WSL/Windows homes, local files, a signed-in browser): PDF tooling, Claude Code session/settings/memory management, skill sync, school bell schedule.",
+  "author": { "name": "Adam Daniel" },
+  "repository": "https://github.com/Adam-S-Daniel/agentskills",
+  "keywords": [
+    "claude-code",
+    "wsl",
+    "windows",
+    "sync",
+    "settings",
+    "memory",
+    "skills",
+    "claude-ai",
+    "pdf",
+    "ocr",
+    "schedule"
+  ]
+}

@@ -37,11 +37,25 @@ jobs:
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
         with:
           python-version: '3.12'
-      - name: Install PyYAML
-        # generate_readme_table.py parses SKILL.md frontmatter with PyYAML.
-        run: python3 -m pip install pyyaml==6.0.3
+      - name: Install Python dependencies
+        # pyyaml:     generate_readme_table.py parses SKILL.md frontmatter with it.
+        # jsonschema: check_agent_plugins.py validates the root plugin.json
+        #   manifests against the VENDORED Agent Plugins 1.0.0 schema using a real
+        #   JSON Schema implementation — this repo forbids hand-rolling a
+        #   validator where a library exists. 4.26.0 is the newest release
+        #   (published 2026-01-07) and clears the 7-day dependency cooling-off
+        #   many times over as of 2026-08-14.
+        run: python3 -m pip install pyyaml==6.0.3 jsonschema==4.26.0
       - name: Check marketplace/filesystem consistency
         run: python3 scripts/check_consistency.py
+      # Each bundle ships TWO manifests: the root plugin.json read by Agent
+      # Plugins v1 clients (Codex, VS Code, Cursor, Copilot) and
+      # .claude-plugin/plugin.json read by Claude Code, which is not a
+      # conformant client. Both are shipped, so both can drift — this validates
+      # the root ones against the pinned schema, checks that schema's sha256,
+      # and cross-checks name/version between each pair.
+      - name: Check Agent Plugins manifests
+        run: python3 scripts/check_agent_plugins.py
       - name: Check README plugin table is up to date
         run: python3 scripts/generate_readme_table.py --check
       # Nothing else asserts that skills.lock is coherent, so without this it
@@ -118,13 +132,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
+        with:
+          # Needed by scripts/test_generate_skills_lock.py's dogfood test
+          # (test_this_repos_own_lock_is_installable_end_to_end), which drives
+          # the bootstrap hook against a file:// clone of THIS repo at the
+          # commit skills.lock pins. A shallow clone does not contain that
+          # commit — and the test then calls pytest.skip() rather than
+          # failing, so the whole end-to-end install path would go SILENTLY
+          # untested while the job stayed green. Measured: with `--depth 1`
+          # that test skips; with full history it passes. Same reason the
+          # consistency job above needs it. Do not shorten this.
+          fetch-depth: 0
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
         with:
           python-version: '3.12'
-      - name: Install pytest
-        run: python3 -m pip install pytest
-      - name: Run sync-skills tests
-        run: python3 -m pytest plugins/*/skills/sync-skills/tests/
+      - name: Install Python dependencies
+        # The scripts/ suites import the modules under test, so this job needs
+        # their third-party deps, not just pytest:
+        #   pyyaml + markdown-it-py -> check_skills.py
+        #   jsonschema              -> check_agent_plugins.py
+        # Pins are deliberately IDENTICAL to the consistency and
+        # skills-conformance jobs above — the same module must not be tested
+        # against a different version than it ships against.
+        #
+        # No git identity is configured on purpose: the lock tests set
+        # user.name/user.email as REPO-LOCAL config on each fixture repo, so
+        # they pass with no global identity available (measured with
+        # GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null).
+        run: python3 -m pip install pytest pyyaml==6.0.3 markdown-it-py==4.2.0 jsonschema==4.26.0
+      # DELIBERATELY REPO-WIDE — do not narrow this back to one directory.
+      # Three suites (scripts/test_check_skills.py, test_generate_skills_lock.py,
+      # test_check_agent_plugins.py — 157 tests) once existed while this job ran
+      # only the sync-skills directory, so they executed NOWHERE for three PRs.
+      # Both targets are DIRECTORIES rather than files precisely so a new
+      # scripts/test_*.py, or a new skills/<skill>/tests/ dir, is picked up with
+      # no edit here and cannot silently go unrun again.
+      #
+      # A bare repo-root `pytest` would be wider still, but it also collects
+      # plugins/adam-local/skills/rename-pdfs/scripts/test_extract_pdf_context.py,
+      # which needs the heavy optional `pypdf` dependency — hence targeting
+      # tests/ dirs plus scripts/ instead of everything.
+      - name: Run every test suite in the repo
+        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ -q
 
   shellcheck:
     runs-on: ubuntu-latest
