@@ -91,3 +91,4 @@ Optional sections for high-impact decisions:
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-consolidate-plugins-into-bundles.md) | Consolidate single-skill plugins into three bundles | Accepted |
+| [0002](0002-limit-account-store-to-repo-independent-skills.md) | Limit the claude.ai account store to personal, repo-independent skills | Accepted |
