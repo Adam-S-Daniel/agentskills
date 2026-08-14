@@ -68,9 +68,14 @@
 # verified separately, and one unreachable registry degrades only its own
 # skills — the rest of the session still gets the rest of the fleet.
 #
-# Fails SOFT, always. A hook that exits non-zero can block a session, so every
-# failure path here emits a verdict naming the exact file or binary at fault
-# and exits 0.
+# Fails SOFT within its own execution: every failure path below emits a verdict
+# naming the exact file or binary at fault and exits 0, because a hook that
+# exits non-zero can block a session. The guarantee stops at the environment
+# bash starts in — `BASH_ENV` is sourced before line one here, so a `BASH_ENV`
+# that exits 7 gives rc=7, empty stdout, no verdict, and `PATH` picks which
+# `bash` runs at all (#72). A precondition, not an open bug: whoever sets either
+# can equally replace this file or `.claude/settings.json`. Stated because
+# "this hook can never block a session" is false, and gets designed against.
 set -uo pipefail
 cat >/dev/null || true   # drain the hook's stdin JSON
 
