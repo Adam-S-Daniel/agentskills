@@ -12,6 +12,16 @@ second; the conformant clients read only the first. They coexist rather than
 one replacing the other, which means the two can drift — so this script
 checks the root manifests against the spec schema AND cross-checks the pair.
 
+It then cross-checks the set it validated against the marketplace, because
+"bundle" here means A DIRECTORY UNDER plugins/ and the marketplace also
+publishes FEDERATED entries whose plugin root lives in another repo. Those are
+never discovered, so their manifests are never validated — and this script
+used to print OK anyway. It now names each one and the repo that lints it,
+fails on any marketplace entry that is neither validated here nor federated,
+and fails on any that is BOTH (a federated entry shadowed by a local
+plugins/<name>/), so its verdict cannot disagree with check_consistency.py's
+on the same tree. See check_marketplace_coverage().
+
 VENDORED SCHEMA PROVENANCE
 --------------------------
   file            schemas/agent-plugins-1.0.0-plugin.schema.json
@@ -56,6 +66,15 @@ except ImportError:  # pragma: no cover - exercised only without the dep
         "       Install it with: python3 -m pip install jsonschema\n"
     )
     raise SystemExit(1)
+
+# Same directory, so running this as a script puts it on sys.path — but be
+# explicit, because pytest and `python -m` do not both agree on that.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Reuse the classifier rather than re-deriving "local or federated?" here. Two
+# copies would eventually disagree, and the disagreement would present as one
+# CI job passing an entry the other rejects — with no way to tell which was right.
+from check_consistency import MARKETPLACE_PATH, classify_source  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGINS_DIR = REPO_ROOT / "plugins"
@@ -196,6 +215,88 @@ def check_bundle(bundle, schema, problems):
             )
 
 
+def check_marketplace_coverage(bundles, problems, marketplace_path=MARKETPLACE_PATH):
+    """Account for every marketplace entry; return the notices to print.
+
+    discover_bundles() defines a bundle as a DIRECTORY under plugins/ carrying
+    a manifest. A federated marketplace entry has no such directory, so it is
+    never discovered, its manifests are never schema-validated — and before
+    this function the script still reported success. That is the same shape of
+    hole as a `claude plugin validate --strict` that passes a bundle whose
+    frontmatter YAML does not parse: a green check asserting nothing.
+
+    Closing it by cloning the remote repo would be the wrong trade. That repo
+    lints its own manifests in its own CI, in the same change that adds them,
+    and a cross-repo clone here would buy a duplicate check at the cost of a
+    network dependency in a pure-filesystem job. So the gap is made VISIBLE
+    and NAMED instead of closed — the same posture this fleet already mandates
+    for a credential-dependent workflow: absent capability produces a clear
+    notice naming the exact thing, never a crash and never a silent no-op.
+
+    What is NOT tolerated is an entry that is neither: a locally sourced entry
+    with no discovered bundle is published and validated by nothing at all,
+    and an entry whose source cannot be classified cannot be reasoned about.
+    Both fail.
+
+    Nor is an entry that is BOTH. A federated entry shadowed by a local
+    plugins/<name>/ bundle makes the notice self-contradicting — "validated by
+    that repo's CI, not here" printed about a bundle this very run validated
+    here — and, worse, makes this script's verdict differ from
+    check_consistency.py's on the identical tree. The shadowing rule therefore
+    lives in both places rather than in whichever one happens to run first.
+    """
+    notices = []
+    if not marketplace_path.is_file():
+        problems.append(
+            "%s: marketplace manifest is missing, so there is no way to tell "
+            "whether every published plugin was validated" % _rel(marketplace_path)
+        )
+        return notices
+
+    marketplace = _load_json(marketplace_path, problems)
+    if marketplace is None:
+        return notices
+
+    local_names = {bundle.name for bundle in bundles}
+    for entry in marketplace.get("plugins", []):
+        name = entry.get("name") or "(unnamed entry)"
+        kind, detail = classify_source(entry)
+        if kind == "federated" and name in local_names:
+            # The notice below is a claim about WHERE this bundle is validated.
+            # If a local plugins/<name>/ was also discovered, that claim is
+            # false in the same breath it is made: the run would print
+            # "validated by that repo's own CI, not here" AND count <name>
+            # among the manifests it just validated here. check_consistency.py
+            # already rejects exactly this shadowing; if this script only
+            # noticed it, the two would return different verdicts on the same
+            # tree and CI would have no single answer.
+            problems.append(
+                "%s: marketplace.json federates it from %s, but a local bundle under "
+                "%s/%s was discovered and validated here — so this run cannot say "
+                "which tree ships under that name. A name cannot be both a local "
+                "plugin root and a remote one; delete one of them "
+                "(check_consistency.py rejects the same shadowing)."
+                % (name, detail, _rel(PLUGINS_DIR), name)
+            )
+        elif kind == "federated":
+            notices.append(
+                "%s: federated from %s — its Agent Plugins manifests are validated "
+                "by that repo's own CI, not here." % (name, detail)
+            )
+        elif kind == "invalid":
+            problems.append(
+                "%s: marketplace entry %s, so this script cannot tell whether its "
+                "manifests are validated anywhere." % (name, detail)
+            )
+        elif name not in local_names:
+            problems.append(
+                "%s: marketplace.json publishes it from the local source '%s', but no "
+                "bundle manifest was discovered under %s/%s — nothing validates it."
+                % (name, detail, _rel(PLUGINS_DIR), name)
+            )
+    return notices
+
+
 def main():
     problems = []
 
@@ -212,6 +313,11 @@ def main():
 
     for bundle in bundles:
         check_bundle(bundle, schema, problems)
+
+    # Printed before the verdict, and on the failure path too: a named skip is
+    # only useful if it is visible in the run someone actually reads.
+    for notice in check_marketplace_coverage(bundles, problems):
+        print("NOTE: %s" % notice)
 
     if problems:
         for problem in problems:
