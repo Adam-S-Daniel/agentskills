@@ -4,12 +4,22 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Only skills-conformance benefits from a schedule. It clones the DEFAULT
+  # BRANCHES of two other repos and audits them, so its verdict can go red with
+  # no commit in this repo at all, and nothing else would ever notice. The other
+  # four jobs read only this repo's own contents, so a scheduled run of them
+  # could not tell anyone anything a push already did — they are gated off
+  # `schedule` below. :17 rather than :00 because GitHub queues the whole
+  # platform's cron on the hour and delays it.
+  schedule:
+    - cron: '17 6 * * *'
 
 permissions:
   contents: read
 
 jobs:
   plugin-validate:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
@@ -27,6 +37,7 @@ jobs:
         run: claude plugin validate . --strict
 
   consistency:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
@@ -115,6 +126,12 @@ jobs:
 
   skills-conformance:
     runs-on: ubuntu-latest
+    # Raised from the workflow-level default for the last step alone, which
+    # opens a tracking issue when the SCHEDULED run fails. Only this job gets
+    # it; the other four keep the read-only default.
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
@@ -143,8 +160,56 @@ jobs:
         # `optional:` with a `reason:`, so its absence is REPORTED in this run's
         # output rather than passing silently.
         run: python3 scripts/check_skills.py
+      # A scheduled failure is INVISIBLE: no PR goes red and nobody is
+      # notified. This fleet has already lost a week to a daily audit running
+      # red unwatched, because detect-only was the wrong contract for a job
+      # nobody is looking at — so the scheduled run reports itself. Idempotent
+      # on purpose: otherwise it would open a fresh issue every morning until
+      # someone noticed.
+      #
+      # `gh` is preinstalled on the runner, so this needs no new `uses:` and
+      # therefore no third-party pin and no cooling-off period. It passes
+      # --repo rather than letting gh infer one from the workspace remote,
+      # because failure() also fires when the CHECKOUT step is what failed,
+      # leaving no git repo to infer from — the step guarding against silent
+      # failure must not have a silent failure of its own.
+      #
+      # Everything the script reads arrives through env:, and the only workflow
+      # expressions here are github.server_url/repository/run_id. Nothing off
+      # the event payload and nothing the census printed is interpolated into
+      # the run: body, where it would be echoed into a public log and evaluated
+      # as shell.
+      - name: File a tracking issue when the scheduled census fails
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: Scheduled skills census is failing
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/census-failure.md" <<EOF
+          The scheduled skills census failed: $RUN_URL
+
+          This job clones the DEFAULT BRANCHES of Adam-S-Daniel/cms-platform and
+          Adam-S-Daniel/adamdaniel.ai and audits them, so its verdict can change
+          with no commit in this repo at all. Look upstream first: the likely
+          cause is a change in one of those repos rather than a change here.
+          EOF
+          # --search is full text, so it can return near-misses; the title is
+          # re-checked EXACTLY before this concludes a duplicate already exists.
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$ISSUE_TITLE in:title" --json number,title \
+            --jq 'map(select(.title == env.ISSUE_TITLE)) | .[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" \
+              --body-file "$RUNNER_TEMP/census-failure.md"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" \
+              --body-file "$RUNNER_TEMP/census-failure.md"
+          fi
 
   pytest:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
@@ -180,14 +245,23 @@ jobs:
       # Three suites (scripts/test_check_skills.py, test_generate_skills_lock.py,
       # test_check_agent_plugins.py — 157 tests) once existed while this job ran
       # only the sync-skills directory, so they executed NOWHERE for three PRs.
-      # Both targets are DIRECTORIES rather than files precisely so a new
+      # Every target is a DIRECTORY rather than a file precisely so a new
       # scripts/test_*.py, or a new skills/<skill>/tests/ dir, is picked up with
       # no edit here and cannot silently go unrun again.
       #
-      # A bare repo-root `pytest` would be wider still, but it also collects
-      # plugins/adam-local/skills/rename-pdfs/scripts/test_extract_pdf_context.py,
-      # which needs the heavy optional `pypdf` dependency — hence targeting
-      # tests/ dirs plus scripts/ instead of everything.
+      # The same failure then recurred one directory over, which is why there is
+      # a third target: the 12 tests in
+      # plugins/adam-local/skills/rename-pdfs/scripts/test_extract_pdf_context.py
+      # ran NOWHERE, sitting in a skill's scripts/ dir and so matching neither
+      # of the first two. The reason recorded here previously — that they need
+      # the heavy optional `pypdf` — was wrong: all 12 exercise find_dates(), a
+      # pure regex date parser, and not one of them imports pypdf. What actually
+      # kept them out was an import-time sys.exit(2) in extract_pdf_context.py's
+      # `except ImportError` for pypdf, which does not fail a single file — it
+      # aborts the entire run with `INTERNALERROR ... caught unexpected
+      # SystemExit`, measured by widening the glob without touching it. That
+      # exit now happens in main(), so nothing here needs pypdf: do not add it
+      # to the pip line above.
       #
       # This job is also where the FEDERATED (multi-registry) lock path is
       # covered — the lock steps in the consistency job cannot cover it, because
@@ -203,9 +277,10 @@ jobs:
       # picked up with no edit here — which a hand-listed job is exactly what
       # this comment's opening paragraph says goes wrong.
       - name: Run every test suite in the repo
-        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ -q
+        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q
 
   shellcheck:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
