@@ -18,6 +18,12 @@
 #
 # Adding a waiver for a defect in THIS repo requires a reason better than "it is
 # red" — see the wj-next-break entries, which carry an explicit owner decision.
+#
+# Every duplicate waiver PINS ITS VERDICT via `match:`. Without that pin a waiver
+# keyed on klass+registry+basename keeps matching after a mirror silently diverges
+# into a fork, and the census reports OK — verified, it did. With the pin, editing
+# one copy of a mirrored skill breaks the match, so the finding fires AND the waiver
+# goes stale: two independent signals for the drift this gate exists to catch.
 
 waivers:
   # --- agentskills: descoped by the owner -----------------------------------
@@ -103,6 +109,7 @@ waivers:
   - klass: undeclared-duplicate
     registry: agentskills
     path: workflow-path-audit
+    match: "verdict: fork"
     reason: >-
       Genuine fork, not a mirror. agentskills owns one body; cms-platform and
       its adamdaniel.ai mirror share a different one. Reconciling them is
@@ -116,44 +123,58 @@ waivers:
   # adamdaniel.ai#3104 — and when it lands, every one of these goes stale and
   # CI will require deleting it.
   - {klass: undeclared-duplicate, registry: cms-platform, path: admin-config-render,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: aws-bootstrap,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: browser-testing,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: ci-watcher-loops,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: cms-platform-secrets,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: cms-stuck-pr-triage,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: code-quality,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: editorial-label-audit,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: github-actions-sha-pinning,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: platform-release-and-bump,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: post-failure-comment,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: preview-environments,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: sveltia-cms-playwright-demo,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
   - {klass: undeclared-duplicate, registry: cms-platform, path: test-canary,
+     match: "verdict: mirror",
      reason: "cms-platform -> adamdaniel.ai vendored mirror (byte-identical).",
      issue: "https://github.com/Adam-S-Daniel/cms-platform/issues/250"}
