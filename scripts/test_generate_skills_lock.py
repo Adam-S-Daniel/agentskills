@@ -1866,19 +1866,24 @@ def test_a_json_in_the_project_directory_is_not_the_hooks_lock_reader(tmp_path, 
 def test_every_python3_the_hook_launches_is_isolated():
     """A drift alarm on the flag itself, since only two call sites are probed.
 
-    The hook launches python three times — the verdict encoder, the lock reader,
-    the digest — and all three put the project directory on sys.path without
-    `-I`. Matching is lexical and deliberately narrow: an invocation is
-    `python3` followed by a flag, which is the shape all three have (`-c`, `-`)
-    and which no prose mention or `command -v python3` probe takes. Comment
-    lines are dropped first so the header's own `python3 -I` reference is not
-    counted as a call site.
+    The hook launches python five times — the verdict encoder, the lock reader,
+    the digest, and the two halves of the install record (the prune planner that
+    READS it and the writer that rewrites it) — and every one of them puts the
+    project directory on sys.path without `-I`. The planner is the one this
+    alarm earns its keep on most: a `json.py` in the project directory would
+    otherwise decide which of the user's directories the hook then `rm -rf`s.
+
+    Matching is lexical and deliberately narrow: an invocation is `python3`
+    followed by a flag, which is the shape all five have (`-c`, `-`) and which
+    no prose mention or `command -v python3` probe takes. Comment lines are
+    dropped first so the header's own `python3 -I` reference is not counted as a
+    call site.
     """
     code = "\n".join(
         line for line in HOOK.read_text(encoding="utf-8").splitlines()
         if not line.lstrip().startswith("#")
     )
-    assert re.findall(r"\bpython3\s+(-\S+)", code) == ["-I", "-I", "-I"]
+    assert re.findall(r"\bpython3\s+(-\S+)", code) == ["-I"] * 5
 
 
 # --------------------------------------------------------------------------
@@ -2457,3 +2462,357 @@ def test_this_repos_own_lock_is_installable_end_to_end(tmp_path):
     expected = len(lock["skills"])
     assert verdict.startswith(f"skills: {expected}/{expected} "), verdict
     assert verdict.endswith("OK"), verdict
+
+
+# --------------------------------------------------------------------------
+# skills that LEAVE the lock (#71)
+#
+# `purge_locked_destinations` removes what the lock NAMES, on the bail-out paths
+# only. Nothing removed what the lock STOPPED naming, and nothing ran on the
+# success path at all — so a withdrawn skill stayed live in ~/.claude/skills
+# forever while the verdict read `skills: N/N … — OK`, and a rename left both
+# names loaded. Reproduced before any of this was written: run 1 with a
+# two-skill lock, run 2 with a one-skill lock, dropped skill still there.
+#
+# The removal cannot be "delete what the lock does not name": ~/.claude/skills
+# is the USER's directory, and the claude.ai account-sync channel writes into
+# `synced/`. So it is driven by the hook's own install record, and every test
+# below pins one of the four conditions a removal needs — or one of the two
+# reasons a directory is left alone and SAID SO rather than silently kept.
+#
+# Each is written to fail if the rule it names is dropped: the ones that assert
+# survival also assert that a real orphan was removed in the same run, so
+# "nothing was deleted" cannot pass them by the prune simply not running.
+# --------------------------------------------------------------------------
+
+_RECORD = ".skills-bootstrap-installed.json"
+
+
+def _record(home: Path) -> dict:
+    """The hook's install record, parsed."""
+    return json.loads(
+        (home / ".claude" / "skills" / _RECORD).read_text(encoding="utf-8"))
+
+
+def _relock(lock_path: Path, full: dict, keep) -> None:
+    """Rewrite `lock_path` naming only the skills in `keep`.
+
+    A skill LEAVES a lock exactly this way — the artifact is the same whether it
+    was withdrawn upstream, renamed, or retired, and rewriting from a saved copy
+    lets one test drop a row and add another back (a rename) without a second
+    fixture commit.
+    """
+    lock = dict(full)
+    lock["skills"] = {key: digest for key, digest in full["skills"].items()
+                      if key.rsplit("/", 1)[-1] in keep}
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+
+def _install_then_relock(tmp_path: Path, registry, keep) -> Tuple[Path, Path]:
+    """Install the two-skill lock, then narrow it to `keep`. Returns (home, lock)."""
+    root, sha = registry
+    project = tmp_path / "project"
+    lock_path = make_project(project, root, sha)
+    full = json.loads(lock_path.read_text(encoding="utf-8"))
+    home = tmp_path / "home"
+    first = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert first.returncode == 0, first.stderr
+    assert _verdict(first).endswith("— OK"), _verdict(first)
+    _relock(lock_path, full, keep)
+    return home, project
+
+
+def test_a_skill_dropped_from_the_lock_is_removed_and_the_verdict_says_so(
+        tmp_path, registry):
+    """The defect itself: `alpha` leaves the lock, and must not survive it."""
+    home, project = _install_then_relock(tmp_path, registry, {"beta"})
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file()
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.startswith("skills: 1/1 "), verdict
+    # Named, not merely gone. A silent removal is the same unreadable state as a
+    # silent leak, from the other side.
+    assert "removed 1 skill no longer in the lock (alpha)" in verdict, verdict
+    assert not (home / ".claude" / "skills" / "alpha").exists(), verdict
+    assert (home / ".claude" / "skills" / "beta" / "SKILL.md").is_file()
+    assert [entry["name"] for entry in _record(home)["installed"]] == ["beta"]
+
+
+def test_a_bundle_the_lock_has_emptied_still_reaps_its_skills(tmp_path, registry):
+    """The scope is the lock's ROUTING, not the bundles its rows happen to name.
+
+    Withdrawing every skill of a bundle at once leaves a lock that still
+    declares the bundle and names none of its skills — so a scope derived from
+    the rows would claim nothing, find no owner for any recorded install, and
+    leak the entire bundle. Deriving it from `claim` is what makes the emptied
+    case behave like every other withdrawal.
+    """
+    home, project = _install_then_relock(tmp_path, registry, set())
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.startswith("skills: 0/0 "), verdict
+    assert "removed 2 skills no longer in the lock (alpha, beta)" in verdict, verdict
+    assert [path.name for path in (home / ".claude" / "skills").iterdir()] == [_RECORD]
+    assert _record(home)["installed"] == []
+
+
+def test_a_skill_the_hook_never_installed_is_never_removed(tmp_path, registry):
+    """The hard constraint. ~/.claude/skills is the user's own directory.
+
+    A hand-made skill no lock has ever named is planted, and the run that
+    removes a genuine orphan is driven right past it. The orphan assertion is
+    what makes this a test of the SCOPE rather than of the prune being inert:
+    `alpha` goes, `handmade` stays, in the same run.
+    """
+    home, project = _install_then_relock(tmp_path, registry, {"beta"})
+    _write(home / ".claude" / "skills" / "handmade" / "SKILL.md",
+           "---\nname: handmade\n---\nwritten by hand, never locked\n")
+    mine = _tree(home / ".claude" / "skills" / "handmade")
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert "removed 1 skill no longer in the lock (alpha)" in verdict, verdict
+    assert _tree(home / ".claude" / "skills" / "handmade") == mine, verdict
+    assert "handmade" not in verdict, verdict
+
+
+def test_a_rename_leaves_only_the_new_name(tmp_path):
+    """Old name out, new name in — the shape that used to load BOTH."""
+    root = tmp_path / "registry"
+    sha = make_registry(root, {"adam/oldname": SKILL_A, "adam/newname": SKILL_B})
+    project = tmp_path / "project"
+    lock_path = make_project(project, root, sha)
+    full = json.loads(lock_path.read_text(encoding="utf-8"))
+    home = tmp_path / "home"
+
+    _relock(lock_path, full, {"oldname"})
+    assert _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"}).returncode == 0
+    assert (home / ".claude" / "skills" / "oldname" / "SKILL.md").is_file()
+
+    _relock(lock_path, full, {"newname"})
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert "removed 1 skill no longer in the lock (oldname)" in verdict, verdict
+    assert not (home / ".claude" / "skills" / "oldname").exists(), verdict
+    assert (home / ".claude" / "skills" / "newname" / "SKILL.md").is_file()
+    assert sorted(path.name for path in
+                  (home / ".claude" / "skills").iterdir()) == [_RECORD, "newname"]
+
+
+def test_a_hand_edited_skill_that_leaves_the_lock_survives_and_says_why(
+        tmp_path, registry):
+    """The digest already detects the edit; what it buys is ownership.
+
+    Once a user has edited a file they have taken it over, and deleting their
+    work to satisfy a lock they may not control is a worse failure than the leak
+    — so it stays, and the verdict says which skill and why, distinctly from a
+    clean removal.
+    """
+    home, project = _install_then_relock(tmp_path, registry, {"beta"})
+    edited = home / ".claude" / "skills" / "alpha" / "SKILL.md"
+    edited.write_text(edited.read_text(encoding="utf-8") + "\nmy own notes\n",
+                      encoding="utf-8")
+    mine = _tree(home / ".claude" / "skills" / "alpha")
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    # A skill that is live but not in the lock is the exact state this hook
+    # exists to make knowable, so it degrades the verdict rather than riding
+    # along under OK.
+    assert "DEGRADED" in verdict, verdict
+    assert ("1 skill no longer in the lock left in place, edited since install "
+            "(alpha)") in verdict, verdict
+    # The note itself, not the bare word — "could be removed this run"
+    # appears in the unreadable-record clause and is not a removal.
+    assert "; removed " not in verdict, verdict
+    assert _tree(home / ".claude" / "skills" / "alpha") == mine, verdict
+
+    # ...and it survives the run AFTER that one, which is where recording the
+    # edited digest would show up: the comparison would then succeed and delete
+    # the user's work one run late, with the notice already gone quiet.
+    third = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert third.returncode == 0, third.stderr
+    assert "edited since install (alpha)" in _verdict(third), _verdict(third)
+    assert _tree(home / ".claude" / "skills" / "alpha") == mine, _verdict(third)
+
+
+@pytest.mark.parametrize("only, note", [
+    ("adam", "leaving 1 other-bundle skill alone (beta)"),
+    ("nothingmatches", "leaving 2 other-bundle skills alone (alpha, beta)"),
+])
+def test_bundle_narrowing_prunes_nothing_from_other_bundles(tmp_path, only, note):
+    """AGENTSKILLS_BUNDLE means "install a subset", not "this is now the truth".
+
+    A run narrowed to one bundle has no opinion about the others, so it must not
+    reap them — otherwise a debug flag silently deletes everything it was not
+    pointed at, which is the third shape #71 reported (`AGENTSKILLS_BUNDLE=
+    nothingmatches` left every seeded skill live under `0/0 … — OK`, saying
+    nothing). What it must do instead is SAY what it left alone.
+    """
+    root = tmp_path / "registry"
+    sha = make_registry(root, {"adam/alpha": SKILL_A, "fastmail/beta": SKILL_B})
+    project = tmp_path / "project"
+    project.mkdir()
+    proc = run_generator("--repo", str(root), "--registry", root.resolve().as_uri(),
+                         "--ref", sha, "--bundles", "adam,fastmail",
+                         "-o", str(project / "skills.lock"))
+    assert proc.returncode == 0, proc.stderr
+    home = tmp_path / "home"
+    assert _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"}).returncode == 0
+    before = _tree(home / ".claude" / "skills")
+    assert before, "nothing was installed, so nothing is at risk of being reaped"
+
+    proc = _run_hook(home, project, {
+        "SKILLS_BOOTSTRAP_FORCE": "1",
+        "AGENTSKILLS_BUNDLE": only,
+    })
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert note in verdict, verdict
+    # The note itself, not the bare word — "could be removed this run"
+    # appears in the unreadable-record clause and is not a removal.
+    assert "; removed " not in verdict, verdict
+    # Byte-identical: nothing removed, nothing rewritten, record included.
+    assert _tree(home / ".claude" / "skills") == before, verdict
+
+
+@pytest.mark.parametrize("corrupt", [
+    "", "{ not json at all", "[]", '{"installed": {"alpha": true}}',
+], ids=["empty", "truncated", "not-an-object", "installed-not-a-list"])
+def test_an_unreadable_install_record_prunes_nothing(tmp_path, registry, corrupt):
+    """A record it cannot read must mean "remove nothing", never "remove all".
+
+    The record is the only thing standing between the prune and the user's own
+    directory, so every way of failing to read one has to fail in the same
+    direction — and say so, because a run that cannot tell whether stale skills
+    are live is exactly the unreadable state this whole file argues against.
+    """
+    home, project = _install_then_relock(tmp_path, registry, {"beta"})
+    record_path = home / ".claude" / "skills" / _RECORD
+    assert record_path.is_file(), "the first run wrote no record to corrupt"
+    record_path.write_text(corrupt, encoding="utf-8")
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert "DEGRADED" in verdict, verdict
+    assert f"could not read the install record {record_path}" in verdict, verdict
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+    # The note itself, not the bare word — "could be removed this run"
+    # appears in the unreadable-record clause and is not a removal.
+    assert "; removed " not in verdict, verdict
+    # The skill the lock DOES name still installed, and the record is rewritten
+    # from this run — one bad file is a one-run blind spot, not a permanent one.
+    assert verdict.startswith("skills: 1/1 "), verdict
+    assert [entry["name"] for entry in _record(home)["installed"]] == ["beta"]
+
+
+def test_the_account_sync_directory_is_never_removed(tmp_path, registry):
+    """`~/.claude/skills/synced/` belongs to the claude.ai account channel.
+
+    Defence in depth, and reached only through a record that claims the hook
+    installed something called `synced` — which is precisely the case where
+    obeying the record would delete a store that is not ours. So the record is
+    hand-written to name it, with a digest that MATCHES the planted directory:
+    every other condition for a removal is satisfied, and the name guard is the
+    only thing left holding.
+    """
+    home, project = _install_then_relock(tmp_path, registry, {"beta"})
+    synced = home / ".claude" / "skills" / "synced"
+    _write(synced / "manifest.json", '{"skills": []}\n')
+    _write(synced / "account-skill" / "SKILL.md",
+           "---\nname: account-skill\n---\nsynced from claude.ai\n")
+    account = _tree(synced)
+
+    record_path = home / ".claude" / "skills" / _RECORD
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    template = record["installed"][0]
+    record["installed"].append({
+        "name": "synced",
+        "registry": template["registry"],
+        "bundle": template["bundle"],
+        "digest": gsl.digest_skill_dir(synced),
+    })
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert "removed 1 skill no longer in the lock (alpha)" in verdict, verdict
+    assert _tree(synced) == account, verdict
+    assert "synced" not in verdict, verdict
+
+
+def test_a_record_that_cannot_be_written_is_reported_rather_than_fatal(
+        tmp_path, registry):
+    """The write is the half that lets the NEXT run prune at all.
+
+    Reached deterministically by leaving a DIRECTORY where the record file goes:
+    `os.replace` onto one fails whatever the permissions say, which is what a
+    read-only-$DEST test could not honestly claim — this suite runs as root in
+    CI, and root ignores the mode (the same reason the `mkdir -p "$DEST"` purge
+    path above is left uncovered). A record it cannot keep must degrade the
+    verdict and name the path, never take the session down with it.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+    blocked = home / ".claude" / "skills" / _RECORD
+    blocked.mkdir(parents=True)
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert "DEGRADED" in verdict, verdict
+    assert f"could not write the install record {blocked}" in verdict, verdict
+    # The session still got its skills: a record it cannot keep is a problem for
+    # the NEXT run, not this one.
+    assert verdict.startswith("skills: 2/2 "), verdict
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file()
+    # And the staged temp file is cleaned up rather than left behind in $DEST.
+    assert [path.name for path in (home / ".claude" / "skills").iterdir()
+            if path.name.endswith(".tmp")] == [], verdict
+
+
+def test_another_repos_lock_does_not_reap_this_ones_skills(tmp_path):
+    """Two repos, one ~/.claude/skills — the reason the scope is per-source.
+
+    Both locks claim the bundle `adam`; only the REGISTRY differs, so this
+    isolates that half of the scope. Unscoped, repo two's run would find every
+    name repo one installed missing from its own lock and reap the lot.
+
+    (The residual the hook's comment states is the case this cannot separate:
+    two locks naming the SAME registry AND bundle at different refs still
+    contend, because neither is more authoritative than the other.)
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/beta": SKILL_B})
+    make_project(tmp_path / "project-one", one, one_sha)
+    make_project(tmp_path / "project-two", two, two_sha)
+    home = tmp_path / "home"
+
+    assert _run_hook(home, tmp_path / "project-one",
+                     {"SKILLS_BOOTSTRAP_FORCE": "1"}).returncode == 0
+    proc = _run_hook(home, tmp_path / "project-two", {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.endswith("— OK"), verdict
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+    assert (home / ".claude" / "skills" / "beta" / "SKILL.md").is_file(), verdict
+    # Both remembered, each attributed to the registry that installed it — which
+    # is what lets either repo prune its own without touching the other's.
+    assert {entry["name"]: entry["registry"]
+            for entry in _record(home)["installed"]} == {
+        "alpha": one.resolve().as_uri(),
+        "beta": two.resolve().as_uri(),
+    }

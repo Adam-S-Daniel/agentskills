@@ -252,6 +252,13 @@ ephemeral surfaces. What works where:
   the project already owns in `.claude/skills/` (personal skills shadow project
   ones), and it always exits 0 — a failure downgrades to a one-line
   `skills: DEGRADED — …` notice naming the knob to fix.
+  It also **removes** a skill that later leaves the lock, so a withdrawn or
+  renamed one stops loading instead of living on under a clean verdict — but
+  only one it installed itself and nobody has edited since, tracked in
+  `~/.claude/skills/.skills-bootstrap-installed.json` and scoped to the
+  registries and bundles the lock still declares. A hand-placed skill, another
+  repo's lock's skills, and the account-sync `synced/` store are never touched;
+  an edited one is kept and named in the verdict rather than deleted.
 - **claude.ai chat**: skills upload as ZIPs via Settings → Capabilities; the
   [`sync-skills`](plugins/adam-local/skills/sync-skills) skill (in the
   `adam-local` bundle) automates pushing this registry's skills there.
