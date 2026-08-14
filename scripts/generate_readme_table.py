@@ -8,22 +8,38 @@ markers in README.md — one row per skill (Plugin, Invocation, Description).
 Everything is derived from marketplace.json + the filesystem; nothing about
 plugin names, skill names, or counts is hardcoded.
 
+A FEDERATED bundle (a plugin root in another repo) has no local skills to
+enumerate and this script does no network I/O, so it renders as a single row
+that NAMES its source repo. Two things that row is not: a fabricated skill
+list, and nothing at all. It used to be the latter — a federated entry
+contributed zero rows, the rendered table came out byte-identical, `--check`
+passed green, and the README never mentioned the bundle. collect_plugin_rows()
+now fails instead of letting any published plugin render as silence.
+
 Usage:
   python3 scripts/generate_readme_table.py            # write README.md
   python3 scripts/generate_readme_table.py --check    # exit 1 if out of date
 """
 
 import argparse
-import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+# Same directory, so running this as a script puts it on sys.path — but be
+# explicit, because pytest and `python -m` do not both agree on that.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# One reader for "what does the marketplace publish", one answer for "is this
+# entry local or federated". A second copy of that classification here is
+# exactly how the README and the consistency gate would come to disagree about
+# which bundles exist.
+from check_consistency import classify_source, load_marketplace  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 PLUGINS_DIR = REPO_ROOT / "plugins"
 README_PATH = REPO_ROOT / "README.md"
 
@@ -112,24 +128,84 @@ def _first_sentence(text: str) -> str:
     return collapsed
 
 
-def build_rows() -> List[str]:
-    marketplace = json.loads(MARKETPLACE_PATH.read_text(encoding="utf-8"))
-    rows: List[str] = []
-    for plugin in marketplace.get("plugins", []):
-        plugin_name = plugin["name"]
-        fallback_desc = plugin.get("description", "")
-        for skill_dir in iter_skill_dirs(PLUGINS_DIR / plugin_name):
-            frontmatter = parse_frontmatter((skill_dir / "SKILL.md").read_text(encoding="utf-8"))
-            skill_name = skill_dir.name
-            description = _first_sentence(frontmatter.get("description") or fallback_desc)
-            invocation = f"`/{plugin_name}:{skill_name}`"
-            rows.append(f"| `{plugin_name}` | {invocation} | {_one_line(description)} |")
+def _row(plugin_name: str, invocation: str, description: str) -> str:
+    return f"| `{plugin_name}` | {invocation} | {_one_line(description)} |"
+
+
+def local_rows(plugin: dict, plugins_dir: Path) -> List[str]:
+    """One row per plugins/<plugin>/skills/<skill>/ that has a SKILL.md."""
+    plugin_name = plugin["name"]
+    fallback_desc = plugin.get("description", "")
+    rows = []
+    for skill_dir in iter_skill_dirs(plugins_dir / plugin_name):
+        frontmatter = parse_frontmatter((skill_dir / "SKILL.md").read_text(encoding="utf-8"))
+        description = _first_sentence(frontmatter.get("description") or fallback_desc)
+        rows.append(_row(plugin_name, f"`/{plugin_name}:{skill_dir.name}`", description))
     return rows
 
 
-def build_table() -> str:
+def federated_row(plugin: dict, repo: str) -> str:
+    """The single row a federated bundle contributes.
+
+    Its skills live in another repo and this script does no network I/O, so
+    the row names the source repo instead of enumerating them — a table that
+    invented a skill list would be worse than one that omits it, and a fetch
+    here would make the README build depend on the network. The invocation
+    cell keeps the `/<bundle>:<skill>` shape so a reader still learns how these
+    are called, with `<skill>` left an explicit placeholder.
+    """
+    plugin_name = plugin["name"]
+    invocation = f"`/{plugin_name}:<skill>` — skills live in [{repo}](https://github.com/{repo})"
+    return _row(plugin_name, invocation, _first_sentence(plugin.get("description", "")))
+
+
+def collect_plugin_rows(
+    marketplace: Optional[dict] = None, plugins_dir: Path = PLUGINS_DIR
+) -> Tuple[List[Tuple[str, List[str]]], List[str]]:
+    """[(plugin name, its rows)] in marketplace order, plus a list of problems.
+
+    Grouped per plugin, and with the problems handed back rather than raised,
+    so the one property that is easy to lose can be asserted structurally:
+    EVERY marketplace plugin contributes at least one row. A plugin that
+    renders as nothing is a plugin the README does not mention, and no amount
+    of `--check`ing a table against itself notices that.
+    """
+    if marketplace is None:
+        marketplace = load_marketplace()
+    by_plugin: List[Tuple[str, List[str]]] = []
+    problems: List[str] = []
+    for plugin in marketplace.get("plugins", []):
+        plugin_name = plugin.get("name")
+        kind, detail = classify_source(plugin)
+        if kind == "local":
+            rows = local_rows(plugin, plugins_dir)
+        elif kind == "federated":
+            rows = [federated_row(plugin, detail)]
+        else:
+            problems.append(
+                f"marketplace.json entry '{plugin_name}' {detail} — it cannot be "
+                "rendered, so the README would silently omit it"
+            )
+            continue
+        if not rows:
+            problems.append(
+                f"marketplace.json publishes plugin '{plugin_name}' but it renders "
+                "no table rows, so README.md would not mention it at all"
+            )
+        by_plugin.append((plugin_name, rows))
+    return by_plugin, problems
+
+
+def build_rows() -> List[str]:
+    by_plugin, problems = collect_plugin_rows()
+    if problems:
+        sys.exit("ERROR: " + "\n       ".join(problems))
+    return [row for _, rows in by_plugin for row in rows]
+
+
+def build_table(rows: List[str]) -> str:
     header = ["| Plugin | Invocation | Description |", "| --- | --- | --- |"]
-    return "\n".join(header + build_rows())
+    return "\n".join(header + rows)
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +220,8 @@ def render(check: bool) -> int:
         )
     before, rest = readme.split(BEGIN_MARKER, 1)
     _, after = rest.split(END_MARKER, 1)
-    new_readme = f"{before}{BEGIN_MARKER}\n{build_table()}\n{END_MARKER}{after}"
+    rows = build_rows()
+    new_readme = f"{before}{BEGIN_MARKER}\n{build_table(rows)}\n{END_MARKER}{after}"
 
     if check:
         if new_readme != readme:
@@ -159,7 +236,7 @@ def render(check: bool) -> int:
 
     if new_readme != readme:
         README_PATH.write_text(new_readme, encoding="utf-8")
-        print(f"README.md updated ({len(build_rows())} skill rows).")
+        print(f"README.md updated ({len(rows)} rows).")
     else:
         print("README.md already up to date.")
     return 0

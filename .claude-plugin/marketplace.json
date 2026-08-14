@@ -19,6 +19,14 @@
       "defaultEnabled": false
     },
     {
+      "name": "cms-platform",
+      "source": { "source": "github", "repo": "Adam-S-Daniel/cms-platform" },
+      "description": "The cms-platform site machinery's own skills, federated from that repo rather than mirrored here: Decap /admin config rendering, AWS bootstrap and PR preview environments, Playwright e2e, CI watcher loops, stuck-PR triage, and the platform release/consumer-bump flow.",
+      "category": "development",
+      "keywords": ["cms", "decap", "jekyll", "aws", "cloudformation", "cloudfront", "preview-environments", "playwright", "e2e", "ci-cd", "github-actions", "release"],
+      "defaultEnabled": false
+    },
+    {
       "name": "fastmail",
       "source": "./plugins/fastmail",
       "description": "Fastmail email skills: browser-driven email workflows (search, read, compose, reply) and sending-identity management via the fastmail-actions workflows.",

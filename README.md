@@ -10,7 +10,10 @@ cross-agent skills that follow the
 
 Skills are grouped into three **bundle plugins** under `plugins/<bundle>/skills/<skill>/`,
 and the repo root is a Claude Code **plugin marketplace**
-(`.claude-plugin/marketplace.json`). The exact same `SKILL.md` files are consumed
+(`.claude-plugin/marketplace.json`). The marketplace also publishes one
+**federated bundle** — `cms-platform`, whose plugin root is that repo itself, so
+it keeps its skills, its cadence and its review path there while this stays the
+one marketplace to add. The exact same `SKILL.md` files are consumed
 unchanged by Codex, Cursor, VS Code, and any other agent that reads the Agent Skills
 format — so a skill is authored once and installs everywhere.
 
@@ -28,12 +31,16 @@ Add the marketplace once, then install whichever bundles you want:
 # opt-in bundles:
 /plugin install adam-local@agentskills
 /plugin install fastmail@agentskills
+/plugin install cms-platform@agentskills   # federated — fetched from Adam-S-Daniel/cms-platform
 # …or browse and pick interactively:
 /plugin
 ```
 
 Skills are namespaced by bundle — invoke them as `/<bundle>:<skill>`, e.g.
-`/adam:pin-actions-to-sha`. Update later with `/plugin marketplace update agentskills`.
+`/adam:pin-actions-to-sha`. Update later with `/plugin marketplace update agentskills`;
+that refreshes the catalog, and the three local bundles' contents with it. The
+federated bundle's contents come from the other repo instead — this marketplace
+carries its address, not its skills.
 
 ### Bundles
 
@@ -42,6 +49,36 @@ session of an arbitrary repo** go in `adam` (installed by default);
 **machine-bound / local-resource** skills (WSL/Windows homes, local files, a
 signed-in browser) go in `adam-local` (opt-in); the **Fastmail domain** is
 `fastmail` (opt-in).
+
+`cms-platform` is the exception to that layout: it is **federated**, not
+vendored — its entry names `Adam-S-Daniel/cms-platform` as the plugin root, so
+its skills are never copied into this repo and never drift from it. It is
+opt-in because it is platform-scoped (useful in cms-platform's own consumer
+sites, noise everywhere else) and every enabled skill costs always-on context.
+
+**Publishing and delivering are independent axes, on purpose.** The marketplace
+says a bundle *exists* and *where it lives*; a consumer's
+[`skills.lock`](skills.lock) says which bundles *that repo* installs and pins.
+So `cms-platform` is published here and delivered by nothing in this repo's own
+lock — which carries only the cloud-safe `adam` bundle — and that is the
+intended state rather than an omission: the platform bundle is opt-in per
+consumer, and which bundles another repo installs is not this repo's business.
+Nothing cross-checks the two files against each other, and nothing should; a
+gate coupling them would be enforcing a rule that isn't true. Written down here
+because a deliberate gap nobody recorded is indistinguishable from an oversight.
+
+**A federated `source` carries exactly `source` and `repo`** — never a
+`ref`, `commit`, `version` or `path` key — and `scripts/check_consistency.py`
+fails the build on one rather than leaving a reader to spot it. Checked against
+the CLI's own plugin-source schema rather than assumed: a `github` plugin source
+declares `repo` plus optional `ref` and `sha`, and nothing else. `path` belongs
+to the separate *marketplace* source schema and `version` to the `npm`/`pip`
+variants, so on a github source those two — and `commit`, and `branch` — are
+undeclared and silently discarded. `ref`/`sha` may well be honoured, but this
+repo refuses them too, as policy: pinning a federated bundle to a revision is
+`skills.lock`'s job, where the pin is an immutable commit plus a sha256 per
+skill that this repo can actually verify. A key that reads as a pin while
+nothing here stands behind it is worse than no key at all.
 
 If you installed the old per-skill plugins (`pin-actions-to-sha`,
 `rename-pdfs`, …), they migrate to their bundle automatically on
@@ -83,6 +120,7 @@ Available skills:
 | `adam-local` | `/adam-local:sync-cc-settings-between-wsl-and-windows` | Sync Claude Code settings.json between a Windows home and a WSL home. |
 | `adam-local` | `/adam-local:sync-skills` | Sync local skill folders from git repos to Claude.ai (and other agent targets) via the upload-skill API. |
 | `adam-local` | `/adam-local:wj-next-break` | Answer questions about the current or next class period, break, passing period, lunch, or bell at Walter Johnson High School (WJ / WJHS, Bethesda MD). |
+| `cms-platform` | `/cms-platform:<skill>` — skills live in [Adam-S-Daniel/cms-platform](https://github.com/Adam-S-Daniel/cms-platform) | The cms-platform site machinery's own skills, federated from that repo rather than mirrored here: Decap /admin config rendering, AWS bootstrap and PR preview environments, Playwright e2e, CI watcher loops, stuck-PR triage, and the platform release/consumer-bump flow. |
 | `fastmail` | `/fastmail:add-from-address` | Add one or more email addresses to a Fastmail account as selectable "From" (sending) identities by triggering the add-from-address GitHub Actions workflow in the Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the FASTMAIL_API_TOKEN repo secret). |
 | `fastmail` | `/fastmail:add-received-from-addresses` | Discover which of a Fastmail account's own alias addresses are worth being able to send from, and add them as "From" identities, by triggering the add-received-from-addresses GitHub Actions workflow in the Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the FASTMAIL_API_TOKEN repo secret). |
 | `fastmail` | `/fastmail:fastmail` | Automate Fastmail email workflows via a local browser session. |
@@ -225,9 +263,10 @@ ephemeral surfaces. What works where:
 ## Repo layout
 
 ```
-.claude-plugin/marketplace.json       # marketplace catalog (3 bundles + renames map)
+.claude-plugin/marketplace.json       # catalog: 3 local bundles + 1 federated + renames map
 plugins/
-  <bundle>/                           # adam | adam-local | fastmail
+  <bundle>/                           # adam | adam-local | fastmail — LOCAL bundles only;
+                                      # cms-platform is federated, so no directory here
     plugin.json                       # Agent Plugins 1.0.0 manifest
     .claude-plugin/plugin.json        # Claude Code bundle manifest
     skills/<skill>/SKILL.md           # one dir per skill (+ scripts/, tests/, hooks/)

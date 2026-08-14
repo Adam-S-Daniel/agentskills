@@ -10,8 +10,10 @@ Two kinds of test live here, deliberately:
   * MACHINERY tests (most of the file) use synthetic bundles, so re-wording a
     shipped description can never break a test of the checking logic;
   * SHIPPED-ARTIFACT tests (the last section) read the real repo on purpose —
-    they pin the contract itself: the vendored schema's identity, and that the
-    three bundles this repo actually ships are valid and mutually consistent.
+    they pin the contract itself: the vendored schema's identity, that the
+    three bundles this repo actually ships are valid and mutually consistent,
+    and that its federated marketplace entry is named in the output rather
+    than skipped in silence.
 
 Run: python3 -m pytest scripts/test_check_agent_plugins.py -q
 """
@@ -25,6 +27,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_agent_plugins as cap  # noqa: E402
+
+# The other half of the pair. Imported so one test can assert the two scripts
+# reach the SAME verdict on one tree, rather than each being checked alone and
+# their disagreement going unnoticed (which is exactly what happened).
+import check_consistency as cc  # noqa: E402
 
 
 # =================================================================================
@@ -107,6 +114,28 @@ def problems_for(bundle, schema):
     found = []
     cap.check_bundle(bundle, schema, found)
     return found
+
+
+def write_marketplace(tmp_path: Path, *entries) -> Path:
+    path = tmp_path / "marketplace.json"
+    payload = {"name": "test-marketplace", "plugins": list(entries)}
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def local_entry(name="demo"):
+    return {"name": name, "source": "./plugins/%s" % name}
+
+
+def federated_entry(name="remote", repo="Owner/Repo"):
+    return {"name": name, "source": {"source": "github", "repo": repo}}
+
+
+def coverage(bundles, marketplace_path):
+    """(notices, problems) from check_marketplace_coverage."""
+    problems = []
+    notices = cap.check_marketplace_coverage(bundles, problems, marketplace_path=marketplace_path)
+    return notices, problems
 
 
 # =================================================================================
@@ -350,6 +379,86 @@ def test_discovery_on_missing_plugins_dir(tmp_path):
 
 
 # =================================================================================
+# Marketplace coverage — the federated entry discover_bundles() cannot see
+# =================================================================================
+
+
+def test_a_locally_discovered_bundle_needs_no_notice(plugins_dir, tmp_path):
+    bundle = write_bundle(plugins_dir, "demo")
+    notices, problems = coverage([bundle], write_marketplace(tmp_path, local_entry("demo")))
+    assert (notices, problems) == ([], [])
+
+
+def test_a_federated_entry_is_named_rather_than_skipped(plugins_dir, tmp_path):
+    # The gap being made visible: nothing here validates that repo's manifests,
+    # and before this the script simply printed OK as though something had.
+    path = write_marketplace(tmp_path, federated_entry("remote", "Owner/Repo"))
+    notices, problems = coverage([], path)
+    assert problems == []
+    assert len(notices) == 1
+    assert "remote" in notices[0] and "Owner/Repo" in notices[0]
+
+
+def test_a_federated_entry_shadowed_by_a_discovered_bundle_is_a_problem(plugins_dir, tmp_path):
+    # The two-scripts-disagree case. Before this, the same run printed
+    # "federated … validated by that repo's own CI, not here" AND counted the
+    # shadowing bundle among the manifests it had just validated HERE, exit 0 —
+    # while check_consistency.py rejected the identical tree.
+    bundle = write_bundle(plugins_dir, "remote")
+    notices, problems = coverage([bundle], write_marketplace(tmp_path, federated_entry("remote")))
+    assert notices == []
+    assert len(problems) == 1
+    assert "remote" in problems[0] and "Owner/Repo" in problems[0]
+
+
+def test_the_shadowing_verdict_matches_check_consistency(plugins_dir, tmp_path):
+    # Pins the agreement itself, not just each script's own behaviour: one tree,
+    # two scripts, both must object.
+    write_bundle(plugins_dir, "remote")
+    entry = federated_entry("remote")
+    _, problems = coverage(cap.discover_bundles(plugins_dir), write_marketplace(tmp_path, entry))
+    consistency_errors = []
+    cc.check_marketplace_entries({"plugins": [entry]}, consistency_errors, plugins_dir=plugins_dir)
+    assert problems and consistency_errors
+
+
+def test_a_local_entry_with_no_discovered_bundle_fails(plugins_dir, tmp_path):
+    # Published by the marketplace, validated by nothing — the case a silent
+    # skip would hide just as thoroughly as it hid the federated one.
+    _, problems = coverage([], write_marketplace(tmp_path, local_entry("ghost")))
+    assert len(problems) == 1
+    assert "ghost" in problems[0]
+
+
+def test_an_entry_that_is_neither_local_nor_federated_fails(tmp_path):
+    entry = {"name": "mystery", "source": {"source": "gitlab", "repo": "o/r"}}
+    _, problems = coverage([], write_marketplace(tmp_path, entry))
+    assert len(problems) == 1
+    assert "mystery" in problems[0]
+
+
+def test_a_missing_marketplace_fails(tmp_path):
+    _, problems = coverage([], tmp_path / "absent.json")
+    assert any("missing" in p for p in problems)
+
+
+def test_an_unparseable_marketplace_fails(tmp_path):
+    path = tmp_path / "marketplace.json"
+    path.write_text("{ oops", encoding="utf-8")
+    _, problems = coverage([], path)
+    assert any("not valid JSON" in p for p in problems)
+
+
+def test_coverage_reports_every_kind_at_once(plugins_dir, tmp_path):
+    bundle = write_bundle(plugins_dir, "demo")
+    path = write_marketplace(
+        tmp_path, local_entry("demo"), federated_entry("remote"), local_entry("ghost")
+    )
+    notices, problems = coverage([bundle], path)
+    assert len(notices) == 1 and len(problems) == 1
+
+
+# =================================================================================
 # Reporting
 # =================================================================================
 
@@ -401,6 +510,21 @@ def test_shipped_schema_matches_recorded_provenance():
 def test_shipped_repo_passes(capsys):
     assert cap.main() == 0
     assert "OK:" in capsys.readouterr().out
+
+
+def test_shipped_run_names_every_federated_entry_it_did_not_validate(capsys):
+    # A skip is acceptable here only because it is NAMED. If the notice ever
+    # stops printing, the run goes back to claiming coverage it does not have.
+    assert cap.main() == 0
+    out = capsys.readouterr().out
+    federated = [
+        (entry["name"], cap.classify_source(entry)[1])
+        for entry in json.loads(cap.MARKETPLACE_PATH.read_text(encoding="utf-8"))["plugins"]
+        if cap.classify_source(entry)[0] == "federated"
+    ]
+    assert federated, "expected this repo to publish at least one federated bundle"
+    for name, repo in federated:
+        assert "NOTE: %s: federated from %s" % (name, repo) in out
 
 
 def test_every_shipped_bundle_has_both_manifests():
