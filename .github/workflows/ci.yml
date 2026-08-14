@@ -61,6 +61,27 @@ jobs:
       # a merge commit that is never the pinned SHA.
       - name: Check skills.lock is faithful to its pinned ref
         run: python3 scripts/generate_skills_lock.py --check
+      # The step above is structurally BLIND to a stale pin, which is the
+      # failure this repo actually has: add a skill to plugins/adam/skills/ and
+      # the lock keeps describing an older commit, faithfully. --check stays
+      # green, the new skill is delivered to no ephemeral surface at all, and
+      # nothing says so — a silent no-op.
+      #
+      # --check-current closes that by comparing the bundle content AT THE
+      # PINNED REF against the working tree. Distinct assertions, both wanted:
+      # --check says the lock is honest, --check-current says it is current.
+      #
+      # Uses the same `fetch-depth: 0` as --check, and for the same reason: it
+      # reads the pinned commit out of the object store, which a shallow clone
+      # does not contain.
+      #
+      # The ordering this implies, when a skill changes: change the bundle
+      # content -> commit -> regenerate the lock, which pins THAT commit ->
+      # commit the lock. The lock commit only touches skills.lock, so the
+      # bundle content at the pinned commit stays current and this step is
+      # green on the finished PR.
+      - name: Check skills.lock still describes the current bundle
+        run: python3 scripts/generate_skills_lock.py --check-current
 
   skills-conformance:
     runs-on: ubuntu-latest
