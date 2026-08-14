@@ -45,6 +45,28 @@ Re-pinning is therefore its own deliberate step. After skills change and the
 change is published, regenerate — otherwise the hook keeps faithfully
 delivering the previous commit's content.
 
+What `--check-current` asserts, and why it is a SEPARATE flag
+-------------------------------------------------------------
+`--check` is structurally blind to the failure this repo actually has: because
+it asks "is the lock faithful to the ref it pins", a lock that pins a commit
+from before a skill was added is perfectly faithful and perfectly green. The
+new skill is simply never delivered to any ephemeral surface, and nothing says
+so. A silent no-op.
+
+`--check-current` closes that: it compares the bundle content **at the pinned
+ref** against the **working tree** and fails, listing added / removed / changed
+skills, when they differ. The two flags assert different things and both are
+wanted — together they mean "the lock is honest AND the lock is current".
+
+It reads the working tree verbatim, which is the point (a brand-new skill
+directory is untracked, and must still count). The corollary is that anything
+else sitting inside a skill directory counts too — leave a `__pycache__` there
+and that skill reports as changed.
+
+Order of operations this creates: change bundle content -> commit -> regenerate
+the lock, pinning THAT commit -> commit the lock. The lock commit only touches
+`skills.lock`, so the bundle content at the pinned commit stays current.
+
 The digest
 ----------
 Per skill, sha256 over a manifest built from the skill directory: for every
@@ -71,6 +93,7 @@ Usage:
   python3 scripts/generate_skills_lock.py [--registry OWNER/REPO] [--ref REF]
                                           [--bundles a,b] [-o PATH]
   python3 scripts/generate_skills_lock.py --check [same flags]
+  python3 scripts/generate_skills_lock.py --check-current [same flags]
   python3 scripts/generate_skills_lock.py --digest DIR
 """
 
@@ -83,7 +106,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY = "Adam-S-Daniel/agentskills"
@@ -186,6 +209,37 @@ def build_lock(repo: Path, registry: str, ref: str, bundles: Sequence[str]) -> d
     return {key: document[key] for key in FIELD_ORDER}
 
 
+def check_current(
+    repo: Path, ref: str, bundles: Sequence[str]
+) -> Tuple[Dict[str, str], List[str]]:
+    """Compare the bundle content at `ref` with the working tree.
+
+    Returns (working-tree skill map, human-readable differences). An empty
+    difference list means the lock's pinned commit still describes the bundle
+    as it stands, i.e. the lock is current as well as faithful.
+    """
+    # Resolve first. `git archive` on a commit this clone does not have reports
+    # a bare "not a valid object name", where resolve_ref names the shallow
+    # clone that actually causes it — the exact failure a CI checkout produces
+    # without `fetch-depth: 0`.
+    resolve_ref(repo, ref)
+    with tempfile.TemporaryDirectory(prefix="skills-current-") as scratch:
+        tree_root = Path(scratch)
+        materialize(repo, ref, tree_root)
+        pinned = collect_skills(tree_root, bundles)
+    working = collect_skills(repo, bundles)
+
+    differences: List[str] = []
+    for name in sorted(set(working) - set(pinned)):
+        differences.append(f"added: '{name}' is in the working tree but not at {ref}")
+    for name in sorted(set(pinned) - set(working)):
+        differences.append(f"removed: '{name}' is at {ref} but not in the working tree")
+    for name in sorted(set(pinned) & set(working)):
+        if pinned[name] != working[name]:
+            differences.append(f"changed: '{name}' differs from its content at {ref}")
+    return working, differences
+
+
 def serialize(document: dict) -> str:
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
@@ -227,6 +281,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "given as flags are inherited from the lock, so this stays "
                              "meaningful on a dirty tree and under a CI merge commit; "
                              "pass --ref explicitly to also assert *which* commit is pinned.")
+    parser.add_argument("--check-current", action="store_true",
+                        help="verify the bundle content at the pinned ref still matches the "
+                             "WORKING TREE, and exit 1 if not, listing the added / removed / "
+                             "changed skills. Distinct from --check: a lock pinned before a "
+                             "skill was added is faithful to its ref (so --check is green) "
+                             "while that skill reaches no ephemeral surface at all. The "
+                             "working tree is read verbatim, so an untracked skill directory "
+                             "counts — and so does anything else left inside one.")
     parser.add_argument("--digest", metavar="DIR", default=None,
                         help="print the sha256 digest of one skill directory and exit "
                              "(the bootstrap hook's integrity check calls this)")
@@ -241,7 +303,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     repo = Path(args.repo) if args.repo else REPO_ROOT
     output = Path(args.output) if args.output else DEFAULT_LOCK
 
-    existing = load_lock(output) if args.check else {}
+    verifying = args.check or args.check_current
+    existing = load_lock(output) if verifying else {}
     registry = args.registry or existing.get("registry") or DEFAULT_REGISTRY
     bundles = (
         _parse_bundles(args.bundles)
@@ -250,22 +313,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     ref = args.ref or existing.get("ref") or resolve_ref(repo, "HEAD")
 
+    if verifying:
+        status = 0
+        # Faithfulness first, currency second: "is the lock an honest
+        # description of the commit it pins", then "is that commit still the
+        # bundle". A lock can pass either one and fail the other.
+        if args.check:
+            document = build_lock(repo, registry, ref, bundles)
+            rendered = serialize(document)
+            on_disk = output.read_text(encoding="utf-8")
+            if on_disk == rendered:
+                print(f"OK: {output} is current ({len(document['skills'])} skills at {ref}).")
+            else:
+                print(f"FAILED: {output} is stale — regenerate it with:")
+                print(f"  python3 {Path(__file__).name} --ref {ref}")
+                for line in _differences(
+                    json.loads(on_disk) if on_disk.strip() else {}, document
+                ):
+                    print(f"  - {line}")
+                status = 1
+        if args.check_current:
+            working, differences = check_current(repo, ref, bundles)
+            if not differences:
+                print(f"OK: the working tree still matches {ref} ({len(working)} skills).")
+            else:
+                print(f"FAILED: the bundle has moved on since {ref}, which {output} still "
+                      "pins — nothing added or changed since then reaches an ephemeral "
+                      "surface. Re-pin it (after committing the content) with:")
+                print("  python3 scripts/generate_skills_lock.py")
+                for line in differences:
+                    print(f"  - {line}")
+                status = 1
+        return status
+
     document = build_lock(repo, registry, ref, bundles)
-    rendered = serialize(document)
-
-    if args.check:
-        on_disk = output.read_text(encoding="utf-8")
-        if on_disk == rendered:
-            print(f"OK: {output} is current ({len(document['skills'])} skills at {ref}).")
-            return 0
-        print(f"FAILED: {output} is stale — regenerate it with:")
-        print(f"  python3 {Path(__file__).name} --ref {ref}")
-        for line in _differences(json.loads(on_disk) if on_disk.strip() else {}, document):
-            print(f"  - {line}")
-        return 1
-
     try:
-        output.write_text(rendered, encoding="utf-8")
+        output.write_text(serialize(document), encoding="utf-8")
     except OSError as exc:
         raise GeneratorError(f"cannot write {output}: {exc}") from None
     print(f"Wrote {output}: {len(document['skills'])} skills from {registry}@{ref}.")

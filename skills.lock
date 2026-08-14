@@ -1,6 +1,6 @@
 {
   "registry": "Adam-S-Daniel/agentskills",
-  "ref": "ca44468418e6eccc6c37e76f258b88e248ebe2e2",
+  "ref": "344a7373d8bcabb5ae5832f07fe3a1244a4bddab",
   "bundles": [
     "adam"
   ],
@@ -14,5 +14,5 @@
     "adam/workflow-path-audit": "1dc1f8194b9cd171ac2f6a75bf13c2f36a93854b7b5d4452ed78bae2843fe149",
     "adam/writing-adrs": "4e9a4b9472bd3d92501bf0d7f882544ba66e8b03aa48bac7fa1689c45d903820"
   },
-  "generated_from": "ca44468418e6eccc6c37e76f258b88e248ebe2e2"
+  "generated_from": "344a7373d8bcabb5ae5832f07fe3a1244a4bddab"
 }

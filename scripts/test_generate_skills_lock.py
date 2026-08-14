@@ -13,6 +13,7 @@ refuses to run without an explicit tmp home.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -287,6 +288,137 @@ def test_check_inherits_the_locks_ref_so_a_moved_head_is_not_a_failure(registry,
     proc = run_generator("--repo", str(root), "--check", "-o", str(out))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert json.loads(out.read_text(encoding="utf-8"))["ref"] == pinned
+
+
+# --------------------------------------------------------------------------
+# --check-current
+#
+# --check asks "is the lock faithful to the ref it pins"; --check-current asks
+# "is that ref still the bundle". A lock pinned before a skill was added passes
+# the first and fails the second, and the skill reaches no ephemeral surface --
+# which is the silent no-op these tests exist to keep caught.
+# --------------------------------------------------------------------------
+
+def _lock_for(root: Path, out: Path) -> None:
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+
+
+def test_check_current_exits_zero_when_the_tree_matches_the_pinned_ref(registry, tmp_path):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_check_current_flags_a_skill_added_to_the_working_tree(registry, tmp_path):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "gamma" / "SKILL.md", "gamma\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "adam/gamma" in proc.stdout
+    assert "added" in proc.stdout
+
+
+def test_check_current_flags_a_skill_removed_from_the_working_tree(registry, tmp_path):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    shutil.rmtree(root / "plugins" / "adam" / "skills" / "beta")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "adam/beta" in proc.stdout
+    assert "removed" in proc.stdout
+
+
+def test_check_current_flags_a_skill_whose_content_changed(registry, tmp_path):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nalpha body, edited\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "adam/alpha" in proc.stdout
+    assert "changed" in proc.stdout
+    # The untouched skill must not be dragged in with it.
+    assert "adam/beta" not in proc.stdout
+
+
+def test_check_current_failure_names_the_re_pin_command(registry, tmp_path):
+    """A red check that does not say how to go green is a check people route around."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "gamma" / "SKILL.md", "gamma\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 1
+    assert "scripts/generate_skills_lock.py" in proc.stdout
+
+
+def test_check_is_blind_to_what_check_current_catches(registry, tmp_path):
+    """The whole reason --check-current is a SEPARATE flag, in one test.
+
+    An added-but-unpinned skill leaves the lock a perfectly faithful
+    description of the commit it pins -- so --check is green -- while that
+    skill is delivered to nobody.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "gamma" / "SKILL.md", "gamma\n")
+
+    faithful = run_generator("--repo", str(root), "--check", "-o", str(out))
+    current = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert faithful.returncode == 0, faithful.stdout + faithful.stderr
+    assert current.returncode == 1, current.stdout + current.stderr
+
+
+def test_check_and_check_current_run_together_and_both_report(registry, tmp_path):
+    """Passing both runs both; the exit code is the worse of the two."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "gamma" / "SKILL.md", "gamma\n")
+
+    proc = run_generator("--repo", str(root), "--check", "--check-current", "-o", str(out))
+    assert proc.returncode == 1
+    assert "OK:" in proc.stdout        # --check's verdict
+    assert "FAILED:" in proc.stdout    # --check-current's
+
+
+def test_check_current_on_a_missing_lock_errors_cleanly(tmp_path):
+    proc = run_generator("--check-current", "-o", str(tmp_path / "absent.lock"))
+    assert proc.returncode != 0
+    assert "Traceback" not in proc.stderr
+
+
+def test_check_current_on_an_unreachable_pinned_ref_errors_cleanly(registry, tmp_path):
+    """The CI shape: a shallow checkout that does not contain the pinned commit."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    lock["ref"] = "0" * 40
+    out.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode != 0
+    assert "Traceback" not in proc.stderr
+    assert "0" * 40 in proc.stderr
 
 
 def test_check_on_a_missing_lock_errors_cleanly(tmp_path):
