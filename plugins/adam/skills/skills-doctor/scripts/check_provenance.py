@@ -13,8 +13,8 @@ the install and reads as hook-owned; a hook-installed skill an editor has touche
 since falls out of the cluster and reads as hand-placed. Both are silent, and a
 doctor whose attribution column is silently wrong is worse than one that has none.
 So: every row marked `hook` below is the writer's own account of what it wrote,
-and the mtime clustering survives only as the clearly-labelled fallback for a
-machine where the hook has never run.
+and the mtime clustering survives only as the clearly-labelled fallback for the
+states where the record cannot answer — absent, or unreadable.
 
 The record's three states are three different machines, not three shades of one.
 ABSENT means the hook has never run here — correct on a durable machine, a
