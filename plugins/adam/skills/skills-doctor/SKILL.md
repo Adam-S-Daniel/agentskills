@@ -5,15 +5,15 @@ description: >
   diff the expected set in `skills.lock` against what actually loaded (the
   session's own skill listing, `~/.claude/skills/`, the account
   `synced/manifest.json`, `claude plugin list`), attribute every skill to the
-  channel that delivered it, and flag silent shadowing, account-store
+  registry and bundle it came from by reading the bootstrap hook's own install
+  record rather than guessing, and flag silent shadowing, account-store
   staleness, dangling payload references, and always-on context cost. Reports
   only — it never installs, copies, deletes or repairs anything. Use when a
   skill you expected is missing or won't trigger, when a repo-owned skill looks
   overridden, when the session-start `skills:` verdict reads DEGRADED, when you
-  need to know whether a skill arrived via the plugin bundle or a personal or
-  account copy, or when the user says "why didn't that skill load", "which
-  skills do I actually have", "is my registry stale", "audit my skills",
-  "skills doctor".
+  need to know where a skill came from or whether the hook installed it, or
+  when the user says "why didn't that skill load", "which skills do I actually
+  have", "is my registry stale", "audit my skills", "skills doctor".
 compatibility: >-
   Claude Code only. Reads ~/.claude/skills, the account synced/ store and the
   `claude plugin` CLI, none of which exist in other agent harnesses. Needs the
@@ -66,38 +66,98 @@ expectation the rest of this skill can only describe, never verdict.
 
 ## 3. Collect the actual
 
-Four independent signals. Gather all four — each one is blind to something the
+Five independent signals. Gather all five — each one is blind to something the
 others see.
 
 ```bash
 ls -1 ~/.claude/skills/                    # personal store: hook-installed or hand-placed
+cat ~/.claude/skills/.skills-bootstrap-installed.json   # the hook's own account of what IT installed
 ls -1 ~/.claude/skills/synced/             # account store (claude.ai uploads)
 cat ~/.claude/skills/synced/manifest.json  # per skill: skillId, source, updatedAt
 claude plugin list --json                  # installed bundles + the commit SHA each resolved to
 ```
 
-The fifth signal is **the session's own skill listing** — the names offered to
+The sixth signal is **the session's own skill listing** — the names offered to
 the Skill tool in this context. It is the only signal that says what the model
 can actually *trigger*, and it is the authority when it disagrees with disk.
 Read it out of context; do not reconstruct it from the filesystem.
 
-## 4. Attribute every skill to its channel
+## 4. Attribute every skill to its source
 
-A name's shape already tells you where it came from:
+A name's shape narrows it to a channel:
 
 | Listed as | Channel | Confirm with |
 |---|---|---|
 | `adam:foo` (namespaced) | plugin / marketplace bundle | `claude plugin list --json` |
-| `foo` (bare) | personal `~/.claude/skills/foo/` — hook-installed or hand-placed | directory present, mtime clusters with the hook's other copies |
+| `foo` (bare) | personal `~/.claude/skills/foo/` — hook-installed or hand-placed | the install record, below |
 | `foo` (bare) | account store | `foo` has a record in `synced/manifest.json` |
 
 The last two collide on purpose: both present as a bare name, so the manifest
 is what separates them. A skill in `synced/manifest.json` came from the
 account; one on disk in `~/.claude/skills/` but absent from the manifest came
-from the hook or a hand copy. Produce one row per expected skill with the
-channel named — "loaded" without a channel is not a diagnosis.
+from the hook or a hand copy.
 
-## 5. The four things that fail silently
+**Which of those two it is, the hook already answered.** It writes
+`~/.claude/skills/.skills-bootstrap-installed.json` — one entry per skill it
+installed, with the registry it was fetched from, the bundle, and the digest
+the bytes had when it verified them. Run the reader rather than reconstructing
+it:
+
+```bash
+python3 -I scripts/check_provenance.py --lock skills.lock
+```
+
+**That path is relative to this skill's own directory, not to the repo you are
+standing in** — `~/.claude/skills/skills-doctor/scripts/` when the hook
+delivered it, `plugins/adam/skills/skills-doctor/scripts/` in a registry
+checkout. Resolve it before running: the registry has a top-level `scripts/` of
+its own, so the bare form run from the repo root reports `No such file or
+directory` and exits 2, which is also argparse's code for a bad flag.
+
+`-I` because this recomputes sha256 over directories to decide whether a skill
+is still the bytes that were installed, and without it `sys.path[0]` is **the
+script's own directory** — which for a delivered skill is content a fetched
+registry supplied. A `hashlib.py` dropped in beside it would be what answers.
+(The hook carries `-I` for the neighbouring reason: it runs `python3 -I -`, so
+`sys.path[0]` would be the *project* directory instead.)
+
+Exit 1 means *there are findings*, not that the tool failed; 0 means none.
+`--skills-dir` and `--project-dir` point it at a store and a project other than
+this machine's.
+
+Produce one row per expected skill, and report `registry` and `bundle` on it,
+not just the channel — "personal copy" does not say whether it came from the
+fleet registry, a federated one, or somebody's hand, and "loaded" without a
+source is not a diagnosis. A row the record names is **fact**: it is the
+writer's own account of what it wrote, not an inference from the filesystem.
+
+**These readings are different machines, not shades of one thing.** Do not
+collapse them into "no record":
+
+| State | What it proves | What to do |
+|---|---|---|
+| present | the hook installed exactly these, from these sources | nothing; read the rows as fact |
+| present, `installed: []` | a run *completed* and installed nothing | anything on disk is not the hook's |
+| absent | no run has ever reached the point of writing it | expected on a durable machine; on an ephemeral one read the session-start `skills:` verdict for why delivery never happened |
+| unreadable | the hook cannot read it either: it pruned nothing that run, and rewrites it from scratch at the next session start | start one clean session — it self-heals in one run, but everything from before the corruption is forgotten, so anything that left the lock in that window is now left alone forever. Still unreadable after that? The rewrite happens LAST, after the lock read, the git probe and the fetch, so that run never got there: read its `skills:` verdict |
+
+The lock has states of its own, and one of them is not a shade of "no lock":
+a file that parses as JSON but that the hook's reader **refuses** — no
+`bundles`, a bundle no source claims, a registry that is not `OWNER/REPO` or a
+URL. It installs nothing at all from such a lock, so every skill judgement made
+against one names a cause that never happened. `check_provenance.py` reports it
+as `lock-rejected` and withholds the rest.
+
+Only when the record cannot answer — absent, or unreadable — does the old
+heuristic apply: directories the hook wrote in one run share an mtime, because
+`cp -R` stamps the copy with the copy time. It is inference and the reader must
+be told so. It degrades in both
+directions — a hand copy made in the same minute as an install clusters with
+the install, and a hook-installed skill an editor has touched since falls out
+of the cluster — and neither failure announces itself. That is the whole reason
+the record exists; never prefer the cluster to it.
+
+## 5. The five things that fail silently
 
 ### Shadowing
 
@@ -112,6 +172,30 @@ comm -12 <(ls -1 ~/.claude/skills) <(ls -1 .claude/skills)
 
 Every name printed is a shadowed repo-owned skill. Report each one with both
 paths and say which copy is winning (the personal one, always).
+
+### Skills nothing will ever remove
+
+The hook removes a skill that has left the lock only when it can prove all four
+of: the record says it installed it, the bytes are still exactly what it
+installed, the lock still declares that (registry, bundle), and the lock no
+longer names it. Everything else it leaves alone — correctly, because
+`~/.claude/skills` is the user's own directory and deleting work to satisfy a
+lock they may not control is the worse failure.
+
+The consequence is that directories live there permanently with nothing saying
+so — a skill the record does not name at all, one whose bytes no longer match
+what was installed, one whose (registry, bundle) the lock has stopped declaring.
+The causes differ and so does what to do about each, which is why
+`check_provenance.py` names the cause rather than just the count. Read its
+FINDINGS section; the hook being right not to act is exactly why a human has to
+see them.
+
+Two of these are easy to state backwards. What preserves an edited skill is the
+**digest mismatch**, not its having left the lock — restore the original bytes
+and the next run removes it, so moving it out of the store is the only way to
+keep it. And a skill whose bundle the lock no longer claims is not merely
+unremoved: it is out of scope, so the hook does not mention it in any verdict
+either, and nothing will ever say it is there.
 
 ### Staleness of the account store
 
@@ -171,9 +255,15 @@ One verdict line, then the evidence:
 skills-doctor: <n>/<n> expected present, <n> shadowed, <n> stale, <n> unattributed — OK | DEGRADED
 ```
 
-Then: the surface and what it implies; a table of expected skill → channel →
-status; each finding with the file path and the knob that fixes it. Close with
-the context-cost figure. No remediation is performed — recommend, do not do.
+Then: the surface and what it implies; a table of expected skill → source →
+status, where source is the `registry # bundle` the record names and not merely
+the channel; each finding with the file path and the knob that fixes it. Say
+which record state the attribution rests on, because it is what separates a
+report that is fact from one that is inference. **Where there is no readable
+record, write `<n> unattributable`, never `0 unattributed`** — the zero is
+arithmetically true and reads as "everything is accounted for", which is the
+exact inversion. Close with the context-cost
+figure. No remediation is performed — recommend, do not do.
 
 ## Traps that will mislead you
 
@@ -192,3 +282,20 @@ the context-cost figure. No remediation is performed — recommend, do not do.
   what the bootstrap installed and verified. It knows nothing about the account
   store, the marketplace, or shadowing, so it is a starting point and never the
   whole answer.
+- **The record's `registry` is a resolved git remote URL; the lock's is a
+  slug.** A lock saying `Adam-S-Daniel/agentskills` produces record entries
+  saying `https://github.com/Adam-S-Daniel/agentskills.git`, and the verdict
+  prints the slug again. Compare them with `==` and every skill reads as coming
+  from a registry its own lock does not declare.
+- **`AGENTSKILLS_BUNDLE` narrows a run and nothing on disk records that it
+  did.** A run narrowed to one bundle claims authority over that bundle only
+  and deliberately leaves every other bundle's skills alone — so a skill that
+  has left the lock can sit there indefinitely while any reading of the record
+  and the lock says the next run will remove it. The hook names it in that
+  run's verdict; no later inspection can recover it.
+- **The record's digest is the one taken at install and is never refreshed.**
+  That is what makes "edited since install" detectable at all: re-recording the
+  edited digest would make the next run's comparison succeed and delete the
+  user's work. So a digest mismatch against the record means *edited*, while a
+  mismatch against the **lock** means the copy predates the current lock — two
+  different facts from the same number.

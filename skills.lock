@@ -1,6 +1,6 @@
 {
   "registry": "Adam-S-Daniel/agentskills",
-  "ref": "9d024c34fe6ea55daaf372e16eddf698bd95991d",
+  "ref": "216e519cb21558ac63040bf31549bde5263f7a70",
   "bundles": [
     "adam"
   ],
@@ -11,9 +11,9 @@
     "adam/github-actions-repo-settings": "4711abccdea94761a17c276127f52d95ffcba2b8364f8879fbab2747a6b8d4cf",
     "adam/pin-actions-to-sha": "024a5700be8310504da906220b3fca643747ada4ca8518982de88cb30b2f4042",
     "adam/review-bash-ci-reliability": "1e1c2993689cfe79b6f1345de09101ff7d3b4b902a34ae5b458ee86e3f28f8b9",
-    "adam/skills-doctor": "daf38b04be2596c85992f41afee102927ea1b1add6722cf1b73940b20eda1d93",
+    "adam/skills-doctor": "37aeccfd4e1b8801a751e0154a9ebd4c0db20e42dc68443bafe7e7c98f8fbff9",
     "adam/workflow-path-audit": "0184dec4c31eb20aea274d6b5f83bd725390c500e5e3beabe488e5a16a794c5e",
     "adam/writing-adrs": "4e9a4b9472bd3d92501bf0d7f882544ba66e8b03aa48bac7fa1689c45d903820"
   },
-  "generated_from": "9d024c34fe6ea55daaf372e16eddf698bd95991d"
+  "generated_from": "216e519cb21558ac63040bf31549bde5263f7a70"
 }
