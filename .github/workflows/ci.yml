@@ -73,6 +73,21 @@ jobs:
       # HEAD. That is deliberate: the lock pins an immutable commit and is
       # re-pinned as its own step, so it normally lags main, and in CI HEAD is
       # a merge commit that is never the pinned SHA.
+      #
+      # FEDERATED LOCKS NEED A SECOND PRECONDITION, of exactly the same kind.
+      # A lock with a `sources` array draws on more than one registry, and this
+      # step reads every source's content out of git — so each one needs a local
+      # checkout, found at the sibling `../<repo-name>` or named with
+      # `--source-repo '<bundles>=<path>'`. Neither flag is passed here (nothing
+      # is: registry, ref, bundles and the whole `sources` array are inherited
+      # from the lock), so the day skills.lock federates, BOTH steps below need
+      # that source checked out beside the workspace — the way the
+      # skills-conformance job already clones ../cms-platform — or they exit 1
+      # with "no checkout at ...". This repo's lock has no `sources` today, which
+      # makes that latent rather than fixed; scripts/test_generate_skills_lock.py
+      # covers it in the pytest job, hermetically, from both directions
+      # (test_the_ci_lock_checks_pass_on_a_federated_lock and
+      # test_the_ci_lock_checks_say_how_to_fix_a_missing_source_checkout).
       - name: Check skills.lock is faithful to its pinned ref
         run: python3 scripts/generate_skills_lock.py --check
       # The step above is structurally BLIND to a stale pin, which is the
@@ -87,7 +102,8 @@ jobs:
       #
       # Uses the same `fetch-depth: 0` as --check, and for the same reason: it
       # reads the pinned commit out of the object store, which a shallow clone
-      # does not contain.
+      # does not contain. It needs a federated source's checkout for the same
+      # reason too — see the note on the step above.
       #
       # The ordering this implies, when a skill changes: change the bundle
       # content -> commit -> regenerate the lock, which pins THAT commit ->
@@ -172,6 +188,20 @@ jobs:
       # plugins/adam-local/skills/rename-pdfs/scripts/test_extract_pdf_context.py,
       # which needs the heavy optional `pypdf` dependency — hence targeting
       # tests/ dirs plus scripts/ instead of everything.
+      #
+      # This job is also where the FEDERATED (multi-registry) lock path is
+      # covered — the lock steps in the consistency job cannot cover it, because
+      # this repo's own skills.lock has no `sources` yet.
+      # scripts/test_generate_skills_lock.py builds `file://` fixture registries
+      # in tmp, generates a federated lock against them, and runs `--check`,
+      # `--check-current` and the bootstrap hook end to end (SKILLS_BOOTSTRAP_FORCE
+      # with a scratch HOME) — no network, no sibling clone. Deliberately a test
+      # rather than a separate CI job: the fixture registries, the scratch-HOME
+      # discipline (`_run_hook` REFUSES to run without a tmp home) and the verdict
+      # parsing all already exist there, so a job would be a second, drifting copy
+      # of them; and this step targets a DIRECTORY, so a new federated test is
+      # picked up with no edit here — which a hand-listed job is exactly what
+      # this comment's opening paragraph says goes wrong.
       - name: Run every test suite in the repo
         run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ -q
 
@@ -183,8 +213,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run shellcheck
         run: |
+          # DELIBERATELY REPO-WIDE — do not narrow this back to `setup.sh` plus
+          # `find plugins`. That pair matched .claude/hooks/skills-bootstrap.sh
+          # NEITHER way (it is not setup.sh and it is not under plugins/), so the
+          # riskiest bash in the repo — a SessionStart hook that runs with no
+          # approval prompt on every ephemeral surface and turns skills.lock
+          # fields into git remote URLs and filesystem paths — was never linted
+          # here at all. Same reasoning as the pytest job above: the target is a
+          # TREE, not a list of paths, so a new *.sh added anywhere is picked up
+          # with no edit here and cannot silently go unchecked.
+          #
+          # The file list is printed first so the run log shows what was covered.
+          # This step's whole failure mode was coverage nobody could see.
+          #
+          # No `--no-run-if-empty`, on purpose: if the find ever matches nothing,
+          # shellcheck exits 1 ("No files specified") instead of passing on an
+          # empty set — a green step that checked nothing is the bug being fixed.
+          #
           # -S error: two SC2088 (tilde-in-quotes) *warnings* exist today in
           # plugins/adam-local/skills/migrate-claude-memory/scripts/memory-migrate.sh
           # (lines 90, 93) — pre-existing, out of scope for this change. Errors still fail CI.
-          shellcheck -S error setup.sh
-          find plugins -name '*.sh' -print0 | xargs -0 --no-run-if-empty shellcheck -S error
+          echo "shellcheck will lint:"
+          find . -path ./.git -prune -o -name '*.sh' -print | sort
+          find . -path ./.git -prune -o -name '*.sh' -print0 | xargs -0 shellcheck -S error
