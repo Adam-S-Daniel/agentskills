@@ -17,9 +17,14 @@ jobs:
         with:
           node-version: '22'
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+        # Pinned: the CLI version is sometimes the variable under test (see
+        # docs/experiments/), so validation results must be reproducible rather
+        # than silently re-baselined by whatever `latest` resolves to today.
+        # 2.1.223 is the `stable` dist-tag, published 2026-08-05 — old enough to
+        # satisfy this repo's 7-day dependency cooling-off as of 2026-08-14.
+        run: npm install -g @anthropic-ai/claude-code@2.1.223
       - name: Validate marketplace and plugins
-        run: claude plugin validate .
+        run: claude plugin validate . --strict
 
   consistency:
     runs-on: ubuntu-latest
@@ -28,10 +33,44 @@ jobs:
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
         with:
           python-version: '3.12'
+      - name: Install PyYAML
+        # generate_readme_table.py parses SKILL.md frontmatter with PyYAML.
+        run: python3 -m pip install pyyaml==6.0.3
       - name: Check marketplace/filesystem consistency
         run: python3 scripts/check_consistency.py
       - name: Check README plugin table is up to date
         run: python3 scripts/generate_readme_table.py --check
+
+  skills-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
+        with:
+          python-version: '3.12'
+      - name: Install Python dependencies
+        # markdown-it-py: the census parses SKILL.md bodies with a real
+        # CommonMark parser rather than regex.
+        run: python3 -m pip install pyyaml==6.0.3 markdown-it-py==4.2.0
+      - name: Check out sibling registries for the cross-registry census
+        # Cloned to ../<repo>, OUTSIDE the workspace checkout, so the trees being
+        # audited never pollute the one under test — and that is exactly where
+        # scripts/skills_registries.yml expects them by default. Both repos are
+        # public, so a plain anonymous shallow clone is simpler than
+        # actions/checkout here and needs no token scoping.
+        run: |
+          git clone --depth 1 --filter=blob:none --quiet https://github.com/Adam-S-Daniel/cms-platform.git ../cms-platform
+          git clone --depth 1 --filter=blob:none --quiet https://github.com/Adam-S-Daniel/adamdaniel.ai.git ../adamdaniel.ai
+      - name: Run the skills conformance census
+        # Deliberately NO --private-registry, deviating from issue #55's checklist:
+        # agentskills-private is a private repo and public-repo CI has no token to
+        # clone it, so pointing the flag at a nonexistent path would only exercise
+        # check_consistency.py's silent-SKIP branch — the exact "green-by-default
+        # when the path is absent" anti-pattern umbrella issue #54 criticises in
+        # platform-drift-guard.yml. Instead the census declares that registry as
+        # `optional:` with a `reason:`, so its absence is REPORTED in this run's
+        # output rather than passing silently.
+        run: python3 scripts/check_skills.py
 
   pytest:
     runs-on: ubuntu-latest
