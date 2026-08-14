@@ -30,6 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
+        with:
+          # Full history — required by the skills.lock check below, NOT an
+          # oversight. See the comment on that step before shortening this.
+          fetch-depth: 0
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
         with:
           python-version: '3.12'
@@ -40,6 +44,23 @@ jobs:
         run: python3 scripts/check_consistency.py
       - name: Check README plugin table is up to date
         run: python3 scripts/generate_readme_table.py --check
+      # Nothing else asserts that skills.lock is coherent, so without this it
+      # can be hand-edited or drift — the same rot the conformance gate's
+      # stale-waiver rule prevents on the other side.
+      #
+      # Needs `fetch-depth: 0` on the checkout above: --check reads the skill
+      # content out of the git object store AT THE COMMIT THE LOCK PINS, and a
+      # shallow clone contains only the tip, so the pinned commit is simply not
+      # there. The failure that produces is confusing rather than obvious — it
+      # surfaces as "cannot resolve ref <sha>" — so do not "optimise" the
+      # checkout back to a shallow one.
+      #
+      # It asserts the lock is faithful to the ref it PINS, not that it pins
+      # HEAD. That is deliberate: the lock pins an immutable commit and is
+      # re-pinned as its own step, so it normally lags main, and in CI HEAD is
+      # a merge commit that is never the pinned SHA.
+      - name: Check skills.lock is faithful to its pinned ref
+        run: python3 scripts/generate_skills_lock.py --check
 
   skills-conformance:
     runs-on: ubuntu-latest
