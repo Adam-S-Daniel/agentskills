@@ -217,6 +217,22 @@ def test_digest_cli_matches_the_library(tmp_path):
     assert proc.stdout.strip() == gsl.digest_skill_dir(skill)
 
 
+def test_the_digest_itself_still_counts_a_build_artefact(tmp_path):
+    """A fix that taught the hasher to skip artefacts would desync the hook.
+
+    `digest_skill_dir` with no `skip` must keep hashing everything under a
+    directory, `__pycache__` included — the hook's inline `digest_dir` hashes
+    `~/.claude/skills`, where nothing is gitignored, so any exclusion has to
+    live on the caller's side (`--check-current`'s `skip=`), never inside the
+    hash function the two copies share.
+    """
+    skill = tmp_path / "skill"
+    _write(skill / "SKILL.md", "body\n")
+    before = gsl.digest_skill_dir(skill)
+    _write(skill / "__pycache__" / "x.pyc", "not really bytecode\n")
+    assert gsl.digest_skill_dir(skill) != before
+
+
 # --------------------------------------------------------------------------
 # lock generation
 # --------------------------------------------------------------------------
@@ -263,6 +279,27 @@ def test_content_comes_from_the_pinned_ref_not_the_working_tree(registry, tmp_pa
     _write(root / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md", "TAMPERED\n")
     assert run_generator("--repo", str(root), "--ref", sha, "-o", str(out)).returncode == 0
     assert json.loads(out.read_text(encoding="utf-8"))["skills"]["adam/alpha"] == pinned
+
+
+def test_the_lock_is_not_poisoned_by_build_artefacts_in_the_working_tree(registry, tmp_path):
+    """The correction of record for issue #81, as a test rather than a claim.
+
+    Commit `0684a6e` and PR #79's body both said regenerating with build
+    artefacts present would pin their digests, "after which no clean checkout
+    can satisfy it". It cannot: the generator reads content out of
+    `git archive <ref>`, which has never heard of an untracked file. The lock
+    a poisoned-looking tree writes is the lock a pristine one writes.
+    """
+    root, sha = registry
+    clean = tmp_path / "clean.lock"
+    assert run_generator("--repo", str(root), "--ref", sha, "-o", str(clean)).returncode == 0
+
+    _write(root / "plugins" / "adam" / "skills" / "alpha" / "__pycache__" / "x.pyc", "junk\n")
+    dirty = tmp_path / "dirty.lock"
+    assert run_generator("--repo", str(root), "--ref", sha, "-o", str(dirty)).returncode == 0
+
+    assert dirty.read_bytes() == clean.read_bytes()
+    assert run_generator("--repo", str(root), "--check", "-o", str(dirty)).returncode == 0
 
 
 def test_unresolvable_ref_reports_an_error_rather_than_a_traceback(registry, tmp_path):
@@ -531,6 +568,26 @@ def test_check_current_reports_a_change_in_a_federated_source(federated, tmp_pat
     assert "changed" in proc.stdout
     # Named with ITS ref, not the primary's, so the message says what to re-pin.
     assert extra_sha in proc.stdout
+
+
+def test_check_current_ignores_a_build_artefact_in_a_federated_source(federated, tmp_path):
+    """Each source has its own repo and its own ignore rules, so each is asked.
+
+    An ignore set computed once — from the primary — would pass every
+    single-source test and then red-fail the first consumer whose federated
+    registry someone had run a test suite in.
+    """
+    primary, _, extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(extra / ".gitignore", "__pycache__/\n")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "ignore build artefacts")
+    _write(extra / "skills" / "deploy" / "__pycache__" / "x.pyc", "junk\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 # --------------------------------------------------------------------------
@@ -930,6 +987,67 @@ def test_check_current_failure_names_the_re_pin_command(registry, tmp_path):
     proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
     assert proc.returncode == 1
     assert "scripts/generate_skills_lock.py" in proc.stdout
+
+
+def test_ignored_paths_reports_a_git_failure_rather_than_returning_nothing(tmp_path):
+    """Failing open here would be a silent downgrade, not a safe default.
+
+    An empty set reads exactly like "git ignores nothing", so a broken query
+    would quietly restore the false positive this exists to remove — and the
+    message would still be about the bundle having moved on.
+    """
+    with pytest.raises(gsl.GeneratorError) as failure:
+        gsl.ignored_paths(tmp_path)
+    assert "ls-files" in str(failure.value)
+
+
+def _registry_ignoring_pycache(root: Path) -> str:
+    """A fixture registry that gitignores build artefacts, as the real one does.
+
+    Committed rather than left loose, so the ignore rule is part of the fixture
+    and no test here depends on whatever `core.excludesFile` the machine has.
+    """
+    _write(root / ".gitignore", "__pycache__/\n")
+    return make_registry(root, {"adam/alpha": SKILL_A, "adam/beta": SKILL_B})
+
+
+def test_check_current_ignores_what_git_ignores(tmp_path):
+    """Issue #81: a local test run left `__pycache__` behind and reddened this.
+
+    `git status` showed nothing, so the check was reporting bytes that can
+    never reach the pinned ref — it cleared with `rm -rf` and came straight
+    back on the next run, which is how a check gets muted.
+    """
+    root = tmp_path / "registry"
+    _registry_ignoring_pycache(root)
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "alpha" / "__pycache__" / "x.pyc", "junk\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_check_current_still_flags_an_untracked_file_git_does_not_ignore(tmp_path):
+    """Excluding more than git ignores would delete the reason this flag exists.
+
+    The file-level half of the untracked-still-counts property that
+    `test_check_current_flags_a_skill_added_to_the_working_tree` pins at the
+    directory level: ask git which files are IGNORED, never merely which are
+    untracked.
+    """
+    root = tmp_path / "registry"
+    _registry_ignoring_pycache(root)
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "alpha" / "notes-draft.md", "draft\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "adam/alpha" in proc.stdout
+    assert "changed" in proc.stdout
 
 
 def test_check_is_blind_to_what_check_current_catches(registry, tmp_path):
