@@ -192,6 +192,23 @@ Pinning and bumping third-party action SHAs is the `pin-actions-to-sha` skill.
 - Write concise commit messages that explain *why*, not just *what*.
 - One logical change per commit.
 - Do not amend published commits or force-push shared branches.
+- **Merge with a merge commit — `gh pr merge --merge`.** Squash and rebase are
+  disabled on every fleet repo, so `--squash` fails rather than falling back;
+  do not try it, and do not offer it as a choice. The exceptions are the three
+  cms-platform-managed repos (`cms-platform`, `adamdaniel.ai`,
+  `jodidaniel.com`), where squash stays enabled because the Decap publish chain
+  arms SQUASH auto-merge on every editorial PR and squash is what collapses an
+  editor's many per-save commits into one `publish: <title>` commit. Merge
+  commits work there too, so `--merge` is the one form that works everywhere.
+
+  Squash is off elsewhere because it is actively unsafe for a repo that pins
+  commits by sha: it collapses a branch into a new commit and strands the
+  originals on no branch, so a lockfile naming the pre-merge content commit
+  (agentskills' `skills.lock`) ends up pinning something a fresh clone of the
+  default branch does not contain. Measured on throwaway clones 2026-08-15 —
+  `generate_skills_lock.py --check` then fails with `cannot resolve ref`.
+  Settings are enforced as code: `repo-settings`' `fleet.yml` for the fleet,
+  `cms-platform`'s `repo-settings.yml` for the three above.
 
 <!-- END MANAGED SECTION -->
 ## Repo-specific additions
