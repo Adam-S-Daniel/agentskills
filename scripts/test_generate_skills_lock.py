@@ -217,6 +217,22 @@ def test_digest_cli_matches_the_library(tmp_path):
     assert proc.stdout.strip() == gsl.digest_skill_dir(skill)
 
 
+def test_the_digest_itself_still_counts_a_build_artefact(tmp_path):
+    """A fix that taught the hasher to skip artefacts would desync the hook.
+
+    `digest_skill_dir` with no `skip` must keep hashing everything under a
+    directory, `__pycache__` included — the hook's inline `digest_dir` hashes
+    `~/.claude/skills`, where nothing is gitignored, so any exclusion has to
+    live on the caller's side (`--check-current`'s `skip=`), never inside the
+    hash function the two copies share.
+    """
+    skill = tmp_path / "skill"
+    _write(skill / "SKILL.md", "body\n")
+    before = gsl.digest_skill_dir(skill)
+    _write(skill / "__pycache__" / "x.pyc", "not really bytecode\n")
+    assert gsl.digest_skill_dir(skill) != before
+
+
 # --------------------------------------------------------------------------
 # lock generation
 # --------------------------------------------------------------------------
@@ -263,6 +279,27 @@ def test_content_comes_from_the_pinned_ref_not_the_working_tree(registry, tmp_pa
     _write(root / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md", "TAMPERED\n")
     assert run_generator("--repo", str(root), "--ref", sha, "-o", str(out)).returncode == 0
     assert json.loads(out.read_text(encoding="utf-8"))["skills"]["adam/alpha"] == pinned
+
+
+def test_the_lock_is_not_poisoned_by_build_artefacts_in_the_working_tree(registry, tmp_path):
+    """The correction of record for issue #81, as a test rather than a claim.
+
+    Commit `0684a6e` and PR #79's body both said regenerating with build
+    artefacts present would pin their digests, "after which no clean checkout
+    can satisfy it". It cannot: the generator reads content out of
+    `git archive <ref>`, which has never heard of an untracked file. The lock
+    a poisoned-looking tree writes is the lock a pristine one writes.
+    """
+    root, sha = registry
+    clean = tmp_path / "clean.lock"
+    assert run_generator("--repo", str(root), "--ref", sha, "-o", str(clean)).returncode == 0
+
+    _write(root / "plugins" / "adam" / "skills" / "alpha" / "__pycache__" / "x.pyc", "junk\n")
+    dirty = tmp_path / "dirty.lock"
+    assert run_generator("--repo", str(root), "--ref", sha, "-o", str(dirty)).returncode == 0
+
+    assert dirty.read_bytes() == clean.read_bytes()
+    assert run_generator("--repo", str(root), "--check", "-o", str(dirty)).returncode == 0
 
 
 def test_unresolvable_ref_reports_an_error_rather_than_a_traceback(registry, tmp_path):
@@ -531,6 +568,26 @@ def test_check_current_reports_a_change_in_a_federated_source(federated, tmp_pat
     assert "changed" in proc.stdout
     # Named with ITS ref, not the primary's, so the message says what to re-pin.
     assert extra_sha in proc.stdout
+
+
+def test_check_current_ignores_a_build_artefact_in_a_federated_source(federated, tmp_path):
+    """Each source has its own repo and its own ignore rules, so each is asked.
+
+    An ignore set computed once — from the primary — would pass every
+    single-source test and then red-fail the first consumer whose federated
+    registry someone had run a test suite in.
+    """
+    primary, _, extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(extra / ".gitignore", "__pycache__/\n")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "ignore build artefacts")
+    _write(extra / "skills" / "deploy" / "__pycache__" / "x.pyc", "junk\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 # --------------------------------------------------------------------------
@@ -932,6 +989,84 @@ def test_check_current_failure_names_the_re_pin_command(registry, tmp_path):
     assert "scripts/generate_skills_lock.py" in proc.stdout
 
 
+def test_check_current_failure_names_the_merge_cause(registry, tmp_path):
+    """The local cause is obvious from the tree; the merge cause is not.
+
+    On a freshly merged branch nothing the reader edited explains the red, and
+    the old wording offered no reason to go and look at the base sha.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "gamma" / "SKILL.md", "gamma\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 1
+    assert "merged" in proc.stdout
+
+
+def test_ignored_paths_reports_a_git_failure_rather_than_returning_nothing(tmp_path):
+    """Failing open here would be a silent downgrade, not a safe default.
+
+    An empty set reads exactly like "git ignores nothing", so a broken query
+    would quietly restore the false positive this exists to remove — and the
+    message would still be about the bundle having moved on.
+    """
+    with pytest.raises(gsl.GeneratorError) as failure:
+        gsl.ignored_paths(tmp_path)
+    assert "ls-files" in str(failure.value)
+
+
+def _registry_ignoring_pycache(root: Path) -> str:
+    """A fixture registry that gitignores build artefacts, as the real one does.
+
+    Committed rather than left loose, so the ignore rule is part of the fixture
+    and no test here depends on whatever `core.excludesFile` the machine has.
+    """
+    _write(root / ".gitignore", "__pycache__/\n")
+    return make_registry(root, {"adam/alpha": SKILL_A, "adam/beta": SKILL_B})
+
+
+def test_check_current_ignores_what_git_ignores(tmp_path):
+    """Issue #81: a local test run left `__pycache__` behind and reddened this.
+
+    `git status` showed nothing, so the check was reporting bytes that can
+    never reach the pinned ref — it cleared with `rm -rf` and came straight
+    back on the next run, which is how a check gets muted.
+    """
+    root = tmp_path / "registry"
+    _registry_ignoring_pycache(root)
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "alpha" / "__pycache__" / "x.pyc", "junk\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_check_current_still_flags_an_untracked_file_git_does_not_ignore(tmp_path):
+    """Excluding more than git ignores would delete the reason this flag exists.
+
+    The file-level half of the untracked-still-counts property that
+    `test_check_current_flags_a_skill_added_to_the_working_tree` pins at the
+    directory level: ask git which files are IGNORED, never merely which are
+    untracked.
+    """
+    root = tmp_path / "registry"
+    _registry_ignoring_pycache(root)
+    out = tmp_path / "skills.lock"
+    _lock_for(root, out)
+
+    _write(root / "plugins" / "adam" / "skills" / "alpha" / "notes-draft.md", "draft\n")
+
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "adam/alpha" in proc.stdout
+    assert "changed" in proc.stdout
+
+
 def test_check_is_blind_to_what_check_current_catches(registry, tmp_path):
     """The whole reason --check-current is a SEPARATE flag, in one test.
 
@@ -984,6 +1119,112 @@ def test_check_current_on_an_unreachable_pinned_ref_errors_cleanly(registry, tmp
     assert proc.returncode != 0
     assert "Traceback" not in proc.stderr
     assert "0" * 40 in proc.stderr
+
+
+# --------------------------------------------------------------------------
+# the merge race (issue #80)
+#
+# A re-pin asserts "the tree at ref X is what this lock describes", and the
+# assertion can be falsified by `main` moving rather than by either branch
+# being wrong. These two pin which shapes merge silently and which do not.
+# --------------------------------------------------------------------------
+
+def _repin(root: Path, message: str) -> None:
+    """Regenerate `root`'s committed lock against its own HEAD and commit that."""
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    assert run_generator("--repo", str(root), "--ref", head,
+                         "-o", str(root / "skills.lock")).returncode == 0
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", message)
+
+
+def _edit_and_commit(root: Path, skill: str) -> None:
+    _write(root / "plugins" / "adam" / "skills" / skill / "SKILL.md",
+           f"---\nname: {skill}\n---\n{skill} body, edited\n")
+    _git(root, "commit", "-q", "-am", f"edit {skill}")
+
+
+def _base_repo_with_a_committed_lock(tmp_path: Path) -> Path:
+    """A registry whose two edited skills sit FAR APART in the lock's skills map.
+
+    Deliberately eight skills rather than two: `alpha` and `theta` are five
+    lines apart once the map is serialized, so their digest lines are separate
+    diff hunks and merge cleanly on their own. That leaves `ref` and
+    `generated_from` as the only lines both re-pins rewrite — which is the
+    mechanism `test_two_repinned_branches_conflict_in_the_lock` is about. With
+    two adjacent skills the merge conflicts either way and the test would pass
+    without binding anything.
+    """
+    root = tmp_path / "registry"
+    names = ("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta")
+    make_registry(root, {f"adam/{name}": {"SKILL.md": f"---\nname: {name}\n---\n{name} body\n"}
+                         for name in names})
+    _repin(root, "pin the base")
+    return root
+
+
+def _merge(root: Path, branch: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(root), "merge", "--no-edit", branch],
+                          capture_output=True, text=True)
+
+
+def test_a_merge_can_leave_the_lock_stale_with_no_conflict(tmp_path):
+    """The one shape that merges silently: `main` between a content commit and its re-pin.
+
+    The branch is green on both flags when it is cut and still green when it
+    lands; what changed underneath it is `main`. Nothing conflicts, so nobody
+    is prompted, and the first anyone hears is CI on `main`.
+    """
+    root = _base_repo_with_a_committed_lock(tmp_path)
+    lock = root / "skills.lock"
+
+    _git(root, "checkout", "-q", "-b", "feature")
+    _edit_and_commit(root, "alpha")
+    _repin(root, "re-pin to the alpha edit")
+    assert run_generator("--repo", str(root), "--check", "-o", str(lock)).returncode == 0
+    assert run_generator("--repo", str(root), "--check-current",
+                         "-o", str(lock)).returncode == 0
+
+    # `main` moves onto a DIFFERENT locked skill, and its own re-pin has not
+    # landed yet — so `main` is already red here, before the merge.
+    _git(root, "checkout", "-q", "main")
+    _edit_and_commit(root, "theta")
+
+    merged = _merge(root, "feature")
+    assert merged.returncode == 0, merged.stdout + merged.stderr
+
+    assert run_generator("--repo", str(root), "--check", "-o", str(lock)).returncode == 0
+    proc = run_generator("--repo", str(root), "--check-current", "-o", str(lock))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "adam/theta" in proc.stdout
+
+
+def test_two_repinned_branches_conflict_in_the_lock(tmp_path):
+    """And the shape that does NOT merge silently, which is why this is not urgent.
+
+    When both sides follow the documented order, both re-pins rewrite the same
+    `ref` and `generated_from` lines, so `skills.lock` conflicts even though
+    the two branches touched different skills — a human is forced to look.
+    """
+    root = _base_repo_with_a_committed_lock(tmp_path)
+
+    _git(root, "checkout", "-q", "-b", "feature")
+    _edit_and_commit(root, "alpha")
+    _repin(root, "re-pin to the alpha edit")
+
+    _git(root, "checkout", "-q", "main")
+    _edit_and_commit(root, "theta")
+    _repin(root, "re-pin to the theta edit")
+
+    merged = _merge(root, "feature")
+    assert merged.returncode != 0, merged.stdout + merged.stderr
+    conflicted = subprocess.run(
+        ["git", "-C", str(root), "diff", "--name-only", "--diff-filter=U"],
+        check=True, capture_output=True, text=True).stdout.split()
+    assert "skills.lock" in conflicted
+    # The skills themselves merge cleanly; it is the lock that catches it.
+    assert not [path for path in conflicted if path.startswith("plugins/")]
 
 
 def test_check_on_a_missing_lock_errors_cleanly(tmp_path):

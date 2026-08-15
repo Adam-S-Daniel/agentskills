@@ -105,13 +105,33 @@ skills, when they differ. The two flags assert different things and both are
 wanted — together they mean "the lock is honest AND the lock is current".
 
 It reads the working tree verbatim, which is the point (a brand-new skill
-directory is untracked, and must still count). The corollary is that anything
-else sitting inside a skill directory counts too — leave a `__pycache__` there
-and that skill reports as changed.
+directory is untracked, and must still count). What git itself ignores is
+excluded from that read — `ignored_paths` asks `git ls-files --others
+--ignored --exclude-standard`, not a fixed list maintained here — so leaving a
+`__pycache__` behind after a local test run no longer reds the check. Anything
+untracked and NOT ignored still counts, which is the brand-new-skill case the
+first sentence names.
 
 Order of operations this creates: change bundle content -> commit -> regenerate
 the lock, pinning THAT commit -> commit the lock. The lock commit only touches
 `skills.lock`, so the bundle content at the pinned commit stays current.
+
+A re-pin is an assertion — "the tree at this ref is what the lock now
+describes" — and it holds only while nothing else touches a locked skill
+between the content commit and the re-pin. A base that has already moved is
+worth checking before a merge, not after one goes wrong.
+
+Two measured outcomes fall out of that, and only one merges silently. When
+both branches carry a proper pair (content plus its own re-pin), `skills.lock`
+conflicts on every merge, because both sides rewrite the same `ref` and
+`generated_from` lines, and a human is forced to look — true whether the two
+pairs touch the same skill or different ones. A clean merge instead needs
+`main` to already be sitting between a content commit and its re-pin — already
+red on `--check-current` — before the merge lands; merging a different locked
+skill's pair into that state merges cleanly, and the result is red, naming the
+newly pinned ref. The merge itself never manufactures a red check out of two
+green branches; it carries an already-red `main` past the point where someone
+was looking, and relabels which ref the complaint names.
 
 The digest
 ----------
@@ -171,6 +191,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -232,7 +253,7 @@ class GeneratorError(Exception):
     """A user-facing failure: reported as a message, never a traceback."""
 
 
-def digest_skill_dir(path: Path) -> str:
+def digest_skill_dir(path: Path, skip: frozenset = frozenset()) -> str:
     """Return the sha256 digest of a skill directory. See module docstring.
 
     MIRRORED, line for line, by `digest_dir` in
@@ -240,6 +261,16 @@ def digest_skill_dir(path: Path) -> str:
     itself rather than executing a copy of this file it just fetched.
     `test_the_hooks_inline_digest_matches_the_generators` binds the two; edit
     one and you must edit the other.
+
+    `skip` excludes specific, already-resolved paths from the manifest —
+    `--check-current` passes it the working tree's `ignored_paths` so a
+    gitignored build artefact does not enter the digest at all. The hook has
+    no counterpart to this parameter, and that is not a gap in the mirror: it
+    hashes what it just installed, under `~/.claude/skills`, where there is no
+    git repository and therefore no ignore rules to ask about — the filtering
+    is a caller-side concern that only exists on the git-backed side. The
+    ALGORITHM the two share — walk, sort, concatenate, hash — is untouched by
+    any of this; `skip` only prunes what is handed to it.
     """
     root = Path(path).resolve()
     if not root.is_dir():
@@ -248,6 +279,8 @@ def digest_skill_dir(path: Path) -> str:
     for candidate in root.rglob("*"):
         if not candidate.is_file():
             continue  # directories carry no bytes; broken symlinks carry none either
+        if candidate in skip:
+            continue
         entries.append((candidate.relative_to(root).as_posix(), candidate))
     manifest = "".join(
         f"{relpath}\0{hashlib.sha256(file_path.read_bytes()).hexdigest()}\n"
@@ -290,6 +323,53 @@ def materialize(repo: Path, ref: str, dest: Path) -> None:
             archive.extractall(dest, filter="data")
         except TypeError:  # Python < 3.11.4 has no extraction filters
             archive.extractall(dest)
+
+
+def ignored_paths(repo: Path) -> frozenset:
+    """Every path under `repo` that git ignores, as absolute paths.
+
+    `--others` restricts the query to untracked files, so a TRACKED file can
+    never come back from this — gitignore does not apply to tracked content,
+    and `git archive` ships it regardless of what a local `.gitignore` says.
+    `--ignored` then narrows untracked down to the ones git actually ignores,
+    which is the distinction that matters: an untracked-but-NOT-ignored file
+    is exactly what a brand-new skill directory looks like, and it must keep
+    counting as a difference. A fixed list — `{__pycache__, .pytest_cache,
+    *.pyc}` — was the alternative; asking git instead is what keeps this
+    honest when the ignore rules change, rather than drifting the moment
+    somebody adds a new build tool with its own cache directory.
+
+    What this can never do is HIDE a real difference, which is the only
+    direction that would matter: everything present at the pinned ref is
+    tracked there, and a tracked path is exactly what `--others` excludes from
+    this set. Measured on the awkward case — a file committed at the pinned ref
+    and later `git rm --cached`ed while still matching an ignore rule — the
+    pinned side still carries it, the working side no longer does, and
+    `--check-current` reports the skill as changed.
+
+    `--exclude-standard` also honours `core.excludesFile` and
+    `.git/info/exclude`, so a developer whose `__pycache__` rule lives in their
+    global config is covered too — measured, not assumed. The cost is that a
+    file someone has globally ignored stops counting here; the reason that is
+    acceptable is the paragraph above. Such a file cannot be committed without
+    `-f`, so it can never reach a pinned ref for this check to be wrong about.
+
+    `-z` NUL-terminates each record and emits raw, unquoted bytes, so a path
+    that is not valid UTF-8 — the suite's own fixtures carry one — still comes
+    back intact; `os.fsdecode` is the matching decode on this side.
+    """
+    proc = _git(repo, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+    if proc.returncode != 0:
+        raise GeneratorError(
+            f"git ls-files --ignored failed in {repo}: "
+            f"{proc.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    root = Path(repo).resolve()
+    return frozenset(
+        root / os.fsdecode(name)
+        for name in proc.stdout.split(b"\0")
+        if name
+    )
 
 
 def _reject_control(value: str, where: str) -> None:
@@ -379,7 +459,8 @@ def layout_dir(layout: str, bundle: str) -> str:
 
 
 def collect_skills(
-    tree_root: Path, bundles: Iterable[str], layout: str = DEFAULT_LAYOUT
+    tree_root: Path, bundles: Iterable[str], layout: str = DEFAULT_LAYOUT,
+    skip: frozenset = frozenset()
 ) -> Dict[str, str]:
     """Map '<bundle>/<skill>' -> digest for every skill in `bundles`.
 
@@ -418,7 +499,7 @@ def collect_skills(
                     "installs nothing, so it must not be written; rename the "
                     "directory, or move it out of the bundle's skills/ root"
                 )
-            skills[f"{bundle}/{skill_dir.name}"] = digest_skill_dir(skill_dir)
+            skills[f"{bundle}/{skill_dir.name}"] = digest_skill_dir(skill_dir, skip=skip)
     return dict(sorted(skills.items()))
 
 
@@ -656,7 +737,14 @@ def check_current(
             tree_root = Path(scratch)
             materialize(source["path"], source["ref"], tree_root)
             pinned = collect_skills(tree_root, source["bundles"], source["layout"])
-        here = collect_skills(source["path"], source["bundles"], source["layout"])
+        # The pinned side needs no ignore filtering of its own: it is
+        # materialised by `git archive`, which emits only tracked files, so an
+        # ignored path cannot be in it to begin with. Passing the working
+        # tree's ignore set into that scratch extraction would be a no-op with
+        # a cost, and the paths would not even line up — they are rooted under
+        # this source's repo, not under the scratch `tree_root`.
+        here = collect_skills(source["path"], source["bundles"], source["layout"],
+                              skip=ignored_paths(source["path"]))
         working.update(here)
         at = source["ref"]
         for name in sorted(set(here) - set(pinned)):
@@ -749,7 +837,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "skill was added is faithful to its ref (so --check is green) "
                              "while that skill reaches no ephemeral surface at all. The "
                              "working tree is read verbatim, so an untracked skill directory "
-                             "counts — and so does anything else left inside one.")
+                             "counts; what git ignores is excluded, so a local __pycache__ "
+                             "does not.")
     parser.add_argument("--digest", metavar="DIR", default=None,
                         help="print the sha256 digest of one skill directory and exit "
                              "(the bootstrap hook's integrity check calls this)")
@@ -821,6 +910,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       "pins — nothing added or changed since then reaches an ephemeral "
                       "surface. Re-pin it (after committing the content) with:")
                 print("  python3 scripts/generate_skills_lock.py")
+                print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
+                print("  before another commit touched a locked skill: the lock is still faithful")
+                print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
                 for line in differences:
                     print(f"  - {line}")
                 status = 1
