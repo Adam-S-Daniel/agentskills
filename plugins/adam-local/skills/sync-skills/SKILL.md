@@ -349,21 +349,57 @@ older than 6 hours rather than silently trusting it, and prints each
 skill's account `updatedAt` beside its verdict so you can see which upload
 a verdict actually describes.
 
+### What "should be on the account" means
+
+Verdicts are read against **`account-skills.txt`** — the declared list of
+skills that belong on the claude.ai account store, sitting beside
+`sync_skills.py`. Read its header (and
+[ADR 0002](../../../../docs/decisions/0002-limit-account-store-to-repo-independent-skills.md))
+before changing it: adding a line is close to a one-way door, because the
+upload API has no delete.
+
+That declaration is what makes "absent from the account" readable at all.
+It means two opposite things — a **missing upload** for a skill that
+belongs there, and the **correct resting state** for one that doesn't —
+and most of this registry is deliberately in the second category. Without
+the list, `--verify --all` flagged every repo-scoped skill as a failure and
+buried the four real ones under thirteen expected ones.
+
 It prints one line per skill checked and exits non-zero unless every one
 passed:
 
-| Verdict | Meaning |
-| --- | --- |
-| `OK` | Every file present and byte-identical (CRLF normalised). |
-| `DRIFT` | Same files, **different contents** — names the differing paths. |
-| `MISMATCH` | File set differs — lists missing/extra paths. |
-| `FAIL` | Selected but has no account copy: the upload never landed. |
+| Verdict | Declared? | On the account? | Meaning |
+| --- | --- | --- | --- |
+| `OK` | yes | yes | Every file present and byte-identical (CRLF normalised). |
+| `DRIFT` | yes | yes | Same files, **different contents** — names the differing paths. |
+| `MISMATCH` | yes | yes | File set differs — lists missing/extra paths. |
+| `FAIL` … *declared … but NOT on it* | yes | no | The **upload never happened**. Nothing is wrong with the local skill — it just hasn't been pushed. Push it (sections 1/3) and re-verify. |
+| `FAIL` … *ON the account but NOT declared* | no | yes | It was **uploaded without a membership ruling**. Either declare it in `account-skills.txt` or delete it by hand in the claude.ai UI — there is no delete API. |
+| one summary line | no | no | Correct and expected; collapsed to a single `(N not declared …)` line so it never drowns the verdicts. |
+
+**Read the two `FAIL` wordings as different bugs.** *Declared but not on
+it* is a **push you still owe**; `DRIFT`/`MISMATCH` is a **push that landed
+wrong**. Re-uploading fixes the first; the second means the upload path
+itself misbehaved (section 6 truncation is the usual cause) and needs
+investigating before you re-push.
 
 It checks the same skill set you just synced (git-changed by default; pass
 `--all` or `--skill NAME` if that's what you used to sync). Selecting
 nothing, or naming a skill that exists in no repo, is an **error** — a
 silent exit 0 there is indistinguishable from a clean run, which is how a
-broken account passed this gate for months.
+broken account passed this gate for months. So is `--skill NAME` for an
+**undeclared** skill: asking to verify something that isn't supposed to be
+on the account is an operator mistake, not a pass.
+
+`--account-list PATH` points the gate at a different membership list — use
+it to dry-run a proposed membership change before committing one. A path
+that isn't readable is an error rather than a silent fall-back to the
+shipped list.
+
+`--prepare` warns on stderr if the payload contains an undeclared skill. It
+does **not** filter the payload — you decide what to POST — but the warning
+has to arrive before the upload, because `--verify` catching it afterwards
+cannot undo it.
 
 If `--verify` reports anything but `OK`, treat the sync as failed:
 re-upload that skill through section 1/3 (never section 6 — that's what
