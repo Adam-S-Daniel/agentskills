@@ -60,8 +60,9 @@ you switch contexts.)
 2. Run `sync_skills.py --prepare` (via Bash) to get the JSON payload.
 3. For each skill in the payload, call `javascript_tool` to POST the ZIP.
 4. Mark each successfully uploaded skill with `--mark-synced`.
-5. Refresh the account-copy mirror and run `--verify`; a sync isn't done
-   until it reports OK for every skill you just uploaded.
+5. Refresh the account-copy mirror (§7) and run `--verify`; a sync isn't
+   done until it reports `OK` for every skill you just uploaded. The
+   refresh is mandatory — `--verify` against a stale mirror proves nothing.
 6. Report results to the user.
 
 ---
@@ -341,16 +342,38 @@ Then run:
 python3 "$SKILL_DIR/sync_skills.py" --verify
 ```
 
-It prints one line per skill checked — `OK` when the account copy's file
-set matches what `zip_skill()` would upload, `MISMATCH` (with the
-missing/extra paths listed) when it doesn't, `SKIP ... not uploaded` when
-the skill has no account copy yet — and exits non-zero if anything
-mismatched. It checks the same skill set you just synced (git-changed by
-default; pass `--all` or `--skill NAME` if that's what you used to sync).
+**The refresh is not optional.** `--verify` reads that mirror, so skipping
+it compares your uploads against a *pre-upload* snapshot and reports OK for
+things that never landed. `--verify` now refuses to run against a mirror
+older than 6 hours rather than silently trusting it, and prints each
+skill's account `updatedAt` beside its verdict so you can see which upload
+a verdict actually describes.
 
-If `--verify` reports a `MISMATCH`, treat the sync as failed: re-upload
-that skill through section 1/3 (never section 6 — that's what causes
-this), then re-run `--verify` before reporting success to the user.
+It prints one line per skill checked and exits non-zero unless every one
+passed:
+
+| Verdict | Meaning |
+| --- | --- |
+| `OK` | Every file present and byte-identical (CRLF normalised). |
+| `DRIFT` | Same files, **different contents** — names the differing paths. |
+| `MISMATCH` | File set differs — lists missing/extra paths. |
+| `FAIL` | Selected but has no account copy: the upload never landed. |
+
+It checks the same skill set you just synced (git-changed by default; pass
+`--all` or `--skill NAME` if that's what you used to sync). Selecting
+nothing, or naming a skill that exists in no repo, is an **error** — a
+silent exit 0 there is indistinguishable from a clean run, which is how a
+broken account passed this gate for months.
+
+If `--verify` reports anything but `OK`, treat the sync as failed:
+re-upload that skill through section 1/3 (never section 6 — that's what
+causes `MISMATCH`), then re-run `--verify` before reporting success.
+
+Content is compared with CRLF normalised on **both** sides, because the
+account store's line endings vary by upload batch and are not a content
+change. Do **not** "fix" that by normalising newlines in `zip_skill()` —
+that would rewrite the bytes of every upload to chase a legacy artefact of
+one 2026-05-11 batch, and the compare-time normalisation already handles it.
 
 ## 8. Reporting
 
