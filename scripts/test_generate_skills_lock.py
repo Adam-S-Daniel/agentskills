@@ -1859,6 +1859,10 @@ def test_hook_removes_a_stale_copy_when_the_source_is_unreachable(tmp_path, fede
     source that owns `deploy` unreachable, and assert the seeded directory does
     not survive — a verdict that says a skill is unavailable must mean it is not
     there. (Regression for the skip-path-above-the-rm bug.)
+
+    Seeded through `_seed_installed`, so the leftover is one this hook OWNS —
+    see that helper: an unrecorded directory is refused rather than removed now,
+    and that is a different invariant with its own test.
     """
     extra = federated[2]
     project = tmp_path / "project"
@@ -1867,10 +1871,7 @@ def test_hook_removes_a_stale_copy_when_the_source_is_unreachable(tmp_path, fede
     lock["sources"][0]["ref"] = "0" * 40  # cms-platform (owns deploy) unreachable
     lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
     home = tmp_path / "home"
-    _write(
-        home / ".claude" / "skills" / "deploy" / "SKILL.md",
-        "---\nname: deploy\n---\nATTACKER-CONTROLLED STALE BODY\n",
-    )
+    _seed_installed(home, "deploy")
 
     proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
     assert proc.returncode == 0, proc.stderr
@@ -2107,15 +2108,17 @@ def test_a_json_in_the_project_directory_is_not_the_hooks_lock_reader(tmp_path, 
 def test_every_python3_the_hook_launches_is_isolated():
     """A drift alarm on the flag itself, since only two call sites are probed.
 
-    The hook launches python five times — the verdict encoder, the lock reader,
-    the digest, and the two halves of the install record (the prune planner that
-    READS it and the writer that rewrites it) — and every one of them puts the
-    project directory on sys.path without `-I`. The planner is the one this
-    alarm earns its keep on most: a `json.py` in the project directory would
-    otherwise decide which of the user's directories the hook then `rm -rf`s.
+    The hook launches python six times — the verdict encoder, the lock reader,
+    the digest, and the three readers/writers of the install record (the
+    attribution read that decides what the install loop may OVERWRITE, the prune
+    planner that decides what it may REMOVE, and the writer that rewrites it) —
+    and every one of them puts the project directory on sys.path without `-I`.
+    The two that read the record are the ones this alarm earns its keep on most:
+    a `json.py` in the project directory would otherwise decide which of the
+    user's directories the hook then `rm -rf`s.
 
     Matching is lexical and deliberately narrow: an invocation is `python3`
-    followed by a flag, which is the shape all five have (`-c`, `-`) and which
+    followed by a flag, which is the shape all six have (`-c`, `-`) and which
     no prose mention or `command -v python3` probe takes. Comment lines are
     dropped first so the header's own `python3 -I` reference is not counted as a
     call site.
@@ -2124,7 +2127,7 @@ def test_every_python3_the_hook_launches_is_isolated():
         line for line in HOOK.read_text(encoding="utf-8").splitlines()
         if not line.lstrip().startswith("#")
     )
-    assert re.findall(r"\bpython3\s+(-\S+)", code) == ["-I"] * 5
+    assert re.findall(r"\bpython3\s+(-\S+)", code) == ["-I"] * 6
 
 
 # --------------------------------------------------------------------------
@@ -2140,6 +2143,16 @@ def test_every_python3_the_hook_launches_is_isolated():
 # Each test below seeds $HOME/.claude/skills/<name> with junk, drives its path,
 # and asserts the directory is GONE — so deleting that path's `rm -rf` reddens
 # exactly one test and names which skip leaked.
+#
+# The seed is RECORDED as this hook's own install (`_seed_installed`), and that
+# is load-bearing rather than incidental: the install loop no longer touches a
+# destination it cannot attribute to itself, so an UNRECORDED directory is
+# refused outright and reported as `shadowed` — which is a different invariant,
+# covered by `test_the_install_loop_refuses_to_overwrite_what_it_did_not_install`
+# below. What these tests exist for is the other one, that the hook's OWN
+# leftover must not survive a skip, so the fixture has to be a leftover the hook
+# owns. `_seed_stale` stays unrecorded for the `purge_locked_destinations`
+# tests, which deliberately still remove regardless of provenance.
 # --------------------------------------------------------------------------
 
 _STALE = "---\nname: {name}\n---\nATTACKER-CONTROLLED STALE BODY\n"
@@ -2149,6 +2162,31 @@ def _seed_stale(home: Path, name: str) -> Path:
     """Plant an unverified copy where the hook installs, and return its dir."""
     _write(home / ".claude" / "skills" / name / "SKILL.md", _STALE.format(name=name))
     return home / ".claude" / "skills" / name
+
+
+def _seed_installed(home: Path, name: str) -> Path:
+    """`_seed_stale`, plus the install record entry that makes it the HOOK's.
+
+    The digest recorded is the seeded directory's own, which is what "this hook
+    installed it and nobody has touched it since" means on the next run — so the
+    install loop is allowed to replace it, and every `rm -rf` under test is
+    reached. Seed WITHOUT the record and the loop refuses the skill instead,
+    which is the point of the guard, not a way to drive these paths.
+    """
+    path = _seed_stale(home, name)
+    record_path = home / ".claude" / "skills" / _RECORD
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        record = {"version": 1, "installed": []}
+    record["installed"].append({
+        "name": name,
+        "registry": "https://example.test/registry",
+        "bundle": "adam",
+        "digest": gsl.digest_skill_dir(path),
+    })
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def test_hook_removes_the_unverified_copy_on_a_digest_mismatch(tmp_path, registry):
@@ -2166,7 +2204,7 @@ def test_hook_removes_the_unverified_copy_on_a_digest_mismatch(tmp_path, registr
     lock["skills"]["adam/alpha"] = "0" * 64
     lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
     home = tmp_path / "home"
-    stale = _seed_stale(home, "alpha")
+    stale = _seed_installed(home, "alpha")
 
     proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
     assert proc.returncode == 0, proc.stderr
@@ -2181,7 +2219,7 @@ def test_hook_removes_a_stale_copy_when_two_lock_rows_collide(tmp_path):
     """Neither colliding row installs, so neither name may survive either."""
     project = _duplicate_basename_project(tmp_path)
     home = tmp_path / "home"
-    stale = _seed_stale(home, "alpha")
+    stale = _seed_installed(home, "alpha")
 
     proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
     assert proc.returncode == 0, proc.stderr
@@ -2206,7 +2244,7 @@ def test_hook_removes_a_stale_copy_when_the_skill_is_absent_at_the_pinned_ref(
     lock["skills"]["adam/ghost"] = "0" * 64
     lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
     home = tmp_path / "home"
-    stale = _seed_stale(home, "ghost")
+    stale = _seed_installed(home, "ghost")
 
     proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
     assert proc.returncode == 0, proc.stderr
@@ -2230,7 +2268,7 @@ def test_hook_removes_a_stale_copy_that_shadows_a_project_owned_skill(tmp_path, 
     make_project(project, root, sha)
     _write(project / ".claude" / "skills" / "alpha" / "SKILL.md", "repo-owned alpha\n")
     home = tmp_path / "home"
-    stale = _seed_stale(home, "alpha")
+    stale = _seed_installed(home, "alpha")
 
     proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
     assert proc.returncode == 0, proc.stderr
@@ -2882,6 +2920,112 @@ def test_a_hand_edited_skill_that_leaves_the_lock_survives_and_says_why(
     assert third.returncode == 0, third.stderr
     assert "edited since install (alpha)" in _verdict(third), _verdict(third)
     assert _tree(home / ".claude" / "skills" / "alpha") == mine, _verdict(third)
+
+
+def test_the_install_loop_refuses_to_overwrite_what_it_did_not_install(
+        tmp_path, registry):
+    """The same ownership rule as the prune, applied on the INSTALL side.
+
+    The install loop used to open by unconditionally `rm -rf`-ing its
+    destination, before consulting anything — so a hand-placed
+    ~/.claude/skills/<name> that happened to share a name with a locked skill
+    was destroyed, and the verdict still read `skills: N/N … — OK`. Nothing
+    said a file had been deleted, and nothing could: the removal ran before the
+    only record of what this hook owns was ever read.
+
+    That is #54's C3 shadowing hazard, closed on the side it was never closed
+    on. Its blast radius today is bounded only by the accident that the hook
+    does not fire in a multi-repo session (#84), and every fix for #84 removes
+    exactly that bound.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+    # The user's own, under a name the lock also names, with NO install record —
+    # nothing here is attributable to this hook.
+    mine = home / ".claude" / "skills" / "alpha"
+    _write(mine / "SKILL.md", "---\nname: alpha\n---\nMY OWN HAND-PLACED BODY\n")
+    sentinel = _tree(mine)
+    assert not (home / ".claude" / "skills" / _RECORD).exists()
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    # Byte-for-byte survival, not merely "a SKILL.md still exists there".
+    assert _tree(mine) == sentinel, verdict
+    # ...and the verdict SAYS so, rather than counting it quietly as installed.
+    assert "shadowed — refusing to overwrite" in verdict, verdict
+    assert "(alpha)" in verdict, verdict
+    assert verdict.startswith("skills: 1/2 "), verdict
+    assert "DEGRADED" in verdict, verdict
+    # The rest of the lock is unaffected: the refusal is per-skill.
+    assert (home / ".claude" / "skills" / "beta" / "SKILL.md").is_file(), verdict
+
+
+def test_the_install_loop_refuses_to_overwrite_its_own_install_once_edited(
+        tmp_path, registry):
+    """The second half of the rule the prune already follows.
+
+    A skill this hook DID install, which the user has since edited, is theirs
+    now — the prune has always said so, and an install that silently reverted
+    the edit would take the same work away through the other door.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+    assert _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"}).returncode == 0
+    edited = home / ".claude" / "skills" / "alpha" / "SKILL.md"
+    edited.write_text(edited.read_text(encoding="utf-8") + "\nmy own notes\n",
+                      encoding="utf-8")
+    mine = _tree(home / ".claude" / "skills" / "alpha")
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert _tree(home / ".claude" / "skills" / "alpha") == mine, verdict
+    assert "shadowed — refusing to overwrite" in verdict, verdict
+    assert "(alpha)" in verdict, verdict
+
+
+def test_the_install_loop_still_replaces_its_own_untouched_install(tmp_path, registry):
+    """Refusing to overwrite must not cost the hook its ability to UPDATE.
+
+    An install this hook made and nobody has touched is the one thing it may
+    still replace — otherwise a locked skill could never move to a new pinned
+    ref, and the guard above would have traded a data-loss bug for a delivery
+    that silently freezes at whatever landed first.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+    first = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert first.returncode == 0, first.stderr
+    assert _verdict(first).endswith("— OK"), _verdict(first)
+
+    # The same skill, new bytes, new commit, new lock — an ordinary upstream
+    # update arriving over an install that is already there.
+    _write(root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha" / "SKILL.md",
+           SKILL_A["SKILL.md"] + "updated upstream\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "update alpha")
+    updated = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert updated != sha
+    make_project(project, root, updated)
+
+    second = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert second.returncode == 0, second.stderr
+    verdict = _verdict(second)
+    assert verdict.endswith("— OK"), verdict
+    assert "shadowed" not in verdict, verdict
+    assert "updated upstream" in (
+        home / ".claude" / "skills" / "alpha" / "SKILL.md"
+    ).read_text(encoding="utf-8"), verdict
 
 
 @pytest.mark.parametrize("only, note", [

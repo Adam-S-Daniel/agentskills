@@ -846,12 +846,130 @@ DIGEST_PY
 # --- install + verify ------------------------------------------------------
 mkdir -p "$DEST" || { purge_locked_destinations; emit "skills: DEGRADED — could not create $DEST (check permissions on \$HOME)"; }
 
+# --- what this hook may overwrite ------------------------------------------
+# $DEST is the USER's directory. The orphan prune at the bottom has always known
+# that — it removes a stale skill only when the install RECORD says this hook
+# put it there and its bytes are still exactly what was installed. The install
+# loop below did not: it opened by unconditionally `rm -rf`-ing its destination,
+# before consulting anything, so a hand-placed ~/.claude/skills/<name> sharing a
+# name with a locked skill was destroyed and the verdict still read
+# `skills: N/N … — OK`. That is the shadowing hazard C3 documented on the
+# personal-store side and never closed on this one.
+#
+# The bound on that blast radius today is an ACCIDENT — the hook does not fire
+# in a multi-repo session (#84) — and every proposal that fixes #84 removes it.
+# So the same test the prune uses is applied here, BEFORE the first removal:
+# what this hook cannot show it installed, it does not overwrite either.
+#
+# Deliberately NOT extended to `purge_locked_destinations`: that function exists
+# so a verdict reporting a failed install cannot leave the previous run's
+# UNVERIFIED bytes live, and its tests assert exactly that, provenance and all.
+# Gating it is a separate argument with its own trade, not part of this one.
+RECORD="$DEST/.skills-bootstrap-installed.json"
+
+# The (name, digest) pairs the record claims as this hook's own installs.
+#
+# Its exit status is deliberately IGNORED: a record that is missing (first run),
+# unreadable, or malformed yields no stream, hence no attributions, hence an
+# install loop that overwrites nothing — the safe direction of the same rule.
+# The corruption itself is still reported, by the planner below, which fails on
+# the identical file and sets $record_unreadable.
+#
+# `-I` (isolated): see the header. This decides which of the user's directories
+# the loop below may `rm -rf`, so a `json.py` or `re.py` in the project dir must
+# not be what reads and validates it.
+RECORD_PATH="$RECORD" TMP_DIR="$tmp" python3 -I - >>"$LOG" 2>&1 <<'RECORDED_PY'
+import json, os, re, sys
+
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+DIGEST = re.compile(r"[0-9a-f]{64}")
+
+try:
+    with open(os.environ["RECORD_PATH"], encoding="utf-8") as handle:
+        record = json.load(handle)
+except FileNotFoundError:
+    record = {"installed": []}          # first run: nothing was ever recorded
+except (OSError, ValueError):
+    sys.exit(3)
+if not isinstance(record, dict) or not isinstance(record.get("installed"), list):
+    sys.exit(3)
+
+rows = []
+for entry in record["installed"]:
+    if not isinstance(entry, dict):
+        continue                        # one bad entry is skipped, not fatal
+    name, digest = entry.get("name"), entry.get("digest")
+    if not isinstance(name, str) or not isinstance(digest, str):
+        continue
+    # The lock reader's charsets, applied again on the way OUT of a file sitting
+    # in a directory anyone with the user's shell can write. A name that cannot
+    # be validated can never be shown safe to overwrite.
+    if NAME.fullmatch(name) and DIGEST.fullmatch(digest):
+        rows.append((name, digest))
+
+with open(os.path.join(os.environ["TMP_DIR"], "recorded.nul"), "w",
+          encoding="utf-8") as handle:
+    for row in rows:
+        for field in row:
+            handle.write(field)
+            handle.write("\0")
+RECORDED_PY
+
+# Parallel indexed arrays, scanned linearly: this targets bash 3.2, which has no
+# associative arrays, and a lock holds tens of skills rather than thousands.
+REC_NAME=()
+REC_DIGEST=()
+if [ -f "$tmp/recorded.nul" ]; then
+  while IFS= read -r -d '' rec_name && IFS= read -r -d '' rec_digest; do
+    REC_NAME+=("$rec_name")
+    REC_DIGEST+=("$rec_digest")
+  done < "$tmp/recorded.nul"
+fi
+
+# may_replace <name> <locked-digest> — is $DEST/<name> this hook's to overwrite?
+#
+# True in exactly three cases, and false for everything else:
+#
+#   * nothing is there — there is no directory to destroy;
+#   * what IS there already digests to the digest the lock names, so replacing
+#     it cannot change a byte anyone would notice. Provenance is irrelevant when
+#     the outcome is content-identical, and this is the clause that keeps an
+#     UNREADABLE record a one-run blind spot rather than a permanent stall: with
+#     no attributions at all, the skills already correctly installed still
+#     re-install, and the run rewrites the record it could not read. Without it,
+#     one corrupt file would refuse every skill forever — and the only other way
+#     out of that, "overwrite freely when the record is unreadable", hands the
+#     whole guard to anyone who can corrupt one file;
+#   * the record claims that exact name AND the bytes on disk still digest to
+#     what was installed — this hook's own prior install, untouched. Replacing
+#     it is how an UPDATE is delivered, so this case must stay.
+#
+# Everything else — never installed by this hook, installed but EDITED since
+# (the user has taken ownership of it), or unmeasurable — is somebody else's.
+#
+# `-n "$have"` is not redundant with either equality: `digest_dir` prints NOTHING
+# when it fails, so two empty strings would compare EQUAL and hand back a
+# directory nothing was ever measured against.
+may_replace () {
+  local want_name="$1" locked="$2" at=0 recorded="" have
+  if [ ! -e "$DEST/$want_name" ] && [ ! -L "$DEST/$want_name" ]; then return 0; fi
+  have="$(digest_dir "$DEST/$want_name")"
+  [ -n "$have" ] || return 1
+  if [ "$have" = "$locked" ]; then return 0; fi
+  while [ "$at" -lt "${#REC_NAME[@]}" ]; do
+    if [ "${REC_NAME[$at]}" = "$want_name" ]; then recorded="${REC_DIGEST[$at]}"; break; fi
+    at=$((at + 1))
+  done
+  [ -n "$recorded" ] && [ "$have" = "$recorded" ]
+}
+
 total=0
 ok=0
 mismatch=()
 collision=()
 duplicate=()
 absent=()
+shadowed=()
 
 # `relpath` is where this skill sits inside its source's tree, already resolved
 # (layout + bundle + name) and validated by the lock reader above — bash never
@@ -884,6 +1002,19 @@ while IFS= read -r -d '' key \
   esac
   if ! [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     absent+=("$name")
+    continue
+  fi
+
+  # Ahead of EVERY `rm -rf` below, which is what lets those stay as they are:
+  # past this point $DEST/$name either does not exist (the removal is a no-op)
+  # or is this hook's own prior install (replacing it is the whole delivery
+  # mechanism — a locked skill must still be able to receive an update). A
+  # directory that is neither is not removed, not overwritten, and not silently
+  # skipped: the skill is dropped from this run and NAMED in the verdict, so
+  # "your hand-placed skill won" is something the reader is told rather than
+  # something they infer from a count.
+  if ! may_replace "$name" "$want"; then
+    shadowed+=("$name")
     continue
   fi
 
@@ -998,7 +1129,9 @@ fi
 # refs with different skill sets still contend, each run removing what the other
 # installed. Neither lock is more authoritative than the other, so a tiebreak
 # here could only be invented — the limit is stated rather than guessed at.
-RECORD="$DEST/.skills-bootstrap-installed.json"
+# $RECORD is set above the install loop, which now reads it too — the same file,
+# for the same question, asked once per direction: may this be overwritten, and
+# may this be removed.
 removed=()
 left=()
 narrowed=()
@@ -1259,6 +1392,14 @@ if [ "${#duplicate[@]}" -gt 0 ]; then
 fi
 if [ "${#absent[@]}" -gt 0 ]; then
   problems+=("${#absent[@]} not installed ($(join_names "${absent[@]}"))")
+fi
+# A locked skill this run did NOT deliver, because delivering it would have meant
+# destroying a directory of the user's. It degrades the verdict for the ordinary
+# reason — the lock names it and it is not installed — and says which way the
+# conflict was resolved, since the fix (move or delete your copy, or drop the
+# row from the lock) is the reader's to choose, not this hook's.
+if [ "${#shadowed[@]}" -gt 0 ]; then
+  problems+=("${#shadowed[@]} shadowed — refusing to overwrite a directory this hook did not install, or that was edited since ($(join_names "${shadowed[@]}"))")
 fi
 # A skill still LIVE that the lock no longer names is exactly the condition this
 # file exists to make knowable — "content that should not be there is, and
