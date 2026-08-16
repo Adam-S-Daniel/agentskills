@@ -231,6 +231,23 @@ bare `.md` file. **That is no longer the case** — the server now rejects
 `.zip` or `.skill` extensions are accepted, and `.skill` is parsed as a
 ZIP container, not a single-file format).
 
+**Why base64: `SKILL_MD_B64` is base64, never raw Markdown.** The
+substituted value is the base64 encoding of the SKILL.md **bytes**. An
+earlier version of this snippet carried the payload in a JS template
+literal (`` const skillMd = `SKILL_MD_CONTENT`; ``), which cannot work: a
+SKILL.md body contains backticks (fenced code blocks, inline code) and
+`${...}` sequences, so the substituted script is a **syntax error** — it
+dies at parse time, before the `expectedFileCount` guard below can run, so
+the guard never fires. Measured against every single-file skill in the
+registry that this section legitimately applies to: 8 of 8 failed
+`node --check`. Base64 has no character that can terminate the string
+early, so it survives any SKILL.md.
+
+Produce it with `base64 -w0 SKILL.md` (Linux/WSL),
+`base64 -i SKILL.md` (macOS), or
+`[Convert]::ToBase64String([IO.File]::ReadAllBytes("SKILL.md"))`
+(PowerShell).
+
 When you don't have `sync_skills.py --prepare` available locally (e.g.
 the local repo doesn't exist on this machine, or you only have the raw
 `SKILL.md` content in hand) and you've confirmed the skill has no other
@@ -266,7 +283,10 @@ files, build a minimal STORE-mode ZIP in the browser and upload that:
   const orgId = "ORG_ID";
   const overwrite = OVERWRITE;             // true | false
   const skillName = "SKILL_NAME";          // e.g. "adam-writing-style"
-  const skillMd = `SKILL_MD_CONTENT`;       // full SKILL.md text
+  // SKILL_MD_B64 is the base64 of the SKILL.md bytes — NEVER the raw text.
+  // See "Why base64" below; pasting Markdown here does not parse.
+  const skillMd = new TextDecoder().decode(
+    Uint8Array.from(atob("SKILL_MD_B64"), c => c.charCodeAt(0)));
   const expectedFileCount = N;             // the total number of files in the skill folder — count them before filling this in
 
   // ----- hard guard: this fallback can only ever upload one file -----

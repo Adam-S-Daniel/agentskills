@@ -5,6 +5,7 @@ import datetime
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -816,3 +817,114 @@ class TestSkillMdSection6Guard:
         assert "Don't put the file at the ZIP root" not in text, (
             "SKILL.md must not reintroduce the refuted ZIP-root-prefix claim"
         )
+
+    def test_payload_placeholder_is_base64_not_a_template_literal(self):
+        """The payload must not be pasted into a JS template literal.
+
+        SKILL.md bodies contain backticks and ${...}; interpolating one into
+        `...` makes the script a syntax error, which kills it at PARSE time —
+        before the expectedFileCount guard can run.
+        """
+        # Scoped to the executable block: the prose deliberately quotes the
+        # old template-literal form to explain why it was replaced.
+        js = section6_js()
+        assert "SKILL_MD_B64" in js
+        assert "SKILL_MD_CONTENT" not in js
+
+
+def section6_js():
+    """The JavaScript block from SKILL.md section 6."""
+    import re
+
+    text = (Path(__file__).parent.parent / "SKILL.md").read_text(encoding="utf-8")
+    section = text.split("## 6.")[1].split("## 7.")[0]
+    blocks = re.findall(r"```javascript\n(.*?)```", section, re.S)
+    assert len(blocks) == 1, f"expected 1 JS block in section 6, found {len(blocks)}"
+    return blocks[0]
+
+
+class TestSection6JavaScriptParses:
+    """Run the substituted section-6 snippet through `node --check`.
+
+    This is the lint that the previous template-literal form would have
+    failed for every legitimate target of section 6.
+    """
+
+    def _substitute(self, skill_md_bytes):
+        """Fill in the snippet the way an agent following SKILL.md would.
+
+        Both payload placeholders are handled deliberately: the lint has to
+        reproduce what actually gets pasted. Substituting only the base64
+        placeholder would leave a raw-text form's `SKILL_MD_CONTENT` intact
+        as a harmless literal, and the lint would pass on the very defect it
+        exists to catch (verified: it did).
+        """
+        js = (
+            section6_js()
+            .replace('"ORG_ID"', '"11111111-2222-3333-4444-555555555555"')
+            .replace("OVERWRITE", "true")
+            .replace('"SKILL_NAME"', '"some-skill"')
+            .replace("= N;", "= 1;")
+        )
+        if "SKILL_MD_B64" in js:
+            js = js.replace("SKILL_MD_B64", base64.b64encode(skill_md_bytes).decode())
+        # A raw-text placeholder gets the raw Markdown, because that is what
+        # the instruction "full SKILL.md text" tells the agent to paste.
+        return js.replace(
+            "SKILL_MD_CONTENT", skill_md_bytes.decode("utf-8")
+        )
+
+    def _node_check(self, source, tmp_path):
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip(
+                "node not on PATH — cannot syntax-check SKILL.md section 6's "
+                "JavaScript. Install Node to run this lint; it is skipped, "
+                "NOT passed."
+            )
+        script = tmp_path / "section6.js"
+        script.write_text(source, encoding="utf-8")
+        return subprocess.run(
+            [node, "--check", str(script)], capture_output=True, text=True
+        )
+
+    def test_parses_with_a_hostile_skill_md(self, tmp_path):
+        """Backticks, ${...} and quotes are all normal in a SKILL.md body."""
+        hostile = (
+            "---\nname: some-skill\n---\n"
+            "# Heading\n\n"
+            "Inline `code` and a fence:\n\n"
+            "```bash\n"
+            'echo "${HOME}/repos" && echo `date`\n'
+            "```\n\n"
+            "A backslash \\ and a lone ` backtick.\n"
+        ).encode("utf-8")
+
+        proc = self._node_check(self._substitute(hostile), tmp_path)
+        assert proc.returncode == 0, (
+            f"section 6's JavaScript does not parse:\n{proc.stderr}"
+        )
+
+    def test_parses_for_every_single_file_skill_in_this_repo(self, tmp_path):
+        """The real targets: skills whose upload really is just SKILL.md."""
+        # tests/ -> sync-skills -> skills -> adam-local -> plugins -> repo root
+        repo = Path(__file__).resolve().parents[5]
+        singles = []
+        for name in get_all_skills(repo):
+            path = _skill_dir(repo, name)
+            with zipfile.ZipFile(io.BytesIO(zip_skill(path))) as zf:
+                if zf.namelist() == ["SKILL.md"]:
+                    singles.append(path / "SKILL.md")
+
+        if not singles:
+            pytest.skip("no single-file skills in this checkout to exercise")
+
+        failures = []
+        for skill_md in singles:
+            proc = self._node_check(
+                self._substitute(skill_md.read_bytes()), tmp_path
+            )
+            if proc.returncode != 0:
+                failures.append(f"{skill_md.parent.name}: {proc.stderr.strip()}")
+
+        assert not failures, "section 6 JS fails to parse for:\n" + "\n".join(failures)
