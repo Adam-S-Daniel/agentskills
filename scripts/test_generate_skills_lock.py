@@ -2991,6 +2991,148 @@ def test_the_account_sync_directory_is_never_removed(tmp_path, registry):
     assert "synced" not in verdict, verdict
 
 
+# --------------------------------------------------------------------------
+# `synced` is a RESERVED destination name, refused before anything deletes it
+#
+# The guard above is defence in depth for a hand-edited install RECORD. These
+# two are the paths that needed no hand-editing at all: a skill DIRECTORY named
+# `synced` in any locked bundle was enough, because the generator emitted that
+# row without complaint. From the lock it reached both destructive consumers of
+# `skills.nul` — the install loop (`rm -rf "$DEST/$name"` then `cp -R`) and
+# `purge_locked_destinations` — and either one destroys ~/.claude/skills/synced,
+# the claude.ai account-sync store, which has no delete or restore API behind it.
+#
+# So the lock READER refuses such a lock wholesale, upstream of both streams, and
+# the GENERATOR refuses to write one — the half that matters because the reader's
+# own verdict tells the operator to regenerate the lock with it.
+# --------------------------------------------------------------------------
+
+SYNCED_SKILL = {"SKILL.md": "---\nname: synced\n---\nan upstream skill named synced\n"}
+
+
+def _account_store(home: Path) -> dict:
+    """Plant a claude.ai account store under `home`, and return its tree."""
+    synced = home / ".claude" / "skills" / "synced"
+    _write(synced / "manifest.json", '{"skills": ["account-skill"]}\n')
+    _write(synced / "account-skill" / "SKILL.md",
+           "---\nname: account-skill\n---\nsynced from claude.ai\n")
+    return _tree(synced)
+
+
+def _bootstrap_log(home: Path) -> str:
+    """Everything the hook wrote to its $LOG on this run.
+
+    $LOG is `mktemp "$TMPDIR/skills-bootstrap.XXXXXX"`, kept deliberately OUTSIDE
+    the run's scratch dir so it survives for the reader the verdicts send there;
+    `_run_hook` points TMPDIR at the scratch HOME, so that is where it lands.
+    """
+    return "".join(path.read_text(encoding="utf-8", errors="replace")
+                   for path in sorted((home / "tmp").glob("skills-bootstrap.*"))
+                   if path.is_file())
+
+
+def _project_naming_synced(project_dir: Path, root: Path, ref: str) -> Path:
+    """A lock naming `adam/synced`, assembled WITHOUT the generator.
+
+    Hand-built because the generator refuses to write one — that is the other
+    half of this fix — but built from the fixture registry's own bytes, with the
+    true digest of a real `synced/` skill directory. That is what makes it a
+    reproduction rather than a straw man: routing, source index, `SKILL.md`
+    present and digest-match are all satisfied, so the reserved-name check is the
+    only thing standing between this lock and the account store.
+
+    `ref` is a parameter because an UNREACHABLE source reaches the other
+    destructive path (the purge) instead of the install loop.
+    """
+    project_dir.mkdir(parents=True, exist_ok=True)
+    skills_root = root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam")
+    lock = {
+        "registry": root.resolve().as_uri(),
+        "ref": ref,
+        "bundles": ["adam"],
+        "skills": {f"adam/{name}": gsl.digest_skill_dir(skills_root / name)
+                   for name in ("alpha", "synced")},
+    }
+    lock_path = project_dir / "skills.lock"
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+    return lock_path
+
+
+def test_a_lock_naming_synced_is_refused_rather_than_installed(tmp_path):
+    """The install loop: `rm -rf "$DEST/$name"`, then `cp -R` over the store.
+
+    Unpatched, this exact run reported `skills: 2/2 ... — OK` — the copy
+    SUCCEEDS and its digest verifies, so every counter agrees the session got
+    what it asked for — while ~/.claude/skills/synced had been replaced by one
+    upstream skill's files. 238 files across 18 skills, on the machine this was
+    found on, with no API to put them back.
+
+    The verdict is deliberately NOT asserted to name the key: the reader fails on
+    the fixed "could not read $LOCK" literal, which carries $LEFT_IN_PLACE and is
+    the one verdict that runs no purge. The offending key is in $LOG, where that
+    literal sends the reader.
+    """
+    root = tmp_path / "registry"
+    sha = make_registry(root, {"adam/alpha": SKILL_A, "adam/synced": SYNCED_SKILL})
+    project = tmp_path / "project"
+    _project_naming_synced(project, root, sha)
+    home = tmp_path / "home"
+    account = _account_store(home)
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert _tree(home / ".claude" / "skills" / "synced") == account, verdict
+    assert "DEGRADED" in verdict, verdict
+    assert "synced" in _bootstrap_log(home), verdict
+    # Refused WHOLESALE, which is the deliberate trade: one bad upstream
+    # directory name costs the consumer every skill in its lock, because the
+    # cheaper answer — skip the row, like the `dup` status does — only works for
+    # a name the install loop has already `rm -rf`'d, and for THIS name that
+    # removal is the entire harm.
+    assert not (home / ".claude" / "skills" / "alpha").exists(), verdict
+
+    # And the same name is unwritable by the sanctioned tooling, which is what
+    # keeps the verdict above honest when it says to regenerate the lock with it.
+    proc = run_generator("--repo", str(root), "--registry", root.resolve().as_uri(),
+                         "--ref", sha, "--bundles", "adam",
+                         "-o", str(tmp_path / "regenerated.lock"))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert "synced" in proc.stderr, proc.stderr
+    assert not (tmp_path / "regenerated.lock").exists(), proc.stderr
+
+
+def test_an_unreachable_source_does_not_purge_the_account_store(tmp_path):
+    """`purge_locked_destinations`, the other consumer of `skills.nul`.
+
+    Every source unreachable means nothing can be installed, and the purge is
+    what makes "nothing to install" also mean "nothing is left installed": it
+    removes every destination the LOCK NAMES. So a lock naming `synced` had it
+    delete the account store on a run that installed nothing whatsoever — under
+    "could not fetch ...", a verdict that never says which name it took.
+
+    This is the path the install-loop test cannot reach: no fetch succeeds, so no
+    `cp -R` is ever attempted and the removal is the only thing that happens.
+    """
+    root = tmp_path / "registry"
+    make_registry(root, {"adam/alpha": SKILL_A, "adam/synced": SYNCED_SKILL})
+    project = tmp_path / "project"
+    # A ref nothing can resolve: the lock's single source is unreachable, so
+    # `fetched` is 0 and the hook takes the purge-then-degrade path.
+    _project_naming_synced(project, root, "0" * 40)
+    home = tmp_path / "home"
+    account = _account_store(home)
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert _tree(home / ".claude" / "skills" / "synced") == account, verdict
+    assert "DEGRADED" in verdict, verdict
+    assert "synced" in _bootstrap_log(home), verdict
+
+
 def test_a_record_that_cannot_be_written_is_reported_rather_than_fatal(
         tmp_path, registry):
     """The write is the half that lets the NEXT run prune at all.

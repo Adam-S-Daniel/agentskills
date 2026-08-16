@@ -479,6 +479,39 @@ for key in sorted(skills):
     if not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
         sys.exit("lock: skill %r has no sha256 digest" % key)
     bundle, name = key.split("/", 1)
+    # `synced/` is the claude.ai account-sync channel's own directory inside
+    # $DEST. Nothing this hook installs is ever called that, so a lock naming it
+    # is wrong by construction — and that store is the ONLY channel reaching
+    # claude.ai chat, Cowork, Claude in Chrome and mobile, with no delete or
+    # restore API behind it. Losing it is total and unrecoverable.
+    #
+    # Refused HERE because `skills.nul` — which this reader has not written yet —
+    # feeds TWO destructive consumers, and the name reaches both:
+    #   * the install loop, which does `rm -rf "$DEST/$name"` then `cp -R`, so it
+    #     reports `skills: n/n … — OK` while annihilating the account store;
+    #   * purge_locked_destinations, which removes every destination the lock
+    #     NAMES — on an unreachable source it deletes the store, installs
+    #     nothing, and its verdict never says which name it took.
+    # Exiting before either stream exists is what covers both at once: the
+    # failure lands on the "could not read $LOCK" verdict below, which carries
+    # $LEFT_IN_PLACE and runs no purge, so ~/.claude/skills is left untouched.
+    #
+    # FAIL-CLOSED — the WHOLE lock, not a skipped row like the `dup` status
+    # below. That branch is only survivable because the install loop has ALREADY
+    # run `rm -rf "$DEST/$name"` by the time it skips; for this one name that
+    # removal is the whole harm, so a row-skip cannot be the answer. One bad
+    # upstream directory name therefore costs a consumer every skill in its lock,
+    # which is the right trade against an unrecoverable store — and
+    # scripts/generate_skills_lock.py refuses to WRITE such a lock, so sanctioned
+    # tooling cannot produce one in the first place.
+    #
+    # Sits above the AGENTSKILLS_BUNDLE filter for the reason the routing check
+    # below spells out, with a poisoned row in place of an unroutable one.
+    if name == "synced":
+        sys.exit("lock: skill %r would install over ~/.claude/skills/synced, the "
+                 "claude.ai account-sync directory — this hook never installs a skill "
+                 "by that name, and that store is not its to replace or delete; rename "
+                 "the skill directory in the registry that ships it" % key)
     # Checked BEFORE the AGENTSKILLS_BUNDLE filter below: narrowing a session to
     # one bundle must not be able to hide an unroutable row in the rest of the
     # lock. A bundle nobody claims has no registry, no ref and no layout, so

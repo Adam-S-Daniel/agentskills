@@ -499,6 +499,33 @@ def collect_skills(
                     "installs nothing, so it must not be written; rename the "
                     "directory, or move it out of the bundle's skills/ root"
                 )
+            # `synced` passes the charset above and is still unwritable: the hook
+            # installs into ~/.claude/skills, where `synced/` is the claude.ai
+            # ACCOUNT-SYNC channel's own directory — the only channel reaching
+            # claude.ai chat, Cowork, Claude in Chrome and mobile, with no delete
+            # or restore API behind it. A lock naming it aims two of the hook's
+            # destructive paths at that store: the install loop `rm -rf`s the
+            # destination before `cp -R` (reporting OK while the store is gone),
+            # and the unreachable-source purge removes every destination the lock
+            # names without installing anything.
+            #
+            # The hook now refuses such a lock WHOLESALE — so, exactly like the
+            # charset check above, a lock it will reject has no business being
+            # written, and the failure belongs at authoring time where a human is
+            # watching. This half is what keeps the hook's own verdict honest: it
+            # tells the operator to "regenerate it with
+            # scripts/generate_skills_lock.py", which without this check would
+            # hand back the identical poisoned lock.
+            if skill_dir.name == "synced":
+                raise GeneratorError(
+                    f"{skill_dir.relative_to(tree_root).as_posix()}: a skill "
+                    "directory named 'synced' cannot be locked — the bootstrap hook "
+                    "installs into ~/.claude/skills, where 'synced/' is the claude.ai "
+                    "account-sync store, and installing over it would destroy an "
+                    "account skill store that has no restore API; the hook refuses "
+                    "the WHOLE lock over such a key, so it must not be written — "
+                    "rename the directory"
+                )
             skills[f"{bundle}/{skill_dir.name}"] = digest_skill_dir(skill_dir, skip=skip)
     return dict(sorted(skills.items()))
 
