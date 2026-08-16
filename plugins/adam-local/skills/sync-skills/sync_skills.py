@@ -25,10 +25,15 @@ from typing import Dict, List, Optional
 
 STATE_FILE = Path.home() / ".sync-skills-state.json"
 
-DEFAULT_REPOS: List[Path] = [
-    Path.home() / "repos" / "agentskills",
-    Path.home() / "repos" / "agentskills-private",
-]
+# The registry repos this script syncs from, in the order they are reported.
+REPO_NAMES = ("agentskills", "agentskills-private")
+
+# Where a clone might live. ~/repos is the historical layout; ZENDA (Adam's
+# Windows box) keeps clones at D:\repos\<github-owner>\<repo> per the fleet
+# AGENTS.md, so hardcoding ~/repos made every default invocation resolve
+# nothing on the very machine this skill exists to run on. $AGENTSKILLS_REPOS
+# (os.pathsep-separated) overrides the search for any other layout.
+WINDOWS_REPO_ROOT = Path("D:/repos/adam-s-daniel")
 
 # Local mirror of the claude.ai skill registry, refreshed by running
 # ``CLAUDE_CODE_SYNC_SKILLS=1 claude -p ...`` — what --verify checks against.
@@ -86,19 +91,98 @@ def _git(args: List[str], cwd: Path) -> Optional[str]:
         return None
 
 
-def _existing_repos(repos: List[Path]) -> List[Path]:
+def _self_repo() -> Optional[Path]:
+    """The repo checkout this script lives in, if it looks like one.
+
+    Layout: ``<repo>/plugins/<plugin>/skills/sync-skills/sync_skills.py``.
+    """
+    root = Path(__file__).resolve().parents[4]
+    if (root / "plugins").is_dir() or (root / "skills").is_dir():
+        return root
+    return None
+
+
+def _repo_candidates(name: str) -> List[Path]:
+    """Where repo ``name`` might live, most-preferred first."""
+    candidates = [Path.home() / "repos" / name, WINDOWS_REPO_ROOT / name]
+    self_repo = _self_repo()
+    # Only claim the checkout we live in for its OWN name — otherwise
+    # agentskills-private would silently resolve to the agentskills clone.
+    if self_repo is not None and self_repo.name == name:
+        candidates.append(self_repo)
+    return candidates
+
+
+def resolve_repos(explicit: Optional[List[str]] = None) -> List[Path]:
+    """Resolve which repos to scan, warning on stderr about what was missed.
+
+    Order: ``--repos`` → ``$AGENTSKILLS_REPOS`` (os.pathsep-separated) →
+    ``~/repos/<name>`` → ``D:/repos/adam-s-daniel/<name>`` → the checkout
+    this script lives in.
+
+    Returns the paths that exist. An empty return means nothing resolved and
+    the caller must not treat the run as a successful no-op.
+    """
+    requested: Optional[List[Path]] = None
+    source = ""
+    if explicit:
+        requested = [Path(p).expanduser() for p in explicit]
+        source = "--repos"
+    else:
+        env = os.environ.get("AGENTSKILLS_REPOS")
+        if env:
+            requested = [
+                Path(p).expanduser() for p in env.split(os.pathsep) if p.strip()
+            ]
+            source = "$AGENTSKILLS_REPOS"
+
+    if requested is not None:
+        # An explicitly named path that isn't there is always worth saying.
+        return _existing_repos(requested, source=source)
+
+    resolved: List[Path] = []
+    for name in REPO_NAMES:
+        candidates = _repo_candidates(name)
+        hit = next((c for c in candidates if c.is_dir()), None)
+        if hit is not None:
+            resolved.append(hit)
+        else:
+            tried = ", ".join(str(c) for c in candidates)
+            print(
+                f"WARNING: no clone of {name} found (tried: {tried}). "
+                f"Set AGENTSKILLS_REPOS or pass --repos to point at it.",
+                file=sys.stderr,
+            )
+
+    if not resolved:
+        self_repo = _self_repo()
+        if self_repo is not None:
+            print(
+                f"WARNING: falling back to the checkout this script lives in: "
+                f"{self_repo}",
+                file=sys.stderr,
+            )
+            resolved = [self_repo]
+    return resolved
+
+
+def _existing_repos(repos: List[Path], source: str = "") -> List[Path]:
     """Yield the repo paths that exist, warning on stderr about those that don't.
 
     Silently skipping an unreadable repo makes a typo'd ``--repos`` and a
     genuinely clean tree indistinguishable: both produce "nothing to do" and
     exit 0. Naming the missing path is the difference between those two.
     """
+    label = f"{source}: " if source else ""
     present: List[Path] = []
     for repo in repos:
         if repo.is_dir():
             present.append(repo)
         else:
-            print(f"WARNING: repo path does not exist: {repo}", file=sys.stderr)
+            print(
+                f"WARNING: {label}repo path does not exist: {repo}",
+                file=sys.stderr,
+            )
     return present
 
 
@@ -581,9 +665,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    repos = [Path(r) for r in args.repos] if args.repos else DEFAULT_REPOS
-
-    # --mark-synced
+    # --mark-synced touches only the state file, so it needs no repo.
     if args.mark_synced:
         parts = args.mark_synced.split(":", 1)
         if len(parts) != 2:
@@ -592,14 +674,20 @@ def main() -> None:
         print(f"Marked {parts[0]} as synced (hash={parts[1]})")
         return
 
+    repos = resolve_repos(args.repos)
+    if not repos:
+        sys.exit(
+            "ERROR: no repo could be resolved, so nothing was inspected. "
+            "This is not the same as having nothing to sync."
+        )
+
     # Resolve skill_names
     if args.skill:
         skill_names: Optional[List[str]] = [args.skill]
     elif args.all:
         skill_names = []
         for repo in repos:
-            if repo.is_dir():
-                skill_names.extend(get_all_skills(repo))
+            skill_names.extend(get_all_skills(repo))
     else:
         skill_names = None  # auto-detect via git diff
 
@@ -608,8 +696,6 @@ def main() -> None:
         state = load_state()
         any_found = False
         for repo in repos:
-            if not repo.is_dir():
-                continue
             names = (
                 skill_names
                 if skill_names is not None

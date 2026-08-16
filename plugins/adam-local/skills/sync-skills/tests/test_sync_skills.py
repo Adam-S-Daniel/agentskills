@@ -4,6 +4,7 @@ import base64
 import datetime
 import io
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -268,13 +269,24 @@ class TestPrepare:
         result = prepare([repo_with_skills], skill_names=["skill-a"])
         assert result["skills"][0]["is_update"] is True
 
-    def test_skips_nonexistent_repo(self, tmp_path, monkeypatch):
+    def test_nonexistent_repo_is_reported_not_silently_skipped(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """D2: a missing repo path must be named, not silently dropped.
+
+        Skipping it quietly made a typo'd --repos indistinguishable from a
+        clean tree: both yielded an empty skill list and exit 0.
+        """
         monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
         monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
 
         missing = tmp_path / "does-not-exist"
         result = prepare([missing], skill_names=["anything"])
+
         assert result["skills"] == []
+        err = capsys.readouterr().err
+        assert "does-not-exist" in err
+        assert "WARNING" in err
 
     def test_org_id_hint_included(self, repo_with_skills, monkeypatch, tmp_path):
         monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
@@ -493,6 +505,74 @@ class TestVerify:
         verify([repo_with_skills], skill_names=["skill-a"])
 
         assert "2026-08-16T00:00:00.000000Z" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# resolve_repos — machine-portable repo discovery (D2)
+# ---------------------------------------------------------------------------
+
+class TestResolveRepos:
+    def test_explicit_repos_win(self, tmp_path):
+        real = tmp_path / "somewhere" / "agentskills"
+        real.mkdir(parents=True)
+        assert sync_skills.resolve_repos([str(real)]) == [real]
+
+    def test_explicit_missing_repo_warns_and_is_dropped(self, tmp_path, capsys):
+        missing = tmp_path / "nope"
+        assert sync_skills.resolve_repos([str(missing)]) == []
+        assert "nope" in capsys.readouterr().err
+
+    def test_env_var_used_when_no_explicit_repos(self, tmp_path, monkeypatch):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        monkeypatch.setenv("AGENTSKILLS_REPOS", os.pathsep.join([str(a), str(b)]))
+        assert sync_skills.resolve_repos(None) == [a, b]
+
+    def test_home_repos_layout_resolves(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        home = tmp_path / "home"
+        (home / "repos" / "agentskills").mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr("sync_skills.WINDOWS_REPO_ROOT", tmp_path / "no-d-drive")
+
+        assert home / "repos" / "agentskills" in sync_skills.resolve_repos(None)
+
+    def test_windows_layout_resolves_when_home_repos_absent(self, tmp_path, monkeypatch):
+        """ZENDA keeps clones at D:\\repos\\<owner>\\<repo>, not ~/repos."""
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        win_root = tmp_path / "d-repos" / "adam-s-daniel"
+        (win_root / "agentskills").mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr("sync_skills.WINDOWS_REPO_ROOT", win_root)
+
+        assert win_root / "agentskills" in sync_skills.resolve_repos(None)
+
+    def test_self_repo_is_last_resort(self, tmp_path, monkeypatch):
+        """With no clone anywhere else, fall back to the checkout we live in."""
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        self_repo = tmp_path / "checkout"
+        (self_repo / "plugins").mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr("sync_skills.WINDOWS_REPO_ROOT", tmp_path / "no-d-drive")
+        monkeypatch.setattr("sync_skills._self_repo", lambda: self_repo)
+
+        assert sync_skills.resolve_repos(None) == [self_repo]
+
+    def test_returns_empty_when_nothing_resolves(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr("sync_skills.WINDOWS_REPO_ROOT", tmp_path / "no-d-drive")
+        monkeypatch.setattr("sync_skills._self_repo", lambda: None)
+
+        assert sync_skills.resolve_repos(None) == []
 
 
 # ---------------------------------------------------------------------------

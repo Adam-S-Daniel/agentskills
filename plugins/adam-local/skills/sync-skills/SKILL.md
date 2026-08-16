@@ -6,7 +6,8 @@ description: >
   skills", "push skills to Claude", "upload skill", or after editing
   SKILL.md files locally. Requires a claude.ai tab open in Chrome (uses
   browser session cookies via javascript_tool). Works on Adam's computer
-  where the agentskills repos live under ~/repos/ or %USERPROFILE%\repos\.
+  wherever the agentskills clones live — the helper finds them itself, and
+  $AGENTSKILLS_REPOS overrides the search.
 compatibility: Requires Claude in Chrome (browser automation) with a logged-in claude.ai tab, plus Bash/Python 3 for the sync_skills.py helper; local interactive execution only — not usable in headless or cloud sessions
 ---
 
@@ -17,17 +18,32 @@ browser's authenticated session. No separate API key required - the
 `javascript_tool` runs in the browser context which already holds the
 session cookies.
 
+## Locating the helper
+
+Clone locations are machine-specific — `~/repos/agentskills` on Linux/WSL,
+`D:\repos\adam-s-daniel\agentskills` on ZENDA (Windows) — so **don't
+hardcode either one**. Resolve the skill folder once and reuse it:
+
+```bash
+# Run from anywhere inside the agentskills clone:
+SKILL_DIR="$(git rev-parse --show-toplevel)/plugins/adam-local/skills/sync-skills"
+```
+
+Every command below uses `"$SKILL_DIR"`. If you're not inside the clone,
+set it by hand to wherever this skill folder actually is on this machine.
+
+`sync_skills.py` finds the **repos to sync** on its own, trying in order:
+`--repos` → `$AGENTSKILLS_REPOS` (`:`/`;`-separated) → `~/repos/<name>` →
+`D:/repos/adam-s-daniel/<name>` → the checkout it lives in. It warns on
+stderr about any clone it could not find and exits non-zero if it resolved
+none — "nothing to sync" and "I couldn't look" are never the same answer.
+
 ## Setup (one-time)
 
 Register the pre-push reminder hook (requires git 2.54+):
 
 ```bash
-bash ~/repos/agentskills/plugins/adam-local/skills/sync-skills/setup.sh
-```
-
-On Windows (Git Bash / WSL):
-```bash
-bash "$USERPROFILE/repos/agentskills/plugins/adam-local/skills/sync-skills/setup.sh"
+bash "$SKILL_DIR/setup.sh"
 ```
 
 This registers a global config-based `pre-push` hook so every push from
@@ -55,14 +71,13 @@ you switch contexts.)
 Run the helper script to find changed skills and build base64-encoded ZIPs:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --prepare
+python3 "$SKILL_DIR/sync_skills.py" --prepare
 ```
 
-On Windows the path is `%USERPROFILE%\repos\agentskills\plugins\adam-local\skills\sync-skills\sync_skills.py`.
 Use `--all` to force-sync every skill regardless of git diff:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --prepare --all
+python3 "$SKILL_DIR/sync_skills.py" --prepare --all
 ```
 
 The output is a JSON object:
@@ -158,7 +173,7 @@ After each successful upload, record it in the state file so future runs
 know to use `overwrite=true`:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py \
+python3 "$SKILL_DIR/sync_skills.py" \
   --mark-synced "SKILL_NAME:HASH"
 ```
 
@@ -171,21 +186,25 @@ Substitute the `name` and `hash` fields from the JSON payload.
 To preview what would be synced without uploading:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --dry-run
+python3 "$SKILL_DIR/sync_skills.py" --dry-run
 ```
 
 To target a single skill:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --skill fastmail
+python3 "$SKILL_DIR/sync_skills.py" --skill fastmail
 ```
 
-To include skills from both repos:
+Both repos are searched automatically. To point at clones somewhere the
+built-in search won't find (a scratch checkout, a non-standard drive):
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --prepare --all \
-  --repos ~/repos/agentskills ~/repos/agentskills-private
+python3 "$SKILL_DIR/sync_skills.py" --prepare --all \
+  --repos /path/to/agentskills /path/to/agentskills-private
 ```
+
+`--skill` and `--all` are mutually exclusive — asking for both used to
+silently sync only the single named skill.
 
 ---
 
@@ -299,7 +318,7 @@ CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'
 Then run:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --verify
+python3 "$SKILL_DIR/sync_skills.py" --verify
 ```
 
 It prints one line per skill checked — `OK` when the account copy's file
