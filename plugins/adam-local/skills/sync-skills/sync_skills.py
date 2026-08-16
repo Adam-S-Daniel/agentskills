@@ -380,7 +380,15 @@ def prepare(
                 {
                     "name": name,
                     "zip_b64": base64.b64encode(zip_bytes).decode(),
-                    "is_update": name in state,
+                    # The account mirror is the authority on whether a skill
+                    # already exists; ~/.sync-skills-state.json only records
+                    # what THIS machine uploaded. On a fresh machine the state
+                    # file is absent, so every skill looked new, went up with
+                    # overwrite=false, and 409'd against the copy already
+                    # there. Fall back to the state file for the window
+                    # between an upload and the next mirror refresh.
+                    "is_update": (ACCOUNT_SKILLS_DIR / name).is_dir()
+                    or name in state,
                     "repo": repo.name,
                     "hash": h,
                 }
@@ -639,11 +647,14 @@ def main() -> None:
         "--prepare", action="store_true", default=True,
         help="Output JSON payload (default behaviour)",
     )
-    parser.add_argument(
+    # --skill used to silently win over --all, so `--all --skill x` synced
+    # only x while reading as "sync everything".
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
         "--all", action="store_true",
         help="Include all skills, not just git-changed ones",
     )
-    parser.add_argument(
+    selection.add_argument(
         "--skill", metavar="NAME",
         help="Target a single skill by name",
     )

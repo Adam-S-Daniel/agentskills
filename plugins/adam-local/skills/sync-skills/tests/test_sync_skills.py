@@ -5,6 +5,7 @@ import datetime
 import io
 import json
 import os
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -255,10 +256,29 @@ class TestPrepare:
 
     def test_is_update_false_for_new_skill(self, repo_with_skills, monkeypatch, tmp_path):
         monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "account")
         monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
 
         result = prepare([repo_with_skills], skill_names=["skill-a"])
         assert result["skills"][0]["is_update"] is False
+
+    def test_is_update_true_when_already_on_the_account(
+        self, repo_with_skills, monkeypatch, tmp_path
+    ):
+        """D6: the account mirror is the authority, not the local state file.
+
+        On a fresh machine ~/.sync-skills-state.json doesn't exist, so a
+        skill that IS on the account reported is_update=False, uploaded with
+        overwrite=false, and 409'd.
+        """
+        account_dir = tmp_path / "account"
+        (account_dir / "skill-a").mkdir(parents=True)
+        monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "no-state.json")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
+
+        result = prepare([repo_with_skills], skill_names=["skill-a"])
+        assert result["skills"][0]["is_update"] is True
 
     def test_is_update_true_after_mark_synced(self, repo_with_skills, monkeypatch, tmp_path):
         state_file = tmp_path / "state.json"
@@ -660,6 +680,118 @@ class TestPluginLayout:
         result = prepare([repo_plugin_layout], skill_names=["skill-a"])
         assert len(result["skills"]) == 1
         assert result["skills"][0]["name"] == "skill-a"
+
+
+# ---------------------------------------------------------------------------
+# CLI exit codes — main() end to end
+#
+# Every vacuous-pass defect showed up as "exit 0", so the exit code is the
+# thing under test here. None of these paths were exercised before: the suite
+# called verify()/prepare() directly and never ran main() at all.
+# ---------------------------------------------------------------------------
+
+SCRIPT = Path(__file__).parent.parent / "sync_skills.py"
+
+
+def run_cli(*args, home):
+    """Run sync_skills.py in a sandboxed HOME (which relocates the mirror)."""
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env.pop("AGENTSKILLS_REPOS", None)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True, text=True, env=env,
+    )
+
+
+@pytest.fixture()
+def sandbox(tmp_path):
+    """A fake HOME with an account mirror, plus a repo holding one skill."""
+    home = tmp_path / "home"
+    account = home / ".claude" / "skills" / "synced"
+    account.mkdir(parents=True)
+
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "skill-a"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: skill-a\n---\nbody\n")
+
+    write_manifest(account, ["skill-a"])
+    return {"home": home, "account": account, "repo": repo, "skill": skill}
+
+
+class TestCliExitCodes:
+    def test_verify_passes_when_account_matches(self, sandbox):
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "OK" in proc.stdout
+
+    def test_verify_fails_on_content_drift(self, sandbox):
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        (sandbox["account"] / "skill-a" / "SKILL.md").write_text("stale\n")
+        proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode != 0
+        assert "DRIFT" in proc.stdout
+
+    def test_verify_fails_when_skill_never_landed(self, sandbox):
+        # Account mirror exists but holds no copy of skill-a.
+        proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode != 0
+        assert "FAIL" in proc.stdout
+
+    def test_verify_fails_on_empty_selection(self, sandbox):
+        """D3(b): bare --verify with nothing selected exited 0 silently."""
+        proc = run_cli("--verify", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode != 0
+        assert "no skills selected" in proc.stderr
+
+    def test_verify_fails_on_unknown_skill(self, sandbox):
+        """D3(c): a typo'd --skill matched nothing and exited 0."""
+        proc = run_cli("--verify", "--repos", str(sandbox["repo"]),
+                       "--skill", "skill-typo", home=sandbox["home"])
+        assert proc.returncode != 0
+        assert "skill-typo" in proc.stderr
+
+    def test_verify_fails_on_unresolvable_repo(self, sandbox, tmp_path):
+        """D2: a wrong --repos reported 'nothing to do' and exited 0."""
+        proc = run_cli("--verify", "--all", "--repos", str(tmp_path / "nope"),
+                       home=sandbox["home"])
+        assert proc.returncode != 0
+        assert "nope" in proc.stderr
+
+    def test_verify_fails_on_stale_mirror(self, sandbox):
+        """D7: verifying against a pre-upload snapshot must not pass."""
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        write_manifest(
+            sandbox["account"], ["skill-a"],
+            age_seconds=sync_skills.MIRROR_MAX_AGE_SECONDS + 60,
+        )
+        proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode != 0
+        assert "stale" in proc.stderr
+
+    def test_all_and_skill_are_mutually_exclusive(self, sandbox):
+        """D9: --skill silently overrode --all."""
+        proc = run_cli("--verify", "--all", "--skill", "skill-a",
+                       "--repos", str(sandbox["repo"]), home=sandbox["home"])
+        assert proc.returncode != 0
+        assert "not allowed with" in proc.stderr
+
+    def test_prepare_marks_is_update_from_account_mirror(self, sandbox):
+        """D6: no state file, but the skill IS on the account -> overwrite."""
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        proc = run_cli("--prepare", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode == 0, proc.stderr
+        payload = json.loads(proc.stdout)
+        assert payload["skills"][0]["is_update"] is True
 
 
 # ---------------------------------------------------------------------------
