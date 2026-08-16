@@ -4,6 +4,7 @@
 Usage:
   python sync_skills.py [--prepare] [--all] [--skill NAME] [--dry-run]
                         [--verify] [--mark-synced NAME:HASH] [--repos PATH ...]
+                        [--account-list PATH]
 """
 
 import argparse
@@ -21,7 +22,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 STATE_FILE = Path.home() / ".sync-skills-state.json"
 
@@ -52,6 +53,41 @@ ACCOUNT_SKILLS_DIR = Path.home() / ".claude" / "skills" / "synced"
 # cross-session snapshot. Tightening it further trades a real safety margin
 # for no extra detection.
 MIRROR_MAX_AGE_SECONDS = 6 * 60 * 60
+
+# Which skills are SUPPOSED to be on the claude.ai account store (ADR 0002).
+# The file's own header carries the rule, the one-way-door warning, and the
+# rulings behind each entry — read it before changing membership.
+ACCOUNT_SKILLS_FILE = Path(__file__).resolve().parent / "account-skills.txt"
+
+
+# ---------------------------------------------------------------------------
+# Declared account-store membership (ADR 0002)
+# ---------------------------------------------------------------------------
+
+def load_account_declaration(path: Optional[Path] = None) -> Optional[Set[str]]:
+    """Return the declared account-store membership, or None if unreadable.
+
+    Format: one skill name per line, ``#`` starts a comment, blanks ignored.
+    Plain text rather than YAML or JSON deliberately: this script runs from a
+    laptop with nothing but the stdlib, and one-name-per-line keeps a
+    membership change to a single-line diff — which is what you want when
+    reviewing an addition that is close to irreversible.
+
+    Returns None, not an empty set, when the file cannot be read. An empty
+    set would silently reclassify every skill as "not supposed to be on the
+    account" and turn the gate into a no-op; None lets the caller say so.
+    """
+    path = path or ACCOUNT_SKILLS_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    names: Set[str] = set()
+    for line in text.splitlines():
+        name = line.split("#", 1)[0].strip()
+        if name:
+            names.add(name)
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -359,8 +395,16 @@ def get_org_id_hint() -> Optional[str]:
 def prepare(
     repos: List[Path],
     skill_names: Optional[List[str]] = None,
+    declared: Optional[Set[str]] = None,
 ) -> Dict:
-    """Build the JSON payload the agent POSTs to claude.ai."""
+    """Build the JSON payload the agent POSTs to claude.ai.
+
+    Warns on stderr about any skill in the payload that is not declared for
+    the account store. The payload itself is unfiltered — the operator, not
+    this script, decides what to POST — but uploading is close to a one-way
+    door (no delete API), so the warning has to arrive BEFORE the upload.
+    ``--verify`` catching it afterwards is too late to undo.
+    """
     state = load_state()
     skills_out: List[Dict] = []
 
@@ -392,6 +436,21 @@ def prepare(
                     "repo": repo.name,
                     "hash": h,
                 }
+            )
+
+    if declared is None:
+        declared = load_account_declaration()
+    if declared is not None:
+        undeclared = sorted(
+            s["name"] for s in skills_out if s["name"] not in declared
+        )
+        if undeclared:
+            print(
+                f"WARNING: not declared for the account store (ADR 0002) but "
+                f"present in this payload: {', '.join(undeclared)}. Uploading "
+                f"is close to a one-way door — the API has no delete. Declare "
+                f"them in {ACCOUNT_SKILLS_FILE.name} or drop them from this run.",
+                file=sys.stderr,
             )
 
     return {"skills": skills_out, "org_id_hint": get_org_id_hint()}
@@ -513,6 +572,8 @@ def verify(
     repos: List[Path],
     skill_names: Optional[List[str]] = None,
     now: Optional[datetime.datetime] = None,
+    declared: Optional[Set[str]] = None,
+    named: Optional[bool] = None,
 ) -> bool:
     """Compare each skill's expected upload against its account copy.
 
@@ -520,22 +581,54 @@ def verify(
     list is used as-is, otherwise each repo's changed skills (via
     ``get_changed_skills``) are checked.
 
+    Every verdict is read against the DECLARED account-store membership
+    (``account-skills.txt``, ADR 0002) rather than inferred, because
+    "selected but absent from the account" has two opposite meanings and
+    nothing else could tell them apart. Absent is a missing upload for a
+    declared skill and the correct resting state for an undeclared one — so
+    without the declaration, ``--verify --all`` buried four real failures
+    under thirteen expected ones.
+
+    Per selected skill:
+
+    ==================  ==========  =====================================
+    declared?           on account  verdict
+    ==================  ==========  =====================================
+    yes                 yes, same   OK
+    yes                 yes, differ DRIFT / MISMATCH
+    yes                 no          FAIL — the upload never happened
+    no                  yes         FAIL — uploaded without a ruling
+    no                  no          not a failure; summarised in one line
+    ==================  ==========  =====================================
+
+    Naming an undeclared skill explicitly via ``--skill`` is an operator
+    error, not a pass: it asks to verify something that is not supposed to
+    be on the account at all.
+
     Compares CONTENT, not just the file set: for every path, the bytes
     ``zip_skill()`` would upload are compared against the account copy's
     bytes, both CRLF-normalised. A path-only comparison passes on an
     account whose files are all present but whose contents are stale, which
-    is exactly the state a failed re-upload leaves behind.
+    is exactly the state a failed re-upload leaves behind. Each verdict is
+    annotated with the account's own ``updatedAt`` stamp so it can be traced
+    to a specific upload.
 
-    Prints one line per skill — OK, MISMATCH (file set differs), or DRIFT
-    (same files, different contents) — each annotated with the account's own
-    ``updatedAt`` stamp so a verdict can be traced to a specific upload.
-
-    Returns True only if the mirror was fresh, at least one skill was
-    checked, and every checked skill matched. A skill that was selected but
-    never landed on the account is a FAILURE, not a skip: it is precisely
-    the upload that silently did not happen.
+    Returns True only if the declaration was readable, the mirror was fresh,
+    at least one skill was selected, and nothing failed.
     """
     all_ok = True
+
+    if declared is None:
+        declared = load_account_declaration()
+    if declared is None:
+        print(
+            f"ERROR: the account-store membership declaration is missing or "
+            f"unreadable at {ACCOUNT_SKILLS_FILE}. Without it --verify cannot "
+            f"tell a missing upload from a skill that was never meant to be on "
+            f"the account, so it refuses to guess.",
+            file=sys.stderr,
+        )
+        return False
 
     manifest = account_manifest()
     stale = check_mirror_freshness(manifest, now)
@@ -544,8 +637,15 @@ def verify(
         all_ok = False
     updated_at = manifest_updated_at(manifest) if manifest else {}
 
-    explicit = skill_names is not None and len(skill_names) > 0
+    # Did the operator NAME these skills (--skill), or did the tool enumerate
+    # them (--all / git-changed)? Only the first makes an undeclared skill an
+    # operator error; enumerating one is just the registry being bigger than
+    # the account store, which is the normal case.
+    if named is None:
+        named = skill_names is not None and len(skill_names) > 0
     checked = 0
+    verified = 0
+    undeclared_absent: List[str] = []
 
     for repo in _existing_repos(repos):
         if skill_names is not None:
@@ -560,14 +660,45 @@ def verify(
 
             checked += 1
             stamp = updated_at.get(name, "unknown")
-            expected = skill_payload(skill_path)
             actual = account_skill_payload(name)
+
+            if name not in declared:
+                if actual is not None:
+                    # The case #59 was still listing as a live defect:
+                    # github-actions-repo-settings was uploaded on 2026-08-13
+                    # with no membership ruling, and nothing surfaced it until
+                    # a human happened to trim the store by hand.
+                    all_ok = False
+                    print(
+                        f"  FAIL      {name}  ({repo.name})  ON the account but "
+                        f"NOT declared in {ACCOUNT_SKILLS_FILE.name} — uploaded "
+                        f"without a membership ruling (ADR 0002). Either declare "
+                        f"it or delete it in the claude.ai UI; there is no delete "
+                        f"API.  [account updatedAt={stamp}]"
+                    )
+                elif named:
+                    all_ok = False
+                    print(
+                        f"ERROR: {name} is not declared in "
+                        f"{ACCOUNT_SKILLS_FILE.name}, so it is not supposed to be "
+                        f"on the account store at all (ADR 0002) and there is "
+                        f"nothing to verify for it. Declare it there first if "
+                        f"that is wrong.",
+                        file=sys.stderr,
+                    )
+                else:
+                    undeclared_absent.append(name)
+                continue
+
+            verified += 1
+            expected = skill_payload(skill_path)
 
             if actual is None:
                 all_ok = False
                 print(
-                    f"  FAIL      {name}  ({repo.name})  never landed on the "
-                    f"account — no copy in {ACCOUNT_SKILLS_DIR}"
+                    f"  FAIL      {name}  ({repo.name})  declared for the account "
+                    f"store but NOT on it — the upload never happened (no copy in "
+                    f"{ACCOUNT_SKILLS_DIR})"
                 )
                 continue
 
@@ -603,8 +734,18 @@ def verify(
                 f"[account updatedAt={stamp}]"
             )
 
+    # One quiet line, not one per skill: under --all these are the majority
+    # of the registry and are correctly absent, so they must stay legible
+    # without drowning the verdicts above them.
+    if undeclared_absent:
+        print(
+            f"  ({len(undeclared_absent)} not declared for the account store "
+            f"and correctly absent from it: "
+            f"{', '.join(sorted(undeclared_absent))})"
+        )
+
     if checked == 0:
-        if explicit:
+        if named:
             print(
                 f"ERROR: no skill named {', '.join(skill_names)} found in any "
                 f"resolved repo — nothing was verified (check the spelling)",
@@ -618,6 +759,16 @@ def verify(
                 file=sys.stderr,
             )
         return False
+
+    # Selection resolved, but none of it was account business. Exit 0 is the
+    # honest answer — there was nothing to upload — but say so, because a
+    # bare exit 0 reads identically to "every account copy checked out".
+    if verified == 0 and all_ok:
+        print(
+            f"NOTE: none of the {checked} selected skill(s) is declared for the "
+            f"account store, so no account copy was verified.",
+            file=sys.stderr,
+        )
 
     return all_ok
 
@@ -674,6 +825,14 @@ def main() -> None:
         "--repos", nargs="+", metavar="PATH",
         help="Repo paths to scan (overrides built-in defaults)",
     )
+    parser.add_argument(
+        "--account-list", metavar="PATH",
+        help=(
+            "Declared account-store membership list to read "
+            f"(default: {ACCOUNT_SKILLS_FILE.name} beside this script). Use it "
+            "to dry-run a proposed membership change before committing one."
+        ),
+    )
     args = parser.parse_args()
 
     # --mark-synced touches only the state file, so it needs no repo.
@@ -690,6 +849,16 @@ def main() -> None:
         sys.exit(
             "ERROR: no repo could be resolved, so nothing was inspected. "
             "This is not the same as having nothing to sync."
+        )
+
+    # An explicitly named list that isn't readable is a typo, not a licence
+    # to fall back to the built-in one.
+    declared = load_account_declaration(
+        Path(args.account_list).expanduser() if args.account_list else None
+    )
+    if args.account_list and declared is None:
+        sys.exit(
+            f"ERROR: --account-list path is not readable: {args.account_list}"
         )
 
     # Resolve skill_names
@@ -722,11 +891,15 @@ def main() -> None:
 
     # --verify
     if args.verify:
-        ok = verify(repos, skill_names)
+        # named=True only for --skill: --all enumerates the registry, and most
+        # of the registry is legitimately not on the account.
+        ok = verify(
+            repos, skill_names, declared=declared, named=bool(args.skill)
+        )
         sys.exit(0 if ok else 1)
 
     # Default: --prepare / JSON output
-    result = prepare(repos, skill_names)
+    result = prepare(repos, skill_names, declared=declared)
     if not result["skills"]:
         result["message"] = (
             "No changed skills found. Use --all to sync everything."

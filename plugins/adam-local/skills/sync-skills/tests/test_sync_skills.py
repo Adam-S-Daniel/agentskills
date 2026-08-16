@@ -351,7 +351,31 @@ def mirror_skill(account_dir, skill_src, name, transform=None):
         target.write_bytes(transform(data) if transform else data)
 
 
+def write_declaration(path, names):
+    """Write an account-store membership list in the real on-disk format."""
+    path.write_text(
+        "# test declaration\n" + "".join(f"{n}\n" for n in names),
+        encoding="utf-8",
+    )
+    return path
+
+
 class TestVerify:
+    @pytest.fixture(autouse=True)
+    def _declare_fixture_skills(self, tmp_path, monkeypatch):
+        """Declare the fixture skills for the account store.
+
+        These tests are about the CONTENT comparison, not about membership,
+        so they run against a declaration that admits every skill they use.
+        Membership semantics have their own class below.
+        """
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_FILE",
+            write_declaration(
+                tmp_path / "declared.txt", ["skill-a", "skill-b", "sync-skills"]
+            ),
+        )
+
     def test_reports_ok_when_content_matches(
         self, repo_with_skills, monkeypatch, tmp_path, capsys
     ):
@@ -529,6 +553,236 @@ class TestVerify:
 
 
 # ---------------------------------------------------------------------------
+# Declared account-store membership (ADR 0002)
+#
+# The gate's first cut made "selected but absent from the account" a failure
+# unconditionally. That is right for --skill and for the git-changed default,
+# and WRONG for --all: --all enumerates the whole registry, and most of the
+# registry is correctly absent from the account store. Thirteen expected
+# failures buried four real ones, which is the exact unreadability the gate
+# exists to remove. These tests pin the four-way verdict on the declaration.
+# ---------------------------------------------------------------------------
+
+class TestLoadAccountDeclaration:
+    def test_parses_names_ignoring_comments_and_blanks(self, tmp_path):
+        f = tmp_path / "list.txt"
+        f.write_text(
+            "# header comment\n"
+            "\n"
+            "alpha\n"
+            "  beta  \n"
+            "gamma  # trailing note\n"
+            "\n",
+            encoding="utf-8",
+        )
+        assert sync_skills.load_account_declaration(f) == {"alpha", "beta", "gamma"}
+
+    def test_missing_file_is_none_not_empty_set(self, tmp_path):
+        """None and set() must not be conflated.
+
+        An empty set reads as "nothing belongs on the account", which would
+        reclassify every skill as undeclared and silently neuter the gate.
+        """
+        assert sync_skills.load_account_declaration(tmp_path / "nope.txt") is None
+
+    def test_shipped_declaration_is_the_ruled_set(self):
+        """Lock the declared membership so a change has to be deliberate.
+
+        Adding a name here is close to a one-way door — the upload API has no
+        delete — so membership moves through this assertion, not by accident.
+        """
+        declared = sync_skills.load_account_declaration()
+        assert declared == {
+            "adam-writing-style",
+            "fastmail",
+            "finding-unknowns",
+            "ocr-pdfs",
+            "pdf-ocr-audit",
+            "rename-pdfs",
+            "sync-cc-settings-between-wsl-and-windows",
+            "sync-skills",
+            "wj-next-break",
+            "writing-adrs",
+        }
+
+
+class TestVerifyDeclaration:
+    def _account(self, tmp_path, monkeypatch, mirrored=()):
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        write_manifest(account_dir, [n for n, _ in mirrored])
+        return account_dir
+
+    def test_undeclared_and_absent_is_not_a_failure(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """The --all noise case: correctly absent must not read as broken."""
+        self._account(tmp_path, monkeypatch)
+
+        ok = verify(
+            [repo_with_skills],
+            skill_names=["skill-a", "skill-b"],
+            declared=set(),
+            named=False,
+        )
+
+        assert ok is True
+        out = capsys.readouterr().out
+        assert "FAIL" not in out
+        assert "skill-a" in out and "skill-b" in out
+
+    def test_undeclared_absent_collapses_to_one_line(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """One summary line, not one per skill — the signal must stay legible."""
+        self._account(tmp_path, monkeypatch)
+
+        verify(
+            [repo_with_skills],
+            skill_names=["skill-a", "skill-b"],
+            declared=set(),
+            named=False,
+        )
+
+        lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+        assert len(lines) == 1
+        assert "not declared" in lines[0]
+
+    def test_undeclared_but_present_on_account_is_a_failure(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """github-actions-repo-settings was exactly this: uploaded, never ruled on.
+
+        Nothing surfaced it until a human trimmed the store by hand, and #59's
+        body was still listing it as live months later.
+        """
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        mirror_skill(account_dir, repo_with_skills / "skills" / "skill-a", "skill-a")
+        write_manifest(account_dir, ["skill-a"])
+
+        ok = verify(
+            [repo_with_skills],
+            skill_names=["skill-a"],
+            declared=set(),
+            named=False,
+        )
+
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "FAIL" in out
+        assert "NOT declared" in out
+
+    def test_declared_but_absent_says_so_distinctly(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """A missing upload must not read like content drift.
+
+        finding-unknowns and writing-adrs are in this state right now: ruled
+        in, not yet uploaded. The message has to name that, or the operator
+        cannot tell it from a re-upload that landed wrong.
+        """
+        self._account(tmp_path, monkeypatch)
+
+        ok = verify(
+            [repo_with_skills],
+            skill_names=["skill-a"],
+            declared={"skill-a"},
+            named=False,
+        )
+
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "FAIL" in out
+        assert "declared for the account store but NOT on it" in out
+        assert "DRIFT" not in out
+
+    def test_named_undeclared_skill_is_an_operator_error(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """--skill NAME for something that shouldn't be there must not pass."""
+        self._account(tmp_path, monkeypatch)
+
+        ok = verify(
+            [repo_with_skills],
+            skill_names=["skill-a"],
+            declared={"skill-b"},
+            named=True,
+        )
+
+        assert ok is False
+        err = capsys.readouterr().err
+        assert "skill-a" in err
+        assert "not declared" in err
+
+    def test_unreadable_declaration_fails_closed(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """No declaration means no verdict — never a permissive default."""
+        self._account(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_FILE", tmp_path / "missing.txt"
+        )
+
+        ok = verify([repo_with_skills], skill_names=["skill-a"])
+
+        assert ok is False
+        assert "declaration is missing" in capsys.readouterr().err
+
+    def test_nothing_declared_in_selection_says_nothing_was_verified(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """Exit 0 is honest here, but it must not look like a verified-clean run."""
+        self._account(tmp_path, monkeypatch)
+
+        ok = verify(
+            [repo_with_skills],
+            skill_names=["skill-a", "skill-b"],
+            declared=set(),
+            named=False,
+        )
+
+        assert ok is True
+        assert "no account copy was verified" in capsys.readouterr().err
+
+
+class TestPrepareDeclaration:
+    def test_warns_before_uploading_an_undeclared_skill(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """The warning has to land BEFORE the POST.
+
+        There is no delete API, so --verify catching an undeclared upload
+        afterwards cannot undo it.
+        """
+        monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "account")
+        monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
+
+        result = prepare(
+            [repo_with_skills], skill_names=["skill-a"], declared=set()
+        )
+
+        # The payload is NOT filtered — the operator decides what to POST.
+        assert [s["name"] for s in result["skills"]] == ["skill-a"]
+        err = capsys.readouterr().err
+        assert "WARNING" in err and "skill-a" in err and "one-way door" in err
+
+    def test_silent_for_a_declared_skill(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "account")
+        monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
+
+        prepare(
+            [repo_with_skills], skill_names=["skill-a"], declared={"skill-a"}
+        )
+
+        assert "not declared" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # resolve_repos — machine-portable repo discovery (D2)
 # ---------------------------------------------------------------------------
 
@@ -694,14 +948,20 @@ class TestPluginLayout:
 SCRIPT = Path(__file__).parent.parent / "sync_skills.py"
 
 
-def run_cli(*args, home):
-    """Run sync_skills.py in a sandboxed HOME (which relocates the mirror)."""
+def run_cli(*args, home, account_list=None):
+    """Run sync_skills.py in a sandboxed HOME (which relocates the mirror).
+
+    ``account_list`` points --account-list at a sandbox membership list, so
+    these end-to-end runs exercise the real loader instead of the shipped
+    declaration (which knows nothing about the fixture skills).
+    """
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env.pop("AGENTSKILLS_REPOS", None)
+    extra = ["--account-list", str(account_list)] if account_list else []
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
+        [sys.executable, str(SCRIPT), *args, *extra],
         capture_output=True, text=True, env=env,
     )
 
@@ -719,14 +979,21 @@ def sandbox(tmp_path):
     (skill / "SKILL.md").write_text("---\nname: skill-a\n---\nbody\n")
 
     write_manifest(account, ["skill-a"])
-    return {"home": home, "account": account, "repo": repo, "skill": skill}
+    return {
+        "home": home,
+        "account": account,
+        "repo": repo,
+        "skill": skill,
+        "declared": write_declaration(tmp_path / "declared.txt", ["skill-a"]),
+        "undeclared": write_declaration(tmp_path / "empty.txt", []),
+    }
 
 
 class TestCliExitCodes:
     def test_verify_passes_when_account_matches(self, sandbox):
         mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
         proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
-                       home=sandbox["home"])
+                       home=sandbox["home"], account_list=sandbox["declared"])
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "OK" in proc.stdout
 
@@ -734,16 +1001,44 @@ class TestCliExitCodes:
         mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
         (sandbox["account"] / "skill-a" / "SKILL.md").write_text("stale\n")
         proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
-                       home=sandbox["home"])
+                       home=sandbox["home"], account_list=sandbox["declared"])
         assert proc.returncode != 0
         assert "DRIFT" in proc.stdout
 
     def test_verify_fails_when_skill_never_landed(self, sandbox):
         # Account mirror exists but holds no copy of skill-a.
         proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
-                       home=sandbox["home"])
+                       home=sandbox["home"], account_list=sandbox["declared"])
         assert proc.returncode != 0
         assert "FAIL" in proc.stdout
+
+    def test_verify_all_passes_over_an_undeclared_absent_skill(self, sandbox):
+        """--all must not fail on the registry being bigger than the account.
+
+        This is the regression the declaration exists for: before it, every
+        undeclared skill under --all produced a FAIL, and thirteen of those
+        hid the four that meant something.
+        """
+        proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"], account_list=sandbox["undeclared"])
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "FAIL" not in proc.stdout
+        assert "not declared" in proc.stdout
+
+    def test_verify_skill_rejects_an_undeclared_name(self, sandbox):
+        """--skill for something that shouldn't be on the account is an error."""
+        proc = run_cli("--verify", "--repos", str(sandbox["repo"]),
+                       "--skill", "skill-a",
+                       home=sandbox["home"], account_list=sandbox["undeclared"])
+        assert proc.returncode != 0
+        assert "not declared" in proc.stderr
+
+    def test_verify_fails_on_unreadable_account_list(self, sandbox, tmp_path):
+        """A typo'd --account-list must not fall back to the shipped one."""
+        proc = run_cli("--verify", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"], account_list=tmp_path / "nope.txt")
+        assert proc.returncode != 0
+        assert "not readable" in proc.stderr
 
     def test_verify_fails_on_empty_selection(self, sandbox):
         """D3(b): bare --verify with nothing selected exited 0 silently."""
