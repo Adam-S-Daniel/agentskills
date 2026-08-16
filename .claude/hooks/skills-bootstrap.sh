@@ -175,9 +175,17 @@ join_names () {
 plural () { if [ "$1" -eq 1 ]; then printf '%s' "$2"; else printf '%s' "$3"; fi; }
 
 # --- surface guard: ephemeral sessions only --------------------------------
+# The verdict NAMES the two values this decision was made from, because "durable
+# session" on its own is indistinguishable from a MISCLASSIFIED remote surface,
+# and that ambiguity is what kept the exact-match `!= "remote"` test's fragility
+# invisible: $CLAUDE_CODE_ENTRYPOINT has at least six `remote_*` spellings
+# (`remote_desktop` among them), none of which this test matches. Printing the
+# inputs does not change the decision — widening the guard is held pending a
+# measurement on a durable Cowork machine, since `remote_cowork` may well BE
+# durable — it just makes a wrong one legible to whoever reads the transcript.
 if [ -z "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" ] && [ "${CLAUDE_CODE_ENTRYPOINT:-}" != "remote" ] \
    && [ -z "${SKILLS_BOOTSTRAP_FORCE:-}" ]; then
-  emit "skills: skipped — durable session, marketplace install is authoritative"
+  emit "skills: skipped — durable session (entrypoint=${CLAUDE_CODE_ENTRYPOINT:-unset}, no remote session id), marketplace install is authoritative"
 fi
 
 # --- locate the lock -------------------------------------------------------
