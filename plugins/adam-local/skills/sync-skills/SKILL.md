@@ -6,7 +6,8 @@ description: >
   skills", "push skills to Claude", "upload skill", or after editing
   SKILL.md files locally. Requires a claude.ai tab open in Chrome (uses
   browser session cookies via javascript_tool). Works on Adam's computer
-  where the agentskills repos live under ~/repos/ or %USERPROFILE%\repos\.
+  wherever the agentskills clones live — the helper finds them itself, and
+  $AGENTSKILLS_REPOS overrides the search.
 compatibility: Requires Claude in Chrome (browser automation) with a logged-in claude.ai tab, plus Bash/Python 3 for the sync_skills.py helper; local interactive execution only — not usable in headless or cloud sessions
 ---
 
@@ -17,17 +18,32 @@ browser's authenticated session. No separate API key required - the
 `javascript_tool` runs in the browser context which already holds the
 session cookies.
 
+## Locating the helper
+
+Clone locations are machine-specific — `~/repos/agentskills` on Linux/WSL,
+`D:\repos\adam-s-daniel\agentskills` on ZENDA (Windows) — so **don't
+hardcode either one**. Resolve the skill folder once and reuse it:
+
+```bash
+# Run from anywhere inside the agentskills clone:
+SKILL_DIR="$(git rev-parse --show-toplevel)/plugins/adam-local/skills/sync-skills"
+```
+
+Every command below uses `"$SKILL_DIR"`. If you're not inside the clone,
+set it by hand to wherever this skill folder actually is on this machine.
+
+`sync_skills.py` finds the **repos to sync** on its own, trying in order:
+`--repos` → `$AGENTSKILLS_REPOS` (`:`/`;`-separated) → `~/repos/<name>` →
+`D:/repos/adam-s-daniel/<name>` → the checkout it lives in. It warns on
+stderr about any clone it could not find and exits non-zero if it resolved
+none — "nothing to sync" and "I couldn't look" are never the same answer.
+
 ## Setup (one-time)
 
 Register the pre-push reminder hook (requires git 2.54+):
 
 ```bash
-bash ~/repos/agentskills/plugins/adam-local/skills/sync-skills/setup.sh
-```
-
-On Windows (Git Bash / WSL):
-```bash
-bash "$USERPROFILE/repos/agentskills/plugins/adam-local/skills/sync-skills/setup.sh"
+bash "$SKILL_DIR/setup.sh"
 ```
 
 This registers a global config-based `pre-push` hook so every push from
@@ -44,8 +60,9 @@ you switch contexts.)
 2. Run `sync_skills.py --prepare` (via Bash) to get the JSON payload.
 3. For each skill in the payload, call `javascript_tool` to POST the ZIP.
 4. Mark each successfully uploaded skill with `--mark-synced`.
-5. Refresh the account-copy mirror and run `--verify`; a sync isn't done
-   until it reports OK for every skill you just uploaded.
+5. Refresh the account-copy mirror (§7) and run `--verify`; a sync isn't
+   done until it reports `OK` for every skill you just uploaded. The
+   refresh is mandatory — `--verify` against a stale mirror proves nothing.
 6. Report results to the user.
 
 ---
@@ -55,14 +72,13 @@ you switch contexts.)
 Run the helper script to find changed skills and build base64-encoded ZIPs:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --prepare
+python3 "$SKILL_DIR/sync_skills.py" --prepare
 ```
 
-On Windows the path is `%USERPROFILE%\repos\agentskills\plugins\adam-local\skills\sync-skills\sync_skills.py`.
 Use `--all` to force-sync every skill regardless of git diff:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --prepare --all
+python3 "$SKILL_DIR/sync_skills.py" --prepare --all
 ```
 
 The output is a JSON object:
@@ -158,7 +174,7 @@ After each successful upload, record it in the state file so future runs
 know to use `overwrite=true`:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py \
+python3 "$SKILL_DIR/sync_skills.py" \
   --mark-synced "SKILL_NAME:HASH"
 ```
 
@@ -171,21 +187,25 @@ Substitute the `name` and `hash` fields from the JSON payload.
 To preview what would be synced without uploading:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --dry-run
+python3 "$SKILL_DIR/sync_skills.py" --dry-run
 ```
 
 To target a single skill:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --skill fastmail
+python3 "$SKILL_DIR/sync_skills.py" --skill fastmail
 ```
 
-To include skills from both repos:
+Both repos are searched automatically. To point at clones somewhere the
+built-in search won't find (a scratch checkout, a non-standard drive):
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --prepare --all \
-  --repos ~/repos/agentskills ~/repos/agentskills-private
+python3 "$SKILL_DIR/sync_skills.py" --prepare --all \
+  --repos /path/to/agentskills /path/to/agentskills-private
 ```
+
+`--skill` and `--all` are mutually exclusive — asking for both used to
+silently sync only the single named skill.
 
 ---
 
@@ -211,6 +231,23 @@ bare `.md` file. **That is no longer the case** — the server now rejects
 `text/markdown` uploads with `skill_upload_invalid_file_type` (only
 `.zip` or `.skill` extensions are accepted, and `.skill` is parsed as a
 ZIP container, not a single-file format).
+
+**Why base64: `SKILL_MD_B64` is base64, never raw Markdown.** The
+substituted value is the base64 encoding of the SKILL.md **bytes**. An
+earlier version of this snippet carried the payload in a JS template
+literal (`` const skillMd = `SKILL_MD_CONTENT`; ``), which cannot work: a
+SKILL.md body contains backticks (fenced code blocks, inline code) and
+`${...}` sequences, so the substituted script is a **syntax error** — it
+dies at parse time, before the `expectedFileCount` guard below can run, so
+the guard never fires. Measured against every single-file skill in the
+registry that this section legitimately applies to: 8 of 8 failed
+`node --check`. Base64 has no character that can terminate the string
+early, so it survives any SKILL.md.
+
+Produce it with `base64 -w0 SKILL.md` (Linux/WSL),
+`base64 -i SKILL.md` (macOS), or
+`[Convert]::ToBase64String([IO.File]::ReadAllBytes("SKILL.md"))`
+(PowerShell).
 
 When you don't have `sync_skills.py --prepare` available locally (e.g.
 the local repo doesn't exist on this machine, or you only have the raw
@@ -247,7 +284,10 @@ files, build a minimal STORE-mode ZIP in the browser and upload that:
   const orgId = "ORG_ID";
   const overwrite = OVERWRITE;             // true | false
   const skillName = "SKILL_NAME";          // e.g. "adam-writing-style"
-  const skillMd = `SKILL_MD_CONTENT`;       // full SKILL.md text
+  // SKILL_MD_B64 is the base64 of the SKILL.md bytes — NEVER the raw text.
+  // See "Why base64" below; pasting Markdown here does not parse.
+  const skillMd = new TextDecoder().decode(
+    Uint8Array.from(atob("SKILL_MD_B64"), c => c.charCodeAt(0)));
   const expectedFileCount = N;             // the total number of files in the skill folder — count them before filling this in
 
   // ----- hard guard: this fallback can only ever upload one file -----
@@ -299,19 +339,77 @@ CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'
 Then run:
 
 ```bash
-python3 ~/repos/agentskills/plugins/adam-local/skills/sync-skills/sync_skills.py --verify
+python3 "$SKILL_DIR/sync_skills.py" --verify
 ```
 
-It prints one line per skill checked — `OK` when the account copy's file
-set matches what `zip_skill()` would upload, `MISMATCH` (with the
-missing/extra paths listed) when it doesn't, `SKIP ... not uploaded` when
-the skill has no account copy yet — and exits non-zero if anything
-mismatched. It checks the same skill set you just synced (git-changed by
-default; pass `--all` or `--skill NAME` if that's what you used to sync).
+**The refresh is not optional.** `--verify` reads that mirror, so skipping
+it compares your uploads against a *pre-upload* snapshot and reports OK for
+things that never landed. `--verify` now refuses to run against a mirror
+older than 6 hours rather than silently trusting it, and prints each
+skill's account `updatedAt` beside its verdict so you can see which upload
+a verdict actually describes.
 
-If `--verify` reports a `MISMATCH`, treat the sync as failed: re-upload
-that skill through section 1/3 (never section 6 — that's what causes
-this), then re-run `--verify` before reporting success to the user.
+### What "should be on the account" means
+
+Verdicts are read against **`account-skills.txt`** — the declared list of
+skills that belong on the claude.ai account store, sitting beside
+`sync_skills.py`. Read its header (and
+[ADR 0002](../../../../docs/decisions/0002-limit-account-store-to-repo-independent-skills.md))
+before changing it: adding a line is close to a one-way door, because the
+upload API has no delete.
+
+That declaration is what makes "absent from the account" readable at all.
+It means two opposite things — a **missing upload** for a skill that
+belongs there, and the **correct resting state** for one that doesn't —
+and most of this registry is deliberately in the second category. Without
+the list, `--verify --all` flagged every repo-scoped skill as a failure and
+buried the four real ones under thirteen expected ones.
+
+It prints one line per skill checked and exits non-zero unless every one
+passed:
+
+| Verdict | Declared? | On the account? | Meaning |
+| --- | --- | --- | --- |
+| `OK` | yes | yes | Every file present and byte-identical (CRLF normalised). |
+| `DRIFT` | yes | yes | Same files, **different contents** — names the differing paths. |
+| `MISMATCH` | yes | yes | File set differs — lists missing/extra paths. |
+| `FAIL` … *declared … but NOT on it* | yes | no | The **upload never happened**. Nothing is wrong with the local skill — it just hasn't been pushed. Push it (sections 1/3) and re-verify. |
+| `FAIL` … *ON the account but NOT declared* | no | yes | It was **uploaded without a membership ruling**. Either declare it in `account-skills.txt` or delete it by hand in the claude.ai UI — there is no delete API. |
+| one summary line | no | no | Correct and expected; collapsed to a single `(N not declared …)` line so it never drowns the verdicts. |
+
+**Read the two `FAIL` wordings as different bugs.** *Declared but not on
+it* is a **push you still owe**; `DRIFT`/`MISMATCH` is a **push that landed
+wrong**. Re-uploading fixes the first; the second means the upload path
+itself misbehaved (section 6 truncation is the usual cause) and needs
+investigating before you re-push.
+
+It checks the same skill set you just synced (git-changed by default; pass
+`--all` or `--skill NAME` if that's what you used to sync). Selecting
+nothing, or naming a skill that exists in no repo, is an **error** — a
+silent exit 0 there is indistinguishable from a clean run, which is how a
+broken account passed this gate for months. So is `--skill NAME` for an
+**undeclared** skill: asking to verify something that isn't supposed to be
+on the account is an operator mistake, not a pass.
+
+`--account-list PATH` points the gate at a different membership list — use
+it to dry-run a proposed membership change before committing one. A path
+that isn't readable is an error rather than a silent fall-back to the
+shipped list.
+
+`--prepare` warns on stderr if the payload contains an undeclared skill. It
+does **not** filter the payload — you decide what to POST — but the warning
+has to arrive before the upload, because `--verify` catching it afterwards
+cannot undo it.
+
+If `--verify` reports anything but `OK`, treat the sync as failed:
+re-upload that skill through section 1/3 (never section 6 — that's what
+causes `MISMATCH`), then re-run `--verify` before reporting success.
+
+Content is compared with CRLF normalised on **both** sides, because the
+account store's line endings vary by upload batch and are not a content
+change. Do **not** "fix" that by normalising newlines in `zip_skill()` —
+that would rewrite the bytes of every upload to chase a legacy artefact of
+one 2026-05-11 batch, and the compare-time normalisation already handles it.
 
 ## 8. Reporting
 
