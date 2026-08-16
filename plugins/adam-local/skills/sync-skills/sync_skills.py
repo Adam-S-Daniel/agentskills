@@ -21,7 +21,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 STATE_FILE = Path.home() / ".sync-skills-state.json"
 
@@ -33,6 +33,20 @@ DEFAULT_REPOS: List[Path] = [
 # Local mirror of the claude.ai skill registry, refreshed by running
 # ``CLAUDE_CODE_SYNC_SKILLS=1 claude -p ...`` — what --verify checks against.
 ACCOUNT_SKILLS_DIR = Path.home() / ".claude" / "skills" / "synced"
+
+# How stale the account mirror may be before --verify refuses to trust it.
+#
+# Why 6 hours: in the documented flow (SKILL.md §7) the refresh runs seconds
+# before --verify, so any mirror belonging to the current sync is minutes old.
+# The failure this guards against is the opposite extreme — the refresh was
+# skipped or silently failed, so --verify compares against a snapshot taken
+# before the uploads and cheerfully reports OK for an upload that never
+# landed. That stale mirror is realistically hours-to-days old (a leftover
+# from a previous session or a previous day). 6h is deliberately generous so
+# a long interactive session never false-fails, while still catching every
+# cross-session snapshot. Tightening it further trades a real safety margin
+# for no extra detection.
+MIRROR_MAX_AGE_SECONDS = 6 * 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +84,22 @@ def _git(args: List[str], cwd: Path) -> Optional[str]:
         return result.stdout.strip()
     except Exception:
         return None
+
+
+def _existing_repos(repos: List[Path]) -> List[Path]:
+    """Yield the repo paths that exist, warning on stderr about those that don't.
+
+    Silently skipping an unreadable repo makes a typo'd ``--repos`` and a
+    genuinely clean tree indistinguishable: both produce "nothing to do" and
+    exit 0. Naming the missing path is the difference between those two.
+    """
+    present: List[Path] = []
+    for repo in repos:
+        if repo.is_dir():
+            present.append(repo)
+        else:
+            print(f"WARNING: repo path does not exist: {repo}", file=sys.stderr)
+    return present
 
 
 def _skill_dir(repo_path: Path, name: str) -> Optional[Path]:
@@ -250,10 +280,7 @@ def prepare(
     state = load_state()
     skills_out: List[Dict] = []
 
-    for repo in repos:
-        if not repo.is_dir():
-            continue
-
+    for repo in _existing_repos(repos):
         if skill_names is not None:
             names = [n for n in skill_names if _skill_dir(repo, n) is not None]
         else:
@@ -282,19 +309,30 @@ def prepare(
 # Verify (account-copy drift check)
 # ---------------------------------------------------------------------------
 
-def skill_files(skill_path: Path) -> Set[str]:
-    """Return the relative paths ``zip_skill()`` would upload for this skill.
+def normalise(data: bytes) -> bytes:
+    """CRLF → LF. The account store's line endings are not a content change.
 
-    Reads the names back out of the actual ZIP bytes rather than re-walking
-    the directory, so the exclusion rules in ``_include_in_zip`` can never
-    drift out of sync with what a real upload would contain.
+    Some account copies came back CRLF and some LF (it varies by upload
+    batch, not by uploader version), so a raw byte compare would flag line
+    endings as drift. This matches the normalisation the independent
+    account-audit oracle applies, so both agree on what counts as drift.
+    """
+    return data.replace(b"\r\n", b"\n")
+
+
+def skill_payload(skill_path: Path) -> Dict[str, bytes]:
+    """Return ``{relpath: bytes}`` exactly as ``zip_skill()`` would upload it.
+
+    Reads the members back out of the actual ZIP bytes rather than
+    re-walking the directory, so the exclusion rules in ``_include_in_zip``
+    can never drift out of sync with what a real upload would contain.
     """
     with zipfile.ZipFile(io.BytesIO(zip_skill(skill_path))) as zf:
-        return set(zf.namelist())
+        return {name: zf.read(name) for name in zf.namelist()}
 
 
-def account_skill_files(name: str) -> Optional[Set[str]]:
-    """Return relative file paths under the local account-copy mirror.
+def account_skill_payload(name: str) -> Optional[Dict[str, bytes]]:
+    """Return ``{relpath: bytes}`` under the local account-copy mirror.
 
     Reads ``ACCOUNT_SKILLS_DIR / name``. Returns None if that directory
     doesn't exist (skill was never uploaded, or the mirror hasn't been
@@ -304,30 +342,120 @@ def account_skill_files(name: str) -> Optional[Set[str]]:
     if not account_dir.is_dir():
         return None
     return {
-        f.relative_to(account_dir).as_posix()
+        f.relative_to(account_dir).as_posix(): f.read_bytes()
         for f in account_dir.rglob("*")
         if f.is_file()
     }
 
 
-def verify(repos: List[Path], skill_names: Optional[List[str]] = None) -> bool:
-    """Compare each skill's expected ZIP contents against its account copy.
+def account_manifest() -> Optional[Dict]:
+    """Parse the account mirror's manifest.json, or None if unreadable."""
+    path = ACCOUNT_SKILLS_DIR / "manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def manifest_updated_at(manifest: Dict) -> Dict[str, str]:
+    """Map skill name -> the account's own ``updatedAt`` stamp for it."""
+    out: Dict[str, str] = {}
+    for entry in manifest.get("skills", []) or []:
+        name = entry.get("name")
+        if name:
+            out[name] = entry.get("updatedAt") or "unknown"
+    return out
+
+
+def mirror_age_seconds(
+    manifest: Dict, now: Optional[datetime.datetime] = None
+) -> Optional[float]:
+    """Seconds since the mirror was last refreshed, or None if unknown.
+
+    ``lastUpdated`` is epoch milliseconds.
+    """
+    raw = manifest.get("lastUpdated")
+    if not isinstance(raw, (int, float)):
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return now.timestamp() - (raw / 1000.0)
+
+
+def check_mirror_freshness(
+    manifest: Optional[Dict], now: Optional[datetime.datetime] = None
+) -> Optional[str]:
+    """Return an error message if the account mirror can't be trusted.
+
+    Returns None when the mirror is present and recent enough. ``--verify``
+    is only meaningful against a mirror refreshed *after* the uploads it is
+    checking; without this, skipping the refresh step turns --verify into a
+    comparison against a pre-upload snapshot that reports OK for uploads
+    that never landed.
+    """
+    refresh = (
+        "refresh it with:  CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'"
+    )
+    if manifest is None:
+        return (
+            f"account mirror manifest not found or unreadable at "
+            f"{ACCOUNT_SKILLS_DIR / 'manifest.json'} — {refresh}"
+        )
+    age = mirror_age_seconds(manifest, now)
+    if age is None:
+        return (
+            f"account mirror manifest has no usable 'lastUpdated' stamp, so "
+            f"its freshness cannot be established — {refresh}"
+        )
+    if age > MIRROR_MAX_AGE_SECONDS:
+        return (
+            f"account mirror is stale: last refreshed {age / 3600:.1f}h ago "
+            f"(limit {MIRROR_MAX_AGE_SECONDS / 3600:.0f}h). Verifying against "
+            f"it would compare uploads to a pre-upload snapshot — {refresh}"
+        )
+    return None
+
+
+def verify(
+    repos: List[Path],
+    skill_names: Optional[List[str]] = None,
+    now: Optional[datetime.datetime] = None,
+) -> bool:
+    """Compare each skill's expected upload against its account copy.
 
     Mirrors ``prepare()``'s skill selection: an explicit ``skill_names``
     list is used as-is, otherwise each repo's changed skills (via
-    ``get_changed_skills``) are checked. Prints one line per skill — OK,
-    MISMATCH (with missing/extra paths), or SKIP when never uploaded —
-    comparing path sets only, never file content: account copies are known
-    to be CRLF while the registry is LF, so a content hash would
-    false-positive almost every time. Returns True iff no skill mismatched
-    (skills not yet uploaded don't count as failures).
+    ``get_changed_skills``) are checked.
+
+    Compares CONTENT, not just the file set: for every path, the bytes
+    ``zip_skill()`` would upload are compared against the account copy's
+    bytes, both CRLF-normalised. A path-only comparison passes on an
+    account whose files are all present but whose contents are stale, which
+    is exactly the state a failed re-upload leaves behind.
+
+    Prints one line per skill — OK, MISMATCH (file set differs), or DRIFT
+    (same files, different contents) — each annotated with the account's own
+    ``updatedAt`` stamp so a verdict can be traced to a specific upload.
+
+    Returns True only if the mirror was fresh, at least one skill was
+    checked, and every checked skill matched. A skill that was selected but
+    never landed on the account is a FAILURE, not a skip: it is precisely
+    the upload that silently did not happen.
     """
     all_ok = True
 
-    for repo in repos:
-        if not repo.is_dir():
-            continue
+    manifest = account_manifest()
+    stale = check_mirror_freshness(manifest, now)
+    if stale:
+        print(f"ERROR: {stale}", file=sys.stderr)
+        all_ok = False
+    updated_at = manifest_updated_at(manifest) if manifest else {}
 
+    explicit = skill_names is not None and len(skill_names) > 0
+    checked = 0
+
+    for repo in _existing_repos(repos):
         if skill_names is not None:
             names = [n for n in skill_names if _skill_dir(repo, n) is not None]
         else:
@@ -338,26 +466,66 @@ def verify(repos: List[Path], skill_names: Optional[List[str]] = None) -> bool:
             if skill_path is None:
                 continue
 
-            expected = skill_files(skill_path)
-            actual = account_skill_files(name)
+            checked += 1
+            stamp = updated_at.get(name, "unknown")
+            expected = skill_payload(skill_path)
+            actual = account_skill_payload(name)
 
             if actual is None:
-                print(f"  SKIP      {name}  ({repo.name})  not uploaded")
+                all_ok = False
+                print(
+                    f"  FAIL      {name}  ({repo.name})  never landed on the "
+                    f"account — no copy in {ACCOUNT_SKILLS_DIR}"
+                )
                 continue
 
-            if expected == actual:
-                print(f"  OK        {name}  ({repo.name})")
+            missing = sorted(set(expected) - set(actual))
+            extra = sorted(set(actual) - set(expected))
+            if missing or extra:
+                all_ok = False
+                detail = []
+                if missing:
+                    detail.append(f"missing: {', '.join(missing)}")
+                if extra:
+                    detail.append(f"extra: {', '.join(extra)}")
+                print(
+                    f"  MISMATCH  {name}  ({repo.name})  "
+                    f"{'  '.join(detail)}  [account updatedAt={stamp}]"
+                )
                 continue
 
-            all_ok = False
-            missing = sorted(expected - actual)
-            extra = sorted(actual - expected)
-            detail = []
-            if missing:
-                detail.append(f"missing: {', '.join(missing)}")
-            if extra:
-                detail.append(f"extra: {', '.join(extra)}")
-            print(f"  MISMATCH  {name}  ({repo.name})  {'  '.join(detail)}")
+            differing = sorted(
+                path for path in sorted(expected)
+                if normalise(expected[path]) != normalise(actual[path])
+            )
+            if differing:
+                all_ok = False
+                print(
+                    f"  DRIFT     {name}  ({repo.name})  content differs: "
+                    f"{', '.join(differing)}  [account updatedAt={stamp}]"
+                )
+                continue
+
+            print(
+                f"  OK        {name}  ({repo.name})  "
+                f"[account updatedAt={stamp}]"
+            )
+
+    if checked == 0:
+        if explicit:
+            print(
+                f"ERROR: no skill named {', '.join(skill_names)} found in any "
+                f"resolved repo — nothing was verified (check the spelling)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "ERROR: no skills selected, so nothing was verified. A silent "
+                "pass here would look identical to a successful sync. Pass "
+                "--all or --skill NAME to say what should have been uploaded.",
+                file=sys.stderr,
+            )
+        return False
 
     return all_ok
 

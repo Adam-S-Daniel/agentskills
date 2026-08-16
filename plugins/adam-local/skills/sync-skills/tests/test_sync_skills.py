@@ -1,6 +1,7 @@
 """Tests for sync_skills.py — run with pytest from the skill root."""
 
 import base64
+import datetime
 import io
 import json
 import sys
@@ -11,6 +12,7 @@ import pytest
 
 # Allow importing the sibling module regardless of working directory.
 sys.path.insert(0, str(Path(__file__).parent.parent))
+import sync_skills  # noqa: E402
 from sync_skills import (  # noqa: E402
     _extract_skill_names,
     _skill_dir,
@@ -286,20 +288,44 @@ class TestPrepare:
 # verify
 # ---------------------------------------------------------------------------
 
+def write_manifest(account_dir, names=(), age_seconds=0):
+    """Write an account-mirror manifest.json, aged ``age_seconds`` into the past."""
+    account_dir.mkdir(parents=True, exist_ok=True)
+    now_ms = datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000
+    (account_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "lastUpdated": now_ms - age_seconds * 1000,
+                "skills": [
+                    {"name": n, "updatedAt": "2026-08-16T00:00:00.000000Z"}
+                    for n in names
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def mirror_skill(account_dir, skill_src, name, transform=None):
+    """Copy a skill folder into the fake account mirror, byte for byte."""
+    dst = account_dir / name
+    for f in sorted(skill_src.rglob("*")):
+        if not f.is_file():
+            continue
+        target = dst / f.relative_to(skill_src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data = f.read_bytes()
+        target.write_bytes(transform(data) if transform else data)
+
+
 class TestVerify:
-    def test_reports_ok_when_account_copy_matches(
+    def test_reports_ok_when_content_matches(
         self, repo_with_skills, monkeypatch, tmp_path, capsys
     ):
-        """Path sets must match; content must NOT be compared — account
-        copies are known to be CRLF while the registry is LF, so this
-        locks in that the comparison stays path-only."""
         account_dir = tmp_path / "account"
         monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
-
-        skill_account = account_dir / "skill-a"
-        skill_account.mkdir(parents=True)
-        (skill_account / "SKILL.md").write_text("---\nname: skill-a\n---\ncontent differs on purpose\n")
-        (skill_account / "extra.txt").write_text("also different content on purpose\n")
+        mirror_skill(account_dir, repo_with_skills / "skills" / "skill-a", "skill-a")
+        write_manifest(account_dir, ["skill-a"])
 
         ok = verify([repo_with_skills], skill_names=["skill-a"])
 
@@ -307,6 +333,54 @@ class TestVerify:
         out = capsys.readouterr().out
         assert "OK" in out
         assert "skill-a" in out
+
+    def test_detects_content_drift_with_identical_file_set(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """The D1 defect: every path present, contents stale.
+
+        A path-only comparison reported OK here, which is exactly the state
+        a re-upload that never landed leaves behind. The gate must catch it.
+        """
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        mirror_skill(account_dir, repo_with_skills / "skills" / "skill-a", "skill-a")
+        # Same file set, different bytes.
+        (account_dir / "skill-a" / "SKILL.md").write_text("---\nname: skill-a\n---\nSTALE\n")
+        write_manifest(account_dir, ["skill-a"])
+
+        ok = verify([repo_with_skills], skill_names=["skill-a"])
+
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "DRIFT" in out
+        assert "SKILL.md" in out
+
+    def test_crlf_only_difference_is_not_drift(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """Line endings are not content.
+
+        Account copies come back CRLF for some upload batches and LF for
+        others. Normalising both sides at COMPARE time is what makes the
+        content check usable; normalising at UPLOAD time (rewriting the
+        bytes of every skill) was considered and rejected — it would change
+        what lands on the account for all skills to chase a legacy artefact.
+        """
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        mirror_skill(
+            account_dir,
+            repo_with_skills / "skills" / "skill-a",
+            "skill-a",
+            transform=lambda b: b.replace(b"\n", b"\r\n"),
+        )
+        write_manifest(account_dir, ["skill-a"])
+
+        ok = verify([repo_with_skills], skill_names=["skill-a"])
+
+        assert ok is True
+        assert "OK" in capsys.readouterr().out
 
     def test_reports_mismatch_and_fails_on_missing_payload(self, monkeypatch, tmp_path, capsys):
         """The exact live bug: SKILL.md present on the account copy, scripts/* absent."""
@@ -324,6 +398,7 @@ class TestVerify:
         skill_account.mkdir(parents=True)
         (skill_account / "SKILL.md").write_text("---\nname: sync-skills\n---\n")
         # scripts/helper.py deliberately absent on the account copy.
+        write_manifest(account_dir, ["sync-skills"])
 
         ok = verify([repo], skill_names=["sync-skills"])
 
@@ -332,17 +407,92 @@ class TestVerify:
         assert "MISMATCH" in out
         assert "scripts/helper.py" in out
 
-    def test_handles_absent_account_directory(
+    def test_absent_account_copy_is_a_failure(
         self, repo_with_skills, monkeypatch, tmp_path, capsys
     ):
-        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "does-not-exist")
+        """D3(a): a selected skill that never landed must fail the gate.
+
+        Reporting SKIP and exiting 0 passed the gate for precisely the
+        upload that silently did not happen.
+        """
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        write_manifest(account_dir, [])
 
         ok = verify([repo_with_skills], skill_names=["skill-a"])
 
-        assert ok is True
+        assert ok is False
         out = capsys.readouterr().out
+        assert "FAIL" in out
         assert "skill-a" in out
-        assert "not uploaded" in out
+
+    def test_empty_selection_is_an_error(self, repo_with_skills, monkeypatch, tmp_path, capsys):
+        """D3(b): verifying nothing must not look like verifying successfully."""
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        write_manifest(account_dir, [])
+
+        ok = verify([repo_with_skills], skill_names=[])
+
+        assert ok is False
+        assert "no skills selected" in capsys.readouterr().err
+
+    def test_unknown_skill_name_is_an_error(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """D3(c): a typo'd --skill resolved nowhere and still exited 0."""
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        write_manifest(account_dir, [])
+
+        ok = verify([repo_with_skills], skill_names=["skill-typo"])
+
+        assert ok is False
+        err = capsys.readouterr().err
+        assert "skill-typo" in err
+
+    def test_stale_mirror_is_an_error(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """D7: a mirror older than the threshold predates the uploads."""
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        mirror_skill(account_dir, repo_with_skills / "skills" / "skill-a", "skill-a")
+        write_manifest(
+            account_dir, ["skill-a"], age_seconds=sync_skills.MIRROR_MAX_AGE_SECONDS + 60
+        )
+
+        ok = verify([repo_with_skills], skill_names=["skill-a"])
+
+        assert ok is False
+        assert "stale" in capsys.readouterr().err
+
+    def test_missing_manifest_is_an_error(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """D7: no manifest means the mirror's freshness cannot be established."""
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        mirror_skill(account_dir, repo_with_skills / "skills" / "skill-a", "skill-a")
+        # No manifest.json written.
+
+        ok = verify([repo_with_skills], skill_names=["skill-a"])
+
+        assert ok is False
+        assert "manifest" in capsys.readouterr().err
+
+    def test_prints_account_updated_at_beside_verdict(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """D7: a verdict must be traceable to the upload it describes."""
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        mirror_skill(account_dir, repo_with_skills / "skills" / "skill-a", "skill-a")
+        write_manifest(account_dir, ["skill-a"])
+
+        verify([repo_with_skills], skill_names=["skill-a"])
+
+        assert "2026-08-16T00:00:00.000000Z" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
