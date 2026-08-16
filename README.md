@@ -223,10 +223,11 @@ so the file this repo already has is the one it reads — verified live
 
 ## Hosted agents — Claude Code on the web, claude.ai
 
-Hosted sessions start with **nothing in `~/.claude`** (no user plugins, skills,
-or marketplace adds), and the repo clone is the only thing they arrive with —
-but the clone can *write* into `~/.claude`. That is the delivery channel for
-ephemeral surfaces. What works where:
+Hosted sessions start with **no user plugins and no marketplace adds** — but
+`~/.claude` is not empty: the claude.ai account store is already present at
+`~/.claude/skills/synced/` and loads from turn one (see "The claude.ai account
+store" below). The repo clone can additionally *write* into `~/.claude`; that
+write is the delivery channel for ephemeral surfaces. What works where:
 
 - **Claude Code on the web / cloud sessions**: files committed to the repo being
   worked on — `CLAUDE.md`, `AGENTS.md`, `.claude/settings.json`, `.claude/skills/`,
@@ -259,9 +260,15 @@ ephemeral surfaces. What works where:
   registries and bundles the lock still declares. A hand-placed skill, another
   repo's lock's skills, and the account-sync `synced/` store are never touched;
   an edited one is kept and named in the verdict rather than deleted.
-- **claude.ai chat**: skills upload as ZIPs via Settings → Capabilities; the
-  [`sync-skills`](plugins/adam-local/skills/sync-skills) skill (in the
-  `adam-local` bundle) automates pushing this registry's skills there.
+- **The claude.ai account store** — `~/.claude/skills/synced/`, populated by
+  uploading skills as ZIPs via Settings → Capabilities. This is the *only*
+  channel that reaches claude.ai chat, Cowork, Claude in Chrome, and mobile —
+  and it loads in Claude Code on the web / cloud sessions too, alongside
+  whatever the repo delivers. It can't be repo-scoped (see
+  [ADR 0002](docs/decisions/0002-limit-account-store-to-repo-independent-skills.md)),
+  so it's reserved for skills that should be live everywhere, not per-repo
+  ones. The [`sync-skills`](plugins/adam-local/skills/sync-skills) skill (in
+  the `adam-local` bundle) automates pushing this registry's skills there.
 - **Memory**: hosted sessions see a repo's git-tracked `.claude/memory/` (see the
   Memory section in [`STRATEGY.md`](STRATEGY.md) and the
   [portable-memory guide](https://github.com/Adam-S-Daniel/claude-memory-map/blob/main/docs/portable-memory.md);
