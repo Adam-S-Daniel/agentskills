@@ -1,0 +1,59 @@
+# account-skills.txt — which skills are SUPPOSED to be on the claude.ai
+# personal account store. One skill name per line; `#` starts a comment;
+# blank lines are ignored. Read by `sync_skills.py --verify`.
+#
+# WHY THIS FILE EXISTS
+# Nothing else stated account-store membership, and that absence made the
+# --verify gate unreadable. "Selected but absent from the account" means a
+# missing upload under `--skill NAME`, but under `--all` it is the correct
+# and expected state of most of this registry — so `--verify --all` emitted
+# a wall of expected failures and a human could not pick the real ones out.
+# That is the same signal-destroying noise the gate was added to remove.
+# Same shape as `skills.lock` on the repo arm: an artifact that states what
+# is supposed to be there, so a difference means something.
+#
+# THE RULE
+# docs/decisions/0002-limit-account-store-to-repo-independent-skills.md —
+# the account store "carries only skills useful in every context the account
+# touches — chat, Cowork, mobile — that do not depend on a particular repo,
+# and everything on it is version-controlled in this registry first.
+# Repo-scoped and platform-scoped skills are never pushed there."
+#
+# ADDING A LINE IS CLOSE TO A ONE-WAY DOOR
+# The upload API has no delete. Removing a name from this file does NOT
+# remove the skill from the account — that is a manual click in the
+# claude.ai UI, and nothing in CI can assert it happened. Worse, dropping
+# the skill from git while the account copy survives recreates the
+# unversioned-orphan condition ADR 0002 exists to prevent. So a new entry
+# commits to carrying that skill in this registry indefinitely, and to
+# paying its always-on description cost (~185 tokens, measured) in every
+# session the account touches. Add deliberately, not to "push it and see".
+#
+# RULINGS ON RECORD (owner, 2026-08-16)
+# `finding-unknowns` and `writing-adrs` are IN. Both are repo-independent
+# methodology, and the fleet AGENTS.md tells agents across 7 repos to "reach
+# for finding-unknowns" — but Cowork and claude.ai chat carry no `adam`
+# bundle, so the skill that guidance names is unreachable exactly where the
+# guidance is loudest. Neither has been uploaded yet; they are declared
+# ahead of the upload on purpose, so --verify names the gap out loud instead
+# of hiding it.
+#
+# `debug-github-workflows` and `review-bash-ci-reliability` are OUT, and
+# stay out. Both need a git checkout and CI context, so pushing them is
+# precisely the "push the adam bundle to the account store" alternative ADR
+# 0002 rejects: account skills cannot be repo-scoped, so they would load as
+# pure context cost in every unrelated session while being outranked by the
+# marketplace bundle in the repos they were written for. Do not add them.
+#
+# Order is alphabetical and carries no meaning.
+
+adam-writing-style
+fastmail
+finding-unknowns
+ocr-pdfs
+pdf-ocr-audit
+rename-pdfs
+sync-cc-settings-between-wsl-and-windows
+sync-skills
+wj-next-break
+writing-adrs
