@@ -1,0 +1,44 @@
+name: Scheduled-run health audit
+# Daily scan of THIS repo's last 48h of scheduled (`event=schedule`) workflow
+# runs for failure / startup_failure / timed_out. Scheduled failures are
+# otherwise SILENT — no PR goes red, nothing notifies (a consumer's daily
+# sweep once startup-failed 30/30 for a month unnoticed). The platform owns
+# the audit logic; this thin caller schedules it. Findings land on a single
+# `ci`-labelled tracking issue (opened on first failure, new runs commented,
+# auto-closed after a clean window) — the issue notification is the alert.
+run-name: >-
+  ${{ github.event_name == 'schedule'
+        && format('scheduled — {0}', github.event.schedule)
+     || format('manual — @{0}', github.actor) }}
+
+on:
+  schedule:
+    # Off-peak offset minute (house precedent). GitHub cron lag (measured
+    # 4-5h on daily crons) is absorbed by the reusable's 48h scan window.
+    - cron: '47 8 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report findings without opening/updating/closing the tracking issue (true/false)'
+        # Declared `string` and fromJSON-coerced below. workflow_dispatch
+        # hands typed (boolean) inputs to a reusable's `with:` as strings,
+        # and the reusable's boolean input rejects them — the dispatch run
+        # startup-fails before any job. The scheduled cron is unaffected
+        # (the `&&` short-circuits, so fromJSON never runs there).
+        type: string
+        default: 'false'
+
+# The reusable needs actions: read (list workflow runs) + issues: write
+# (open/comment/close the tracking issue); reusable-workflow permissions are
+# capped by this caller's grant.
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  audit:
+    uses: Adam-S-Daniel/cms-platform/.github/workflows/scheduled-run-health.yml@v0.1.85
+    with:
+      platform_ref: v0.1.85
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && fromJSON(inputs.dry_run) || false }}
