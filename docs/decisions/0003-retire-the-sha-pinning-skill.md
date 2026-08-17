@@ -118,7 +118,11 @@ was promoted into the rule rather than left in the part being deleted.
   strand any user updating from a pre-consolidation marketplace — the exact
   harm the append-only rule exists to prevent — and would do so to save a
   string in a machine-read map that no agent loads into context. The skill is
-  gone; the historical plugin name keeps resolving.
+  gone; the historical plugin name keeps resolving. The eradication this ADR
+  records sanctioned two places the retired name may survive — this file, and
+  the `results/` folder on skills-evals' `eval-results` branch. The `renames`
+  key is a **third**, ruled on explicitly rather than overlooked: an audit that
+  finds it should stop here, not "finish the job".
 
 ## Alternatives considered
 
