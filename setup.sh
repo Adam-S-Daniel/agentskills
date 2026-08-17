@@ -8,7 +8,7 @@
 #   /plugin marketplace add Adam-S-Daniel/agentskills
 #   /plugin install adam@agentskills
 #
-# invoke its skills as /<bundle>:<skill> (e.g. /adam:pin-actions-to-sha),
+# invoke its skills as /<bundle>:<skill> (e.g. /adam:finding-unknowns),
 # and don't need this script at all.
 #
 # This script is for the *other* agent tools (Codex, Cursor, the generic

@@ -65,7 +65,7 @@ version.
   `claude plugin update fastmail@agentskills` (plus
   `claude plugin enable fastmail@agentskills` if it was disabled).
 - Invocations change from `/<skill>:<skill>` to `/<bundle>:<skill>`
-  (e.g. `/adam:pin-actions-to-sha`).
+  (e.g. `/adam:finding-unknowns`).
 
 ## Alternatives considered
 

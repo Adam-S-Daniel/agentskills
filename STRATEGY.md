@@ -58,9 +58,9 @@ embed secrets or PII:
   session; the `SKILL.md` carries no credentials of its own. **Public is correct.**
 - `sync-cc-settings-between-wsl-and-windows`, `sync-skills` — operate on local
   paths / the user's own browser session; no embedded secrets. **Public is correct.**
-- The remaining skills (`adam-writing-style`, `pin-actions-to-sha`,
-  `workflow-path-audit`, `github-actions-repo-settings`, `rename-pdfs`) are
-  generically reusable. **Public is correct.**
+- The remaining skills (`adam-writing-style`, `workflow-path-audit`,
+  `github-actions-repo-settings`, `rename-pdfs`) are generically reusable.
+  **Public is correct.**
 
 No skill currently needs to move. Re-run this audit whenever a skill starts to
 embed a secret, token, private hostname, or personal data — at that point it moves

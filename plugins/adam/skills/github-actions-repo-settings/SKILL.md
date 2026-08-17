@@ -341,6 +341,11 @@ If API endpoints change: **Settings > Actions > General** for settings 1-2;
 
 ## 10. Related
 
-- After enabling SHA pinning, existing workflows with unpinned actions will
-  fail -- audit and fix them with the **`pin-actions-to-sha`** skill.
+- After enabling `sha_pinning_required`, existing workflows with unpinned
+  actions will fail. The pin format this repo setting demands is not a skill
+  you have to load -- it is always-on managed guidance: see **AGENTS.md ->
+  "Pinning GitHub Actions"** for the full 40-character SHA, the trailing
+  `# vX.Y.Z (YYYY-MM-DD)` comment, the 7-day cooling-off before adopting a
+  release, dereferencing annotated tags, and the `./local` / `docker://` refs
+  that have nothing to pin.
 - **`workflow-path-audit`** -- ensure workflows only run on salient path changes.
