@@ -43,5 +43,8 @@
   re-authing. Also: raw curl to api.github.com without a User-Agent gets
   rejected at the edge.
 - In _agent-guidance, `test/run-tests.sh` (test_drift_report) writes mock
-  data into the real `drift-report.md` — `git checkout -- drift-report.md`
-  before committing.
+  data into the real `drift-report.md`. That file is **gitignored and untracked**
+  on `main` (ADR 0001 moved the published copy to the `drift-report-latest`
+  results branch), so `git checkout -- drift-report.md` fails with *pathspec did
+  not match any file(s) known to git*. Clean it with
+  `git clean -fX -- drift-report.md` before committing.
