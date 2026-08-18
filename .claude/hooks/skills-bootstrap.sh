@@ -710,17 +710,27 @@ if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=1; fi
 # deadline still lands on git itself, and the only thing lost is the reaping of
 # its helper. Degrading to a late orphan is acceptable; degrading to no deadline
 # is what this whole function exists to prevent.
+#
+# Every git here runs with EOL translation OFF. This hook decides whether to
+# install a skill by comparing a sha256 of the fetched bytes against the one
+# the lock recorded, so what it checks out has to be what the blob holds. With
+# `core.autocrlf=true` — the Windows default — git rewrites every LF on the way
+# out, so a lock generated anywhere else disagrees with every clone made here
+# and nothing is ever installed. The registry's own `.gitattributes` is not
+# enough to rely on: a federated source may not carry one.
+GIT_VERBATIM=(-c core.autocrlf=false -c core.eol=lf)
+
 run_git () {
   local left=$(( fetch_deadline - SECONDS ))
   if [ "$left" -lt 1 ]; then left=1; fi
   if [ "$HAVE_TIMEOUT" -eq 1 ]; then
-    timeout -k 5 "$left" git "$@"
+    timeout -k 5 "$left" git "${GIT_VERBATIM[@]}" "$@"
     return $?
   fi
   local monitor=0 git_pid watchdog status
   case "$-" in *m*) monitor=1 ;; esac
   set -m
-  git "$@" &
+  git "${GIT_VERBATIM[@]}" "$@" &
   git_pid=$!
   ( sleep "$left"
     kill -TERM -"$git_pid" 2>/dev/null || kill -TERM "$git_pid" 2>/dev/null

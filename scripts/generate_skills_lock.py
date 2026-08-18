@@ -289,9 +289,20 @@ def digest_skill_dir(path: Path, skip: frozenset = frozenset()) -> str:
     return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
 
+# Every git this script runs has EOL translation turned off. `git archive`
+# honours `core.autocrlf`, so on Windows -- where it is the default, and where
+# it is set on ZENDA -- `materialize` extracted the pinned ref with every LF
+# rewritten to CRLF and digested THAT. The lock is the authoritative record of
+# what a skill's bytes are, and one generated here would have named a digest no
+# Linux run could ever reproduce, for content that never changed. It is not
+# enough for the repo to carry `.gitattributes`: the ref being archived may
+# predate it, and a federated source may not carry one at all.
+_GIT_VERBATIM = ("-c", "core.autocrlf=false", "-c", "core.eol=lf")
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", *_GIT_VERBATIM, "-C", str(repo), *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -947,7 +958,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     document = build_lock(repo, registry, ref, bundles, extras, overrides)
     try:
-        output.write_text(serialize(document), encoding="utf-8")
+        # newline="": the lock is a COMMITTED artifact whose bytes are compared
+        # (test_this_repos_committed_lock_regenerates_byte_identically, and
+        # `--check`). Text mode would end its lines with os.linesep, so a lock
+        # regenerated on Windows would differ from the same lock regenerated on
+        # Linux in every single line.
+        output.write_text(serialize(document), encoding="utf-8", newline="")
     except OSError as exc:
         raise GeneratorError(f"cannot write {output}: {exc}") from None
     origins = ", ".join(

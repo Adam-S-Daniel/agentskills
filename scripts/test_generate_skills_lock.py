@@ -40,13 +40,27 @@ import generate_skills_lock as gsl  # noqa: E402
 # --------------------------------------------------------------------------
 
 def _write(path: Path, text: str) -> None:
+    # newline="": python's text mode rewrites "\n" as os.linesep, so on Windows
+    # every fixture was written with different bytes than on Linux — and
+    # TRICKY_SKILL's deliberate "line one\r\nline two\r\n" landed on disk as
+    # "line one\r\r\nline two\r\r\n", which is not the CRLF content the digest
+    # tests exist to pin. A fixture whose bytes depend on the platform cannot
+    # bind two hash implementations to the same answer.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")
+
+
+# Fixture repos must round-trip bytes verbatim. Without this they inherit the
+# developer's own `core.autocrlf`, which on Windows rewrites line endings on
+# the way into the blob and back out again — so what the hook fetches is not
+# what the fixture wrote, and every digest assertion is measuring git's
+# translation rather than the two implementations under test.
+_GIT_VERBATIM = ("-c", "core.autocrlf=false", "-c", "core.eol=lf")
 
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", *_GIT_VERBATIM, "-C", str(repo), *args],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
