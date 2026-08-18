@@ -54,6 +54,26 @@ Repo locations are host-specific — match the convention of the machine you're 
   assume existing repos live there rather than under the user profile
   (`C:\Users\<user>\...`).
 
+## Sessions get cut off
+
+**`ZENDA` drops sessions mid-task, frequently.** Assume any run can end between
+one tool call and the next, and keep the work recoverable throughout rather
+than only at the end.
+
+- **Commit and push as you go**, on a branch. A pushed branch survives the
+  laptop; the conversation, a dirty tree and a worktree do not — a worktree can
+  be deleted with the session that made it. Small commits *are* the checkpoint.
+- **Persist the expensive part**, which is the investigation and not the diff:
+  the root cause, the baseline test result, the option already ruled out. A
+  fresh session can regenerate a patch quickly; it cannot cheaply re-derive why
+  the obvious fix was wrong. Put it in the commit message, the PR body, or an
+  ADR — all of which outlive the context window. Chat does not.
+- **Say where things stand before a long step** — a full test suite, a CI
+  watch, a wide refactor — so a resumed session starts from a statement of what
+  is done and what is next, not a reconstruction of it.
+- **Report a resume pointer, not just an outcome:** branch, PR number, worktree
+  path, and the next command to run.
+
 ## Security
 
 Standard practice applies without being restated here. These are the ones with
