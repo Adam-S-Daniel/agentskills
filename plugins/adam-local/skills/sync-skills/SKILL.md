@@ -6,8 +6,9 @@ description: >
   skills", "push skills to Claude", "upload skill", or after editing
   SKILL.md files locally. Requires a claude.ai tab open in Chrome (uses
   browser session cookies via javascript_tool). Works on Adam's computer
-  wherever the agentskills clones live — the helper finds them itself, and
-  $AGENTSKILLS_REPOS overrides the search.
+  wherever the agentskills clones live, but the helper does not guess where:
+  it scans its own checkout, and any other clone must be named with --repos
+  or $AGENTSKILLS_REPOS.
 compatibility: Requires Claude in Chrome (browser automation) with a logged-in claude.ai tab, plus Bash/Python 3 for the sync_skills.py helper; local interactive execution only — not usable in headless or cloud sessions
 ---
 
@@ -32,11 +33,61 @@ SKILL_DIR="$(git rev-parse --show-toplevel)/plugins/adam-local/skills/sync-skill
 Every command below uses `"$SKILL_DIR"`. If you're not inside the clone,
 set it by hand to wherever this skill folder actually is on this machine.
 
-`sync_skills.py` finds the **repos to sync** on its own, trying in order:
-`--repos` → `$AGENTSKILLS_REPOS` (`:`/`;`-separated) → `~/repos/<name>` →
-`D:/repos/adam-s-daniel/<name>` → the checkout it lives in. It warns on
-stderr about any clone it could not find and exits non-zero if it resolved
+`sync_skills.py` resolves the **repos to sync** in this order, and no
+other: `--repos` → `$AGENTSKILLS_REPOS` (`:`/`;`-separated) → the checkout
+it lives in, claimed only for that checkout's own repo name.
+
+There are deliberately **no built-in clone locations**. A `~/repos/<name>`
+guess used to come first, which meant any directory sitting at that
+path — an empty folder, a half-finished clone, a junction — outranked the
+checkout the script was demonstrably running from. On ZENDA that guess
+resolved an empty `~/repos/agentskills`, enumerated zero skills from it,
+and reported `no skills selected ... Pass --all` on a command line that
+already said `--all`. A path that merely exists is not evidence that it is
+the registry.
+
+The cost is that **`agentskills-private` is no longer found implicitly** —
+nothing derives its location from `__file__`. It has to be named:
+
+```bash
+# WSL / Linux
+python3 "$SKILL_DIR/sync_skills.py" --prepare --all \
+  --repos ~/repos/agentskills ~/repos/agentskills-private
+```
+
+```powershell
+# Windows (PowerShell) — set it once for the session
+$env:AGENTSKILLS_REPOS = "D:\repos\adam-s-daniel\agentskills;D:\repos\adam-s-daniel\agentskills-private"
+```
+
+It warns on stderr about any declared repo it could not resolve, saying
+that repo's skills went **unexamined**, and exits non-zero if it resolved
 none — "nothing to sync" and "I couldn't look" are never the same answer.
+
+### Repo-state gate
+
+Before `--prepare`, `--verify` or `--dry-run` does any work, each resolved
+repo is checked: it must be on `main` (compared literally, so a repo whose
+default branch is called something else gets surfaced rather than silently
+mishandled) and level with `origin/main`. Answering the second honestly
+needs a `git fetch`, so it runs one, bounded to 20 seconds; if the fetch
+can't happen — no remote, offline, too slow — the run says the state
+**could not be determined** for that repo and carries on, because asserting
+"up to date" from stale remote-tracking refs is the same class of lie the
+resolution defaults used to tell.
+
+The gate exists because the upload is built from the **working tree** and
+the upload API has no delete: syncing from an off-main or behind clone
+publishes the wrong bytes irreversibly.
+
+- Interactive terminal: it lists the problems and asks
+  `Continue anyway? [y/N] `. The default is no — a bare Enter, EOF, or
+  anything not starting with `y` aborts non-zero.
+- Not a terminal (an agent driving it through Bash): it does **not** wait
+  for an answer nobody will give. It exits non-zero, lists the problems,
+  and names `--yes`.
+- `--yes` bypasses the gate, and says on stderr that it did. A silent
+  override is how a gate rots into decoration.
 
 ## Setup (one-time)
 
@@ -57,7 +108,10 @@ you switch contexts.)
 ## Quick-start checklist
 
 1. Ensure a claude.ai tab is open in Chrome (any page will do).
-2. Run `sync_skills.py --prepare` (via Bash) to get the JSON payload.
+2. Run `sync_skills.py --prepare` (via Bash) to get the JSON payload. If it
+   stops on the repo-state gate, fix the clone (`git checkout main`,
+   `git pull`) rather than reaching for `--yes` — you are about to publish
+   that tree to an API with no delete.
 3. For each skill in the payload, call `javascript_tool` to POST the ZIP.
 4. Mark each successfully uploaded skill with `--mark-synced`.
 5. Refresh the account-copy mirror (§7) and run `--verify`; a sync isn't
@@ -98,8 +152,12 @@ The output is a JSON object:
 }
 ```
 
-If `skills` is empty, nothing has changed since the last sync. Inform the
-user and stop.
+If `skills` is empty, read the `message` the payload carries with it — it
+lists every repo that was resolved and how many skills each one held. An
+empty payload from a plain `--prepare` means nothing changed since the last
+sync; an empty one from `--prepare --all` means the resolved tree held no
+skills, which is a resolution problem and not something to report as
+"nothing to do". Either way, tell the user which it was, and stop.
 
 ---
 
@@ -196,8 +254,9 @@ To target a single skill:
 python3 "$SKILL_DIR/sync_skills.py" --skill fastmail
 ```
 
-Both repos are searched automatically. To point at clones somewhere the
-built-in search won't find (a scratch checkout, a non-standard drive):
+Only this script's own checkout is found without being told. Every other
+clone — `agentskills-private`, a scratch checkout, a non-standard drive —
+has to be named:
 
 ```bash
 python3 "$SKILL_DIR/sync_skills.py" --prepare --all \
@@ -206,6 +265,25 @@ python3 "$SKILL_DIR/sync_skills.py" --prepare --all \
 
 `--skill` and `--all` are mutually exclusive — asking for both used to
 silently sync only the single named skill.
+
+When a run checks nothing, the error says which of three things happened,
+and always lists the repos it resolved with a skill count for each:
+
+- **nothing was selected** — no `--all`, no `--skill`, and the git-diff
+  path found no changes. Pass one of them.
+- **something was selected but no resolved repo contains any of it** — the
+  flags are fine; this is repo resolution. The counts tell you which tree
+  it decided to call the registry.
+- **`--skill NAME` matched nothing** — check the spelling against the
+  counts.
+
+Reading the second as the first is what cost three round-trips on the
+Windows report: `--all` was on the command line and the message asked for
+`--all`.
+
+If the run stops before any of that with a branch or `origin/main`
+complaint, that is the repo-state gate — see "Locating the helper" above,
+and `--yes` to override it.
 
 ---
 

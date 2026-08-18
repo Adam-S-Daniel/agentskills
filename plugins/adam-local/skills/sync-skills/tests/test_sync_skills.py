@@ -805,49 +805,115 @@ class TestResolveRepos:
         monkeypatch.setenv("AGENTSKILLS_REPOS", os.pathsep.join([str(a), str(b)]))
         assert sync_skills.resolve_repos(None) == [a, b]
 
-    def test_home_repos_layout_resolves(self, tmp_path, monkeypatch):
+    def test_home_repos_layout_is_not_consulted(self, tmp_path, monkeypatch):
+        """~/repos/<name> is no longer a candidate, even when it exists.
+
+        This is the reported defect, at the unit level: on Windows a
+        directory at ~/repos/agentskills outranked the checkout the script
+        was running from, yielded zero skills, and the run died claiming
+        --all had not been passed.
+        """
         monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
         home = tmp_path / "home"
-        (home / "repos" / "agentskills").mkdir(parents=True)
+        decoy = home / "repos" / "agentskills"
+        decoy.mkdir(parents=True)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-        monkeypatch.setattr("sync_skills.WINDOWS_REPO_ROOT", tmp_path / "no-d-drive")
+        monkeypatch.setattr("sync_skills._self_repo", lambda: None)
 
-        assert home / "repos" / "agentskills" in sync_skills.resolve_repos(None)
+        assert decoy not in sync_skills.resolve_repos(None)
+        assert sync_skills.resolve_repos(None) == []
 
-    def test_windows_layout_resolves_when_home_repos_absent(self, tmp_path, monkeypatch):
-        """ZENDA keeps clones at D:\\repos\\<owner>\\<repo>, not ~/repos."""
+    def test_home_repos_decoy_loses_to_the_self_checkout(self, tmp_path, monkeypatch):
+        """The decoy must not merely be dropped — the real tree must win.
+
+        Dropping ~/repos and resolving nothing would still leave the
+        operator stuck; the point is that the checkout the script lives in
+        is what gets scanned.
+        """
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        home = tmp_path / "home"
+        decoy = home / "repos" / "agentskills"
+        decoy.mkdir(parents=True)
+        real = tmp_path / "checkout" / "agentskills"
+        (real / "plugins").mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr("sync_skills._self_repo", lambda: real)
+
+        assert sync_skills.resolve_repos(None) == [real]
+
+    def test_windows_default_root_is_not_consulted(self, tmp_path, monkeypatch):
+        """The hardcoded D:\\repos\\adam-s-daniel root is gone entirely.
+
+        It was a guess about one machine baked into every machine; the
+        constant it lived in must not come back.
+        """
+        assert not hasattr(sync_skills, "WINDOWS_REPO_ROOT")
         monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
         home = tmp_path / "home"
         home.mkdir()
         win_root = tmp_path / "d-repos" / "adam-s-daniel"
         (win_root / "agentskills").mkdir(parents=True)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-        monkeypatch.setattr("sync_skills.WINDOWS_REPO_ROOT", win_root)
+        monkeypatch.setattr("sync_skills._self_repo", lambda: None)
 
-        assert win_root / "agentskills" in sync_skills.resolve_repos(None)
+        assert win_root / "agentskills" not in sync_skills.resolve_repos(None)
 
-    def test_self_repo_is_last_resort(self, tmp_path, monkeypatch):
-        """With no clone anywhere else, fall back to the checkout we live in."""
+    def test_self_repo_is_claimed_for_its_own_name_only(self, tmp_path, monkeypatch):
+        """The self-checkout answers for its own name, and nothing else.
+
+        Claiming it for every declared repo is how agentskills-private would
+        silently resolve to the agentskills clone and verify against the
+        wrong tree.
+        """
         monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
         home = tmp_path / "home"
         home.mkdir()
-        self_repo = tmp_path / "checkout"
+        self_repo = tmp_path / "agentskills"
         (self_repo / "plugins").mkdir(parents=True)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-        monkeypatch.setattr("sync_skills.WINDOWS_REPO_ROOT", tmp_path / "no-d-drive")
         monkeypatch.setattr("sync_skills._self_repo", lambda: self_repo)
 
+        assert sync_skills._repo_candidates("agentskills") == [self_repo]
+        assert sync_skills._repo_candidates("agentskills-private") == []
         assert sync_skills.resolve_repos(None) == [self_repo]
+
+    def test_unresolvable_repo_says_it_went_unexamined(self, tmp_path, monkeypatch, capsys):
+        """agentskills-private can no longer be found implicitly — say so.
+
+        The deliberate cost of deleting the guesses. It must never degrade
+        into silence: "not looked at" and "looked at, nothing to do" are
+        different answers.
+        """
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        self_repo = tmp_path / "agentskills"
+        (self_repo / "plugins").mkdir(parents=True)
+        monkeypatch.setattr("sync_skills._self_repo", lambda: self_repo)
+
+        sync_skills.resolve_repos(None)
+
+        err = capsys.readouterr().err
+        assert "agentskills-private" in err
+        assert "NONE of its skills were examined" in err
+        assert "AGENTSKILLS_REPOS" in err
 
     def test_returns_empty_when_nothing_resolves(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-        monkeypatch.setattr("sync_skills.WINDOWS_REPO_ROOT", tmp_path / "no-d-drive")
         monkeypatch.setattr("sync_skills._self_repo", lambda: None)
 
         assert sync_skills.resolve_repos(None) == []
+
+    def test_explicit_repos_beat_the_env_var(self, tmp_path, monkeypatch):
+        """--repos wins outright; the env var is not merged into it."""
+        flagged = tmp_path / "flagged"
+        env_repo = tmp_path / "from-env"
+        flagged.mkdir()
+        env_repo.mkdir()
+        monkeypatch.setenv("AGENTSKILLS_REPOS", str(env_repo))
+
+        assert sync_skills.resolve_repos([str(flagged)]) == [flagged]
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1154,437 @@ class TestCliExitCodes:
         assert proc.returncode == 0, proc.stderr
         payload = json.loads(proc.stdout)
         assert payload["skills"][0]["is_update"] is True
+
+
+# ---------------------------------------------------------------------------
+# "Nothing happened" messages must say WHICH nothing, and where it looked
+#
+# The reported defect: `--verify --all` on Windows printed "no skills
+# selected ... Pass --all" while --all was on the command line. The message
+# covered three unrelated situations and named none of the repos it had
+# resolved, which cost three round-trips before anyone looked at resolution.
+# ---------------------------------------------------------------------------
+
+class TestEmptyRunDiagnostics:
+    def test_all_with_an_empty_repo_blames_resolution_not_the_flags(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The exact Windows shape: --all was passed, the repo held nothing."""
+        empty = tmp_path / "decoy-agentskills"
+        empty.mkdir()
+        account = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account)
+        write_manifest(account, [])
+
+        ok = verify([empty], skill_names=[], declared=set(), selection="all")
+
+        err = capsys.readouterr().err
+        assert ok is False
+        assert "no resolved repo contains any" in err
+        assert "Nothing is wrong with the flags" in err
+        assert "no skills selected" not in err
+        assert str(empty) in err
+        assert "0 skill(s) found" in err
+
+    def test_nothing_selected_keeps_its_own_message(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        """Case 1 stays distinct from case 2, and now names the repos too."""
+        account = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account)
+        write_manifest(account, [])
+
+        ok = verify(
+            [repo_with_skills], skill_names=[], declared=set(),
+            selection="changed",
+        )
+
+        err = capsys.readouterr().err
+        assert ok is False
+        assert "no skills selected" in err
+        assert "no resolved repo contains any" not in err
+        assert str(repo_with_skills) in err
+        assert "2 skill(s) found" in err
+
+    def test_named_skill_not_found_names_the_repos(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        account = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account)
+        write_manifest(account, [])
+
+        ok = verify(
+            [repo_with_skills], skill_names=["skill-typo"], declared=set(),
+            selection="skill",
+        )
+
+        err = capsys.readouterr().err
+        assert ok is False
+        assert "skill-typo" in err
+        assert str(repo_with_skills) in err
+
+    def test_cli_all_over_an_empty_repo(self, sandbox, tmp_path):
+        """End to end, with the real argv the user typed."""
+        empty = tmp_path / "empty-repo"
+        empty.mkdir()
+        proc = run_cli("--verify", "--all", "--repos", str(empty),
+                       home=sandbox["home"], account_list=sandbox["declared"])
+        assert proc.returncode != 0
+        assert "no resolved repo contains any" in proc.stderr
+        assert str(empty) in proc.stderr
+        assert "no skills selected" not in proc.stderr
+
+    def test_describe_resolved_repos_counts_each_repo(
+        self, repo_with_skills, tmp_path
+    ):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        text = sync_skills.describe_resolved_repos([repo_with_skills, empty])
+        assert f"{repo_with_skills}  (2 skill(s) found)" in text
+        assert f"{empty}  (0 skill(s) found)" in text
+
+    def test_describe_resolved_repos_says_none_and_how_to_fix_it(self):
+        text = sync_skills.describe_resolved_repos([])
+        assert "no repo was resolved" in text
+        assert "AGENTSKILLS_REPOS" in text
+
+
+# ---------------------------------------------------------------------------
+# Repo-state gate — off main / behind origin/main
+#
+# Uploads are built from the working tree, and the upload API has no delete,
+# so syncing from a stale or off-main clone publishes the wrong bytes
+# irreversibly. The remote is a local bare repo: the gate's fetch has to
+# really run (not trusting stale refs is its entire point), and a path remote
+# keeps that deterministic and offline.
+# ---------------------------------------------------------------------------
+
+GIT_ID = [
+    "-c", "user.name=Test", "-c", "user.email=test@example.com",
+    "-c", "commit.gpgsign=false",
+]
+
+
+def _git_run(args, cwd):
+    proc = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr}"
+    return proc.stdout.strip()
+
+
+@pytest.fixture()
+def git_clone(tmp_path):
+    """A real clone on ``main``, up to date with a local bare origin."""
+    origin = tmp_path / "origin.git"
+    _git_run(["init", "--bare", "--initial-branch=main", str(origin)], tmp_path)
+
+    work = tmp_path / "agentskills"
+    _git_run(["init", "--initial-branch=main", str(work)], tmp_path)
+    skill = work / "skills" / "skill-a"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: skill-a\n---\nbody\n")
+    _git_run(["add", "-A"], work)
+    _git_run([*GIT_ID, "commit", "-m", "seed"], work)
+    _git_run(["remote", "add", "origin", str(origin)], work)
+    _git_run(["push", "-u", "origin", "main"], work)
+    return work
+
+
+def run_cli_no_tty(*args, home):
+    """Run the CLI with stdin closed, i.e. the way an agent drives it.
+
+    Explicitly DEVNULL rather than inherited: a subprocess inherits the real
+    fd 0, so a human running pytest from a terminal would otherwise hand the
+    gate a TTY and hang the suite on a prompt.
+    """
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env.pop("AGENTSKILLS_REPOS", None)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+    )
+
+
+class TestRepoStateGate:
+    def test_clean_clone_passes(self, git_clone):
+        state = sync_skills.repo_state(git_clone)
+        assert state["problems"] == []
+        assert state["unknowns"] == []
+        assert sync_skills.check_repo_state([git_clone]) is True
+
+    def test_off_main_is_a_problem(self, git_clone):
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        problems = sync_skills.repo_state(git_clone)["problems"]
+        assert any("on branch 'feature'" in p for p in problems)
+        assert any("not 'main'" in p for p in problems)
+
+    def test_behind_upstream_is_a_problem(self, git_clone):
+        (git_clone / "skills" / "skill-a" / "SKILL.md").write_text("v2\n")
+        _git_run(["add", "-A"], git_clone)
+        _git_run([*GIT_ID, "commit", "-m", "second"], git_clone)
+        _git_run(["push", "origin", "main"], git_clone)
+        _git_run(["reset", "--hard", "HEAD~1"], git_clone)
+
+        problems = sync_skills.repo_state(git_clone)["problems"]
+        assert any("not up to date" in p for p in problems)
+        assert any("1 behind, 0 ahead" in p for p in problems)
+
+    def test_ahead_of_upstream_is_a_problem(self, git_clone):
+        (git_clone / "skills" / "skill-a" / "SKILL.md").write_text("v2\n")
+        _git_run(["add", "-A"], git_clone)
+        _git_run([*GIT_ID, "commit", "-m", "unpushed"], git_clone)
+
+        problems = sync_skills.repo_state(git_clone)["problems"]
+        assert any("0 behind, 1 ahead" in p for p in problems)
+
+    def test_the_fetch_is_what_detects_a_stale_clone(self, git_clone, tmp_path):
+        """Someone else pushed; this clone's remote-tracking ref is stale.
+
+        The only way to see it is to fetch, which is why the gate does. If
+        the fetch were dropped in favour of the refs already on disk, this
+        clone would report itself up to date while being a commit behind.
+        """
+        origin = tmp_path / "origin.git"
+        other = tmp_path / "other"
+        _git_run(["clone", str(origin), str(other)], tmp_path)
+        (other / "elsewhere.txt").write_text("from another machine\n")
+        _git_run(["add", "-A"], other)
+        _git_run([*GIT_ID, "commit", "-m", "landed on main elsewhere"], other)
+        _git_run(["push", "origin", "main"], other)
+
+        # Stale refs alone still say "up to date" — that is the trap.
+        stale = _git_run(
+            ["rev-list", "--left-right", "--count", "origin/main...HEAD"],
+            git_clone,
+        )
+        assert stale.split() == ["0", "0"]
+
+        problems = sync_skills.repo_state(git_clone)["problems"]
+        assert any("1 behind, 0 ahead" in p for p in problems)
+
+    def test_git_returns_none_on_timeout(self, git_clone, monkeypatch):
+        """A hung remote becomes "could not determine", not a hang or a pass."""
+        def _boom(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+        monkeypatch.setattr(subprocess, "run", _boom)
+        assert sync_skills._git(["fetch"], cwd=git_clone, timeout=1) is None
+
+    def test_unfetchable_remote_is_unknown_not_a_verdict(self, git_clone):
+        """No remote to ask means "could not determine", never "fine"."""
+        _git_run(["remote", "remove", "origin"], git_clone)
+        state = sync_skills.repo_state(git_clone)
+        assert state["problems"] == []
+        assert any("could not fetch" in u for u in state["unknowns"])
+        assert any("could not be determined" in u for u in state["unknowns"])
+
+    def test_non_git_directory_is_unknown_not_a_problem(self, tmp_path):
+        """A plain exported tree has no branch to be wrong — don't block it."""
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        state = sync_skills.repo_state(plain)
+        assert state["problems"] == []
+        assert any("not a git checkout" in u for u in state["unknowns"])
+
+    def test_unknowns_are_reported_on_stderr(self, tmp_path, capsys):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert sync_skills.check_repo_state([plain]) is True
+        assert "could not be determined" in capsys.readouterr().err
+
+    def test_non_tty_aborts_instead_of_prompting(self, git_clone, monkeypatch, capsys):
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        monkeypatch.setattr("sync_skills._stdin_is_tty", lambda: False)
+
+        assert sync_skills.check_repo_state([git_clone]) is False
+        err = capsys.readouterr().err
+        assert "not a terminal" in err
+        assert "--yes" in err
+
+    def test_yes_bypasses_and_says_so(self, git_clone, monkeypatch, capsys):
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        monkeypatch.setattr("sync_skills._stdin_is_tty", lambda: False)
+
+        assert sync_skills.check_repo_state([git_clone], assume_yes=True) is True
+        err = capsys.readouterr().err
+        assert "--yes bypassed" in err
+        assert "on branch 'feature'" in err
+
+    def test_tty_answering_no_aborts(self, git_clone, monkeypatch, capsys):
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+
+        assert sync_skills.check_repo_state([git_clone]) is False
+        assert "not confirmed" in capsys.readouterr().err
+
+    def test_tty_bare_enter_aborts(self, git_clone, monkeypatch):
+        """Default is no: Enter must not be a way to say yes."""
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+        assert sync_skills.check_repo_state([git_clone]) is False
+
+    def test_tty_eof_aborts(self, git_clone, monkeypatch):
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+
+        def _eof(prompt=""):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _eof)
+        assert sync_skills.check_repo_state([git_clone]) is False
+
+    def test_tty_answering_yes_proceeds(self, git_clone, monkeypatch):
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+        assert sync_skills.check_repo_state([git_clone]) is True
+
+
+class TestWindowsDecoyRegression:
+    """The reported defect, end to end, with the argv the user actually typed.
+
+    `--verify --all` on Windows died with "no skills selected ... Pass --all"
+    because a directory at ~/repos/agentskills outranked the checkout the
+    script was running from and enumerated nothing. Reproduced here by
+    running a COPY of the script from a synthetic checkout, so the real
+    __file__-derived _self_repo() is what has to win — a monkeypatched one
+    would prove nothing about the path that failed.
+    """
+
+    @pytest.fixture()
+    def planted(self, tmp_path):
+        """A synthetic clone holding the script, plus a decoy ~/repos clone."""
+        checkout = tmp_path / "real" / "agentskills"
+        skill_dir = checkout / "plugins" / "adam-local" / "skills" / "sync-skills"
+        skill_dir.mkdir(parents=True)
+        shutil.copy2(SCRIPT, skill_dir / "sync_skills.py")
+        shutil.copy2(SCRIPT.parent / "account-skills.txt", skill_dir)
+        real_skill = checkout / "plugins" / "adam" / "skills" / "planted-skill"
+        real_skill.mkdir(parents=True)
+        (real_skill / "SKILL.md").write_text("---\nname: planted-skill\n---\n")
+
+        # On main and up to date, so the repo-state gate is not what is
+        # under test here.
+        origin = tmp_path / "origin.git"
+        _git_run(["init", "--bare", "--initial-branch=main", str(origin)], tmp_path)
+        _git_run(["init", "--initial-branch=main", str(checkout)], tmp_path)
+        _git_run(["add", "-A"], checkout)
+        _git_run([*GIT_ID, "commit", "-m", "seed"], checkout)
+        _git_run(["remote", "add", "origin", str(origin)], checkout)
+        _git_run(["push", "-u", "origin", "main"], checkout)
+
+        # The decoy: exists, is not a clone of anything, holds no skills.
+        home = tmp_path / "home"
+        decoy = home / "repos" / "agentskills"
+        (decoy / "plugins").mkdir(parents=True)
+        return {
+            "home": home,
+            "decoy": decoy,
+            "checkout": checkout,
+            "script": skill_dir / "sync_skills.py",
+        }
+
+    def _run(self, planted, *args):
+        env = dict(os.environ)
+        env["HOME"] = str(planted["home"])
+        env["USERPROFILE"] = str(planted["home"])
+        env.pop("AGENTSKILLS_REPOS", None)
+        return subprocess.run(
+            [sys.executable, str(planted["script"]), *args],
+            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+        )
+
+    def test_decoy_no_longer_outranks_the_self_checkout(self, planted):
+        proc = self._run(planted, "--dry-run", "--all")
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "planted-skill" in proc.stdout
+        assert str(planted["decoy"]) not in proc.stdout
+        assert str(planted["decoy"]) not in proc.stderr
+
+    def test_all_is_never_reported_as_missing(self, planted):
+        """The literal symptom: --all was passed and blamed for being absent."""
+        proc = self._run(planted, "--dry-run", "--all")
+        assert "no skills selected" not in proc.stderr
+        assert "Pass --all" not in proc.stderr
+
+    def test_private_repo_absence_is_stated_not_guessed(self, planted):
+        """A decoy at ~/repos/agentskills-private must not fill the gap."""
+        private_decoy = planted["home"] / "repos" / "agentskills-private"
+        private_decoy.mkdir(parents=True)
+
+        proc = self._run(planted, "--dry-run", "--all")
+
+        assert str(private_decoy) not in proc.stdout
+        assert "agentskills-private" in proc.stderr
+        assert "NONE of its skills were examined" in proc.stderr
+
+
+class TestRepoStateGateCli:
+    def test_off_main_aborts_the_run(self, git_clone, tmp_path):
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        home = tmp_path / "home"
+        home.mkdir()
+        proc = run_cli_no_tty(
+            "--dry-run", "--all", "--repos", str(git_clone), home=home
+        )
+        assert proc.returncode != 0
+        assert "on branch 'feature'" in proc.stderr
+        assert "not a terminal" in proc.stderr
+
+    def test_behind_upstream_aborts_the_run(self, git_clone, tmp_path):
+        (git_clone / "skills" / "skill-a" / "SKILL.md").write_text("v2\n")
+        _git_run(["add", "-A"], git_clone)
+        _git_run([*GIT_ID, "commit", "-m", "second"], git_clone)
+        _git_run(["push", "origin", "main"], git_clone)
+        _git_run(["reset", "--hard", "HEAD~1"], git_clone)
+        home = tmp_path / "home"
+        home.mkdir()
+
+        proc = run_cli_no_tty(
+            "--dry-run", "--all", "--repos", str(git_clone), home=home
+        )
+        assert proc.returncode != 0
+        assert "not up to date" in proc.stderr
+
+    def test_yes_lets_the_run_through(self, git_clone, tmp_path):
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        home = tmp_path / "home"
+        home.mkdir()
+        proc = run_cli_no_tty(
+            "--dry-run", "--all", "--yes", "--repos", str(git_clone), home=home
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "--yes bypassed" in proc.stderr
+        assert "skill-a" in proc.stdout
+
+    def test_clean_clone_runs_without_the_gate_complaining(self, git_clone, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        proc = run_cli_no_tty(
+            "--dry-run", "--all", "--repos", str(git_clone), home=home
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "skill-a" in proc.stdout
+
+    def test_mark_synced_is_exempt_from_the_gate(self, git_clone, tmp_path):
+        """It touches only the state file, so repo state is irrelevant to it."""
+        _git_run(["checkout", "-b", "feature"], git_clone)
+        home = tmp_path / "home"
+        home.mkdir()
+        proc = run_cli_no_tty(
+            "--mark-synced", "skill-a:abc123", "--repos", str(git_clone),
+            home=home,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "on branch" not in proc.stderr
 
 
 # ---------------------------------------------------------------------------
