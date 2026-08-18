@@ -11,8 +11,15 @@
 - Memory-path munging replaces both `/` AND `.` with `-`, so decoded paths are
   ambiguous (e.g. `adamdaniel.ai` vs `adamdaniel/ai`) — the
   `migrate-claude-memory` inventory marks such stores as decode-guesses.
-- `autoMemoryDirectory` accepts only absolute or `~/` paths (no repo-relative);
-  the in-repo pattern works because repos live at `~/repos/<name>` everywhere.
+- `autoMemoryDirectory` accepts only absolute or `~/` paths (no repo-relative).
+  It used to say the in-repo pattern works "because repos live at
+  `~/repos/<name>` everywhere" — that is FALSE. On ZENDA they live at
+  `D:\repos\<owner>\<repo>`, and this exact assumption is what broke
+  sync-skills: it guessed `~/repos/<name>` ahead of the checkout it was
+  running from, so a decoy there outranked the real clone and `--all`
+  enumerated nothing. Whether the in-repo `autoMemoryDirectory` pattern
+  actually resolves on ZENDA is therefore UNVERIFIED — check on the machine
+  rather than assuming, and never encode a repo location as a constant.
 - claude-memory-map: the `@sparticuz/chromium` serverless test path is broken in
   v131 (`.default` removed); CI uses `npm run setup:browser` instead.
 - sync.sh cannot recover a stale remote `agents-md-sync/update` branch (push is

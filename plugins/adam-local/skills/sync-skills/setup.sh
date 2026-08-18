@@ -39,13 +39,36 @@ git config --global hook.sync-skills-reminder.command "bash \"$HOOK_PATH\""
 echo "OK       global hook registered: sync-skills-reminder → $HOOK_PATH"
 
 # ── Register for agentskills-private if it exists ────────────────────
-PRIVATE_REPOS=(
+# $AGENTSKILLS_REPOS first, matching sync_skills.py: the helper stopped
+# guessing clone locations after a stale ~/repos directory outranked the
+# real checkout, and this loop should not go on guessing behind its back.
+# The two ~/repos paths stay only as a trailing fallback for the machines
+# that do use that layout; being wrong here costs a hook registration, not
+# an upload.
+PRIVATE_REPOS=()
+if [[ -n "${AGENTSKILLS_REPOS:-}" ]]; then
+  # Split on ';' when the value contains one, else on ':' — the same
+  # os.pathsep the helper reads, and the only rule that does not shred a
+  # Windows path: 'D:\repos\...' has a colon in it by nature.
+  if [[ "$AGENTSKILLS_REPOS" == *";"* ]]; then
+    IFS=';' read -r -a agentskills_repo_list <<< "$AGENTSKILLS_REPOS"
+  else
+    IFS=':' read -r -a agentskills_repo_list <<< "$AGENTSKILLS_REPOS"
+  fi
+  for repo_entry in "${agentskills_repo_list[@]}"; do
+    [[ -n "$repo_entry" ]] && PRIVATE_REPOS+=("$repo_entry")
+  done
+fi
+PRIVATE_REPOS+=(
   "$HOME/repos/agentskills-private"
   "${USERPROFILE:-}/repos/agentskills-private"
 )
 for private_repo in "${PRIVATE_REPOS[@]}"; do
   [[ -z "$private_repo" ]] && continue
   [[ ! -d "$private_repo/.git" ]] && continue
+  # $AGENTSKILLS_REPOS lists every registry clone, not just the private
+  # one; only the private repo gets this hook registration.
+  [[ "$(basename "$private_repo")" != *private* ]] && continue
 
   # The private repo may use either the legacy skills/ layout or the newer
   # plugins/<plugin>/skills/sync-skills/ layout (any plugin — resolve by
@@ -73,6 +96,9 @@ for private_repo in "${PRIVATE_REPOS[@]}"; do
 done
 
 # ── Remove legacy file-based hooks ───────────────────────────────────
+# These paths are archaeology, not resolution: they name where earlier
+# versions of this script INSTALLED a file-based hook, so they have to stay
+# even though nothing looks for repos there any more. A miss is a no-op.
 LEGACY_REPOS=(
   "$SCRIPT_DIR/../../../.."
   "$HOME/repos/agentskills"

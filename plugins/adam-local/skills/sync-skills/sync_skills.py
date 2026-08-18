@@ -4,7 +4,10 @@
 Usage:
   python sync_skills.py [--prepare] [--all] [--skill NAME] [--dry-run]
                         [--verify] [--mark-synced NAME:HASH] [--repos PATH ...]
-                        [--account-list PATH]
+                        [--account-list PATH] [--yes]
+
+Repos are located by --repos, then $AGENTSKILLS_REPOS, then the checkout this
+file lives in (for its own name only). There are no built-in clone paths.
 """
 
 import argparse
@@ -29,12 +32,33 @@ STATE_FILE = Path.home() / ".sync-skills-state.json"
 # The registry repos this script syncs from, in the order they are reported.
 REPO_NAMES = ("agentskills", "agentskills-private")
 
-# Where a clone might live. ~/repos is the historical layout; ZENDA (Adam's
-# Windows box) keeps clones at D:\repos\<github-owner>\<repo> per the fleet
-# AGENTS.md, so hardcoding ~/repos made every default invocation resolve
-# nothing on the very machine this skill exists to run on. $AGENTSKILLS_REPOS
-# (os.pathsep-separated) overrides the search for any other layout.
-WINDOWS_REPO_ROOT = Path("D:/repos/adam-s-daniel")
+# There are deliberately NO built-in clone locations. Guessing one (~/repos,
+# D:\repos\<owner>) let anything sitting at the guessed path — an empty
+# folder, a stale partial clone, a junction — outrank the checkout this
+# script is demonstrably running from. That is not hypothetical: a Windows
+# `--verify --all` resolved an empty ~/repos/agentskills, enumerated zero
+# skills from it, and then reported that --all had not been passed. A repo is
+# either NAMED (--repos, $AGENTSKILLS_REPOS) or is the checkout this file
+# lives in; a path that merely exists is not evidence of anything.
+#
+# The cost is deliberate: agentskills-private can no longer be found
+# implicitly. resolve_repos() says so on stderr rather than going quiet,
+# because a repo that went unexamined and a repo with nothing to sync must
+# never produce the same output.
+
+# What to tell an operator who now has to name a path. Windows first — that
+# is the machine the old defaults were failing on.
+REPO_HINT = (
+    "Name it: --repos D:\\repos\\adam-s-daniel\\agentskills  (PowerShell: "
+    "$env:AGENTSKILLS_REPOS = 'D:\\repos\\adam-s-daniel\\agentskills'), or on "
+    "Linux/WSL --repos /path/to/agentskills  (AGENTSKILLS_REPOS=/path/to/"
+    "agentskills). Separate several paths with the OS path separator."
+)
+
+# The branch a clone must be on before this script will sync from it, and how
+# long to wait on the fetch that answers "is it up to date?".
+MAIN_BRANCH = "main"
+FETCH_TIMEOUT_SECONDS = 20
 
 # Local mirror of the claude.ai skill registry, refreshed by running
 # ``CLAUDE_CODE_SYNC_SKILLS=1 claude -p ...`` — what --verify checks against.
@@ -111,14 +135,22 @@ def save_state(state: Dict) -> None:
 # Git helpers
 # ---------------------------------------------------------------------------
 
-def _git(args: List[str], cwd: Path) -> Optional[str]:
-    """Run git; return stripped stdout or None on non-zero exit."""
+def _git(
+    args: List[str], cwd: Path, timeout: Optional[float] = None
+) -> Optional[str]:
+    """Run git; return stripped stdout, or None on non-zero exit or timeout.
+
+    ``timeout`` is for the one call that touches the network (``fetch``): a
+    hung remote must not hang the whole sync, and a timeout has to be
+    reported as "could not determine", never folded into a verdict.
+    """
     try:
         result = subprocess.run(
             ["git"] + args,
             cwd=cwd,
             capture_output=True,
             text=True,
+            timeout=timeout,
         )
         if result.returncode != 0:
             return None
@@ -139,22 +171,28 @@ def _self_repo() -> Optional[Path]:
 
 
 def _repo_candidates(name: str) -> List[Path]:
-    """Where repo ``name`` might live, most-preferred first."""
-    candidates = [Path.home() / "repos" / name, WINDOWS_REPO_ROOT / name]
+    """Where repo ``name`` might live, most-preferred first.
+
+    Exactly one candidate is ever possible: the checkout this script lives
+    in, and only for its OWN name. That is derived from ``__file__``, so it
+    is a fact about this run rather than a guess about the machine —
+    otherwise agentskills-private would silently resolve to the agentskills
+    clone. Everything else must be named; see the note on built-in defaults
+    at the top of this file for what guessing cost.
+    """
     self_repo = _self_repo()
-    # Only claim the checkout we live in for its OWN name — otherwise
-    # agentskills-private would silently resolve to the agentskills clone.
     if self_repo is not None and self_repo.name == name:
-        candidates.append(self_repo)
-    return candidates
+        return [self_repo]
+    return []
 
 
 def resolve_repos(explicit: Optional[List[str]] = None) -> List[Path]:
     """Resolve which repos to scan, warning on stderr about what was missed.
 
-    Order: ``--repos`` → ``$AGENTSKILLS_REPOS`` (os.pathsep-separated) →
-    ``~/repos/<name>`` → ``D:/repos/adam-s-daniel/<name>`` → the checkout
-    this script lives in.
+    Order, and nothing else: ``--repos`` → ``$AGENTSKILLS_REPOS``
+    (os.pathsep-separated) → the checkout this script lives in, claimed only
+    for its own repo name. There is no ``~/repos`` or ``D:/repos`` guess any
+    more — see the note on built-in defaults at the top of this file.
 
     Returns the paths that exist. An empty return means nothing resolved and
     the caller must not treat the run as a successful no-op.
@@ -183,22 +221,15 @@ def resolve_repos(explicit: Optional[List[str]] = None) -> List[Path]:
         if hit is not None:
             resolved.append(hit)
         else:
-            tried = ", ".join(str(c) for c in candidates)
+            # Not fatal on its own — this run may not need that repo — but it
+            # does mean part of the registry went unexamined, and that must
+            # never read the same as "checked it, nothing to do".
             print(
-                f"WARNING: no clone of {name} found (tried: {tried}). "
-                f"Set AGENTSKILLS_REPOS or pass --repos to point at it.",
+                f"WARNING: no clone of {name} is known to this run, so NONE of "
+                f"its skills were examined. This is not the same as finding it "
+                f"clean. {REPO_HINT}",
                 file=sys.stderr,
             )
-
-    if not resolved:
-        self_repo = _self_repo()
-        if self_repo is not None:
-            print(
-                f"WARNING: falling back to the checkout this script lives in: "
-                f"{self_repo}",
-                file=sys.stderr,
-            )
-            resolved = [self_repo]
     return resolved
 
 
@@ -220,6 +251,169 @@ def _existing_repos(repos: List[Path], source: str = "") -> List[Path]:
                 file=sys.stderr,
             )
     return present
+
+
+def describe_resolved_repos(repos: List[Path]) -> str:
+    """One line per resolved repo: its path, and how many skills it holds.
+
+    Every "nothing happened" message ends with this. The Windows report that
+    prompted it said only "no skills selected"; what the operator actually
+    needed was which directory the tool had decided to call the registry, and
+    that it had found zero skills there.
+    """
+    if not repos:
+        return f"  (none — no repo was resolved)\n{REPO_HINT}"
+    return "\n".join(
+        f"  {repo}  ({len(get_all_skills(repo))} skill(s) found)"
+        for repo in repos
+    )
+
+
+# ---------------------------------------------------------------------------
+# Repo-state gate
+# ---------------------------------------------------------------------------
+
+def _stdin_is_tty() -> bool:
+    """True when there is a human to ask. Never raises."""
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def repo_state(
+    repo: Path, timeout: float = FETCH_TIMEOUT_SECONDS
+) -> Dict[str, List[str]]:
+    """Describe one repo's branch/upstream state for the pre-flight gate.
+
+    Returns ``{"problems": [...], "unknowns": [...]}``. The split is the
+    whole point: a *problem* is something established to be wrong (off
+    ``main``, ahead of or behind ``origin/main``) and blocks; an *unknown* is
+    a question this run could not answer (no remote, offline, fetch timed
+    out) and is reported without being turned into a verdict either way.
+    Asserting "up to date" from stale remote-tracking refs would be the same
+    class of lie as the resolution defaults this gate ships alongside.
+
+    A path that is not a git checkout at all is an unknown, not a problem:
+    it has no branch to be wrong and no upstream to be behind, and blocking
+    there would break every legitimate ``--repos /some/exported/tree`` run.
+    """
+    problems: List[str] = []
+    unknowns: List[str] = []
+
+    if _git(["rev-parse", "--is-inside-work-tree"], cwd=repo) != "true":
+        unknowns.append(
+            f"{repo}: not a git checkout — branch and up-to-date state unknown"
+        )
+        return {"problems": problems, "unknowns": unknowns}
+
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo)
+    if branch is None:
+        unknowns.append(f"{repo}: could not determine the current branch")
+    elif branch != MAIN_BRANCH:
+        # Compared literally, so a repo whose default branch is called
+        # something else is surfaced rather than silently mishandled.
+        problems.append(
+            f"{repo}: on branch '{branch}', not '{MAIN_BRANCH}'"
+        )
+
+    # Answer "is it up to date?" from a fresh fetch or not at all.
+    fetched = _git(
+        [
+            "fetch",
+            "--quiet",
+            "origin",
+            f"+refs/heads/{MAIN_BRANCH}:refs/remotes/origin/{MAIN_BRANCH}",
+        ],
+        cwd=repo,
+        timeout=timeout,
+    )
+    if fetched is None:
+        unknowns.append(
+            f"{repo}: could not fetch origin/{MAIN_BRANCH} (no such remote, "
+            f"offline, or slower than {timeout:.0f}s) — whether it is up to "
+            f"date could not be determined"
+        )
+        return {"problems": problems, "unknowns": unknowns}
+
+    counts = _git(
+        ["rev-list", "--left-right", "--count", f"origin/{MAIN_BRANCH}...HEAD"],
+        cwd=repo,
+    )
+    parts = counts.split() if counts else []
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        unknowns.append(
+            f"{repo}: could not compare HEAD against origin/{MAIN_BRANCH}"
+        )
+    else:
+        behind, ahead = int(parts[0]), int(parts[1])
+        if behind or ahead:
+            problems.append(
+                f"{repo}: not up to date with origin/{MAIN_BRANCH} "
+                f"({behind} behind, {ahead} ahead)"
+            )
+    return {"problems": problems, "unknowns": unknowns}
+
+
+def check_repo_state(
+    repos: List[Path],
+    assume_yes: bool = False,
+    timeout: float = FETCH_TIMEOUT_SECONDS,
+) -> bool:
+    """Pre-flight gate. True to proceed; never False without saying why.
+
+    What gets uploaded is built from the working tree, so an off-main or
+    behind clone silently publishes the wrong bytes to an API that has no
+    delete. Ask first.
+    """
+    problems: List[str] = []
+    unknowns: List[str] = []
+    for repo in repos:
+        state = repo_state(repo, timeout=timeout)
+        problems.extend(state["problems"])
+        unknowns.extend(state["unknowns"])
+
+    for line in unknowns:
+        print(f"NOTE: repo state could not be determined — {line}", file=sys.stderr)
+
+    if not problems:
+        return True
+
+    header = "repo state is not what a sync should be run from:\n" + "\n".join(
+        f"  - {problem}" for problem in problems
+    )
+
+    if assume_yes:
+        # A silent override is how a gate rots into decoration.
+        print(
+            f"WARNING: {header}\n--yes bypassed the checks above. What gets "
+            f"uploaded will be built from these trees exactly as they stand, "
+            f"not from origin/{MAIN_BRANCH}.",
+            file=sys.stderr,
+        )
+        return True
+
+    if not _stdin_is_tty():
+        print(
+            f"ERROR: {header}\nStdin is not a terminal, so there is nobody to "
+            f"ask — refusing rather than hanging on a prompt nobody will see. "
+            f"Bring the tree(s) to {MAIN_BRANCH} and up to date, or re-run "
+            f"with --yes to sync from them as they are.",
+            file=sys.stderr,
+        )
+        return False
+
+    print(f"WARNING: {header}", file=sys.stderr)
+    try:
+        answer = input("Continue anyway? [y/N] ")
+    except EOFError:
+        answer = ""
+    if not answer.strip().lower().startswith("y"):
+        print(
+            "ERROR: aborted — repo state was not confirmed.", file=sys.stderr
+        )
+        return False
+    return True
 
 
 def _skill_dir(repo_path: Path, name: str) -> Optional[Path]:
@@ -574,6 +768,7 @@ def verify(
     now: Optional[datetime.datetime] = None,
     declared: Optional[Set[str]] = None,
     named: Optional[bool] = None,
+    selection: Optional[str] = None,
 ) -> bool:
     """Compare each skill's expected upload against its account copy.
 
@@ -613,6 +808,15 @@ def verify(
     annotated with the account's own ``updatedAt`` stamp so it can be traced
     to a specific upload.
 
+    ``selection`` records HOW the caller chose ("skill" / "all" /
+    "changed"), which is the only way to say something useful when nothing
+    gets checked. An empty ``skill_names`` list is ambiguous on its own —
+    under ``--all`` it means the resolved repos held no skills (a resolution
+    problem), and from a direct caller it means nothing was selected (a flag
+    problem) — and reporting the second when the first happened is precisely
+    the misdiagnosis this parameter exists to end. It defaults to the older
+    inference so existing callers keep their behaviour.
+
     Returns True only if the declaration was readable, the mirror was fresh,
     at least one skill was selected, and nothing failed.
     """
@@ -643,6 +847,8 @@ def verify(
     # the account store, which is the normal case.
     if named is None:
         named = skill_names is not None and len(skill_names) > 0
+    if selection is None:
+        selection = "skill" if named else "changed"
     checked = 0
     verified = 0
     undeclared_absent: List[str] = []
@@ -745,17 +951,31 @@ def verify(
         )
 
     if checked == 0:
+        where = describe_resolved_repos(repos)
         if named:
             print(
                 f"ERROR: no skill named {', '.join(skill_names)} found in any "
-                f"resolved repo — nothing was verified (check the spelling)",
+                f"resolved repo — nothing was verified (check the spelling). "
+                f"Resolved repos:\n{where}",
+                file=sys.stderr,
+            )
+        elif selection == "all":
+            # The Windows failure: --all WAS passed, and the repo it got
+            # pointed at simply held nothing. Blaming the flag sent three
+            # round-trips looking for a flag that was already there.
+            print(
+                f"ERROR: skills were selected (--all), but no resolved repo "
+                f"contains any, so nothing was verified. Nothing is wrong with "
+                f"the flags — this is repo resolution. Resolved repos:\n{where}"
+                f"\nIf that is not the tree you meant: {REPO_HINT}",
                 file=sys.stderr,
             )
         else:
             print(
-                "ERROR: no skills selected, so nothing was verified. A silent "
-                "pass here would look identical to a successful sync. Pass "
-                "--all or --skill NAME to say what should have been uploaded.",
+                f"ERROR: no skills selected, so nothing was verified. A silent "
+                f"pass here would look identical to a successful sync. Pass "
+                f"--all or --skill NAME to say what should have been uploaded. "
+                f"Resolved repos:\n{where}",
                 file=sys.stderr,
             )
         return False
@@ -823,7 +1043,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--repos", nargs="+", metavar="PATH",
-        help="Repo paths to scan (overrides built-in defaults)",
+        help=(
+            "Repo paths to scan. There are no built-in clone locations: this "
+            "or $AGENTSKILLS_REPOS is how a repo other than this script's own "
+            "checkout gets found at all"
+        ),
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help=(
+            f"Sync from a repo that is off {MAIN_BRANCH} or not up to date "
+            f"with origin/{MAIN_BRANCH} instead of stopping to ask"
+        ),
     )
     parser.add_argument(
         "--account-list", metavar="PATH",
@@ -847,9 +1078,15 @@ def main() -> None:
     repos = resolve_repos(args.repos)
     if not repos:
         sys.exit(
-            "ERROR: no repo could be resolved, so nothing was inspected. "
-            "This is not the same as having nothing to sync."
+            f"ERROR: no repo could be resolved, so nothing was inspected. "
+            f"This is not the same as having nothing to sync. {REPO_HINT}"
         )
+
+    # Everything below builds an upload out of these working trees, so their
+    # state is a precondition, not a detail. --mark-synced returned above and
+    # is exempt: it touches only the state file.
+    if not check_repo_state(repos, assume_yes=args.yes):
+        sys.exit(1)
 
     # An explicitly named list that isn't readable is a typo, not a licence
     # to fall back to the built-in one.
@@ -886,7 +1123,12 @@ def main() -> None:
                 print(f"  {tag}  {name}  ({repo.name})")
                 any_found = True
         if not any_found:
-            print("No changed skills found. Use --all to sync everything.")
+            print(
+                f"Nothing would be synced. Resolved repos:\n"
+                f"{describe_resolved_repos(repos)}\n"
+                f"Use --all to sync everything; if the tree(s) above are not "
+                f"the ones you meant: {REPO_HINT}"
+            )
         return
 
     # --verify
@@ -894,7 +1136,8 @@ def main() -> None:
         # named=True only for --skill: --all enumerates the registry, and most
         # of the registry is legitimately not on the account.
         ok = verify(
-            repos, skill_names, declared=declared, named=bool(args.skill)
+            repos, skill_names, declared=declared, named=bool(args.skill),
+            selection="skill" if args.skill else ("all" if args.all else "changed"),
         )
         sys.exit(0 if ok else 1)
 
@@ -902,7 +1145,16 @@ def main() -> None:
     result = prepare(repos, skill_names, declared=declared)
     if not result["skills"]:
         result["message"] = (
-            "No changed skills found. Use --all to sync everything."
+            "No skills to sync. Resolved repos: "
+            + "; ".join(
+                f"{repo} ({len(get_all_skills(repo))} skill(s) found)"
+                for repo in repos
+            )
+            + (
+                ". --all was passed, so this is repo resolution, not the flags."
+                if args.all
+                else ". Use --all to sync everything."
+            )
         )
     print(json.dumps(result))
 
