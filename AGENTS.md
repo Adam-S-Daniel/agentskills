@@ -132,7 +132,36 @@ Two things about that setting are easy to get wrong:
 
 `semver-minor-days` / `semver-patch-days` are deliberately left undefined —
 they fall back to `default-days`, and spelling them out only invites drift.
-Pinning and bumping third-party action SHAs is the `pin-actions-to-sha` skill.
+
+## Pinning GitHub Actions
+
+**Every `uses:` is pinned to a full 40-character commit SHA** — in workflows,
+composite actions, and reusable-workflow references alike. Never a tag, never a
+branch, never an abbreviated SHA. A tag is a movable pointer: pinning to one
+gives whoever can retag the upstream repo a shell on the runner, holding that
+job's token.
+
+```yaml
+uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1 (2023-10-17)
+```
+
+- **The trailing `# vX.Y.Z (YYYY-MM-DD)` comment is part of the pin.** Forty hex
+  characters say nothing on their own; the version says what it is and the date
+  says how stale it is. Dependabot rewrites the SHA and the version but not the
+  date, so dates drift — cosmetic, a chore, never an incident.
+- **Wait 7 days after a release before adopting it** — the cooling-off above,
+  applied by hand. If the newest release is younger than that, pin the previous
+  one.
+- **Dereference annotated tags.** `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`
+  returning `.object.type == "tag"` gives you the tag object's SHA, not the
+  commit's, and pinning that fails at runtime. Follow it with
+  `git/tags/<that-sha>`, or ask git directly:
+  `git ls-remote <url> 'refs/tags/<tag>^{}'`.
+- `./local/path` and `docker://` refs have nothing to pin. Leave them.
+
+This is enforced, not merely expected: `sha_pinning_required: true` is set on
+every repo — by `repo-settings`' `fleet.yml` for the fleet, and by
+`cms-platform`'s `repo-settings.yml` for the three sites it manages.
 
 ## Subagent delegation (model routing)
 
@@ -165,7 +194,7 @@ Pinning and bumping third-party action SHAs is the `pin-actions-to-sha` skill.
   default-on), `adam-local` (machine-bound), and `fastmail` — each holding
   `skills/<skill>/` directories.
 - In Claude Code with the marketplace installed, invoke a skill as
-  `/adam:<skill>` (e.g. `/adam:pin-actions-to-sha`).
+  `/adam:<skill>` (e.g. `/adam:finding-unknowns`).
 - Local machines get the marketplace plus per-agent symlinks via that repo's
   `setup.sh`.
 - Cloud/ephemeral sessions still get **no** plugins from repo-declared
