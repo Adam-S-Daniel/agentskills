@@ -549,7 +549,13 @@ for row in rows:
 # the writer and cannot be changed by any field's CONTENT — unlike the earlier
 # positional, newline/tab-split TSV, where one hostile value forged whole rows.
 def _write_records(path, records):
-    with open(path, "w", encoding="utf-8") as handle:
+    # newline="" on every writer that bash reads back: python's text mode
+    # translates "\n" to os.linesep, so on Windows the separators became CRLF
+    # and bash read a trailing "\r" as part of the field. That is what made
+    # `meta` fail its `^[0-9]+$` check and report a bogus framing error on
+    # every Windows session. These files are a byte-level contract with bash;
+    # the writer decides what is in them, not the platform.
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         for record in records:
             for field in record:
                 handle.write(field)
@@ -591,7 +597,8 @@ _write_records(
 # The verifiable python<->bash contract: the counts bash must read back. If
 # bash reads a different number of COMPLETE records, the stream was truncated
 # or desynced and every skill's source index is suspect.
-with open(os.path.join(out_dir, "meta"), "w", encoding="utf-8") as handle:
+with open(os.path.join(out_dir, "meta"), "w", encoding="utf-8",
+          newline="") as handle:  # LF only -- see _write_records
     handle.write("%d\n%d\n" % (len(sources), len(rows)))
 PY
 then
@@ -916,7 +923,7 @@ for entry in record["installed"]:
         rows.append((name, digest))
 
 with open(os.path.join(os.environ["TMP_DIR"], "recorded.nul"), "w",
-          encoding="utf-8") as handle:
+          encoding="utf-8", newline="") as handle:  # LF only -- see above
     for row in rows:
         for field in row:
             handle.write(field)
@@ -1244,7 +1251,8 @@ for entry in record["installed"]:
         # bundle. Not ours to remove, and not ours to forget either.
         plan.append(("keep", name, registry, bundle, digest))
 
-with open(os.path.join(tmp_dir, "plan.nul"), "w", encoding="utf-8") as handle:
+with open(os.path.join(tmp_dir, "plan.nul"), "w", encoding="utf-8",
+          newline="") as handle:  # LF only -- see above
     for row in plan:
         for field in row:
             handle.write(field)
@@ -1352,7 +1360,9 @@ directory = os.path.dirname(record_path) or "."
 staged_fd, staged = tempfile.mkstemp(
     dir=directory, prefix=".skills-bootstrap-installed.", suffix=".tmp")
 try:
-    with os.fdopen(staged_fd, "w", encoding="utf-8") as handle:
+    # LF only: the install record is a JSON artifact a human reads and another
+    # run parses. Its bytes should not depend on which platform wrote it.
+    with os.fdopen(staged_fd, "w", encoding="utf-8", newline="") as handle:
         handle.write(json.dumps(payload, indent=2) + "\n")
     os.replace(staged, record_path)
 except BaseException:
