@@ -43,7 +43,10 @@ Common categories (adapt to the repo):
 - **Test code** the workflow runs: `e2e/`, `tests/`, `_plugins_test/`
 - **Scripts** the workflow invokes: `scripts/<the specific script>.sh`
 - **Configs** the workflow reads: `playwright.config.js`, `Gemfile`, `package.json`, framework configs
-- **Dep manifests** that change behaviour: `package*.json`, `Gemfile*`, `requirements*.txt`, `go.sum`
+- **Dep manifests AND their lockfiles**: `package*.json`, `Gemfile*`,
+  `requirements*.txt`, `go.sum`. The glob is deliberate — see the lockfile
+  trap below; filtering on the manifest alone is the most common way this
+  audit ships a hole.
 - **The workflow file itself** — always salient (workflow self-validation)
 
 Things almost never salient (good `paths-ignore` candidates):
@@ -107,6 +110,12 @@ jobs:
 
 The job always runs so the named check is always present and reports success when nothing salient changed. Manual `workflow_dispatch` always forces a real run.
 
+`workflow_dispatch` in that example may be a trigger the workflow **does not
+already have**. Adding one is a change beyond a filter audit — harmless, usually
+welcome, and still not what you were asked for. Either keep the manual-force
+branch only where the workflow already accepts `workflow_dispatch`, or add it and
+name the addition in your summary. Don't slip a new trigger in unremarked.
+
 ### 4. Apply the changes
 
 Edit each workflow's `on:` block (or job steps for the always-run pattern) and add/correct the path filter.
@@ -115,14 +124,18 @@ For workflow-level filters, prefer one filter style per workflow — if the work
 
 When listing patterns, group related items and sort within groups. A future reader skimming the list should be able to tell "what are docs", "what are tests", "what are sibling workflows".
 
-### 5. Update the docs
+### 5. Update the docs that already exist
 
-Most repos have an AGENTS.md or CONTRIBUTING.md that documents workflows. Update:
+If the repo documents its workflows — an AGENTS.md, a CONTRIBUTING.md, a
+`docs/WORKFLOWS.md` — bring it back into step with what you changed:
 
 - Any quick-reference table of "what each workflow does + what triggers it" — make sure the salient paths column reflects the new filter.
 - Any per-workflow section with a "Trigger:" line — confirm it matches the YAML.
 
-If the repo has neither, add a "Workflow path-filtering rule" section to AGENTS.md (or whatever the equivalent agent-onboarding doc is) that names the rule and lists the salient paths per workflow.
+**If no such doc exists, do not create one.** An audit tightens filters; it does
+not introduce a documentation convention the repo never adopted. Record it in the
+summary instead — "no workflow doc found; the filters are the only record" — and
+let the owner decide whether they want one.
 
 ### 6. Verify
 
@@ -147,6 +160,47 @@ GitHub blocks the merge when a required status check is *missing* — including 
 When promoting an existing path-filtered workflow to required, refactor it to always-run + early-skip in the same change.
 
 The concrete shape of the fix: the required workflow's trigger carries no `paths:` / `paths-ignore:` at all, so it fires on every PR, and the salience decision moves *inside* it. An always-run `detect` job computes the changed files and passes them through a salience predicate — an inline `grep -qE` over the diff, or a small script the repo owns — and only a salient result runs the heavy job downstream; the required check reports a status either way.
+
+## Lockfile trap
+
+An installer step reads the **lockfile**, not the manifest. `npm ci` installs
+*exclusively* from `package-lock.json` — it ignores `package.json`'s ranges and
+fails outright if the two disagree. So any workflow that runs an installer is
+salient to the lockfile, and a filter naming only the manifest misses the most
+common dependency change there is.
+
+That is exactly the shape of a Dependabot or Renovate PR: `package.json`
+untouched, `package-lock.json` rewritten. A `paths: [package.json]` filter skips
+the very tests that exist to catch a bad upgrade.
+
+| Manifest | What the installer actually reads |
+|---|---|
+| `package.json` | `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb` |
+| `Gemfile` | `Gemfile.lock` |
+| `pyproject.toml` / `requirements.in` | `poetry.lock`, `uv.lock`, `requirements.txt` |
+| `go.mod` | `go.sum` |
+| `Cargo.toml` | `Cargo.lock` |
+| `composer.json` | `composer.lock` |
+
+Two ways to get it right — pick one and hold to it within a repo:
+
+- **Glob both**: `package*.json` matches manifest and lockfile in one pattern
+  (`Gemfile*` likewise). Shortest, and hard to get wrong when someone edits it later.
+- **List both**: `package.json`, `package-lock.json`. Longer, but a reader sees
+  the coverage without having to evaluate a glob in their head.
+
+The same rule governs the salience regex **inside** an always-run + early-skip
+gate. A gate that greps for `package\.json` and not the lockfile has precisely
+the blind spot the workflow-level filter would have had — the required check goes
+green on a dependency bump it never tested.
+
+## Stay inside the audit
+
+The blast radius is `.github/workflows/` — plus the branch-protection ruleset,
+and then only when the required-check trap forces it and the owner asked. Anything
+else you notice on the way (a missing lockfile, a workflow that should not exist,
+a test that never runs) belongs in the summary as a finding, not in the diff. An
+audit that also refactors CI is no longer reviewable as an audit.
 
 ## Output
 
