@@ -268,3 +268,54 @@ Skills are grouped into three bundle plugins — `plugins/adam/` (cloud-safe),
 `skills/<skill>/` dirs; skill directory basenames must stay unique and never
 change (they key `setup.sh` symlinks and claude.ai uploads), and the
 marketplace `renames` map is append-only.
+
+### Operational gotchas
+
+- `gh api ... --jq '<filter>'` on an HTTP error prints the raw error JSON body
+  to stdout — the jq filter never runs — and exits 1, so `out=$(cmd) || true`
+  captures that garbage instead of an empty result. Discard output on failure
+  explicitly: `out=$(cmd) || out=""`. This silently broke sync.sh's
+  `default_sections` once.
+- Eval skill installs need the nested path: copy `plugins/<name>/skills/<name>/`
+  into `.claude/skills/<name>/`. Copying the outer plugin directory buries
+  `SKILL.md` and the skill silently never loads.
+- `autoMemoryDirectory` accepts only absolute or `~/` paths (no repo-relative
+  form). Don't assume the in-repo pattern resolves identically on every
+  machine just because repos "live at `~/repos/<name>` everywhere" — see
+  Workstation layout above for the counterexample. That exact assumption once
+  broke sync-skills: it guessed `~/repos/<name>` ahead of the checkout it was
+  actually running from, a decoy outranked the real clone, and `--all`
+  enumerated nothing. Check the resolved path on the machine in front of you;
+  never encode a repo location as a constant.
+- `sync.sh` never force-pushes a stale remote `agents-md-sync/update` branch
+  (the push is non-fast-forward and it deliberately won't override). Recover
+  by opening a PR from the stale branch and merging it to free the name, then
+  re-running sync — don't add `--force` to `sync.sh`, it could discard
+  reviewer commits on an open PR.
+- The marketplace `renames` map is a one-way door: an object
+  `{old: new|null}` (`null` = removed), chains followed to depth 16 by Claude
+  Code's plugin resolver (verified at 2.1.211), append-only forever.
+  Many-to-one is fine; enable-state merges are first-wins, so a disabled
+  surviving plugin silently disables skills migrated into it (the
+  fastmail/fastmail-identities caveat — see ADR 0001).
+- After any bundle restructure, re-run `bash setup.sh` on every machine right
+  away. A stale global sync-skills pre-push hook keeps pointing at the old
+  plugin path and fails every `git push` from every repo until re-registered.
+
+### One-way doors get an adversarial round
+
+- The irreversible surfaces in this repo are the marketplace `renames` map
+  (append-only forever), skill directory basenames (they key `setup.sh`
+  symlinks and claude.ai uploads), and an upload to the claude.ai account
+  store — which has no delete in the upload path (ADR 0002). A change that
+  touches one of them gets an **independent adversarial round before merge**:
+  a separately prompted agent whose job is to break the change, not to
+  approve it, run against the diff and — where the change is one-way — against
+  a live migration in a scratch environment.
+- **One clean-looking fix does not end the gate.** Of the four rounds that
+  hardened `.claude/hooks/skills-bootstrap.sh`, two found defects *introduced
+  by the previous round's fix*, one of them a fresh RCE. Keep going while
+  rounds keep finding things.
+- Depth, including the negative-control rule that keeps "the exploit stopped
+  working" from being mistaken for "the harness stopped working", is in
+  [`docs/experiments/E4-federated-bundle-delivery.md`](docs/experiments/E4-federated-bundle-delivery.md).
