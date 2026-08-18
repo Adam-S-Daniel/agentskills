@@ -38,6 +38,14 @@ treat unknown-hunting as part of the work, not a phase that ends at the plan:
 - While building: keep a running note of decisions that departed from the plan
   and edge cases you hit. Surface them; don't silently absorb them.
 - After building: be able to explain what changed and why it is correct.
+- Durable findings go in the **repo**, not in agent memory — an environment
+  quirk, non-obvious wiring, where a source of truth actually lives, a
+  sequencing constraint. Repo files version with the code and every person and
+  every harness that opens the repo sees them; agent memory is per-agent and is
+  silently missed by the next session. A fleet-wide rule goes in
+  `_agent-guidance`'s `agents-md/base.md`, a repo fact below the
+  `## Repo-specific additions` marker, a reusable procedure into the skills
+  registry. A memory note is a supplement, never the only copy.
 
 The full workflow (blind-spot pass, self-interview, implementation notes,
 post-hoc explainer) is the **`finding-unknowns`** skill in the registry. Reach
@@ -139,6 +147,57 @@ Fleet repos enforce PR-only default branches via ruleset, managed as code in
   cms-platform-managed repos (outside the fleet ruleset) use it by their own
   design.
 
+### A required status check gets no `concurrency` group
+
+A job that publishes a **required** status context and can fire more than once
+on the same head sha — label events, an `opened` + `synchronize` burst, any
+multi-event trigger — gets no `concurrency` block at all.
+
+- GitHub picks **non-deterministically** between a cancelled run and a
+  successful one for the same context + sha. When cancelled wins the PR is hard
+  blocked: the merge API returns `405 Required status check "<ctx>" is
+  cancelled`, and nothing overrides it — not native auto-merge, not an explicit
+  merge call, not a nudge bot. The PR looks all-green and simply never lands.
+- **`cancel-in-progress: false` is not "run them all."** GitHub keeps the
+  in-progress run plus only the *latest* pending run in the group and cancels
+  the other pending duplicates, so a same-sha burst still leaves cancelled runs
+  behind. Flipping that flag is the fix that looks right and changes nothing.
+- Same mechanic on any shared lane: when one push drives two workflows into one
+  group, the older pending sibling is cancelled. Make the triggers pairwise
+  disjoint — a shared group only serialises runs that already arrive apart.
+- Jobs triggered only by `push` / `synchronize` — each a new sha — are safe to
+  cancel and keep `cancel-in-progress: true`.
+- Lock the invariant with a test that **parses** the workflow YAML (the `yaml`
+  package — never a regex or line scan, which reads clean on text it cannot
+  see), so the block cannot come back.
+
+## "The watch finished" is not "CI passed"
+
+Never read CI pass/fail off a watch command's exit code, or off the fact that it
+returned. Three failure modes stack: in `cmd | tail` the shell's `$?` is
+`tail`'s — always 0 — masking the non-zero from `gh pr checks`; a backgrounded
+watch reports that same pipeline code, so its "completed (exit code 0)"
+notification says nothing about the build; and `tail -N` can show only the
+passing and skipping lines while the FAILURE lines scrolled out of the window,
+so eyeballing it looks green too. (Real incident: all three lined up on one PR —
+e2e and lint were FAILURE while the session reported CI green and moved on.)
+
+- Capture the real code with `${PIPESTATUS[0]}`, or don't pipe the watch at all.
+- After **any** CI watch, query the conclusions explicitly and report the parsed
+  result before acting on it:
+
+  ```bash
+  gh pr view <n> --repo <owner>/<repo> --json statusCheckRollup --jq \
+    '.statusCheckRollup[] | (.conclusion // .state) as $c
+     | select($c != null and $c != "SUCCESS" and $c != "NEUTRAL")
+     | "\(.name // .context): \($c)"'
+  ```
+
+  A check run carries `.conclusion`, a legacy commit status carries `.state` —
+  filter on only one and the other's failures read as clean.
+- Treat "watch done" as "now verify", never as "passed". Don't launch a watch
+  and go passive without a definite verify-the-rollup step on resume.
+
 ## Dependency updates
 
 Dependabot runs with a **minimum package age** (`cooldown`) so an unattended
@@ -152,6 +211,12 @@ Two things about that setting are easy to get wrong:
 
 `semver-minor-days` / `semver-patch-days` are deliberately left undefined —
 they fall back to `default-days`, and spelling them out only invites drift.
+
+The window is not only Dependabot's. A package you add or bump **by hand** mid-task
+is the case with no automation watching it: check the publish date
+(`npm view <pkg> time --json`), take the newest release that has already cleared
+the 7 days rather than the freshest one, and pin it exact (no caret) so `npm ci`
+cannot drift onto a version that has had no cooling-off at all.
 
 ## Pinning GitHub Actions
 
@@ -221,6 +286,15 @@ ref for review, not the setting, to catch.
   repo guidance entirely. Restate load-bearing constraints (style, test
   command, invariants) in the delegation prompt, and don't hand
   guidance-sensitive work to agents that won't see it.
+- **Any prompt that sends a subagent to live-test states the credential
+  boundary** — which `HOME`/profile it may use, what it may read, and that it
+  must not copy real credentials anywhere to make the test pass. (Real
+  incident: a reviewer live-testing a plugin migration in a scratch `HOME`
+  copied the account's real OAuth credentials into it. The test worked; nobody
+  had asked, and nothing in the prompt forbade it.)
+- Supply a throwaway credential, or scope the test to what runs
+  unauthenticated. If it genuinely cannot run without a real one, that is the
+  operator's call — not a gap for the subagent to close on its own initiative.
 
 ## Skills ecosystem
 
