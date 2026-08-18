@@ -108,11 +108,13 @@ you switch contexts.)
 ## Quick-start checklist
 
 1. Ensure a claude.ai tab is open in Chrome (any page will do).
-2. Run `sync_skills.py --prepare` (via Bash) to get the JSON payload. If it
-   stops on the repo-state gate, fix the clone (`git checkout main`,
-   `git pull`) rather than reaching for `--yes` — you are about to publish
-   that tree to an API with no delete.
-3. For each skill in the payload, call `javascript_tool` to POST the ZIP.
+2. Run `sync_skills.py --prepare --zip-dir DIR` (via Bash) to write the
+   ZIPs to disk and get the JSON payload. If it stops on the repo-state
+   gate, fix the clone (`git checkout main`, `git pull`) rather than
+   reaching for `--yes` — you are about to publish that tree to an API
+   with no delete.
+3. Hand those ZIP files to the page with `file_upload`, then POST them
+   with `javascript_tool` (§3). Do **not** paste base64 into the script.
 4. Mark each successfully uploaded skill with `--mark-synced`.
 5. Refresh the account-copy mirror (§7) and run `--verify`; a sync isn't
    done until it reports `OK` for every skill you just uploaded. The
@@ -123,16 +125,18 @@ you switch contexts.)
 
 ## 1. Get the change list
 
-Run the helper script to find changed skills and build base64-encoded ZIPs:
+Run the helper script to find changed skills and build their ZIPs. Pass
+`--zip-dir` so the ZIPs are written as real files — that is what the
+upload path in §3 consumes:
 
 ```bash
-python3 "$SKILL_DIR/sync_skills.py" --prepare
+python3 "$SKILL_DIR/sync_skills.py" --prepare --zip-dir "$TMPDIR/skillzips"
 ```
 
 Use `--all` to force-sync every skill regardless of git diff:
 
 ```bash
-python3 "$SKILL_DIR/sync_skills.py" --prepare --all
+python3 "$SKILL_DIR/sync_skills.py" --prepare --all --zip-dir "$TMPDIR/skillzips"
 ```
 
 The output is a JSON object:
@@ -142,7 +146,9 @@ The output is a JSON object:
   "skills": [
     {
       "name": "fastmail",
-      "zip_b64": "<base64-encoded ZIP>",
+      "zip_path": "/tmp/skillzips/fastmail.zip",
+      "zip_bytes": 34552,
+      "zip_sha256": "e647b204980d5794...",
       "is_update": true,
       "repo": "agentskills",
       "hash": "a1b2c3d4e5f6a7b8"
@@ -151,6 +157,10 @@ The output is a JSON object:
   "org_id_hint": "12345678-abcd-..."
 }
 ```
+
+Without `--zip-dir` each entry carries `zip_b64` (base64 of the ZIP)
+instead of `zip_path`. That shape still works, but prefer `--zip-dir`:
+see §3 for why.
 
 If `skills` is empty, read the `message` the payload carries with it — it
 lists every repo that was resolved and how many skills each one held. An
@@ -163,55 +173,137 @@ skills, which is a resolution problem and not something to report as
 
 ## 2. Get the org_id
 
-If `org_id_hint` is non-null, use it directly.
+**Use `org_id_hint` from the payload. It is the answer — don't go looking
+for another one.** It is read from `~/.claude.json`
+(`oauthAccount.organizationUuid`): the org this machine's Claude Code CLI
+is authenticated against. That is the right org by construction, because
+the same CLI writes the account mirror that `--verify` reads in §7. If you
+upload somewhere else, `--verify` can never see it.
 
-Otherwise, retrieve it via `javascript_tool`:
+To read it directly:
+
+```bash
+python3 -c "import json,pathlib;print(json.load(open(pathlib.Path.home()/'.claude.json'))['oauthAccount']['organizationUuid'])"
+```
+
+The UUID is not hardcoded in this skill on purpose — it is an account
+identifier and this repo is public.
+
+### Don't pick one from `/api/organizations`
+
+That endpoint lists **every** org the account belongs to, with nothing
+marking which one owns the skill store:
 
 ```javascript
 // Returns an array of orgs; the upload-skill endpoint keys on UUID (o.uuid),
-// NOT the integer primary key (o.id). Always pick o.uuid.
-(async () => {
-  const resp = await fetch('https://claude.ai/api/organizations', {credentials: 'include'});
-  const orgs = await resp.json();
-  return orgs.map(o => ({uuid: o.uuid, name: o.name}));
-})()
+// NOT the integer primary key (o.id).
+const resp = await fetch('https://claude.ai/api/organizations', {credentials: 'include'});
+(await resp.json()).map(o => ({uuid: o.uuid, name: o.name}));
 ```
 
-Pick the correct `uuid` from the list (usually only one) - that's the value
-to substitute for `ORG_ID` in step 3. Confirm with the user if there are
-multiple orgs.
+On this account it returns two, and the personal-looking name is the
+correct one — a coin flip you should not be taking. Guessing wrong 404s
+every request. There is also **no read API to fall back on**: `GET
+/skills`, `GET /skills/{id}` and `GET /skills/list` all 404 under both
+orgs, so you cannot probe for the right one. Use `org_id_hint`, and only
+fall back to this list if it is null.
 
 ---
 
 ## 3. Upload each skill
 
-For each entry in `skills`, call `javascript_tool` with the following
-template. Substitute `ORG_ID`, `SKILL_NAME`, `OVERWRITE`, and `ZIP_B64`.
+**Hand the browser the ZIP *files*; never carry them as base64.** A single
+skill can be 200KB+ of base64 (`sync-skills` itself is ~218KB), and pasting
+that into a `javascript_tool` call spends it all as context and risks
+truncating the script. The file-input route below moves zero payload bytes
+through the conversation.
 
-- `OVERWRITE` = `true` when `is_update` is `true`, `false` otherwise.
+Open a claude.ai tab first — the POST needs that origin's session cookies.
+
+**Step 3a — inject a file input** into the claude.ai page:
 
 ```javascript
-(async () => {
-  const orgId   = "ORG_ID";
-  const name    = "SKILL_NAME";
-  const overwrite = OVERWRITE;   // true or false (boolean, not string)
-  const zipB64  = "ZIP_B64";     // full base64 string from the JSON
+let el = document.getElementById('agentZipInput');
+if (!el) {
+  el = document.createElement('input');
+  el.type = 'file';
+  el.id = 'agentZipInput';
+  el.setAttribute('aria-label', 'agent zip input');
+  el.style.cssText = 'position:fixed;top:8px;left:8px;z-index:2147483647;width:320px;height:36px;background:#fff;';
+  document.body.appendChild(el);
+}
+JSON.stringify({injected: true, files: el.files.length})
+```
 
-  const url = `https://claude.ai/api/organizations/${orgId}/skills/upload-skill?overwrite=${overwrite}`;
+**Step 3b — locate it** with `find` (query: `file input with aria-label
+"agent zip input"`) to get a `ref_N`.
 
-  // Decode base64 -> Uint8Array -> Blob
-  const binary = atob(zipB64);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const blob   = new Blob([bytes], {type: 'application/zip'});
+**Step 3c — load the ZIPs into it** with the `file_upload` tool, passing
+the `zip_path` values from §1 (it accepts several at once; the combined
+limit is 10MB).
 
-  const form   = new FormData();
-  form.append('file', blob, `${name}.zip`);
+**Step 3d — POST them.** This reads the files straight from the input, so
+`ORG_ID` is the only substitution:
 
-  const resp   = await fetch(url, {method: 'POST', body: form, credentials: 'include'});
-  const text   = await resp.text();
-  return {status: resp.status, ok: resp.ok, body: text.slice(0, 400)};
-})();
+```javascript
+const orgId = "ORG_ID";
+const el = document.getElementById('agentZipInput');
+// name -> expected byte size, from the payload's zip_bytes. The guard is
+// the only check that the file the browser picked up is the file the
+// helper built; without it a stale or truncated pick uploads silently.
+const expected = EXPECTED_SIZES;   // e.g. {"sync-skills.zip": 163439}
+const results = [];
+for (const f of Array.from(el.files)) {
+  if (expected[f.name] !== f.size) {
+    results.push({file: f.name, skipped: `size ${f.size} != expected ${expected[f.name]}`});
+    continue;
+  }
+  // overwrite=true when the payload's is_update is true for this skill.
+  const url = `https://claude.ai/api/organizations/${orgId}/skills/upload-skill?overwrite=true`;
+  const form = new FormData();
+  form.append('file', f, f.name);
+  const resp = await fetch(url, {method: 'POST', body: form, credentials: 'include'});
+  results.push({
+    skill: f.name.replace(/\.zip$/, ''),
+    status: resp.status,
+    body: (await resp.text()).slice(0, 500),
+  });
+}
+JSON.stringify({results}, null, 1)
+```
+
+Remove the injected input when you're done:
+`document.getElementById('agentZipInput')?.remove()`.
+
+**`overwrite=true` replaces the skill; it does not create a duplicate.**
+The response carries a *new* `skillId` each time, which looks alarming but
+is just how the server versions an overwrite — the account still holds one
+copy. Confirmed by refreshing the mirror after an overwrite and finding no
+duplicate names.
+
+### Things that look like they should work and don't
+
+- **Serving the ZIPs over `http://127.0.0.1` and fetching them from the
+  page.** claude.ai's CSP `connect-src` doesn't include localhost, so the
+  fetch hangs until aborted and the local server never logs a request.
+- **Running the upload from the localhost page instead.** Then the POST is
+  cross-origin and never carries claude.ai's session cookies.
+
+### If you genuinely have no ZIP on disk
+
+The base64 form still works — substitute `ZIP_B64` from a `--prepare` run
+made *without* `--zip-dir`:
+
+```javascript
+const binary = atob("ZIP_B64");
+const bytes = new Uint8Array(binary.length);
+for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+const form = new FormData();
+form.append('file', new Blob([bytes], {type: 'application/zip'}), "SKILL_NAME.zip");
+const resp = await fetch(
+  `https://claude.ai/api/organizations/ORG_ID/skills/upload-skill?overwrite=OVERWRITE`,
+  {method: 'POST', body: form, credentials: 'include'});
+JSON.stringify({status: resp.status, body: (await resp.text()).slice(0, 400)});
 ```
 
 **Expected success:** HTTP 200 with a `skill` field in the response.

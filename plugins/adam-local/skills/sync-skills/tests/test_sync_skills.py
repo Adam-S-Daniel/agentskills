@@ -1864,3 +1864,125 @@ class TestIssue93Residuals:
                        home=sandbox["home"])
         assert proc.returncode != 0
         assert "nope" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# --zip-dir: ZIPs as real files, so the browser can read them directly
+# ---------------------------------------------------------------------------
+
+class TestPrepareZipDir:
+    """The upload path in SKILL.md section 3 hands the browser a FILE.
+
+    The point of this mode is that the ZIP never becomes base64 in the
+    agent's context, so the assertion that matters most here is the
+    NEGATIVE one: zip_b64 must be absent. A version that emitted both
+    would pass a naive "zip_path is present" test while still paying the
+    whole cost the mode exists to avoid.
+    """
+
+    def _prep(self, repo, monkeypatch, tmp_path, zip_dir):
+        monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "account")
+        monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
+        return prepare([repo], skill_names=["skill-a"], zip_dir=zip_dir)
+
+    def test_writes_a_real_zip_file(self, repo_with_skills, monkeypatch, tmp_path):
+        zd = tmp_path / "zips"
+        result = self._prep(repo_with_skills, monkeypatch, tmp_path, zd)
+        entry = result["skills"][0]
+        written = Path(entry["zip_path"])
+        assert written.exists()
+        assert written == zd / "skill-a.zip"
+        assert zipfile.is_zipfile(written)
+
+    def test_omits_zip_b64(self, repo_with_skills, monkeypatch, tmp_path):
+        result = self._prep(repo_with_skills, monkeypatch, tmp_path, tmp_path / "zips")
+        assert "zip_b64" not in result["skills"][0]
+
+    def test_reports_size_and_digest_of_what_it_wrote(
+        self, repo_with_skills, monkeypatch, tmp_path
+    ):
+        """The digest is the only end-to-end check on the file the browser
+        picks up: nothing else compares the bytes on disk to the bytes this
+        script built."""
+        import hashlib
+
+        result = self._prep(repo_with_skills, monkeypatch, tmp_path, tmp_path / "zips")
+        entry = result["skills"][0]
+        raw = Path(entry["zip_path"]).read_bytes()
+        assert entry["zip_bytes"] == len(raw)
+        assert entry["zip_sha256"] == hashlib.sha256(raw).hexdigest()
+
+    def test_creates_missing_directory(self, repo_with_skills, monkeypatch, tmp_path):
+        zd = tmp_path / "a" / "b" / "c"
+        result = self._prep(repo_with_skills, monkeypatch, tmp_path, zd)
+        assert Path(result["skills"][0]["zip_path"]).exists()
+
+    def test_default_still_emits_base64(self, repo_with_skills, monkeypatch, tmp_path):
+        """Without --zip-dir the old payload shape is unchanged."""
+        result = self._prep(repo_with_skills, monkeypatch, tmp_path, None)
+        entry = result["skills"][0]
+        assert "zip_path" not in entry
+        assert zipfile.is_zipfile(io.BytesIO(base64.b64decode(entry["zip_b64"])))
+
+
+# ---------------------------------------------------------------------------
+# org id resolution
+# ---------------------------------------------------------------------------
+
+class TestOrgIdFromCliConfig:
+    """Which org to upload to must be answerable without guessing.
+
+    The account can belong to several orgs; /api/organizations lists them
+    all and marks none of them as the one owning the skill store, and the
+    wrong choice 404s. ~/.claude.json names the org the CLI is actually
+    authenticated against -- the same CLI that writes the mirror --verify
+    reads -- so it is the exact answer.
+    """
+
+    def _home(self, tmp_path, monkeypatch, payload):
+        home = tmp_path / "home"
+        home.mkdir()
+        if payload is not None:
+            (home / ".claude.json").write_text(json.dumps(payload))
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+        return home
+
+    def test_reads_organization_uuid(self, tmp_path, monkeypatch):
+        uuid = "29094e6a-eeb7-4d76-982e-84e62238e605"
+        self._home(tmp_path, monkeypatch, {"oauthAccount": {"organizationUuid": uuid}})
+        assert sync_skills.org_id_from_cli_config() == uuid
+
+    def test_missing_file_is_none_not_an_error(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch, None)
+        assert sync_skills.org_id_from_cli_config() is None
+
+    def test_malformed_json_is_none_not_an_error(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".claude.json").write_text("{not json")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+        assert sync_skills.org_id_from_cli_config() is None
+
+    def test_absent_oauth_account_is_none(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch, {"projects": {}})
+        assert sync_skills.org_id_from_cli_config() is None
+
+    def test_rejects_a_value_that_is_not_a_uuid(self, tmp_path, monkeypatch):
+        """A non-UUID would be pasted straight into an API URL."""
+        self._home(tmp_path, monkeypatch, {"oauthAccount": {"organizationUuid": "nope"}})
+        assert sync_skills.org_id_from_cli_config() is None
+
+    def test_hint_prefers_cli_config_over_cookie_scrape(self, monkeypatch):
+        uuid = "11111111-2222-3333-4444-555555555555"
+        monkeypatch.setattr("sync_skills.org_id_from_cli_config", lambda: uuid)
+        assert sync_skills.get_org_id_hint() == uuid
+
+    def test_hint_falls_back_when_cli_config_has_nothing(self, tmp_path, monkeypatch):
+        """Falling through to the cookie scrape must still work; with no
+        Chrome profile present that path simply yields None rather than
+        raising."""
+        monkeypatch.setattr("sync_skills.org_id_from_cli_config", lambda: None)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nonexistent"))
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "nohome"))
+        assert sync_skills.get_org_id_hint() is None
