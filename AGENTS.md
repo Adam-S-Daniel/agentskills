@@ -136,10 +136,10 @@ they fall back to `default-days`, and spelling them out only invites drift.
 ## Pinning GitHub Actions
 
 **Every `uses:` is pinned to a full 40-character commit SHA** — in workflows,
-composite actions, and reusable-workflow references alike. Never a tag, never a
-branch, never an abbreviated SHA. A tag is a movable pointer: pinning to one
-gives whoever can retag the upstream repo a shell on the runner, holding that
-job's token.
+composite actions, and reusable-workflow references alike, with exactly one
+carve-out, named below. Never a tag, never a branch, never an abbreviated SHA. A
+tag is a movable pointer: pinning to one gives whoever can retag the upstream
+repo a shell on the runner, holding that job's token.
 
 ```yaml
 uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1 (2023-10-17)
@@ -157,11 +157,26 @@ uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1 (2023-1
   commit's, and pinning that fails at runtime. Follow it with
   `git/tags/<that-sha>`, or ask git directly:
   `git ls-remote <url> 'refs/tags/<tag>^{}'`.
+- **The one carve-out: a reusable *workflow* from a repo this account owns stays
+  on a tag.** `uses: Adam-S-Daniel/cms-platform/.github/workflows/<x>.yml@v0.1.85`
+  is correct as written — do not "fix" it to a SHA. The tag is the platform's
+  release identity: `platform-bump.yml` moves the `uses:@` refs, the theme gem,
+  `platform.lock` and every `platform_ref:` input to one release in a single PR,
+  and `check-platform-pin-consistency.js` asserts each of those refs equals
+  `platform.lock`'s `platform_ref` — a SHA there fails the lint and strands the
+  bump. It stops there: the platform's own composite actions under
+  `.github/actions/` take a SHA and the usual `# vX.Y.Z` comment, and nothing
+  third-party is ever a tag.
 - `./local/path` and `docker://` refs have nothing to pin. Leave them.
 
-This is enforced, not merely expected: `sha_pinning_required: true` is set on
-every repo — by `repo-settings`' `fleet.yml` for the fleet, and by
-`cms-platform`'s `repo-settings.yml` for the three sites it manages.
+`sha_pinning_required: true` enforces the rule at the repo level — set by
+`repo-settings`' `fleet.yml` for the fleet and `cms-platform`'s
+`repo-settings.yml` for the three sites it manages. It governs **actions**, not
+reusable-workflow refs: adamdaniel.ai and jodidaniel.com were already enforcing
+it at the 2026-07-13 audit and still call 32 tag-pinned cms-platform reusables
+apiece, and four repos on the `fleet.yml` default call one each. That is what
+makes the carve-out workable — and what leaves a tag in a *third-party* reusable
+ref for review, not the setting, to catch.
 
 ## Subagent delegation (model routing)
 
