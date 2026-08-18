@@ -399,7 +399,7 @@ def check_repo_state(
         )
         return True
 
-    if not _stdin_is_tty():
+    def refuse_nobody_to_ask() -> None:
         print(
             f"ERROR: {header}\nStdin is not a terminal, so there is nobody to "
             f"ask — refusing rather than hanging on a prompt nobody will see. "
@@ -407,13 +407,24 @@ def check_repo_state(
             f"with --yes to sync from them as they are.",
             file=sys.stderr,
         )
+
+    if not _stdin_is_tty():
+        refuse_nobody_to_ask()
         return False
 
     print(f"WARNING: {header}", file=sys.stderr)
     try:
         answer = input("Continue anyway? [y/N] ")
     except EOFError:
-        answer = ""
+        # isatty() claimed a terminal and the very first read hit end of
+        # input, so there was nobody there after all. Windows reports the
+        # NUL device as a character device, which makes isatty() true under
+        # `stdin=DEVNULL` — the way an agent drives this script, and the
+        # exact case the non-TTY branch above exists for. Same situation,
+        # so it gets the same answer instead of the vaguer "not confirmed",
+        # which named neither the cause nor --yes as the way past it.
+        refuse_nobody_to_ask()
+        return False
     if not answer.strip().lower().startswith("y"):
         print(
             "ERROR: aborted — repo state was not confirmed.", file=sys.stderr
