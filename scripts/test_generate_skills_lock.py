@@ -747,7 +747,7 @@ _VALIDATION_CASES = [
     # other skill too. A generator that happily digests such a directory into a
     # key is therefore writing a lock nobody can read.
     ("skill", "alpha", True),
-    ("skill", "pin-actions-to-sha", True),
+    ("skill", "workflow-path-audit", True),     # internal hyphens are fine
     ("skill", "skills_doctor", True),           # '_' is fine, just not leading
     ("skill", "_template", False),              # leading '_' (a scaffold dir)
     ("skill", ".hidden", False),                # leading '.'

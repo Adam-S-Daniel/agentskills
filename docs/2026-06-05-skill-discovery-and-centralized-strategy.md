@@ -42,7 +42,7 @@ hand-installing each one.
   `plugins/<name>/skills/<name>/SKILL.md`.
 - Claude Code users do `/plugin marketplace add Adam-S-Daniel/agentskills` then
   `/plugin install <name>@agentskills`. Skills are namespaced
-  (`/pin-actions-to-sha:pin-actions-to-sha`).
+  (`/workflow-path-audit:workflow-path-audit`).
 - Non-Claude-Code agents (Codex, Gemini, Cursor) and local use are served by
   `setup.sh`, which symlinks/junctions each skill dir into the per-agent homes —
   including `~/.claude/skills`.
@@ -112,8 +112,8 @@ every skill into every session.* This repo has 9 plugins today and will grow.
 - Consider marking niche/personal plugins (`wj-next-break`, `fastmail`,
   `sync-cc-settings-between-wsl-and-windows`) as `defaultEnabled: false` in their
   `plugin.json` / marketplace entries, so they're installed-but-dormant until
-  invoked. Keep broadly useful ones (`adam-writing-style`, `pin-actions-to-sha`,
-  `workflow-path-audit`) enabled.
+  invoked. Keep broadly useful ones (`adam-writing-style`,
+  `github-actions-repo-settings`, `workflow-path-audit`) enabled.
 - Keep frontmatter `description` fields tight and trigger-focused — they are the
   text the model reads to decide whether to surface a skill, and they're what the
   "suggested for this directory" matcher keys off of.

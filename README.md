@@ -1,9 +1,5 @@
 # agentskills
 
-[![pin-actions-to-sha eval](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FAdam-S-Daniel%2Fskills-evals%2Feval-results%2Fbadges%2Fpin-actions-to-sha.json)](https://github.com/Adam-S-Daniel/skills-evals)
-
-Measures the `pin-actions-to-sha` skill's with-vs-without eval, run weekly.
-
 Adam Daniel's reusable agent skills, packaged as **Claude Code plugins** and as
 cross-agent skills that follow the
 [Agent Skills specification](https://agentskills.io/specification).
@@ -37,7 +33,7 @@ Add the marketplace once, then install whichever bundles you want:
 ```
 
 Skills are namespaced by bundle — invoke them as `/<bundle>:<skill>`, e.g.
-`/adam:pin-actions-to-sha`. Update later with `/plugin marketplace update agentskills`;
+`/adam:finding-unknowns`. Update later with `/plugin marketplace update agentskills`;
 that refreshes the catalog, and the three local bundles' contents with it. The
 federated bundle's contents come from the other repo instead — this marketplace
 carries its address, not its skills.
@@ -80,7 +76,7 @@ repo refuses them too, as policy: pinning a federated bundle to a revision is
 skill that this repo can actually verify. A key that reads as a pin while
 nothing here stands behind it is worse than no key at all.
 
-If you installed the old per-skill plugins (`pin-actions-to-sha`,
+If you installed the old per-skill plugins (`workflow-path-audit`,
 `rename-pdfs`, …), they migrate to their bundle automatically on
 `/plugin marketplace update agentskills` via the marketplace `renames` map.
 That map is **append-only forever** — JSON has no comments, so it's said here:
@@ -106,7 +102,6 @@ Available skills:
 | `adam` | `/adam:debug-github-workflows` | Debugging GitHub Actions workflow failures. |
 | `adam` | `/adam:finding-unknowns` | Surface and resolve the ambiguities in a task before, during, and after implementation — the blind-spot pass, the self-interview, reference-driven specs, implementation notes, and a post-hoc explainer or quiz. |
 | `adam` | `/adam:github-actions-repo-settings` | Configure and enforce GitHub repository security settings as code: require actions to be pinned to full-length commit SHAs, require approval for all outside collaborators' fork pull-request workflow runs, and protect the default branch via a repository ruleset. |
-| `adam` | `/adam:pin-actions-to-sha` | Audit and fix GitHub Actions workflow files to ensure every `uses` reference is pinned to a full-length commit SHA (40 hex characters) with a version comment that includes the release date. |
 | `adam` | `/adam:review-bash-ci-reliability` | Review bash scripts for CI/CD reliability issues. |
 | `adam` | `/adam:skills-doctor` | Diagnose skill DELIVERY health for the current session: name the surface, diff the expected set in `skills.lock` against what actually loaded (the session's own skill listing, `~/.claude/skills/`, the account `synced/manifest.json`, `claude plugin list`), attribute every skill to the registry and bundle it came from by reading the bootstrap hook's own install record rather than guessing, and flag silent shadowing, account-store staleness, dangling payload references, and always-on context cost. |
 | `adam` | `/adam:workflow-path-audit` | Audit GitHub Actions workflows for salient-path conditionals — every workflow that triggers on pull_request or push must filter on the files and directories its steps actually depend on, and skip with success when nothing salient changed. |

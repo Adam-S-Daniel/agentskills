@@ -418,7 +418,7 @@ After all uploads, summarise:
 ```
 Synced 3 skills:
   [OK]  fastmail           (updated)  agentskills
-  [OK]  pin-actions-to-sha (new)      agentskills
+  [OK]  skills-doctor      (new)      agentskills
   [FAIL] some-skill        status 403
 ```
 
