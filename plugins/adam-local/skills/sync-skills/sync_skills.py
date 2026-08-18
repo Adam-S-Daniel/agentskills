@@ -560,8 +560,42 @@ def zip_skill(skill_path: Path) -> bytes:
 # Org-id hint from Chrome cookies
 # ---------------------------------------------------------------------------
 
+def org_id_from_cli_config() -> Optional[str]:
+    """Read the org UUID the Claude Code CLI itself is authenticated against.
+
+    This is the authoritative answer to "which org do I upload to", and it
+    is worth reading before the cookie store because it is *specific*: the
+    account can belong to several orgs, ``/api/organizations`` lists all of
+    them with no marker for which one owns the skill store, and picking the
+    wrong one 404s every request. The mirror under
+    ``~/.claude/skills/synced`` is produced by this CLI, so the org named
+    here is by construction the org whose store ``--verify`` reads.
+
+    Deliberately resolved at runtime rather than hardcoded in the skill: the
+    UUID is an account identifier and this repo is public.
+    """
+    try:
+        with open(Path.home() / ".claude.json", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    org = (data.get("oauthAccount") or {}).get("organizationUuid")
+    if isinstance(org, str) and re.fullmatch(r"[0-9a-f-]{36}", org):
+        return org
+    return None
+
+
 def get_org_id_hint() -> Optional[str]:
-    """Try to read an org UUID from Chrome's sqlite cookie store."""
+    """Best-effort org UUID: CLI config first, then Chrome's cookie store.
+
+    The cookie scrape was the only source for a long time and it routinely
+    returns None -- the org UUID only appears in a cookie *path*, which most
+    claude.ai cookies do not carry -- which left the agent to guess between
+    orgs. ``org_id_from_cli_config`` is tried first because it is exact.
+    """
+    from_cli = org_id_from_cli_config()
+    if from_cli:
+        return from_cli
     localappdata = os.environ.get("LOCALAPPDATA", "")
     cookie_paths = [
         Path(localappdata) / "Google/Chrome/User Data/Default/Network/Cookies",
@@ -626,8 +660,17 @@ def prepare(
     repos: List[Path],
     skill_names: Optional[List[str]] = None,
     declared: Optional[Set[str]] = None,
+    zip_dir: Optional[Path] = None,
 ) -> Dict:
     """Build the JSON payload the agent POSTs to claude.ai.
+
+    With ``zip_dir`` set, each ZIP is written there as a real file and the
+    entry carries ``zip_path``/``zip_bytes``/``zip_sha256`` **instead of**
+    ``zip_b64``. That is the mode the documented upload path uses (SKILL.md
+    §3): the browser reads the file directly, so the payload never has to
+    travel through the agent's context as base64. Dropping ``zip_b64`` is
+    the point, not an oversight -- a single skill can be 200KB+ of base64,
+    and emitting both would keep the cost this mode exists to avoid.
 
     Warns on stderr about any skill in the payload that is not declared for
     the account store. The payload itself is unfiltered — the operator, not
@@ -655,15 +698,22 @@ def prepare(
                 continue
             h = skill_hash(skill_path)
             zip_bytes = zip_skill(skill_path)
-            skills_out.append(
-                {
-                    "name": name,
-                    "zip_b64": base64.b64encode(zip_bytes).decode(),
-                    "is_update": is_update(name, state),
-                    "repo": repo.name,
-                    "hash": h,
-                }
-            )
+            entry = {
+                "name": name,
+                "is_update": is_update(name, state),
+                "repo": repo.name,
+                "hash": h,
+            }
+            if zip_dir is not None:
+                zip_dir.mkdir(parents=True, exist_ok=True)
+                zip_path = zip_dir / f"{name}.zip"
+                zip_path.write_bytes(zip_bytes)
+                entry["zip_path"] = str(zip_path)
+                entry["zip_bytes"] = len(zip_bytes)
+                entry["zip_sha256"] = hashlib.sha256(zip_bytes).hexdigest()
+            else:
+                entry["zip_b64"] = base64.b64encode(zip_bytes).decode()
+            skills_out.append(entry)
 
     # is_update() above sets each upload's overwrite flag, and it reads the
     # account mirror. --verify refuses a mirror older than MIRROR_MAX_AGE
@@ -1110,6 +1160,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--zip-dir", metavar="DIR",
+        help=(
+            "Write each skill's ZIP into DIR as a real file and emit "
+            "zip_path instead of zip_b64. This is what the documented "
+            "upload path (SKILL.md section 3) uses: the browser reads the "
+            "file directly, so a 200KB base64 blob never has to travel "
+            "through the agent's context."
+        ),
+    )
+    parser.add_argument(
         "--account-list", metavar="PATH",
         help=(
             "Declared account-store membership list to read "
@@ -1205,7 +1265,8 @@ def main() -> None:
         sys.exit(0 if ok else 1)
 
     # Default: --prepare / JSON output
-    result = prepare(repos, skill_names, declared=declared)
+    zip_dir = Path(args.zip_dir).expanduser() if args.zip_dir else None
+    result = prepare(repos, skill_names, declared=declared, zip_dir=zip_dir)
     if not result["skills"]:
         result["message"] = (
             "No skills to sync. Resolved repos: "
