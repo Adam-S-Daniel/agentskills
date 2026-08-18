@@ -86,6 +86,14 @@ repo_abs=$(cd "$REPO_DIR" && pwd -P)
 home_abs=$(cd "$HOME" && pwd -P)
 
 auto_memory_dir=""
+# The tildes below are DELIBERATELY literal, which is why SC2088 is
+# disabled rather than obeyed. This value is printed for the operator
+# to paste into .claude/settings.json, where `~` is the portable
+# home-relative form Claude Code expands itself. Expanding it here
+# would bake THIS machine's absolute home path into a file whose
+# entire purpose is to travel between machines — the else-branch
+# below warns precisely because it cannot avoid doing that.
+# shellcheck disable=SC2088
 if [ "$repo_abs" = "$home_abs" ]; then
   auto_memory_dir="~/.claude/memory"
 elif [[ "$repo_abs" == "$home_abs"/* ]]; then

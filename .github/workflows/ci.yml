@@ -298,16 +298,55 @@ jobs:
           # TREE, not a list of paths, so a new *.sh added anywhere is picked up
           # with no edit here and cannot silently go unchecked.
           #
+          # SELECTION IS BY SHEBANG AS WELL AS BY NAME. `-name '*.sh'` on its
+          # own missed sync-skills' hooks/pre-push completely: git chooses that
+          # filename, so the extension is not ours to add. That file is
+          # registered as a GLOBAL pre-push hook by its setup.sh, so it runs on
+          # every push in every repo on the machine — the most frequently
+          # executed bash in this repo was the one piece the lane could not see.
+          #
           # The file list is printed first so the run log shows what was covered.
           # This step's whole failure mode was coverage nobody could see.
           #
-          # No `--no-run-if-empty`, on purpose: if the find ever matches nothing,
-          # shellcheck exits 1 ("No files specified") instead of passing on an
-          # empty set — a green step that checked nothing is the bug being fixed.
+          # No `--no-run-if-empty`, on purpose: if the search ever matches
+          # nothing, shellcheck exits 1 ("No files specified") instead of
+          # passing on an empty set — a green step that checked nothing is the
+          # bug being fixed.
           #
-          # -S error: two SC2088 (tilde-in-quotes) *warnings* exist today in
-          # plugins/adam-local/skills/migrate-claude-memory/scripts/memory-migrate.sh
-          # (lines 90, 93) — pre-existing, out of scope for this change. Errors still fail CI.
+          # -S warning, not -S error. The defect that exposed the gap above was
+          # SC2034 (assigned but never used), which shellcheck rates a WARNING:
+          # pinned at `error` this lane would have gone on passing over it even
+          # once the file was finally in scope. Coverage and severity had to
+          # move together, or the fix would have been cosmetic. The two SC2088s
+          # in memory-migrate.sh are deliberate literal tildes and now carry an
+          # inline `shellcheck disable` naming the reason, rather than being
+          # held under the bar by a blanket severity floor.
+          files="$RUNNER_TEMP/shellcheck-files.txt"
+          find . -path ./.git -prune -o -type f -print | while IFS= read -r f; do
+            case "$f" in
+              *.sh) printf '%s\n' "$f"; continue ;;
+            esac
+            # First line only: a shebang quoted inside a doc or a test
+            # fixture must not drag a non-script into the lane.
+            first=$(head -n 1 "$f" 2>/dev/null)
+            case "$first" in
+              '#!'*) ;;
+              *) continue ;;
+            esac
+            # Reduce the shebang to the interpreter's basename, then match it
+            # EXACTLY. Globbing on `*sh` looks equivalent and is not: pwsh,
+            # zsh and fish all end in those two letters, and this repo really
+            # does ship `#!/usr/bin/env pwsh` files — a `*sh` glob fed both of
+            # them to shellcheck, which rejects the shebang and fails the lane.
+            # The list is exactly what shellcheck supports.
+            interp=$(printf '%s\n' "$first" \
+              | sed -e 's/^#! *//' -e 's|.*/env  *||' -e 's/^-S  *//' \
+                    -e 's/ .*//' -e 's|.*/||')
+            case "$interp" in
+              sh|bash|dash|ksh) printf '%s\n' "$f" ;;
+            esac
+          done | sort -u > "$files"
+
           echo "shellcheck will lint:"
-          find . -path ./.git -prune -o -name '*.sh' -print | sort
-          find . -path ./.git -prune -o -name '*.sh' -print0 | xargs -0 shellcheck -S error
+          cat "$files"
+          tr '\n' '\0' < "$files" | xargs -0 shellcheck -S warning
