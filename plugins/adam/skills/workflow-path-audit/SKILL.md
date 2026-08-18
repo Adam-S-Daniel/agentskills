@@ -154,12 +154,32 @@ For workflows using `paths-ignore`, open a draft PR that only edits a path in th
 
 GitHub blocks the merge when a required status check is *missing* — including when path filtering prevented the workflow from triggering. If a check is required:
 
-- DON'T use workflow-level `paths` / `paths-ignore` — use the always-run + early-skip pattern instead.
+- DON'T use workflow-level `paths` / `paths-ignore`, and DON'T add a companion "skip" workflow reporting the same check name (see below) — use the always-run + early-skip pattern instead.
 - DO list the named check (job ID, or `<job_id> (<matrix value>)` for matrix jobs) in `.github/rulesets/main.json` and apply via `gh api -X PUT`.
 
 When promoting an existing path-filtered workflow to required, refactor it to always-run + early-skip in the same change.
 
 The concrete shape of the fix: the required workflow's trigger carries no `paths:` / `paths-ignore:` at all, so it fires on every PR, and the salience decision moves *inside* it. An always-run `detect` job computes the changed files and passes them through a salience predicate — an inline `grep -qE` over the diff, or a small script the repo owns — and only a salient result runs the heavy job downstream; the required check reports a status either way.
+
+### The companion "skip" workflow is not a partition
+
+The tempting wrong answer — widely recommended — keeps `paths:` on the real
+workflow and adds a companion (`tests-skip.yml`) whose job carries the SAME
+required check name and the INVERSE `paths-ignore:`, reporting success
+trivially. Exactly one of the pair fires, the reasoning goes, so the required
+context is never missing.
+
+The two filters are not complements. `paths` fires the workflow when **any**
+changed file matches; `paths-ignore` skips it only when **every** changed file
+matches. A PR touching `src/index.js` AND `docs/guide.md` fires BOTH — one file
+matched, and not all files matched. Two runs post a status named `unit-tests`,
+and the required context resolves by completion order: a trivial green can
+land on top of a real red.
+
+Mixed changesets are the common case, not the corner. Use always-run +
+early-skip: one workflow, one check, one verdict. If you inherit such a pair,
+delete the companion and gate the real workflow internally — lead with the
+mixed changeset when you explain it to the owner; "both fire" is the bug.
 
 ## Lockfile trap
 
