@@ -1469,6 +1469,30 @@ def _path_farm(tmp_path: Path, omit: str) -> str:
     `omit` need not be in the list (`timeout` is not — nothing else here uses
     it); the final assertion is what actually establishes the tool is hidden.
     """
+    if os.name == "nt":
+        # A PATH farm cannot be built on Windows AT ALL, and the reason is not
+        # the linking — it is that the isolation the farm depends on is what
+        # breaks the tools. These are MSYS binaries: each one loads
+        # msys-2.0.dll, which Windows finds via the application directory and
+        # then PATH. A farm holds neither, so every tool in it dies at load
+        # time with 0xC0000135 (STATUS_DLL_NOT_FOUND) before it runs a single
+        # instruction — measured. The hook then reports "could not create a
+        # temp directory" because `mktemp` never started, which is a different
+        # branch from the tool-less one under test, and the failure names the
+        # wrong cause.
+        #
+        # Copying msys-2.0.dll in beside them would fix the load and defeat
+        # the point: the farm's whole job is to be a directory containing
+        # nothing but the chosen tools.
+        #
+        # This skips whether or not os.symlink is permitted here — it is
+        # refused without Developer Mode (WinError 1314) on a workstation and
+        # allowed on a GitHub runner, and the farm is useless either way. So
+        # the tool-less branch goes unexercised on Windows, and says so; a
+        # farm quietly holding the real PATH would have claimed it passed.
+        pytest.skip("a PATH farm cannot be built on Windows: an MSYS tool "
+                    "isolated from msys-2.0.dll fails to load (0xC0000135), "
+                    "so hiding one tool hides them all")
     farm = tmp_path / f"bin-no-{omit}"
     farm.mkdir(exist_ok=True)
     for tool in _PATH_FARM_TOOLS:
@@ -1479,19 +1503,7 @@ def _path_farm(tmp_path: Path, omit: str) -> str:
             pytest.skip(f"{tool} is not on PATH, so a PATH farm cannot be built")
         link = farm / tool
         if not link.exists():
-            try:
-                link.symlink_to(found)
-            except OSError as exc:
-                # Windows needs Developer Mode or elevation for os.symlink
-                # (WinError 1314). There is no honest substitute here: a
-                # junction links directories, not files, and a hardlink to an
-                # interpreter in Program Files is refused — and even where it
-                # is not, the copy would sit in a farm directory with none of
-                # the DLLs it loads beside it. Skipping says the tool-less
-                # branch went unexercised; a farm that silently held the real
-                # PATH would say it passed.
-                pytest.skip(f"cannot build a PATH farm: {tool} could not be "
-                            f"linked into it ({exc})")
+            link.symlink_to(found)
     assert shutil.which(omit, path=str(farm)) is None
     return str(farm)
 
