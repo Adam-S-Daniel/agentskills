@@ -1331,6 +1331,57 @@ def _find_posix_bash() -> Optional[str]:
 BASH = _find_posix_bash()
 
 
+def _find_cygpath() -> Optional[str]:
+    """Git Bash's path translator, which ships beside bash itself."""
+    if os.name != "nt" or BASH is None:
+        return None
+    candidate = Path(BASH).with_name("cygpath.exe")
+    return str(candidate) if candidate.is_file() else None
+
+
+CYGPATH = _find_cygpath()
+
+
+def _symlink_to_dir(link: Path, target: Path) -> None:
+    """Point `link` at directory `target`, however this platform can.
+
+    `os.symlink` needs Developer Mode or elevation on Windows (WinError 1314),
+    which is not a reasonable thing for a test run to require. A directory
+    JUNCTION needs neither, and is the same thing for everything asserted
+    here: `Path.resolve()` follows it to the target, which is precisely the
+    de-duplication being pinned.
+    """
+    if os.name != "nt":
+        link.symlink_to(target, target_is_directory=True)
+        return
+    proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.skip("cannot create a directory junction here: "
+                    f"{(proc.stderr or proc.stdout).strip()}")
+
+
+def _hook_path(path: Path) -> str:
+    """`path` spelled the way the hook's own shell spells it.
+
+    The hook runs under Git Bash on Windows, whose MSYS layer has its own mount
+    table: the Windows temp directory is `/tmp`, `C:\\` is `/c`. Every path the
+    hook prints back is in that spelling, so an expectation built from
+    `str(WindowsPath(...))` is comparing against something that was never going
+    to look like one — the assertion failed on the rendering, not on the
+    behaviour it was written to pin.
+
+    Asking `cygpath` is asking the very shell the hook runs under, so this
+    tracks the real mount table instead of hard-coding a guess at it. Off
+    Windows there is nothing to translate.
+    """
+    if CYGPATH is None:
+        return str(path)
+    proc = subprocess.run([CYGPATH, "-u", str(path)],
+                          capture_output=True, text=True, check=True)
+    return proc.stdout.strip()
+
+
 # Windows needs a baseline environment that POSIX does not, and the hook's
 # deliberately scrubbed env was leaving it out. Strip LOCALAPPDATA and the
 # `python3` shim that Python 3.14 installs can no longer see its own installed
@@ -1428,7 +1479,19 @@ def _path_farm(tmp_path: Path, omit: str) -> str:
             pytest.skip(f"{tool} is not on PATH, so a PATH farm cannot be built")
         link = farm / tool
         if not link.exists():
-            link.symlink_to(found)
+            try:
+                link.symlink_to(found)
+            except OSError as exc:
+                # Windows needs Developer Mode or elevation for os.symlink
+                # (WinError 1314). There is no honest substitute here: a
+                # junction links directories, not files, and a hardlink to an
+                # interpreter in Program Files is refused — and even where it
+                # is not, the copy would sit in a farm directory with none of
+                # the DLLs it loads beside it. Skipping says the tool-less
+                # branch went unexercised; a farm that silently held the real
+                # PATH would say it passed.
+                pytest.skip(f"cannot build a PATH farm: {tool} could not be "
+                            f"linked into it ({exc})")
     assert shutil.which(omit, path=str(farm)) is None
     return str(farm)
 
@@ -1614,7 +1677,7 @@ def test_hook_fails_soft_when_the_lock_is_missing(tmp_path):
     verdict = _verdict(proc)
     assert "DEGRADED" in verdict
     assert "skills.lock" in verdict
-    assert str(project / "skills.lock") in verdict
+    assert _hook_path(project / "skills.lock") in verdict
 
 
 def test_missing_lock_verdict_names_one_location_once(tmp_path):
@@ -1633,7 +1696,7 @@ def test_missing_lock_verdict_names_one_location_once(tmp_path):
     assert proc.returncode == 0
     verdict = _verdict(proc)
     assert "DEGRADED" in verdict
-    assert _looked_in(verdict) == [str((repo / "skills.lock").resolve())]
+    assert _looked_in(verdict) == [_hook_path((repo / "skills.lock").resolve())]
 
 
 def test_missing_lock_verdict_names_each_distinct_location_once(tmp_path):
@@ -1650,8 +1713,8 @@ def test_missing_lock_verdict_names_each_distinct_location_once(tmp_path):
                      {"SKILLS_BOOTSTRAP_FORCE": "1"}, script=script)
     assert proc.returncode == 0
     assert _looked_in(_verdict(proc)) == [
-        str((project / "skills.lock").resolve()),
-        str((repo / "skills.lock").resolve()),
+        _hook_path((project / "skills.lock").resolve()),
+        _hook_path((repo / "skills.lock").resolve()),
     ]
 
 
@@ -1665,12 +1728,12 @@ def test_missing_lock_verdict_de_duplicates_a_symlinked_project_dir(tmp_path):
     repo = tmp_path / "repo"
     script = _hook_copy(repo)
     link = tmp_path / "link"
-    link.symlink_to(repo, target_is_directory=True)
+    _symlink_to_dir(link, repo)
 
     proc = _run_hook(tmp_path / "home", link,
                      {"SKILLS_BOOTSTRAP_FORCE": "1"}, script=script)
     assert proc.returncode == 0
-    assert _looked_in(_verdict(proc)) == [str((repo / "skills.lock").resolve())]
+    assert _looked_in(_verdict(proc)) == [_hook_path((repo / "skills.lock").resolve())]
 
 
 def test_hook_verifies_using_the_registrys_own_generator(tmp_path):
@@ -2654,16 +2717,27 @@ class _Tarpit:
         Killing the process GROUP takes the helper too, and the socket closes.
 
         Each connection has the client's TLS ClientHello sitting in it, so a
-        readable socket is drained until recv() returns b"" (EOF, the client is
-        gone). Nothing here waits out `within` on the happy path: the FIN
-        arrives as soon as the last holder of the socket dies.
+        readable socket is drained until recv() reports the client is gone.
+        Nothing here waits out `within` on the happy path: the socket resolves
+        as soon as its last holder dies.
+
+        "Gone" has two spellings. A graceful close gives b"" (EOF). A process
+        that was KILLED — which is the whole point of this test — has its
+        socket torn down abortively, and Windows surfaces that RST as
+        ConnectionResetError rather than as EOF. Both mean the client is gone,
+        which is the only thing being observed here; treating the reset as an
+        error would fail the test on the very outcome it is asserting.
         """
         deadline = time.monotonic() + within
         pending = list(self.held)
         while pending and time.monotonic() < deadline:
             readable, _, _ = select.select(pending, [], [], 0.1)
             for connection in readable:
-                if connection.recv(65536) == b"":
+                try:
+                    gone = connection.recv(65536) == b""
+                except (ConnectionResetError, ConnectionAbortedError):
+                    gone = True
+                if gone:
                     pending.remove(connection)
         return not pending
 
@@ -3207,7 +3281,7 @@ def test_an_unreadable_install_record_prunes_nothing(tmp_path, registry, corrupt
     assert proc.returncode == 0, proc.stderr
     verdict = _verdict(proc)
     assert "DEGRADED" in verdict, verdict
-    assert f"could not read the install record {record_path}" in verdict, verdict
+    assert f"could not read the install record {_hook_path(record_path)}" in verdict, verdict
     assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
     # The note itself, not the bare word — "could be removed this run"
     # appears in the unreadable-record clause and is not a removal.
@@ -3418,7 +3492,7 @@ def test_a_record_that_cannot_be_written_is_reported_rather_than_fatal(
     assert proc.returncode == 0, proc.stderr
     verdict = _verdict(proc)
     assert "DEGRADED" in verdict, verdict
-    assert f"could not write the install record {blocked}" in verdict, verdict
+    assert f"could not write the install record {_hook_path(blocked)}" in verdict, verdict
     # The session still got its skills: a record it cannot keep is a problem for
     # the NEXT run, not this one.
     assert verdict.startswith("skills: 2/2 "), verdict
