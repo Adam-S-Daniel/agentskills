@@ -29,8 +29,14 @@ from typing import Dict, List, Optional, Set
 
 STATE_FILE = Path.home() / ".sync-skills-state.json"
 
-# The registry repos this script syncs from, in the order they are reported.
-REPO_NAMES = ("agentskills", "agentskills-private")
+# The registry repos a run is EXPECTED to cover, in the order they are
+# reported. This list resolves NOTHING - resolution is --repos, then
+# $AGENTSKILLS_REPOS, then this script's own checkout, and nothing else.
+# Its only remaining job is to notice that one of these names was never
+# resolved and say so, because a repo that went unexamined must never read
+# like a repo that was checked and found clean. Adding a name here buys the
+# warning, not the lookup: a new registry still has to be named to be synced.
+EXPECTED_REPO_NAMES = ("agentskills", "agentskills-private")
 
 # There are deliberately NO built-in clone locations. Guessing one (~/repos,
 # D:\repos\<owner>) let anything sitting at the guessed path — an empty
@@ -215,7 +221,7 @@ def resolve_repos(explicit: Optional[List[str]] = None) -> List[Path]:
         return _existing_repos(requested, source=source)
 
     resolved: List[Path] = []
-    for name in REPO_NAMES:
+    for name in EXPECTED_REPO_NAMES:
         candidates = _repo_candidates(name)
         hit = next((c for c in candidates if c.is_dir()), None)
         if hit is not None:
@@ -393,7 +399,7 @@ def check_repo_state(
         )
         return True
 
-    if not _stdin_is_tty():
+    def refuse_nobody_to_ask() -> None:
         print(
             f"ERROR: {header}\nStdin is not a terminal, so there is nobody to "
             f"ask — refusing rather than hanging on a prompt nobody will see. "
@@ -401,13 +407,24 @@ def check_repo_state(
             f"with --yes to sync from them as they are.",
             file=sys.stderr,
         )
+
+    if not _stdin_is_tty():
+        refuse_nobody_to_ask()
         return False
 
     print(f"WARNING: {header}", file=sys.stderr)
     try:
         answer = input("Continue anyway? [y/N] ")
     except EOFError:
-        answer = ""
+        # isatty() claimed a terminal and the very first read hit end of
+        # input, so there was nobody there after all. Windows reports the
+        # NUL device as a character device, which makes isatty() true under
+        # `stdin=DEVNULL` — the way an agent drives this script, and the
+        # exact case the non-TTY branch above exists for. Same situation,
+        # so it gets the same answer instead of the vaguer "not confirmed",
+        # which named neither the cause nor --yes as the way past it.
+        refuse_nobody_to_ask()
+        return False
     if not answer.strip().lower().startswith("y"):
         print(
             "ERROR: aborted — repo state was not confirmed.", file=sys.stderr
@@ -586,6 +603,25 @@ def get_org_id_hint() -> Optional[str]:
 # Core prepare
 # ---------------------------------------------------------------------------
 
+def is_update(name: str, state: Optional[Dict] = None) -> bool:
+    """Does the account already hold ``name``, so the upload must overwrite?
+
+    The account mirror is the authority. ``~/.sync-skills-state.json`` only
+    records what THIS machine uploaded, so on a fresh machine every skill
+    looked new, went up with ``overwrite=false`` and 409'd against the copy
+    already on the account; the state file is the fallback for the window
+    between an upload and the next mirror refresh.
+
+    ``--dry-run`` and ``--prepare`` MUST answer this the same way, which is
+    why it lives in one place. They used to disagree: the preview tagged
+    UPDATE/NEW from the state file alone, so on a fresh machine it previewed
+    NEW for skills the real run then correctly uploaded as updates.
+    """
+    if state is None:
+        state = load_state()
+    return (ACCOUNT_SKILLS_DIR / name).is_dir() or name in state
+
+
 def prepare(
     repos: List[Path],
     skill_names: Optional[List[str]] = None,
@@ -602,7 +638,12 @@ def prepare(
     state = load_state()
     skills_out: List[Dict] = []
 
-    for repo in _existing_repos(repos):
+    # One resolution pass, handed down: main resolves (resolve_repos) and
+    # gates (check_repo_state) the SAME list iterated here. Re-filtering
+    # internally meant the gated list and the used list were computed twice
+    # and could in principle differ - a repo gated then dropped, or the
+    # reverse. Callers pass repos that already exist.
+    for repo in repos:
         if skill_names is not None:
             names = [n for n in skill_names if _skill_dir(repo, n) is not None]
         else:
@@ -618,18 +659,25 @@ def prepare(
                 {
                     "name": name,
                     "zip_b64": base64.b64encode(zip_bytes).decode(),
-                    # The account mirror is the authority on whether a skill
-                    # already exists; ~/.sync-skills-state.json only records
-                    # what THIS machine uploaded. On a fresh machine the state
-                    # file is absent, so every skill looked new, went up with
-                    # overwrite=false, and 409'd against the copy already
-                    # there. Fall back to the state file for the window
-                    # between an upload and the next mirror refresh.
-                    "is_update": (ACCOUNT_SKILLS_DIR / name).is_dir()
-                    or name in state,
+                    "is_update": is_update(name, state),
                     "repo": repo.name,
                     "hash": h,
                 }
+            )
+
+    # is_update() above sets each upload's overwrite flag, and it reads the
+    # account mirror. --verify refuses a mirror older than MIRROR_MAX_AGE
+    # rather than silently trust it; prepare trusted one of any age, so a
+    # week-old mirror could drive that flag with nothing said out loud.
+    if skills_out:
+        stale = check_mirror_freshness(account_manifest())
+        if stale:
+            print(
+                f"WARNING: the overwrite flag in this payload was decided "
+                f"against an account mirror that cannot be trusted - {stale}."
+                f" A skill already on the account can look new here and 409 "
+                f"on upload; retry that one with overwrite=true.",
+                file=sys.stderr,
             )
 
     if declared is None:
@@ -853,7 +901,12 @@ def verify(
     verified = 0
     undeclared_absent: List[str] = []
 
-    for repo in _existing_repos(repos):
+    # One resolution pass, handed down: main resolves (resolve_repos) and
+    # gates (check_repo_state) the SAME list iterated here. Re-filtering
+    # internally meant the gated list and the used list were computed twice
+    # and could in principle differ - a repo gated then dropped, or the
+    # reverse. Callers pass repos that already exist.
+    for repo in repos:
         if skill_names is not None:
             names = [n for n in skill_names if _skill_dir(repo, n) is not None]
         else:
@@ -1119,7 +1172,17 @@ def main() -> None:
                 else get_changed_skills(repo)
             )
             for name in names:
-                tag = "UPDATE" if name in state else "NEW   "
+                # Preview only what this repo actually holds. A requested
+                # name used to be printed once per resolved repo, inventing
+                # a row for repos that do not carry the skill at all - which
+                # reads as a second copy and invites an upload from the
+                # wrong tree.
+                if _skill_dir(repo, name) is None:
+                    continue
+                # Same answer as prepare(), from the same function: tagging
+                # from the state file alone previewed NEW on a fresh machine
+                # for skills the real run uploaded as updates.
+                tag = "UPDATE" if is_update(name, state) else "NEW   "
                 print(f"  {tag}  {name}  ({repo.name})")
                 any_found = True
         if not any_found:

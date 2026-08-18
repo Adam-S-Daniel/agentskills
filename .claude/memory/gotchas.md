@@ -9,5 +9,8 @@
   machine (plugin-cache-miss after the rename migration); sync-skills flags
   all 17 skills changed once (hash-dedup makes the re-upload a no-op).
 - In _agent-guidance, `test/run-tests.sh` (test_drift_report) writes mock
-  data into the real `drift-report.md` — `git checkout -- drift-report.md`
-  before committing.
+  data into the real `drift-report.md`. That file is **gitignored and untracked**
+  on `main` (ADR 0001 moved the published copy to the `drift-report-latest`
+  results branch), so `git checkout -- drift-report.md` fails with *pathspec did
+  not match any file(s) known to git*. Clean it with
+  `git clean -fX -- drift-report.md` before committing.

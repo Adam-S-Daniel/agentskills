@@ -308,6 +308,40 @@ jobs:
           # -S error: two SC2088 (tilde-in-quotes) *warnings* exist today in
           # plugins/adam-local/skills/migrate-claude-memory/scripts/memory-migrate.sh
           # (lines 90, 93) — pre-existing, out of scope for this change. Errors still fail CI.
+          #
+          # Extensionless shell files matched NEITHER find when this step
+          # globbed only '*.sh'. A git hook cannot carry an extension, so
+          # hooks/pre-push - which this repo's own setup.sh installs as a
+          # global pre-push hook in every clone - was linted nowhere at all.
+          # Same coverage bug as the paragraph above, one layer down. Match
+          # them by SHEBANG rather than by name, and keep them in their own
+          # list so they can be held to a stricter bar without moving the
+          # bar for the existing *.sh files.
+          hooks=/tmp/shellcheck-extensionless.txt
+          find . -path ./.git -prune -o -type f ! -name '*.*' -print0 > /tmp/noext.z
+          while IFS= read -r -d '' f; do
+            case "$(head -n 1 "$f")" in
+              '#!'*sh|'#!'*sh[[:space:]]*) echo "$f" ;;
+            esac
+          done < /tmp/noext.z | sort -u > "$hooks"
+
+          targets=/tmp/shellcheck-targets.txt
+          find . -path ./.git -prune -o -name '*.sh' -print > /tmp/sh.txt
+          cat /tmp/sh.txt "$hooks" | sort -u > "$targets"
+
           echo "shellcheck will lint:"
-          find . -path ./.git -prune -o -name '*.sh' -print | sort
-          find . -path ./.git -prune -o -name '*.sh' -print0 | xargs -0 shellcheck -S error
+          cat "$targets"
+          xargs -a "$targets" shellcheck -S error
+
+          # The extensionless hooks additionally at WARNING level. SC2034
+          # (assigned but never used) is a warning, so -S error alone would
+          # have kept missing the pre-push defect even once the file was in
+          # scope: the lane missed it twice over. Deliberately NOT applied
+          # to *.sh - the repo is not warning-clean there (the SC2088s noted
+          # above), and a lane that fails on unrelated pre-existing warnings
+          # gets muted rather than fixed.
+          if [ -s "$hooks" ]; then
+            echo "shellcheck (warning level, extensionless hooks only):"
+            cat "$hooks"
+            xargs -a "$hooks" shellcheck -S warning
+          fi

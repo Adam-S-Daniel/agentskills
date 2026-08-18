@@ -30,6 +30,22 @@ from sync_skills import (  # noqa: E402
 )
 
 
+# Decode subprocess output as UTF-8 explicitly, and never die on a stray byte.
+#
+# `text=True` on its own decodes using the LOCALE encoding, which on Windows
+# is cp1252. That is not hypothetical here. sync-skills' own setup.sh
+# registers hooks/pre-push as a GLOBAL git hook, so every `git push` these
+# fixtures make — including into a throwaway bare repo under tmp — prints
+# that hook's UTF-8 box-drawing banner, and cp1252 cannot decode it. The
+# whole repo-state-gate class errored out before its first assertion, on
+# exactly the class of machine this skill exists to run on and the one whose
+# failure prompted the resolution work in #92.
+#
+# errors="replace" as well as an explicit encoding: a test helper must fail
+# on the assertion it was written for, never on decoding the evidence.
+TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -293,10 +309,17 @@ class TestPrepare:
     def test_nonexistent_repo_is_reported_not_silently_skipped(
         self, tmp_path, monkeypatch, capsys
     ):
-        """D2: a missing repo path must be named, not silently dropped.
+        """D2: a typo'd --repos must never look like a clean tree.
 
-        Skipping it quietly made a typo'd --repos indistinguishable from a
-        clean tree: both yielded an empty skill list and exit 0.
+        prepare() no longer re-filters its input: resolution happens once, in
+        resolve_repos(), and is handed down (issue #93 item 4). The naming
+        guarantee is asserted where it now lives -
+        TestResolveRepos.test_explicit_missing_repo_warns_and_is_dropped for
+        the warning, and
+        TestIssue93Residuals.test_missing_repos_path_is_named_and_the_run_fails
+        for the end-to-end CLI behaviour. What is pinned here is that
+        prepare() stays empty rather than inventing skills for a path that
+        is not there.
         """
         monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
         monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
@@ -305,9 +328,6 @@ class TestPrepare:
         result = prepare([missing], skill_names=["anything"])
 
         assert result["skills"] == []
-        err = capsys.readouterr().err
-        assert "does-not-exist" in err
-        assert "WARNING" in err
 
     def test_org_id_hint_included(self, repo_with_skills, monkeypatch, tmp_path):
         monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
@@ -430,7 +450,13 @@ class TestVerify:
             account_dir,
             repo_with_skills / "skills" / "skill-a",
             "skill-a",
-            transform=lambda b: b.replace(b"\n", b"\r\n"),
+            # Normalise before converting. On Windows the fixture's own
+            # SKILL.md is already CRLF, so a bare \n -> \r\n replace
+            # produced \r\r\n: the test manufactured the drift it exists
+            # to prove is not drift, and failed on its own fixture.
+            transform=lambda b: b.replace(b"\r\n", b"\n").replace(
+                b"\n", b"\r\n"
+            ),
         )
         write_manifest(account_dir, ["skill-a"])
 
@@ -1028,7 +1054,7 @@ def run_cli(*args, home, account_list=None):
     extra = ["--account-list", str(account_list)] if account_list else []
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args, *extra],
-        capture_output=True, text=True, env=env,
+        capture_output=True, env=env, **TEXT,
     )
 
 
@@ -1267,7 +1293,7 @@ GIT_ID = [
 
 def _git_run(args, cwd):
     proc = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+        ["git", *args], cwd=str(cwd), capture_output=True, **TEXT,
     )
     assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr}"
     return proc.stdout.strip()
@@ -1304,7 +1330,7 @@ def run_cli_no_tty(*args, home):
     env.pop("AGENTSKILLS_REPOS", None)
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
-        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, env=env, stdin=subprocess.DEVNULL, **TEXT,
     )
 
 
@@ -1498,7 +1524,7 @@ class TestWindowsDecoyRegression:
         env.pop("AGENTSKILLS_REPOS", None)
         return subprocess.run(
             [sys.executable, str(planted["script"]), *args],
-            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, env=env, stdin=subprocess.DEVNULL, **TEXT,
         )
 
     def test_decoy_no_longer_outranks_the_self_checkout(self, planted):
@@ -1720,3 +1746,121 @@ class TestSection6JavaScriptParses:
                 failures.append(f"{skill_md.parent.name}: {proc.stderr.strip()}")
 
         assert not failures, "section 6 JS fails to parse for:\n" + "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# Issue #93: residual defects surfaced while fixing repo resolution (#92)
+#
+# One is_update shared by the preview and the run; one resolution pass handed
+# down; and no trusting an account mirror of unknown age to set the overwrite
+# flag. Each of these was small, real, and independently fixable.
+# ---------------------------------------------------------------------------
+
+
+class TestIssue93Residuals:
+    def test_dry_run_tags_update_from_the_account_not_just_the_state_file(
+        self, sandbox
+    ):
+        """#93.1: the preview disagreed with the run on a fresh machine.
+
+        Nothing was uploaded from THIS machine, so the state file is empty,
+        but the skill IS on the account and the real upload correctly
+        overwrites. The preview tagged from the state file alone: NEW.
+        """
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        proc = run_cli("--dry-run", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode == 0, proc.stderr
+        assert "UPDATE" in proc.stdout
+        assert "NEW" not in proc.stdout
+
+    def test_dry_run_and_prepare_agree_on_is_update(self, sandbox):
+        """The preview and the run must never answer this differently."""
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        dry = run_cli("--dry-run", "--all", "--repos", str(sandbox["repo"]),
+                      home=sandbox["home"])
+        prep = run_cli("--prepare", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert dry.returncode == 0 and prep.returncode == 0
+        previewed_update = "UPDATE" in dry.stdout
+        payload = json.loads(prep.stdout)
+        assert payload["skills"][0]["is_update"] is previewed_update
+
+    def test_dry_run_does_not_invent_a_row_for_a_repo_without_the_skill(
+        self, sandbox, tmp_path
+    ):
+        """A requested name was printed once per RESOLVED repo.
+
+        With two repos resolved and only one carrying the skill, the preview
+        claimed a second copy - which reads as a name collision and invites
+        an upload from the wrong tree.
+        """
+        other = tmp_path / "other-repo"
+        unrelated = other / "skills" / "unrelated"
+        unrelated.mkdir(parents=True)
+        (unrelated / "SKILL.md").write_text(
+            "---\nname: unrelated\n---\nbody\n"
+        )
+
+        proc = run_cli("--dry-run", "--skill", "skill-a",
+                       "--repos", str(sandbox["repo"]), str(other),
+                       home=sandbox["home"])
+        assert proc.returncode == 0, proc.stderr
+        rows = [ln for ln in proc.stdout.splitlines() if "skill-a" in ln]
+        assert len(rows) == 1, proc.stdout
+
+    def test_prepare_warns_when_the_mirror_is_too_old_to_trust(self, sandbox):
+        """#93.2: prepare read the mirror at ANY age to set overwrite.
+
+        --verify refuses a mirror past MIRROR_MAX_AGE rather than trust it;
+        prepare had no freshness check at all, so a week-old mirror silently
+        drove the flag. The payload is still built - the operator decides
+        what to POST - but the doubt is stated before the upload, not after.
+        """
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        write_manifest(
+            sandbox["account"], ["skill-a"],
+            age_seconds=sync_skills.MIRROR_MAX_AGE_SECONDS + 60,
+        )
+        proc = run_cli("--prepare", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout)["skills"], "payload should still build"
+        assert "overwrite flag" in proc.stderr
+        assert "stale" in proc.stderr
+
+    def test_prepare_says_nothing_about_a_fresh_mirror(self, sandbox):
+        """The warning has to stay rare enough to still mean something."""
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        write_manifest(sandbox["account"], ["skill-a"])
+        proc = run_cli("--prepare", "--all", "--repos", str(sandbox["repo"]),
+                       home=sandbox["home"])
+        assert proc.returncode == 0, proc.stderr
+        assert "overwrite flag" not in proc.stderr
+
+    def test_expected_repo_names_warns_but_never_resolves(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """#93.3: the constant is a warning list, not a lookup.
+
+        Adding a name buys the "went unexamined" warning and nothing else -
+        a new registry still has to be NAMED to be synced.
+        """
+        monkeypatch.setattr(
+            sync_skills, "EXPECTED_REPO_NAMES",
+            ("agentskills", "not-a-real-registry"),
+        )
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        resolved = sync_skills.resolve_repos()
+        err = capsys.readouterr().err
+        assert "not-a-real-registry" in err
+        assert all(p.name != "not-a-real-registry" for p in resolved)
+
+    def test_missing_repos_path_is_named_and_the_run_fails(
+        self, sandbox, tmp_path
+    ):
+        """#93.4: one resolution pass, and it still refuses to go quiet."""
+        proc = run_cli("--prepare", "--all", "--repos", str(tmp_path / "nope"),
+                       home=sandbox["home"])
+        assert proc.returncode != 0
+        assert "nope" in proc.stderr
