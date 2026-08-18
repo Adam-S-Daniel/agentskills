@@ -279,6 +279,57 @@ jobs:
       - name: Run every test suite in the repo
         run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q
 
+  # The same suites on Windows, because until #98 they could not run there at
+  # all — 72 failures, every one of them a platform fault rather than a real
+  # defect, on the machine most of these skills exist to run on. Three of the
+  # causes were in the SHIPPED code, not the tests: the bootstrap hook framed
+  # its python<->bash handoff with os.linesep and so reported a bogus "framing
+  # error" on every Windows session, generate_skills_lock.py digested a
+  # CRLF rendering of the pinned ref, and the vendored schema failed its own
+  # integrity check on every Windows clone. A Linux-only CI could not see any
+  # of that, and #92 was opened because of a Windows failure this lane is what
+  # would have caught.
+  #
+  # A SEPARATE JOB rather than a `matrix` on the one above, deliberately: a
+  # matrix renames the existing check to `pytest (ubuntu-latest)`, and a
+  # required status check that changes context name blocks every open PR until
+  # the ruleset in repo-settings is updated to match. This adds a context, it
+  # renames none.
+  pytest-windows:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    defaults:
+      run:
+        # Git Bash, not pwsh. The pytest targets below are GLOBS, and pwsh
+        # neither expands them nor passes them through in a form pytest can
+        # use — the run would collect nothing and pass. It also keeps this
+        # step byte-identical to the ubuntu one above.
+        shell: bash
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 (2025-11-20)
+        with:
+          # Same reason as the ubuntu job: without full history the dogfood
+          # test SKIPS rather than fails, and the end-to-end install path goes
+          # silently untested while this job stays green.
+          fetch-depth: 0
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 (2025-11-24)
+        with:
+          python-version: '3.12'
+      # Pins identical to every other job here — see the ubuntu job for why.
+      - run: python3 -m pip install pytest pyyaml==6.0.3 markdown-it-py==4.2.0 jsonschema==4.26.0
+      # `core.autocrlf` is true by default on Windows runners. .gitattributes
+      # (`* -text`) is what keeps the checkout byte-identical to Linux's, and
+      # every digest in skills.lock depends on that holding — so assert it
+      # here rather than discovering it as an unexplained hash mismatch.
+      - name: Assert the checkout was not line-ending mangled
+        run: |
+          if grep -qU $'\r' README.md; then
+            echo "::error::README.md checked out with CRLF — .gitattributes did not apply."
+            exit 1
+          fi
+      - name: Run every test suite in the repo
+        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q
+
   shellcheck:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
