@@ -238,6 +238,14 @@ python3 "$SKILL_DIR/sync_skills.py" \
 
 Substitute the `name` and `hash` fields from the JSON payload.
 
+The state file is a *fallback*, not the source of truth. It records only
+what THIS machine uploaded, so on a fresh machine it is empty even though
+the skills are all on the account — which is how every skill once looked
+new, went up with `overwrite=false`, and 409'd against the copy already
+there. `is_update` therefore prefers the account mirror and falls back to
+the state file, which covers the window between an upload and the next
+mirror refresh.
+
 ---
 
 ## 5. Dry run / troubleshooting
@@ -247,6 +255,20 @@ To preview what would be synced without uploading:
 ```bash
 python3 "$SKILL_DIR/sync_skills.py" --dry-run
 ```
+
+`--dry-run` reaches the same `UPDATE`/`NEW` decision `--prepare` will —
+both call one `is_update()` — so the preview cannot promise `NEW` for a
+skill the very next command uploads as an update.
+
+If the account mirror is stale or missing, both paths say so on stderr and
+name what it costs, rather than letting an old snapshot drive the
+overwrite flag in silence: `UPDATE` rests on that snapshot, and `NEW`
+means only "absent from it", so anything uploaded from another machine
+since the last refresh is already on the account and will 409. The mirror
+is still consulted while stale — ignoring it puts the fresh-machine 409
+back — so this is a warning, not a refusal. `--verify` is the opposite
+case and does refuse: checking against a pre-upload snapshot yields a
+false OK, which is worth less than no check at all.
 
 To target a single skill:
 

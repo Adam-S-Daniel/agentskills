@@ -30,6 +30,18 @@ from sync_skills import (  # noqa: E402
 )
 
 
+# Decode subprocess output as UTF-8 explicitly, and never die on a stray byte.
+#
+# `text=True` on its own decodes using the LOCALE encoding, which on Windows
+# is cp1252. That is not a hypothetical here. sync-skills' own setup.sh
+# registers hooks/pre-push as a GLOBAL git hook, so every `git push` these
+# fixtures make — including into a throwaway bare repo under tmp — prints
+# that hook's UTF-8 box-drawing banner, and cp1252 cannot decode it. The
+# whole repo-state-gate class errored out before its first assertion, on
+# exactly the kind of machine this skill exists to run on.
+TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -290,24 +302,38 @@ class TestPrepare:
         result = prepare([repo_with_skills], skill_names=["skill-a"])
         assert result["skills"][0]["is_update"] is True
 
-    def test_nonexistent_repo_is_reported_not_silently_skipped(
+    def test_a_missing_path_is_named_by_resolution_not_by_prepare(
         self, tmp_path, monkeypatch, capsys
     ):
-        """D2: a missing repo path must be named, not silently dropped.
+        """D2's guarantee, relocated by #93.4 rather than given up.
 
-        Skipping it quietly made a typo'd --repos indistinguishable from a
-        clean tree: both yielded an empty skill list and exit 0.
+        A missing repo path must be NAMED, not silently dropped: skipping
+        it quietly made a typo'd --repos indistinguishable from a clean
+        tree, since both yield an empty skill list and exit 0.
+
+        prepare() used to run its own _existing_repos() pass and warn from
+        there. That was a second resolution pass, running after the
+        repo-state gate had already decided against resolve_repos()'s
+        list, so the two could in principle disagree about which repos
+        were in play. Resolution happens once now — and it is still
+        resolution that names the bad path.
         """
         monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "account"
+        )
         monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
 
         missing = tmp_path / "does-not-exist"
-        result = prepare([missing], skill_names=["anything"])
+        resolved = sync_skills.resolve_repos([str(missing)])
 
-        assert result["skills"] == []
+        assert resolved == []
         err = capsys.readouterr().err
         assert "does-not-exist" in err
         assert "WARNING" in err
+
+        # Nothing reaches prepare(), because resolution already dropped it.
+        assert prepare(resolved, skill_names=["anything"])["skills"] == []
 
     def test_org_id_hint_included(self, repo_with_skills, monkeypatch, tmp_path):
         monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
@@ -430,7 +456,13 @@ class TestVerify:
             account_dir,
             repo_with_skills / "skills" / "skill-a",
             "skill-a",
-            transform=lambda b: b.replace(b"\n", b"\r\n"),
+            # Normalise before converting: on Windows the fixture's own
+            # SKILL.md is already CRLF, so a bare \n -> \r\n replace made
+            # \r\r\n and the test invented the drift it was written to
+            # prove is not drift.
+            transform=lambda b: b.replace(b"\r\n", b"\n").replace(
+                b"\n", b"\r\n"
+            ),
         )
         write_manifest(account_dir, ["skill-a"])
 
@@ -873,9 +905,16 @@ class TestResolveRepos:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
         monkeypatch.setattr("sync_skills._self_repo", lambda: self_repo)
 
-        assert sync_skills._repo_candidates("agentskills") == [self_repo]
-        assert sync_skills._repo_candidates("agentskills-private") == []
+        # Asserted through resolve_repos() rather than a per-name candidate
+        # helper: after #93.3 the own-name rule is the resolution, not a
+        # step inside a search that could only ever return one element.
         assert sync_skills.resolve_repos(None) == [self_repo]
+
+        renamed = tmp_path / "agentskills-private"
+        (renamed / "plugins").mkdir(parents=True)
+        monkeypatch.setattr("sync_skills._self_repo", lambda: renamed)
+        # The private clone answers for its own name and not for the other.
+        assert sync_skills.resolve_repos(None) == [renamed]
 
     def test_unresolvable_repo_says_it_went_unexamined(self, tmp_path, monkeypatch, capsys):
         """agentskills-private can no longer be found implicitly — say so.
@@ -1028,7 +1067,7 @@ def run_cli(*args, home, account_list=None):
     extra = ["--account-list", str(account_list)] if account_list else []
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args, *extra],
-        capture_output=True, text=True, env=env,
+        capture_output=True, env=env, **TEXT,
     )
 
 
@@ -1267,7 +1306,7 @@ GIT_ID = [
 
 def _git_run(args, cwd):
     proc = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+        ["git", *args], cwd=str(cwd), capture_output=True, **TEXT,
     )
     assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr}"
     return proc.stdout.strip()
@@ -1304,7 +1343,7 @@ def run_cli_no_tty(*args, home):
     env.pop("AGENTSKILLS_REPOS", None)
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
-        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, env=env, stdin=subprocess.DEVNULL, **TEXT,
     )
 
 
@@ -1498,7 +1537,7 @@ class TestWindowsDecoyRegression:
         env.pop("AGENTSKILLS_REPOS", None)
         return subprocess.run(
             [sys.executable, str(planted["script"]), *args],
-            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, env=env, stdin=subprocess.DEVNULL, **TEXT,
         )
 
     def test_decoy_no_longer_outranks_the_self_checkout(self, planted):
@@ -1720,3 +1759,284 @@ class TestSection6JavaScriptParses:
                 failures.append(f"{skill_md.parent.name}: {proc.stderr.strip()}")
 
         assert not failures, "section 6 JS fails to parse for:\n" + "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# #93.1 / #93.2 — one UPDATE/NEW rule, and the mirror's age said out loud
+#
+# prepare() preferred the account mirror and fell back to the state file;
+# --dry-run read the state file alone. On a machine that had never uploaded
+# anything, the preview promised NEW for every skill the very next command
+# correctly sent as an update — while prepare() carried a comment describing
+# that exact fix. The rule now lives in is_update() and both callers use it.
+# ---------------------------------------------------------------------------
+
+
+class TestOneUpdateRule:
+    """is_update() is the single place the UPDATE/NEW question is answered."""
+
+    def test_the_account_mirror_alone_is_enough(self, tmp_path, monkeypatch):
+        """The fresh-machine case: empty state file, skill already uploaded."""
+        account = tmp_path / "account"
+        (account / "skill-a").mkdir(parents=True)
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account)
+
+        assert sync_skills.is_update("skill-a", {}) is True
+
+    def test_the_state_file_alone_is_enough(self, tmp_path, monkeypatch):
+        """Covers the window between an upload and the next mirror refresh."""
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "account"
+        )
+
+        assert sync_skills.is_update("skill-a", {"skill-a": {}}) is True
+
+    def test_neither_source_means_new(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "account"
+        )
+
+        assert sync_skills.is_update("skill-a", {}) is False
+
+
+class TestDryRunAgreesWithPrepare:
+    def test_dry_run_says_update_when_only_the_mirror_knows(self, sandbox):
+        """#93.1 exactly: state file empty, skill-a already on the account.
+
+        The old --dry-run read ~/.sync-skills-state.json alone and printed
+        NEW here, while prepare() — one command later, same machine, same
+        skill — correctly set is_update=True.
+        """
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+
+        proc = run_cli(
+            "--dry-run", "--all", "--repos", str(sandbox["repo"]),
+            home=sandbox["home"], account_list=sandbox["declared"],
+        )
+
+        assert proc.returncode == 0
+        assert "UPDATE" in proc.stdout
+        assert "NEW" not in proc.stdout
+
+    def test_dry_run_and_prepare_reach_the_same_verdict(self, sandbox):
+        """Whatever the answer, the preview and the run it previews agree."""
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        skill_b = sandbox["repo"] / "skills" / "skill-b"
+        skill_b.mkdir(parents=True)
+        (skill_b / "SKILL.md").write_text("---\nname: skill-b\n---\nbody\n")
+
+        dry = run_cli(
+            "--dry-run", "--all", "--repos", str(sandbox["repo"]),
+            home=sandbox["home"], account_list=sandbox["declared"],
+        )
+        prep = run_cli(
+            "--all", "--repos", str(sandbox["repo"]),
+            home=sandbox["home"], account_list=sandbox["declared"],
+        )
+
+        previewed = {
+            line.split()[1]: line.split()[0]
+            for line in dry.stdout.splitlines() if line.strip()
+        }
+        actual = {
+            s["name"]: "UPDATE" if s["is_update"] else "NEW"
+            for s in json.loads(prep.stdout)["skills"]
+        }
+
+        assert previewed == actual
+        assert actual == {"skill-a": "UPDATE", "skill-b": "NEW"}
+
+    def test_dry_run_lists_a_skill_only_under_a_repo_that_has_it(
+        self, sandbox, tmp_path
+    ):
+        """--all unions the names across repos; the preview must not.
+
+        prepare() filters each name through _skill_dir(repo, name); --dry-run
+        did not, so with two repos resolved it printed every selected skill
+        under BOTH of them.
+        """
+        other = tmp_path / "other-repo"
+        (other / "skills" / "skill-z").mkdir(parents=True)
+        (other / "skills" / "skill-z" / "SKILL.md").write_text(
+            "---\nname: skill-z\n---\nbody\n"
+        )
+
+        proc = run_cli(
+            "--dry-run", "--all",
+            "--repos", str(sandbox["repo"]), str(other),
+            home=sandbox["home"], account_list=sandbox["declared"],
+        )
+
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 2
+        assert any("skill-a" in ln and "(repo)" in ln for ln in lines)
+        assert any("skill-z" in ln and "(other-repo)" in ln for ln in lines)
+
+
+class TestStaleMirrorDrivingTheOverwriteFlag:
+    """#93.2 — --verify refuses a stale mirror; prepare() used it in silence."""
+
+    @staticmethod
+    def _make_stale(sandbox):
+        write_manifest(
+            sandbox["account"], ["skill-a"],
+            age_seconds=sync_skills.MIRROR_MAX_AGE_SECONDS + 60,
+        )
+
+    def _prepare(self, sandbox):
+        return run_cli(
+            "--all", "--repos", str(sandbox["repo"]),
+            home=sandbox["home"], account_list=sandbox["declared"],
+        )
+
+    def test_a_stale_mirror_is_still_consulted(self, sandbox):
+        """Ignoring it would put the 409 back, so the flag must stay UPDATE.
+
+        A stale mirror can only ever be MISSING recent uploads; it cannot
+        invent one. Dropping it on age would mark every skill NEW on a
+        machine with an empty state file — which is the failure the mirror
+        was consulted for in the first place.
+        """
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        self._make_stale(sandbox)
+
+        payload = json.loads(self._prepare(sandbox).stdout)
+
+        assert payload["skills"][0]["is_update"] is True
+
+    def test_a_stale_mirror_no_longer_drives_the_flag_in_silence(self, sandbox):
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        self._make_stale(sandbox)
+
+        err = self._prepare(sandbox).stderr
+
+        # Phrases only the real message carries. A bare "stale" would also
+        # match pytest's tmp_path, which is named after this test and gets
+        # printed by the repo-state gate's NOTE line.
+        assert "account mirror is stale" in err
+        assert "overwrite=true" in err
+        assert "skill-a" in err
+
+    def test_a_new_verdict_off_a_stale_mirror_is_flagged_too(self, sandbox):
+        """NEW is the reading a stale mirror genuinely cannot support."""
+        self._make_stale(sandbox)
+
+        err = self._prepare(sandbox).stderr
+
+        assert "overwrite=false" in err
+        assert "409" in err
+
+    def test_a_missing_manifest_is_reported_the_same_way(self, sandbox):
+        """No mirror at all is the same class of answer as an old one."""
+        (sandbox["account"] / "manifest.json").unlink()
+
+        err = self._prepare(sandbox).stderr
+
+        assert "manifest not found or unreadable" in err
+        assert "overwrite=false" in err
+
+    def test_a_fresh_mirror_warns_about_nothing(self, sandbox):
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+
+        err = self._prepare(sandbox).stderr
+
+        assert "account mirror is stale" not in err
+        assert "manifest not found or unreadable" not in err
+        assert "overwrite=" not in err
+
+    def test_dry_run_carries_the_same_warning(self, sandbox):
+        """The preview must not look more certain than the run."""
+        mirror_skill(sandbox["account"], sandbox["skill"], "skill-a")
+        self._make_stale(sandbox)
+
+        proc = run_cli(
+            "--dry-run", "--all", "--repos", str(sandbox["repo"]),
+            home=sandbox["home"], account_list=sandbox["declared"],
+        )
+
+        assert "UPDATE" in proc.stdout
+        assert "account mirror is stale" in proc.stderr
+
+
+class TestRegistryReposConstant:
+    """#93.3 — one tuple, two jobs, both reading it directly."""
+
+    def test_it_gates_which_name_the_self_checkout_may_claim(
+        self, tmp_path, monkeypatch
+    ):
+        """Job 1: resolution. Emptying the tuple resolves nothing at all."""
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        self_repo = tmp_path / "agentskills"
+        (self_repo / "plugins").mkdir(parents=True)
+        monkeypatch.setattr("sync_skills._self_repo", lambda: self_repo)
+
+        monkeypatch.setattr("sync_skills.REGISTRY_REPOS", ("agentskills",))
+        assert sync_skills.resolve_repos(None) == [self_repo]
+
+        # Rename the registry and the same checkout stops answering for it.
+        monkeypatch.setattr("sync_skills.REGISTRY_REPOS", ("something-else",))
+        assert sync_skills.resolve_repos(None) == []
+
+    def test_it_drives_the_unexamined_warning(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Job 2: reporting. A third registry needs no other edit."""
+        monkeypatch.delenv("AGENTSKILLS_REPOS", raising=False)
+        self_repo = tmp_path / "agentskills"
+        (self_repo / "plugins").mkdir(parents=True)
+        monkeypatch.setattr("sync_skills._self_repo", lambda: self_repo)
+        monkeypatch.setattr(
+            "sync_skills.REGISTRY_REPOS", ("agentskills", "agentskills-third"),
+        )
+
+        resolved = sync_skills.resolve_repos(None)
+
+        err = capsys.readouterr().err
+        assert resolved == [self_repo]
+        assert "agentskills-third" in err
+        assert "NONE of its skills were examined" in err
+
+
+class TestSingleResolutionPass:
+    """#93.4 — resolve once, then hand the same list to every consumer."""
+
+    @staticmethod
+    def _forbid_refilter(monkeypatch):
+        monkeypatch.setattr(
+            "sync_skills._existing_repos",
+            lambda *a, **k: pytest.fail(
+                "re-filtered a list that resolve_repos() had already resolved"
+            ),
+        )
+
+    def test_prepare_does_not_re_resolve_what_it_was_handed(
+        self, repo_with_skills, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "account"
+        )
+        monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
+        self._forbid_refilter(monkeypatch)
+
+        result = prepare([repo_with_skills], skill_names=["skill-a"])
+
+        assert [s["name"] for s in result["skills"]] == ["skill-a"]
+
+    def test_verify_does_not_re_resolve_what_it_was_handed(
+        self, repo_with_skills, monkeypatch, tmp_path, capsys
+    ):
+        account_dir = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account_dir)
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_FILE",
+            write_declaration(tmp_path / "declared.txt", ["skill-a"]),
+        )
+        mirror_skill(
+            account_dir, repo_with_skills / "skills" / "skill-a", "skill-a"
+        )
+        write_manifest(account_dir, ["skill-a"])
+        self._forbid_refilter(monkeypatch)
+
+        assert verify([repo_with_skills], skill_names=["skill-a"]) is True
+        assert "OK" in capsys.readouterr().out

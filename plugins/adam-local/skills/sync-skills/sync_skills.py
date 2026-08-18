@@ -29,8 +29,23 @@ from typing import Dict, List, Optional, Set
 
 STATE_FILE = Path.home() / ".sync-skills-state.json"
 
-# The registry repos this script syncs from, in the order they are reported.
-REPO_NAMES = ("agentskills", "agentskills-private")
+# The registry repos a complete sync covers, in the order they are reported.
+#
+# This tuple has TWO jobs, and reading it as having only one is what made
+# it look vestigial once the built-in clone paths were deleted:
+#
+#   1. RESOLUTION. The checkout this script lives in is claimed only if
+#      its directory name appears here. That name check is the whole
+#      reason a clone called `agentskills` is not also handed over as
+#      `agentskills-private`. Empty this tuple and nothing resolves at
+#      all — it is load-bearing, not decoration.
+#   2. REPORTING. Any name here that no path resolved to gets the
+#      "went unexamined" warning in resolve_repos(), so a registry that
+#      was never looked at can never read as one with nothing to sync.
+#
+# Adding a third registry, or renaming one, means editing this tuple and
+# nothing else: both jobs read it directly rather than through a helper.
+REGISTRY_REPOS = ("agentskills", "agentskills-private")
 
 # There are deliberately NO built-in clone locations. Guessing one (~/repos,
 # D:\repos\<owner>) let anything sitting at the guessed path — an empty
@@ -64,7 +79,12 @@ FETCH_TIMEOUT_SECONDS = 20
 # ``CLAUDE_CODE_SYNC_SKILLS=1 claude -p ...`` — what --verify checks against.
 ACCOUNT_SKILLS_DIR = Path.home() / ".claude" / "skills" / "synced"
 
-# How stale the account mirror may be before --verify refuses to trust it.
+# How stale the account mirror may be before this script stops quoting it
+# as current. Two callers, two different responses, both deliberate:
+# --verify REFUSES (a check against a pre-upload snapshot is a false OK,
+# which is worse than no check), while prepare()/--dry-run still read it
+# and WARN — see warn_if_mirror_untrusted() for why ignoring it there
+# would be the worse trade.
 #
 # Why 6 hours: in the documented flow (SKILL.md §7) the refresh runs seconds
 # before --verify, so any mirror belonging to the current sync is minutes old.
@@ -170,22 +190,6 @@ def _self_repo() -> Optional[Path]:
     return None
 
 
-def _repo_candidates(name: str) -> List[Path]:
-    """Where repo ``name`` might live, most-preferred first.
-
-    Exactly one candidate is ever possible: the checkout this script lives
-    in, and only for its OWN name. That is derived from ``__file__``, so it
-    is a fact about this run rather than a guess about the machine —
-    otherwise agentskills-private would silently resolve to the agentskills
-    clone. Everything else must be named; see the note on built-in defaults
-    at the top of this file for what guessing cost.
-    """
-    self_repo = _self_repo()
-    if self_repo is not None and self_repo.name == name:
-        return [self_repo]
-    return []
-
-
 def resolve_repos(explicit: Optional[List[str]] = None) -> List[Path]:
     """Resolve which repos to scan, warning on stderr about what was missed.
 
@@ -214,22 +218,28 @@ def resolve_repos(explicit: Optional[List[str]] = None) -> List[Path]:
         # An explicitly named path that isn't there is always worth saying.
         return _existing_repos(requested, source=source)
 
+    # Exactly one path can resolve without being named: the checkout this
+    # script lives in, claimed only under its OWN name. That comes from
+    # __file__, so it is a fact about this run rather than a guess about
+    # the machine. It is matched against REGISTRY_REPOS inline: the
+    # per-name candidate list this replaced could never hold more than one
+    # element, and reading like a search kept implying there was somewhere
+    # else left to look.
+    self_repo = _self_repo()
     resolved: List[Path] = []
-    for name in REPO_NAMES:
-        candidates = _repo_candidates(name)
-        hit = next((c for c in candidates if c.is_dir()), None)
-        if hit is not None:
-            resolved.append(hit)
-        else:
-            # Not fatal on its own — this run may not need that repo — but it
-            # does mean part of the registry went unexamined, and that must
-            # never read the same as "checked it, nothing to do".
-            print(
-                f"WARNING: no clone of {name} is known to this run, so NONE of "
-                f"its skills were examined. This is not the same as finding it "
-                f"clean. {REPO_HINT}",
-                file=sys.stderr,
-            )
+    for name in REGISTRY_REPOS:
+        if self_repo is not None and self_repo.name == name and self_repo.is_dir():
+            resolved.append(self_repo)
+            continue
+        # Not fatal on its own — this run may not need that repo — but it
+        # does mean part of the registry went unexamined, and that must
+        # never read the same as "checked it, nothing to do".
+        print(
+            f"WARNING: no clone of {name} is known to this run, so NONE of "
+            f"its skills were examined. This is not the same as finding it "
+            f"clean. {REPO_HINT}",
+            file=sys.stderr,
+        )
     return resolved
 
 
@@ -393,7 +403,7 @@ def check_repo_state(
         )
         return True
 
-    if not _stdin_is_tty():
+    def refuse_nobody_to_ask() -> None:
         print(
             f"ERROR: {header}\nStdin is not a terminal, so there is nobody to "
             f"ask — refusing rather than hanging on a prompt nobody will see. "
@@ -401,13 +411,23 @@ def check_repo_state(
             f"with --yes to sync from them as they are.",
             file=sys.stderr,
         )
+
+    if not _stdin_is_tty():
+        refuse_nobody_to_ask()
         return False
 
     print(f"WARNING: {header}", file=sys.stderr)
     try:
         answer = input("Continue anyway? [y/N] ")
     except EOFError:
-        answer = ""
+        # isatty() claimed a terminal and the very first read hit end of
+        # input, so there was nobody there after all. Windows reports the
+        # NUL device as a character device, which makes isatty() true under
+        # `stdin=DEVNULL` — the way an agent drives this script, and the
+        # case the non-TTY branch above exists for. Same situation, so it
+        # gets the same answer instead of the vaguer "not confirmed".
+        refuse_nobody_to_ask()
+        return False
     if not answer.strip().lower().startswith("y"):
         print(
             "ERROR: aborted — repo state was not confirmed.", file=sys.stderr
@@ -583,115 +603,8 @@ def get_org_id_hint() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Core prepare
+# Account mirror: freshness, and the single UPDATE/NEW rule
 # ---------------------------------------------------------------------------
-
-def prepare(
-    repos: List[Path],
-    skill_names: Optional[List[str]] = None,
-    declared: Optional[Set[str]] = None,
-) -> Dict:
-    """Build the JSON payload the agent POSTs to claude.ai.
-
-    Warns on stderr about any skill in the payload that is not declared for
-    the account store. The payload itself is unfiltered — the operator, not
-    this script, decides what to POST — but uploading is close to a one-way
-    door (no delete API), so the warning has to arrive BEFORE the upload.
-    ``--verify`` catching it afterwards is too late to undo.
-    """
-    state = load_state()
-    skills_out: List[Dict] = []
-
-    for repo in _existing_repos(repos):
-        if skill_names is not None:
-            names = [n for n in skill_names if _skill_dir(repo, n) is not None]
-        else:
-            names = get_changed_skills(repo)
-
-        for name in names:
-            skill_path = _skill_dir(repo, name)
-            if skill_path is None:
-                continue
-            h = skill_hash(skill_path)
-            zip_bytes = zip_skill(skill_path)
-            skills_out.append(
-                {
-                    "name": name,
-                    "zip_b64": base64.b64encode(zip_bytes).decode(),
-                    # The account mirror is the authority on whether a skill
-                    # already exists; ~/.sync-skills-state.json only records
-                    # what THIS machine uploaded. On a fresh machine the state
-                    # file is absent, so every skill looked new, went up with
-                    # overwrite=false, and 409'd against the copy already
-                    # there. Fall back to the state file for the window
-                    # between an upload and the next mirror refresh.
-                    "is_update": (ACCOUNT_SKILLS_DIR / name).is_dir()
-                    or name in state,
-                    "repo": repo.name,
-                    "hash": h,
-                }
-            )
-
-    if declared is None:
-        declared = load_account_declaration()
-    if declared is not None:
-        undeclared = sorted(
-            s["name"] for s in skills_out if s["name"] not in declared
-        )
-        if undeclared:
-            print(
-                f"WARNING: not declared for the account store (ADR 0002) but "
-                f"present in this payload: {', '.join(undeclared)}. Uploading "
-                f"is close to a one-way door — the API has no delete. Declare "
-                f"them in {ACCOUNT_SKILLS_FILE.name} or drop them from this run.",
-                file=sys.stderr,
-            )
-
-    return {"skills": skills_out, "org_id_hint": get_org_id_hint()}
-
-
-# ---------------------------------------------------------------------------
-# Verify (account-copy drift check)
-# ---------------------------------------------------------------------------
-
-def normalise(data: bytes) -> bytes:
-    """CRLF → LF. The account store's line endings are not a content change.
-
-    Some account copies came back CRLF and some LF (it varies by upload
-    batch, not by uploader version), so a raw byte compare would flag line
-    endings as drift. This matches the normalisation the independent
-    account-audit oracle applies, so both agree on what counts as drift.
-    """
-    return data.replace(b"\r\n", b"\n")
-
-
-def skill_payload(skill_path: Path) -> Dict[str, bytes]:
-    """Return ``{relpath: bytes}`` exactly as ``zip_skill()`` would upload it.
-
-    Reads the members back out of the actual ZIP bytes rather than
-    re-walking the directory, so the exclusion rules in ``_include_in_zip``
-    can never drift out of sync with what a real upload would contain.
-    """
-    with zipfile.ZipFile(io.BytesIO(zip_skill(skill_path))) as zf:
-        return {name: zf.read(name) for name in zf.namelist()}
-
-
-def account_skill_payload(name: str) -> Optional[Dict[str, bytes]]:
-    """Return ``{relpath: bytes}`` under the local account-copy mirror.
-
-    Reads ``ACCOUNT_SKILLS_DIR / name``. Returns None if that directory
-    doesn't exist (skill was never uploaded, or the mirror hasn't been
-    refreshed since).
-    """
-    account_dir = ACCOUNT_SKILLS_DIR / name
-    if not account_dir.is_dir():
-        return None
-    return {
-        f.relative_to(account_dir).as_posix(): f.read_bytes()
-        for f in account_dir.rglob("*")
-        if f.is_file()
-    }
-
 
 def account_manifest() -> Optional[Dict]:
     """Parse the account mirror's manifest.json, or None if unreadable."""
@@ -738,6 +651,11 @@ def check_mirror_freshness(
     checking; without this, skipping the refresh step turns --verify into a
     comparison against a pre-upload snapshot that reports OK for uploads
     that never landed.
+
+    The message is written for either caller. ``--verify`` treats it as an
+    error and stops; ``prepare()``/``--dry-run`` pass it to
+    warn_if_mirror_untrusted() and carry on, because there the mirror is
+    still the best evidence available about what is already uploaded.
     """
     refresh = (
         "refresh it with:  CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'"
@@ -756,10 +674,216 @@ def check_mirror_freshness(
     if age > MIRROR_MAX_AGE_SECONDS:
         return (
             f"account mirror is stale: last refreshed {age / 3600:.1f}h ago "
-            f"(limit {MIRROR_MAX_AGE_SECONDS / 3600:.0f}h). Verifying against "
-            f"it would compare uploads to a pre-upload snapshot — {refresh}"
+            f"(limit {MIRROR_MAX_AGE_SECONDS / 3600:.0f}h), so it describes the "
+            f"account as it was BEFORE anything this session uploaded — {refresh}"
         )
     return None
+
+
+def mirror_status(now: Optional[datetime.datetime] = None) -> Dict:
+    """Whether the account mirror is fresh enough to be quoted as current.
+
+    Returns ``{"fresh": bool, "problem": Optional[str]}``. Call it once per
+    run and hand the result down: two callers re-deriving it could disagree
+    about the same snapshot, which is the shape of the bug this fixes.
+    """
+    problem = check_mirror_freshness(account_manifest(), now)
+    return {"fresh": problem is None, "problem": problem}
+
+
+def is_update(name: str, state: Dict) -> bool:
+    """Would uploading ``name`` land on top of a copy already on the account?
+
+    THE one place this rule lives, and the reason it now has a name. It used
+    to be written twice and differently: ``prepare()`` preferred the account
+    mirror and fell back to the state file, while ``--dry-run`` read the
+    state file alone. So on any machine that had not uploaded before — where
+    the state file is empty but the skills are all on the account — a dry run
+    previewed NEW for every skill the very next command correctly uploaded as
+    an UPDATE. A preview that disagrees with the run it is previewing is
+    worse than no preview: prepare() carried a comment describing that exact
+    fix, and the preview path never got it.
+
+    The mirror is the authority. ``~/.sync-skills-state.json`` records only
+    what THIS machine uploaded, so it is empty on a fresh machine and cannot
+    answer the question alone; it stays as the fallback covering the window
+    between an upload and the next mirror refresh.
+    """
+    return (ACCOUNT_SKILLS_DIR / name).is_dir() or name in state
+
+
+def warn_if_mirror_untrusted(
+    mirror: Dict, updates: List[str], news: List[str]
+) -> None:
+    """Say so when a stale mirror is what drove the overwrite flag.
+
+    ``--verify`` REFUSES to run against a stale mirror and this path does
+    not. That is a deliberate difference, not an oversight. Verifying
+    against a pre-upload snapshot manufactures a false OK and is worth
+    nothing, so refusing is the only useful answer. Deciding UPDATE vs NEW
+    against an old snapshot is different: it is still strictly better than
+    the alternative, because ignoring the mirror puts back the failure the
+    mirror was consulted for in the first place — with an empty state file
+    every skill looks new, uploads with ``overwrite=false``, and 409s
+    against the copy already sitting on the account. A stale mirror can only
+    ever be MISSING recent uploads; it cannot invent one.
+
+    So the mirror is still read, and what it cannot establish is said out
+    loud instead of being folded into the flag. The silence was the defect:
+    a week-old snapshot drove ``overwrite`` with nothing on stderr to say
+    how old the evidence behind it was.
+    """
+    if mirror["fresh"] or not (updates or news):
+        return
+    lines = [
+        f"WARNING: {mirror['problem']}",
+        "It was still consulted rather than ignored — ignoring it marks every "
+        "skill NEW on a machine that has not uploaded before, and each one "
+        "409s against the copy already there. What it cannot establish while "
+        "stale:",
+    ]
+    if updates:
+        lines.append(
+            f"  UPDATE (overwrite=true) for {', '.join(sorted(set(updates)))} "
+            f"rests on that old snapshot — a copy deleted in the UI since then "
+            f"is no longer there to overwrite."
+        )
+    if news:
+        lines.append(
+            f"  NEW (overwrite=false) for {', '.join(sorted(set(news)))} means "
+            f"only that it was absent from that old snapshot — anything "
+            f"uploaded from another machine since then is already on the "
+            f"account and will 409."
+        )
+    print("\n".join(lines), file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Core prepare
+# ---------------------------------------------------------------------------
+
+def prepare(
+    repos: List[Path],
+    skill_names: Optional[List[str]] = None,
+    declared: Optional[Set[str]] = None,
+    mirror: Optional[Dict] = None,
+) -> Dict:
+    """Build the JSON payload the agent POSTs to claude.ai.
+
+    Warns on stderr about any skill in the payload that is not declared for
+    the account store. The payload itself is unfiltered — the operator, not
+    this script, decides what to POST — but uploading is close to a one-way
+    door (no delete API), so the warning has to arrive BEFORE the upload.
+    ``--verify`` catching it afterwards is too late to undo.
+
+    ``repos`` is the OUTPUT of resolve_repos() and is iterated as given.
+    It is deliberately not re-filtered here: this used to run its own
+    ``_existing_repos()`` pass after the repo-state gate had already run
+    against resolve_repos()'s list, so two passes could in principle
+    disagree — a repo gated and then dropped, or dropped and then gated.
+    Resolution happens once, at the top of main(), and every consumer is
+    handed the same list.
+    """
+    state = load_state()
+    if mirror is None:
+        mirror = mirror_status()
+    skills_out: List[Dict] = []
+    updates: List[str] = []
+    news: List[str] = []
+
+    for repo in repos:
+        if skill_names is not None:
+            names = [n for n in skill_names if _skill_dir(repo, n) is not None]
+        else:
+            names = get_changed_skills(repo)
+
+        for name in names:
+            skill_path = _skill_dir(repo, name)
+            if skill_path is None:
+                continue
+            h = skill_hash(skill_path)
+            zip_bytes = zip_skill(skill_path)
+            # One rule, shared with --dry-run. See is_update() for why the
+            # account mirror outranks the state file.
+            update = is_update(name, state)
+            (updates if update else news).append(name)
+            skills_out.append(
+                {
+                    "name": name,
+                    "zip_b64": base64.b64encode(zip_bytes).decode(),
+                    "is_update": update,
+                    "repo": repo.name,
+                    "hash": h,
+                }
+            )
+
+    # Before the payload is handed over, not after: this says how old the
+    # evidence behind every overwrite flag above actually is.
+    warn_if_mirror_untrusted(mirror, updates, news)
+
+    if declared is None:
+        declared = load_account_declaration()
+    if declared is not None:
+        undeclared = sorted(
+            s["name"] for s in skills_out if s["name"] not in declared
+        )
+        if undeclared:
+            print(
+                f"WARNING: not declared for the account store (ADR 0002) but "
+                f"present in this payload: {', '.join(undeclared)}. Uploading "
+                f"is close to a one-way door — the API has no delete. Declare "
+                f"them in {ACCOUNT_SKILLS_FILE.name} or drop them from this run.",
+                file=sys.stderr,
+            )
+
+    return {"skills": skills_out, "org_id_hint": get_org_id_hint()}
+
+
+# ---------------------------------------------------------------------------
+# Verify (account-copy drift check)
+#
+# The manifest/freshness helpers this section used to own now live under
+# "Account mirror" above: prepare() and --dry-run ask the same questions
+# about the same snapshot, so verify() is no longer their only caller.
+# ---------------------------------------------------------------------------
+
+def normalise(data: bytes) -> bytes:
+    """CRLF → LF. The account store's line endings are not a content change.
+
+    Some account copies came back CRLF and some LF (it varies by upload
+    batch, not by uploader version), so a raw byte compare would flag line
+    endings as drift. This matches the normalisation the independent
+    account-audit oracle applies, so both agree on what counts as drift.
+    """
+    return data.replace(b"\r\n", b"\n")
+
+
+def skill_payload(skill_path: Path) -> Dict[str, bytes]:
+    """Return ``{relpath: bytes}`` exactly as ``zip_skill()`` would upload it.
+
+    Reads the members back out of the actual ZIP bytes rather than
+    re-walking the directory, so the exclusion rules in ``_include_in_zip``
+    can never drift out of sync with what a real upload would contain.
+    """
+    with zipfile.ZipFile(io.BytesIO(zip_skill(skill_path))) as zf:
+        return {name: zf.read(name) for name in zf.namelist()}
+
+
+def account_skill_payload(name: str) -> Optional[Dict[str, bytes]]:
+    """Return ``{relpath: bytes}`` under the local account-copy mirror.
+
+    Reads ``ACCOUNT_SKILLS_DIR / name``. Returns None if that directory
+    doesn't exist (skill was never uploaded, or the mirror hasn't been
+    refreshed since).
+    """
+    account_dir = ACCOUNT_SKILLS_DIR / name
+    if not account_dir.is_dir():
+        return None
+    return {
+        f.relative_to(account_dir).as_posix(): f.read_bytes()
+        for f in account_dir.rglob("*")
+        if f.is_file()
+    }
 
 
 def verify(
@@ -819,6 +943,14 @@ def verify(
 
     Returns True only if the declaration was readable, the mirror was fresh,
     at least one skill was selected, and nothing failed.
+
+    ``repos`` is the OUTPUT of resolve_repos() and is iterated as given.
+    It is deliberately not re-filtered here: this used to run its own
+    ``_existing_repos()`` pass after the repo-state gate had already run
+    against resolve_repos()'s list, so two passes could in principle
+    disagree — a repo gated and then dropped, or dropped and then gated.
+    Resolution happens once, at the top of main(), and every consumer is
+    handed the same list.
     """
     all_ok = True
 
@@ -853,7 +985,7 @@ def verify(
     verified = 0
     undeclared_absent: List[str] = []
 
-    for repo in _existing_repos(repos):
+    for repo in repos:
         if skill_names is not None:
             names = [n for n in skill_names if _skill_dir(repo, n) is not None]
         else:
@@ -1109,8 +1241,17 @@ def main() -> None:
         skill_names = None  # auto-detect via git diff
 
     # --dry-run
+    #
+    # This previews the run below it, so every decision it shows has to be
+    # the decision that run will make. It used to compute UPDATE/NEW from
+    # the state file alone while prepare() preferred the account mirror,
+    # so a preview on a machine that had never uploaded promised NEW for
+    # skills the very next command correctly sent as updates.
     if args.dry_run:
         state = load_state()
+        mirror = mirror_status()
+        updates: List[str] = []
+        news: List[str] = []
         any_found = False
         for repo in repos:
             names = (
@@ -1119,9 +1260,18 @@ def main() -> None:
                 else get_changed_skills(repo)
             )
             for name in names:
-                tag = "UPDATE" if name in state else "NEW   "
+                # The same membership test prepare() applies. Without it a
+                # --all preview listed every selected name under EVERY
+                # resolved repo, including repos that do not contain it,
+                # and listed names that exist in no repo at all.
+                if _skill_dir(repo, name) is None:
+                    continue
+                update = is_update(name, state)
+                (updates if update else news).append(name)
+                tag = "UPDATE" if update else "NEW   "
                 print(f"  {tag}  {name}  ({repo.name})")
                 any_found = True
+        warn_if_mirror_untrusted(mirror, updates, news)
         if not any_found:
             print(
                 f"Nothing would be synced. Resolved repos:\n"
