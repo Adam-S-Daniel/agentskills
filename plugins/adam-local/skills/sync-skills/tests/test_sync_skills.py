@@ -30,6 +30,22 @@ from sync_skills import (  # noqa: E402
 )
 
 
+# Decode subprocess output as UTF-8 explicitly, and never die on a stray byte.
+#
+# `text=True` on its own decodes using the LOCALE encoding, which on Windows
+# is cp1252. That is not hypothetical here. sync-skills' own setup.sh
+# registers hooks/pre-push as a GLOBAL git hook, so every `git push` these
+# fixtures make — including into a throwaway bare repo under tmp — prints
+# that hook's UTF-8 box-drawing banner, and cp1252 cannot decode it. The
+# whole repo-state-gate class errored out before its first assertion, on
+# exactly the class of machine this skill exists to run on and the one whose
+# failure prompted the resolution work in #92.
+#
+# errors="replace" as well as an explicit encoding: a test helper must fail
+# on the assertion it was written for, never on decoding the evidence.
+TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -434,7 +450,13 @@ class TestVerify:
             account_dir,
             repo_with_skills / "skills" / "skill-a",
             "skill-a",
-            transform=lambda b: b.replace(b"\n", b"\r\n"),
+            # Normalise before converting. On Windows the fixture's own
+            # SKILL.md is already CRLF, so a bare \n -> \r\n replace
+            # produced \r\r\n: the test manufactured the drift it exists
+            # to prove is not drift, and failed on its own fixture.
+            transform=lambda b: b.replace(b"\r\n", b"\n").replace(
+                b"\n", b"\r\n"
+            ),
         )
         write_manifest(account_dir, ["skill-a"])
 
@@ -1032,7 +1054,7 @@ def run_cli(*args, home, account_list=None):
     extra = ["--account-list", str(account_list)] if account_list else []
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args, *extra],
-        capture_output=True, text=True, env=env,
+        capture_output=True, env=env, **TEXT,
     )
 
 
@@ -1271,7 +1293,7 @@ GIT_ID = [
 
 def _git_run(args, cwd):
     proc = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+        ["git", *args], cwd=str(cwd), capture_output=True, **TEXT,
     )
     assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr}"
     return proc.stdout.strip()
@@ -1308,7 +1330,7 @@ def run_cli_no_tty(*args, home):
     env.pop("AGENTSKILLS_REPOS", None)
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
-        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, env=env, stdin=subprocess.DEVNULL, **TEXT,
     )
 
 
@@ -1502,7 +1524,7 @@ class TestWindowsDecoyRegression:
         env.pop("AGENTSKILLS_REPOS", None)
         return subprocess.run(
             [sys.executable, str(planted["script"]), *args],
-            capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, env=env, stdin=subprocess.DEVNULL, **TEXT,
         )
 
     def test_decoy_no_longer_outranks_the_self_checkout(self, planted):
