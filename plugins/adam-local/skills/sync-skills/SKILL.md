@@ -248,6 +248,14 @@ To preview what would be synced without uploading:
 python3 "$SKILL_DIR/sync_skills.py" --dry-run
 ```
 
+The preview answers `UPDATE` vs `NEW` from the same place the real run does:
+the account mirror first, then `~/.sync-skills-state.json`. It used to read
+the state file alone, so on a machine that had never uploaded anything it
+previewed `NEW` for skills the run then correctly sent as updates. It also
+lists a skill only for the repo that actually holds it — a requested name
+was previously printed once per resolved repo, which reads as a second copy
+and invites an upload from the wrong tree.
+
 To target a single skill:
 
 ```bash
@@ -478,6 +486,12 @@ shipped list.
 does **not** filter the payload — you decide what to POST — but the warning
 has to arrive before the upload, because `--verify` catching it afterwards
 cannot undo it.
+
+`--prepare` also warns when the `is_update` flag it just computed — the one
+that becomes `overwrite=` on the POST — was decided against an account mirror
+it cannot trust: missing, unstamped, or older than the same six hours
+`--verify` refuses. The payload is still built; the doubt is simply stated
+before the upload rather than discovered as a `409` during it.
 
 If `--verify` reports anything but `OK`, treat the sync as failed:
 re-upload that skill through section 1/3 (never section 6 — that's what
