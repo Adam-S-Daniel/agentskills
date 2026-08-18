@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import pytest
 
@@ -1244,6 +1244,101 @@ def test_unwritable_output_errors_cleanly(registry, tmp_path):
 # the bootstrap hook (bash, driven through subprocess)
 # --------------------------------------------------------------------------
 
+def _windows_dir() -> Path:
+    """The Windows directory, as the place a WSL `bash.exe` is found under."""
+    return Path(os.environ.get("SystemRoot", r"C:\Windows"))
+
+
+def _is_wsl_launcher(candidate: Path) -> bool:
+    """True for `C:\\Windows\\System32\\bash.exe` and friends.
+
+    Anything named `bash` living under the Windows directory is the WSL
+    launcher, not a POSIX shell. Judged by location rather than by running it,
+    so this stays a pure predicate and does not depend on WSL's state.
+    """
+    try:
+        candidate.resolve().relative_to(_windows_dir().resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _find_posix_bash() -> Optional[str]:
+    """Absolute path to a POSIX bash, or None if this machine has none.
+
+    On Windows `subprocess` hands the bare name to `CreateProcess`, which
+    searches the application directory, the current directory and then
+    **System32** before it ever consults PATH — and `System32\\bash.exe` is the
+    WSL launcher. It cannot execute a hook addressed by a `D:\\...` path, so
+    every `["bash", script]` here failed having tested nothing.
+
+    `shutil.which("bash")` is not the fix and is actively misleading: it
+    searches PATH only, so it reports Git Bash on exactly the machines where
+    `CreateProcess` reaches WSL. Resolving to an absolute path before invoking
+    is what closes the gap; passing the bare name cannot.
+
+    POSIX has nothing to disambiguate, so the bare name is kept there and this
+    whole path is a no-op off Windows.
+    """
+    if os.name != "nt":
+        return "bash"
+
+    candidates = []
+    found = shutil.which("bash")
+    if found:
+        candidates.append(Path(found))
+
+    # Git for Windows ships the real bash at <git>/usr/bin/bash.exe. Derive the
+    # install root from git itself (covers portable/scoop installs that are on
+    # PATH but in no standard location), then fall back to the usual roots.
+    git = shutil.which("git")
+    if git:
+        # .../cmd/git.exe, .../bin/git.exe and .../mingw64/bin/git.exe all sit
+        # one or two levels below the install root.
+        for up in (2, 3):
+            root = Path(git).resolve().parents[up - 1]
+            candidates.append(root / "usr" / "bin" / "bash.exe")
+    for var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)",
+                "LOCALAPPDATA"):
+        base = os.environ.get(var)
+        if base:
+            candidates.append(Path(base) / "Git" / "usr" / "bin" / "bash.exe")
+            candidates.append(
+                Path(base) / "Programs" / "Git" / "usr" / "bin" / "bash.exe")
+
+    for candidate in candidates:
+        if _is_wsl_launcher(candidate):
+            continue
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+BASH = _find_posix_bash()
+
+
+# Windows needs a baseline environment that POSIX does not, and the hook's
+# deliberately scrubbed env was leaving it out. Strip LOCALAPPDATA and the
+# `python3` shim that Python 3.14 installs can no longer see its own installed
+# runtimes: it prints "Extracting: ..." onto STDOUT — corrupting the framed
+# JSON the hook reads back, which surfaced as a bogus "framing error" verdict —
+# and downloads a fresh interpreter into the current directory, which is how a
+# suite that documents itself as hermetic ended up fetching 30MB over the
+# network and writing it into the repo.
+#
+# None of these name the developer's home, which is what the tmp HOME exists to
+# protect: `$HOME/.claude/skills` is expanded by bash, and every python3 the
+# hook runs is `-I` with its paths handed over explicitly in the environment.
+# USERPROFILE is deliberately NOT among them — it is the one that would let a
+# stray `expanduser("~")` escape the tmp home on Windows.
+_WINDOWS_BASE_ENV = (
+    "SystemRoot", "SystemDrive", "windir", "COMSPEC", "PATHEXT",
+    "LOCALAPPDATA", "APPDATA", "ProgramData", "ProgramFiles",
+    "ProgramFiles(x86)", "ProgramW6432", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+)
+
+
 def _run_hook(home: Path, project_dir: Path = None, extra_env: dict = None,
               script: Path = HOOK, cwd: Path = None,
               timeout: float = None) -> subprocess.CompletedProcess:
@@ -1259,6 +1354,9 @@ def _run_hook(home: Path, project_dir: Path = None, extra_env: dict = None,
     None, so a hang there surfaces as the suite hanging rather than as a
     misattributed failure.
     """
+    if BASH is None:
+        pytest.skip("no POSIX bash on this machine (Windows System32 bash.exe "
+                    "is the WSL launcher, which cannot run the hook)")
     home.mkdir(parents=True, exist_ok=True)
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -1268,12 +1366,19 @@ def _run_hook(home: Path, project_dir: Path = None, extra_env: dict = None,
         # hook itself only reads, but keep git non-interactive regardless.
         "GIT_TERMINAL_PROMPT": "0",
     }
+    for name in _WINDOWS_BASE_ENV if os.name == "nt" else ():
+        if name in os.environ:
+            env[name] = os.environ[name]
+    if os.name == "nt":
+        # Windows' own spellings of TMPDIR, kept pointing at the tmp home so
+        # nothing spills into the real temp directory.
+        env["TEMP"] = env["TMP"] = str(home / "tmp")
     (home / "tmp").mkdir(parents=True, exist_ok=True)
     if project_dir is not None:
         env["CLAUDE_PROJECT_DIR"] = str(project_dir)
     env.update(extra_env or {})
     return subprocess.run(
-        ["bash", str(script)],
+        [BASH, str(script)],
         input='{"hook_event_name":"SessionStart","source":"startup"}',
         env=env, cwd=str(cwd) if cwd else None, capture_output=True, text=True,
         timeout=timeout,
