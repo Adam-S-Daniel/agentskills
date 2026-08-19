@@ -295,6 +295,16 @@ jobs:
   # required status check that changes context name blocks every open PR until
   # the ruleset in repo-settings is updated to match. This adds a context, it
   # renames none.
+  #
+  # That hypothetical is now this job's own situation: `pytest-windows` IS a
+  # required status check on this repo's default branch (declared in
+  # repo-settings' fleet.yml, the only one in that fleet). So the job id below
+  # is a published contract, and this job must stay free of anything that
+  # renames its context — a `name:`, a `matrix` — or that could leave the
+  # context unreported on a PR: a `paths:` filter on the trigger, or a
+  # `concurrency:` block at either level, which lets a cancelled run win the
+  # sha and wedge the merge API. scripts/test_ci_workflow.py asserts all of
+  # that against this file, parsed.
   pytest-windows:
     if: github.event_name != 'schedule'
     runs-on: windows-latest
