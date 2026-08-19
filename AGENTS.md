@@ -171,6 +171,45 @@ multi-event trigger — gets no `concurrency` block at all.
   package — never a regex or line scan, which reads clean on text it cannot
   see), so the block cannot come back.
 
+## Two GitHub connectors, and which one you are holding
+
+A session here can see **two** GitHub MCP servers at once. They authenticate as
+the same person, so `get_me` will not tell them apart, and the tool names do
+not say which is which. Establish it before you reach for one:
+
+- **`mcp__github__*` — session-provisioned.** It does NOT appear in
+  `ListConnectors`; the remote environment supplies it and the session's own
+  system prompt points at it. It is the **only** one with GitHub Actions tools
+  (`actions_list`, `actions_get`, `actions_run_trigger`), CI introspection
+  (`get_check_run`, `get_job_logs`), auto-merge control, and review-thread
+  resolution. Its reach is the session's attached repositories; `add_repo`
+  widens it mid-session.
+- **`mcp__b26ebb34-…__*` — the claude.ai org connector `github-mcp`.** It lists
+  in `ListConnectors` as `connected: true`. Its tool set is a **strict subset**
+  of the above: same reads, same PR and issue writes, same `merge_pull_request`,
+  `push_files` and `delete_file` — and no Actions, no job logs, no auto-merge,
+  no review threads. Its reach comes from a GitHub App installation allowlist
+  that is INDEPENDENT of the session's attached repos.
+
+Three consequences, and the first is why this section sits where it does:
+
+- **Everything that verifies CI is `mcp__github__`-only.** Dispatching a run,
+  reading a rollup, pulling a failed job's log — the org connector can do none
+  of it. A session holding only `github-mcp` cannot follow the rule below at
+  all: it can merge a pull request but it cannot check one.
+- **Fewer tools is not less dangerous.** Both connectors merge, push and
+  delete. The subset one is the connector whose reach you cannot infer from the
+  session's repo list, so a write through it can land somewhere the session was
+  never scoped to. Measured 2026-08-19: `github-mcp` 404s on the private
+  `repo-settings` even though the account can push there, while both read a
+  public non-attached repo fine.
+- **A 404 means "not visible to THIS connector"** — never that a repo or file
+  does not exist. Re-check on the other one before concluding anything.
+
+Prefer `mcp__github__` for everything. Reach for `github-mcp` only when the
+other genuinely cannot see a repo, and say so out loud when you do. When you
+report a verification, name the connector it came from.
+
 ## "The watch finished" is not "CI passed"
 
 Never read CI pass/fail off a watch command's exit code, or off the fact that it
