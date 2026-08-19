@@ -549,7 +549,13 @@ for row in rows:
 # the writer and cannot be changed by any field's CONTENT — unlike the earlier
 # positional, newline/tab-split TSV, where one hostile value forged whole rows.
 def _write_records(path, records):
-    with open(path, "w", encoding="utf-8") as handle:
+    # newline="" on every writer that bash reads back: python's text mode
+    # translates "\n" to os.linesep, so on Windows the separators became CRLF
+    # and bash read a trailing "\r" as part of the field. That is what made
+    # `meta` fail its `^[0-9]+$` check and report a bogus framing error on
+    # every Windows session. These files are a byte-level contract with bash;
+    # the writer decides what is in them, not the platform.
+    with open(path, "w", encoding="utf-8", newline="") as handle:
         for record in records:
             for field in record:
                 handle.write(field)
@@ -591,7 +597,8 @@ _write_records(
 # The verifiable python<->bash contract: the counts bash must read back. If
 # bash reads a different number of COMPLETE records, the stream was truncated
 # or desynced and every skill's source index is suspect.
-with open(os.path.join(out_dir, "meta"), "w", encoding="utf-8") as handle:
+with open(os.path.join(out_dir, "meta"), "w", encoding="utf-8",
+          newline="") as handle:  # LF only -- see _write_records
     handle.write("%d\n%d\n" % (len(sources), len(rows)))
 PY
 then
@@ -703,17 +710,27 @@ if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=1; fi
 # deadline still lands on git itself, and the only thing lost is the reaping of
 # its helper. Degrading to a late orphan is acceptable; degrading to no deadline
 # is what this whole function exists to prevent.
+#
+# Every git here runs with EOL translation OFF. This hook decides whether to
+# install a skill by comparing a sha256 of the fetched bytes against the one
+# the lock recorded, so what it checks out has to be what the blob holds. With
+# `core.autocrlf=true` — the Windows default — git rewrites every LF on the way
+# out, so a lock generated anywhere else disagrees with every clone made here
+# and nothing is ever installed. The registry's own `.gitattributes` is not
+# enough to rely on: a federated source may not carry one.
+GIT_VERBATIM=(-c core.autocrlf=false -c core.eol=lf)
+
 run_git () {
   local left=$(( fetch_deadline - SECONDS ))
   if [ "$left" -lt 1 ]; then left=1; fi
   if [ "$HAVE_TIMEOUT" -eq 1 ]; then
-    timeout -k 5 "$left" git "$@"
+    timeout -k 5 "$left" git "${GIT_VERBATIM[@]}" "$@"
     return $?
   fi
   local monitor=0 git_pid watchdog status
   case "$-" in *m*) monitor=1 ;; esac
   set -m
-  git "$@" &
+  git "${GIT_VERBATIM[@]}" "$@" &
   git_pid=$!
   ( sleep "$left"
     kill -TERM -"$git_pid" 2>/dev/null || kill -TERM "$git_pid" 2>/dev/null
@@ -916,7 +933,7 @@ for entry in record["installed"]:
         rows.append((name, digest))
 
 with open(os.path.join(os.environ["TMP_DIR"], "recorded.nul"), "w",
-          encoding="utf-8") as handle:
+          encoding="utf-8", newline="") as handle:  # LF only -- see above
     for row in rows:
         for field in row:
             handle.write(field)
@@ -1244,7 +1261,8 @@ for entry in record["installed"]:
         # bundle. Not ours to remove, and not ours to forget either.
         plan.append(("keep", name, registry, bundle, digest))
 
-with open(os.path.join(tmp_dir, "plan.nul"), "w", encoding="utf-8") as handle:
+with open(os.path.join(tmp_dir, "plan.nul"), "w", encoding="utf-8",
+          newline="") as handle:  # LF only -- see above
     for row in plan:
         for field in row:
             handle.write(field)
@@ -1352,7 +1370,9 @@ directory = os.path.dirname(record_path) or "."
 staged_fd, staged = tempfile.mkstemp(
     dir=directory, prefix=".skills-bootstrap-installed.", suffix=".tmp")
 try:
-    with os.fdopen(staged_fd, "w", encoding="utf-8") as handle:
+    # LF only: the install record is a JSON artifact a human reads and another
+    # run parses. Its bytes should not depend on which platform wrote it.
+    with os.fdopen(staged_fd, "w", encoding="utf-8", newline="") as handle:
         handle.write(json.dumps(payload, indent=2) + "\n")
     os.replace(staged, record_path)
 except BaseException:

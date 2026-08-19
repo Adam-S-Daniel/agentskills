@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import pytest
 
@@ -40,13 +40,27 @@ import generate_skills_lock as gsl  # noqa: E402
 # --------------------------------------------------------------------------
 
 def _write(path: Path, text: str) -> None:
+    # newline="": python's text mode rewrites "\n" as os.linesep, so on Windows
+    # every fixture was written with different bytes than on Linux — and
+    # TRICKY_SKILL's deliberate "line one\r\nline two\r\n" landed on disk as
+    # "line one\r\r\nline two\r\r\n", which is not the CRLF content the digest
+    # tests exist to pin. A fixture whose bytes depend on the platform cannot
+    # bind two hash implementations to the same answer.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")
+
+
+# Fixture repos must round-trip bytes verbatim. Without this they inherit the
+# developer's own `core.autocrlf`, which on Windows rewrites line endings on
+# the way into the blob and back out again — so what the hook fetches is not
+# what the fixture wrote, and every digest assertion is measuring git's
+# translation rather than the two implementations under test.
+_GIT_VERBATIM = ("-c", "core.autocrlf=false", "-c", "core.eol=lf")
 
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", *_GIT_VERBATIM, "-C", str(repo), *args],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1244,6 +1258,152 @@ def test_unwritable_output_errors_cleanly(registry, tmp_path):
 # the bootstrap hook (bash, driven through subprocess)
 # --------------------------------------------------------------------------
 
+def _windows_dir() -> Path:
+    """The Windows directory, as the place a WSL `bash.exe` is found under."""
+    return Path(os.environ.get("SystemRoot", r"C:\Windows"))
+
+
+def _is_wsl_launcher(candidate: Path) -> bool:
+    """True for `C:\\Windows\\System32\\bash.exe` and friends.
+
+    Anything named `bash` living under the Windows directory is the WSL
+    launcher, not a POSIX shell. Judged by location rather than by running it,
+    so this stays a pure predicate and does not depend on WSL's state.
+    """
+    try:
+        candidate.resolve().relative_to(_windows_dir().resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _find_posix_bash() -> Optional[str]:
+    """Absolute path to a POSIX bash, or None if this machine has none.
+
+    On Windows `subprocess` hands the bare name to `CreateProcess`, which
+    searches the application directory, the current directory and then
+    **System32** before it ever consults PATH — and `System32\\bash.exe` is the
+    WSL launcher. It cannot execute a hook addressed by a `D:\\...` path, so
+    every `["bash", script]` here failed having tested nothing.
+
+    `shutil.which("bash")` is not the fix and is actively misleading: it
+    searches PATH only, so it reports Git Bash on exactly the machines where
+    `CreateProcess` reaches WSL. Resolving to an absolute path before invoking
+    is what closes the gap; passing the bare name cannot.
+
+    POSIX has nothing to disambiguate, so the bare name is kept there and this
+    whole path is a no-op off Windows.
+    """
+    if os.name != "nt":
+        return "bash"
+
+    candidates = []
+    found = shutil.which("bash")
+    if found:
+        candidates.append(Path(found))
+
+    # Git for Windows ships the real bash at <git>/usr/bin/bash.exe. Derive the
+    # install root from git itself (covers portable/scoop installs that are on
+    # PATH but in no standard location), then fall back to the usual roots.
+    git = shutil.which("git")
+    if git:
+        # .../cmd/git.exe, .../bin/git.exe and .../mingw64/bin/git.exe all sit
+        # one or two levels below the install root.
+        for up in (2, 3):
+            root = Path(git).resolve().parents[up - 1]
+            candidates.append(root / "usr" / "bin" / "bash.exe")
+    for var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)",
+                "LOCALAPPDATA"):
+        base = os.environ.get(var)
+        if base:
+            candidates.append(Path(base) / "Git" / "usr" / "bin" / "bash.exe")
+            candidates.append(
+                Path(base) / "Programs" / "Git" / "usr" / "bin" / "bash.exe")
+
+    for candidate in candidates:
+        if _is_wsl_launcher(candidate):
+            continue
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+BASH = _find_posix_bash()
+
+
+def _find_cygpath() -> Optional[str]:
+    """Git Bash's path translator, which ships beside bash itself."""
+    if os.name != "nt" or BASH is None:
+        return None
+    candidate = Path(BASH).with_name("cygpath.exe")
+    return str(candidate) if candidate.is_file() else None
+
+
+CYGPATH = _find_cygpath()
+
+
+def _symlink_to_dir(link: Path, target: Path) -> None:
+    """Point `link` at directory `target`, however this platform can.
+
+    `os.symlink` needs Developer Mode or elevation on Windows (WinError 1314),
+    which is not a reasonable thing for a test run to require. A directory
+    JUNCTION needs neither, and is the same thing for everything asserted
+    here: `Path.resolve()` follows it to the target, which is precisely the
+    de-duplication being pinned.
+    """
+    if os.name != "nt":
+        link.symlink_to(target, target_is_directory=True)
+        return
+    proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.skip("cannot create a directory junction here: "
+                    f"{(proc.stderr or proc.stdout).strip()}")
+
+
+def _hook_path(path: Path) -> str:
+    """`path` spelled the way the hook's own shell spells it.
+
+    The hook runs under Git Bash on Windows, whose MSYS layer has its own mount
+    table: the Windows temp directory is `/tmp`, `C:\\` is `/c`. Every path the
+    hook prints back is in that spelling, so an expectation built from
+    `str(WindowsPath(...))` is comparing against something that was never going
+    to look like one — the assertion failed on the rendering, not on the
+    behaviour it was written to pin.
+
+    Asking `cygpath` is asking the very shell the hook runs under, so this
+    tracks the real mount table instead of hard-coding a guess at it. Off
+    Windows there is nothing to translate.
+    """
+    if CYGPATH is None:
+        return str(path)
+    proc = subprocess.run([CYGPATH, "-u", str(path)],
+                          capture_output=True, text=True, check=True)
+    return proc.stdout.strip()
+
+
+# Windows needs a baseline environment that POSIX does not, and the hook's
+# deliberately scrubbed env was leaving it out. Strip LOCALAPPDATA and the
+# `python3` shim that Python 3.14 installs can no longer see its own installed
+# runtimes: it prints "Extracting: ..." onto STDOUT — corrupting the framed
+# JSON the hook reads back, which surfaced as a bogus "framing error" verdict —
+# and downloads a fresh interpreter into the current directory, which is how a
+# suite that documents itself as hermetic ended up fetching 30MB over the
+# network and writing it into the repo.
+#
+# None of these name the developer's home, which is what the tmp HOME exists to
+# protect: `$HOME/.claude/skills` is expanded by bash, and every python3 the
+# hook runs is `-I` with its paths handed over explicitly in the environment.
+# USERPROFILE is deliberately NOT among them — it is the one that would let a
+# stray `expanduser("~")` escape the tmp home on Windows.
+_WINDOWS_BASE_ENV = (
+    "SystemRoot", "SystemDrive", "windir", "COMSPEC", "PATHEXT",
+    "LOCALAPPDATA", "APPDATA", "ProgramData", "ProgramFiles",
+    "ProgramFiles(x86)", "ProgramW6432", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+)
+
+
 def _run_hook(home: Path, project_dir: Path = None, extra_env: dict = None,
               script: Path = HOOK, cwd: Path = None,
               timeout: float = None) -> subprocess.CompletedProcess:
@@ -1259,6 +1419,9 @@ def _run_hook(home: Path, project_dir: Path = None, extra_env: dict = None,
     None, so a hang there surfaces as the suite hanging rather than as a
     misattributed failure.
     """
+    if BASH is None:
+        pytest.skip("no POSIX bash on this machine (Windows System32 bash.exe "
+                    "is the WSL launcher, which cannot run the hook)")
     home.mkdir(parents=True, exist_ok=True)
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -1268,12 +1431,19 @@ def _run_hook(home: Path, project_dir: Path = None, extra_env: dict = None,
         # hook itself only reads, but keep git non-interactive regardless.
         "GIT_TERMINAL_PROMPT": "0",
     }
+    for name in _WINDOWS_BASE_ENV if os.name == "nt" else ():
+        if name in os.environ:
+            env[name] = os.environ[name]
+    if os.name == "nt":
+        # Windows' own spellings of TMPDIR, kept pointing at the tmp home so
+        # nothing spills into the real temp directory.
+        env["TEMP"] = env["TMP"] = str(home / "tmp")
     (home / "tmp").mkdir(parents=True, exist_ok=True)
     if project_dir is not None:
         env["CLAUDE_PROJECT_DIR"] = str(project_dir)
     env.update(extra_env or {})
     return subprocess.run(
-        ["bash", str(script)],
+        [BASH, str(script)],
         input='{"hook_event_name":"SessionStart","source":"startup"}',
         env=env, cwd=str(cwd) if cwd else None, capture_output=True, text=True,
         timeout=timeout,
@@ -1299,6 +1469,30 @@ def _path_farm(tmp_path: Path, omit: str) -> str:
     `omit` need not be in the list (`timeout` is not — nothing else here uses
     it); the final assertion is what actually establishes the tool is hidden.
     """
+    if os.name == "nt":
+        # A PATH farm cannot be built on Windows AT ALL, and the reason is not
+        # the linking — it is that the isolation the farm depends on is what
+        # breaks the tools. These are MSYS binaries: each one loads
+        # msys-2.0.dll, which Windows finds via the application directory and
+        # then PATH. A farm holds neither, so every tool in it dies at load
+        # time with 0xC0000135 (STATUS_DLL_NOT_FOUND) before it runs a single
+        # instruction — measured. The hook then reports "could not create a
+        # temp directory" because `mktemp` never started, which is a different
+        # branch from the tool-less one under test, and the failure names the
+        # wrong cause.
+        #
+        # Copying msys-2.0.dll in beside them would fix the load and defeat
+        # the point: the farm's whole job is to be a directory containing
+        # nothing but the chosen tools.
+        #
+        # This skips whether or not os.symlink is permitted here — it is
+        # refused without Developer Mode (WinError 1314) on a workstation and
+        # allowed on a GitHub runner, and the farm is useless either way. So
+        # the tool-less branch goes unexercised on Windows, and says so; a
+        # farm quietly holding the real PATH would have claimed it passed.
+        pytest.skip("a PATH farm cannot be built on Windows: an MSYS tool "
+                    "isolated from msys-2.0.dll fails to load (0xC0000135), "
+                    "so hiding one tool hides them all")
     farm = tmp_path / f"bin-no-{omit}"
     farm.mkdir(exist_ok=True)
     for tool in _PATH_FARM_TOOLS:
@@ -1495,7 +1689,7 @@ def test_hook_fails_soft_when_the_lock_is_missing(tmp_path):
     verdict = _verdict(proc)
     assert "DEGRADED" in verdict
     assert "skills.lock" in verdict
-    assert str(project / "skills.lock") in verdict
+    assert _hook_path(project / "skills.lock") in verdict
 
 
 def test_missing_lock_verdict_names_one_location_once(tmp_path):
@@ -1514,7 +1708,7 @@ def test_missing_lock_verdict_names_one_location_once(tmp_path):
     assert proc.returncode == 0
     verdict = _verdict(proc)
     assert "DEGRADED" in verdict
-    assert _looked_in(verdict) == [str((repo / "skills.lock").resolve())]
+    assert _looked_in(verdict) == [_hook_path((repo / "skills.lock").resolve())]
 
 
 def test_missing_lock_verdict_names_each_distinct_location_once(tmp_path):
@@ -1531,8 +1725,8 @@ def test_missing_lock_verdict_names_each_distinct_location_once(tmp_path):
                      {"SKILLS_BOOTSTRAP_FORCE": "1"}, script=script)
     assert proc.returncode == 0
     assert _looked_in(_verdict(proc)) == [
-        str((project / "skills.lock").resolve()),
-        str((repo / "skills.lock").resolve()),
+        _hook_path((project / "skills.lock").resolve()),
+        _hook_path((repo / "skills.lock").resolve()),
     ]
 
 
@@ -1546,12 +1740,12 @@ def test_missing_lock_verdict_de_duplicates_a_symlinked_project_dir(tmp_path):
     repo = tmp_path / "repo"
     script = _hook_copy(repo)
     link = tmp_path / "link"
-    link.symlink_to(repo, target_is_directory=True)
+    _symlink_to_dir(link, repo)
 
     proc = _run_hook(tmp_path / "home", link,
                      {"SKILLS_BOOTSTRAP_FORCE": "1"}, script=script)
     assert proc.returncode == 0
-    assert _looked_in(_verdict(proc)) == [str((repo / "skills.lock").resolve())]
+    assert _looked_in(_verdict(proc)) == [_hook_path((repo / "skills.lock").resolve())]
 
 
 def test_hook_verifies_using_the_registrys_own_generator(tmp_path):
@@ -2535,16 +2729,27 @@ class _Tarpit:
         Killing the process GROUP takes the helper too, and the socket closes.
 
         Each connection has the client's TLS ClientHello sitting in it, so a
-        readable socket is drained until recv() returns b"" (EOF, the client is
-        gone). Nothing here waits out `within` on the happy path: the FIN
-        arrives as soon as the last holder of the socket dies.
+        readable socket is drained until recv() reports the client is gone.
+        Nothing here waits out `within` on the happy path: the socket resolves
+        as soon as its last holder dies.
+
+        "Gone" has two spellings. A graceful close gives b"" (EOF). A process
+        that was KILLED — which is the whole point of this test — has its
+        socket torn down abortively, and Windows surfaces that RST as
+        ConnectionResetError rather than as EOF. Both mean the client is gone,
+        which is the only thing being observed here; treating the reset as an
+        error would fail the test on the very outcome it is asserting.
         """
         deadline = time.monotonic() + within
         pending = list(self.held)
         while pending and time.monotonic() < deadline:
             readable, _, _ = select.select(pending, [], [], 0.1)
             for connection in readable:
-                if connection.recv(65536) == b"":
+                try:
+                    gone = connection.recv(65536) == b""
+                except (ConnectionResetError, ConnectionAbortedError):
+                    gone = True
+                if gone:
                     pending.remove(connection)
         return not pending
 
@@ -3088,7 +3293,7 @@ def test_an_unreadable_install_record_prunes_nothing(tmp_path, registry, corrupt
     assert proc.returncode == 0, proc.stderr
     verdict = _verdict(proc)
     assert "DEGRADED" in verdict, verdict
-    assert f"could not read the install record {record_path}" in verdict, verdict
+    assert f"could not read the install record {_hook_path(record_path)}" in verdict, verdict
     assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
     # The note itself, not the bare word — "could be removed this run"
     # appears in the unreadable-record clause and is not a removal.
@@ -3299,7 +3504,7 @@ def test_a_record_that_cannot_be_written_is_reported_rather_than_fatal(
     assert proc.returncode == 0, proc.stderr
     verdict = _verdict(proc)
     assert "DEGRADED" in verdict, verdict
-    assert f"could not write the install record {blocked}" in verdict, verdict
+    assert f"could not write the install record {_hook_path(blocked)}" in verdict, verdict
     # The session still got its skills: a record it cannot keep is a problem for
     # the NEXT run, not this one.
     assert verdict.startswith("skills: 2/2 "), verdict

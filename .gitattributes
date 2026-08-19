@@ -1,0 +1,32 @@
+# This repository pins its own content by sha256: skills.lock records a digest
+# per skill directory, computed over the WORKING TREE's bytes by
+# scripts/generate_skills_lock.py, and .claude/hooks/skills-bootstrap.sh
+# recomputes the same digest over a fresh clone before it installs anything.
+# schemas/ is pinned the same way, by SCHEMA_SHA256 in check_agent_plugins.py.
+#
+# That only works if a checkout's bytes are the same on every platform. They
+# are not by default: with `core.autocrlf=true` -- the Windows default, and set
+# on ZENDA -- git rewrites LF to CRLF on the way out, so every digest computed
+# on Windows disagreed with the one committed from Linux. The vendored schema
+# reported "sha256 mismatch ... the vendored schema was modified" on every
+# Windows clone, which is the worst possible failure mode for an integrity
+# guard: it accuses you of tampering when nothing but the line endings changed.
+#
+# `-text` turns EOL conversion off entirely, in both directions, so the working
+# tree is byte-for-byte what the blob holds. Not `text=auto eol=lf`: that
+# normalises on the way IN as well, so a stale CRLF working tree keeps hashing
+# clean and the digests stay silently wrong. With `-text` git reports those
+# files as modified until they are re-checked-out, which is the loud version of
+# the same news.
+#
+# Every tracked file here is text (89 of 89 at the time of writing), so there
+# is nothing this can mangle.
+#
+# An existing Windows clone made before this file needs its working tree
+# refreshed once, so the CRLF copies are replaced by the blobs' own bytes:
+#     git reset --hard HEAD        (commit or stash your work first)
+#
+# NOT `git add --renormalize .`: under `-text` that reads the working tree
+# without converting and writes the CRLF bytes back as new blobs, committing
+# the problem instead of clearing it.
+* -text
