@@ -484,8 +484,43 @@ for key in sorted(skills):
     digest = skills[key]
     if not re.fullmatch(NAME + "/" + NAME, key):
         sys.exit("lock: skill key %r is not '<bundle>/<skill>'" % key)
-    if not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+    # BOTH shapes, normalised to bare hex. A committed lock of bare 64-hex
+    # values trips gitleaks' `generic-api-key` rule: a keyword-bearing skill
+    # basename (`secrets`, `oauth`, `token`, `api-…`) is the keyword, and the
+    # digest clears the 3.5 entropy gate. `sha256:` defuses it because `:` sits
+    # outside the rule's capture class, cutting the capture to 6 characters —
+    # under its 10-character floor. Entropy is not a lever (only ~0.02% of real
+    # digests fall below the gate) and a green lock today can flip red on a
+    # content change, so the value's SHAPE is the only durable fix.
+    #
+    # DO NOT DELETE THIS AS DEAD CODE because the lock in front of you is bare
+    # hex. This tolerance ships FIRST and must reach every consumer BEFORE the
+    # generator emits the prefix: the hook is pinned by sha256 in
+    # `_agent-guidance/repos.yml`, so a consumer that receives a prefixed lock
+    # while still carrying an intolerant hook rejects the whole lock and every
+    # ephemeral session there reports `skills: DEGRADED`. Both shapes stay
+    # readable for as long as any consumer might be running an older pin.
+    #
+    # Normalising HERE is what keeps this a one-site change: the bare hex flows
+    # into `skills.nul`, and from there into the `[ "$got" = "$want" ]` integrity
+    # check (`digest_dir` always prints bare hex) and into the install record —
+    # so both record readers' own `[0-9a-f]{64}` still match, and neither a
+    # re-install loop nor a purge loop can be opened by a prefixed lock.
+    #
+    # `isinstance` FIRST, and no `str()` coercion: a JSON *number* of exactly 64
+    # decimal digits stringifies into this very character class, so `str(digest)`
+    # would hand the pattern something that matches and the bogus value would
+    # flow on into the install loop's `rm -rf "$DEST/$name"` — deleting a skill
+    # this hook had already installed and verified. Before the normalisation
+    # above existed the same int reached the record writer, crashed the reader,
+    # and the lock landed on the "could not read $LOCK" verdict, which carries
+    # $LEFT_IN_PLACE and removes nothing. Refusing every non-string here keeps
+    # that fail-closed outcome rather than trading it for a destructive one.
+    matched = (re.fullmatch(r"(?:sha256:)?([0-9a-f]{64})", digest)
+               if isinstance(digest, str) else None)
+    if not matched:
         sys.exit("lock: skill %r has no sha256 digest" % key)
+    digest = matched.group(1)
     bundle, name = key.split("/", 1)
     # `synced/` is the claude.ai account-sync channel's own directory inside
     # $DEST. Nothing this hook installs is ever called that, so a lock naming it
