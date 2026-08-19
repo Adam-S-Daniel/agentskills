@@ -795,6 +795,46 @@ def _reject_basename_collisions(skills: Dict[str, str]) -> Dict[str, str]:
     return skills
 
 
+# The lock records digests as `sha256:<64 hex>`, not bare hex, and the prefix is
+# a SECRETS-SCANNING fix rather than decoration. gitleaks' default
+# `generic-api-key` rule fires on `"<keyword-bearing name>": "<high-entropy
+# value>"`, and a skill basename containing any of `access api auth key
+# credential creds passwd password secret token` is that keyword — `oauth` via
+# `auth`, `api-keys` via both. A real sha256 clears its 3.5 entropy gate with
+# near-certainty (measured: only ~0.01-0.04% of digests fall below it), so
+# entropy is not a lever and truncating is both probabilistic and fatal to the
+# pin. `:` is outside the rule's capture class `[\w.=-]`, so prefixing cuts the
+# capture to 6 characters — under its 10-character floor — and the rule cannot
+# fire at all. Measured over 3000 varying digests: 2991-2995 leaks bare, 0
+# prefixed.
+#
+# The point of fixing it HERE rather than in each consumer's `.gitleaks.toml` is
+# that a brand-new adopter's first lock commit is then green with no config at
+# all — nothing to deliver, nothing to time, nothing to hand-add after a red.
+# The alternative that looks equivalent is not: a lock can pass gitleaks BY LUCK
+# (~0.18% of digests happen to contain a hex-spellable stopword like `dead` or
+# `feed`), so a green scan today is not evidence the next content change stays
+# green. See agentskills#87.
+#
+# Readers normalise the prefix away rather than storing it: the bootstrap hook
+# strips it at its lock reader and everything downstream — the integrity
+# comparison, the install record, skills-doctor's `check_provenance` — keeps
+# seeing bare hex. That tolerance had to be DELIVERED to every consumer before
+# this began emitting, or a consumer would receive a lock its own hook rejects.
+LOCK_DIGEST_PREFIX = "sha256:"
+
+
+def _label_digests(skills: Dict[str, str]) -> Dict[str, str]:
+    """Tag each bare-hex digest with the algorithm that produced it.
+
+    Applied at the document boundary, not inside `collect_skills`, so every
+    comparison BETWEEN builder outputs keeps working on bare hex. That is what
+    leaves `--check-current` alone: it compares a pinned tree against a working
+    tree, both freshly digested, and never reads the lock's stored values.
+    """
+    return {name: LOCK_DIGEST_PREFIX + digest for name, digest in skills.items()}
+
+
 def build_lock(
     repo: Path,
     registry: str,
@@ -809,7 +849,7 @@ def build_lock(
         "registry": registry,
         "ref": ref,
         "bundles": list(bundles),
-        "skills": collect_from_sources(sources),
+        "skills": _label_digests(collect_from_sources(sources)),
         "generated_from": resolved,
     }
     if len(sources) > 1:

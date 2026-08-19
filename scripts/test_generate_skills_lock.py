@@ -263,9 +263,44 @@ def test_generates_a_lock_for_every_skill_in_the_bundle(registry, tmp_path):
     assert lock["generated_from"] == sha
     assert lock["bundles"] == ["adam"]
     assert sorted(lock["skills"]) == ["adam/alpha", "adam/beta"]
-    assert lock["skills"]["adam/alpha"] == gsl.digest_skill_dir(
+    assert lock["skills"]["adam/alpha"] == gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(
         root / "plugins" / "adam" / "skills" / "alpha"
     )
+
+
+def test_every_emitted_digest_is_labelled_sha256(registry, tmp_path):
+    """Every lock value is `sha256:<64 hex>` -- the shape gitleaks cannot fire on.
+
+    RED before the generator labelled them: bare 64-hex values trip gitleaks'
+    default `generic-api-key` rule whenever the skill basename contains one of
+    its ten keyword substrings (`access api auth key credential creds passwd
+    password secret token`), which is why every adopter's first lock commit used
+    to go red and get a hand-written `.gitleaks.toml` after the fact.
+
+    Asserted over EVERY value, not a sample: the rule fires per line, so one
+    unlabelled digest is one red scan. And asserted as a shape rather than as
+    "no leaks", because a bare lock can pass a real scan BY LUCK -- roughly
+    0.18% of digests happen to contain a hex-spellable stopword like `dead` --
+    so a green scanner is not evidence the next content change stays green.
+    See agentskills#87.
+    """
+    root, sha = registry
+    out = tmp_path / "skills.lock"
+    proc = run_generator("--repo", str(root), "--registry", "owner/repo",
+                         "--bundles", "adam", "-o", str(out))
+    assert proc.returncode == 0, proc.stderr
+    skills = json.loads(out.read_text(encoding="utf-8"))["skills"]
+    assert skills, "a lock with no skills would pass this vacuously"
+    for key, digest in skills.items():
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest), (key, digest)
+
+    # The label is a serialisation detail and must not have disturbed the pin
+    # itself: strip it and the value is still exactly what digest_skill_dir
+    # produces. This is what makes the change safe to apply to committed locks.
+    for key, digest in skills.items():
+        bundle, name = key.split("/", 1)
+        assert digest == gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(
+            root / "plugins" / bundle / "skills" / name)
 
 
 def test_an_empty_bundle_yields_an_empty_skills_map(tmp_path):
@@ -407,7 +442,7 @@ def test_a_second_source_is_recorded_and_digested_from_its_own_layout(federated,
         "layout": "skills",
     }]
     assert sorted(lock["skills"]) == ["adam/alpha", "cms-platform/deploy"]
-    assert lock["skills"]["cms-platform/deploy"] == gsl.digest_skill_dir(
+    assert lock["skills"]["cms-platform/deploy"] == gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(
         extra / "skills" / "deploy"
     )
 
@@ -431,7 +466,7 @@ def test_source_repo_overrides_the_sibling_checkout_lookup(tmp_path):
     found = run_generator(*args, "--source-repo", f"cms-platform={extra}")
     assert found.returncode == 0, found.stderr
     lock = json.loads(out.read_text(encoding="utf-8"))
-    assert lock["skills"]["cms-platform/deploy"] == gsl.digest_skill_dir(
+    assert lock["skills"]["cms-platform/deploy"] == gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(
         extra / "skills" / "deploy"
     )
 
@@ -2243,11 +2278,22 @@ def test_hook_reports_a_digest_mismatch(tmp_path, registry):
 # digest: the fixture's digests stay the ones the generator actually computes.
 # --------------------------------------------------------------------------
 
-def _prefix_lock_digests(lock_path: Path) -> None:
-    """Rewrite `lock_path` with every digest carrying the `sha256:` prefix."""
+def _reshape_lock_digests(lock_path: Path, *, prefix: bool) -> None:
+    """Rewrite `lock_path` with every digest in the requested shape.
+
+    Normalises whatever is already there BEFORE applying the shape, so a fixture
+    states which shape it wants instead of inheriting the generator's. That
+    inheritance is exactly what broke these when the generator began emitting
+    the prefix: prepending unconditionally produced `sha256:sha256:<hex>`, which
+    the reader rejects outright, and all three tests failed as DEGRADED — the
+    fixtures were wrong, not the hook. A test that pins one side of a contract
+    must not be written in terms of the other side's current behaviour.
+    """
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    lock["skills"] = {key: "sha256:" + digest
-                      for key, digest in lock["skills"].items()}
+    lock["skills"] = {
+        key: ("sha256:" if prefix else "") + digest.split("sha256:")[-1]
+        for key, digest in lock["skills"].items()
+    }
     lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
@@ -2267,12 +2313,17 @@ def test_both_digest_shapes_install_and_record_identically(tmp_path, registry):
     root, sha = registry
     bare_project = tmp_path / "bare"
     prefixed_project = tmp_path / "prefixed"
-    make_project(bare_project, root, sha)
+    bare_lock = make_project(bare_project, root, sha)
+    _reshape_lock_digests(bare_lock, prefix=False)
     prefixed_lock = make_project(prefixed_project, root, sha)
-    _prefix_lock_digests(prefixed_lock)
-    # The fixture is only worth anything if the two locks really do differ.
+    _reshape_lock_digests(prefixed_lock, prefix=True)
+    # The fixture is only worth anything if the two locks really do differ, and
+    # BOTH sides are asserted now that the generator emits one of the two shapes
+    # natively -- otherwise "bare" silently becomes a second prefixed run.
     assert all(digest.startswith("sha256:") for digest in
                json.loads(prefixed_lock.read_text(encoding="utf-8"))["skills"].values())
+    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in
+               json.loads(bare_lock.read_text(encoding="utf-8"))["skills"].values())
 
     bare_home = tmp_path / "bare-home"
     prefixed_home = tmp_path / "prefixed-home"
@@ -2316,7 +2367,7 @@ def test_a_second_run_against_a_prefixed_lock_is_a_clean_no_op(tmp_path, registr
     """
     root, sha = registry
     project = tmp_path / "project"
-    _prefix_lock_digests(make_project(project, root, sha))
+    _reshape_lock_digests(make_project(project, root, sha), prefix=True)
     home = tmp_path / "home"
 
     first = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
@@ -2352,7 +2403,7 @@ def test_a_skill_leaving_a_prefixed_lock_is_still_reaped(tmp_path, registry):
     root, sha = registry
     project = tmp_path / "project"
     lock_path = make_project(project, root, sha)
-    _prefix_lock_digests(lock_path)
+    _reshape_lock_digests(lock_path, prefix=True)
     full = json.loads(lock_path.read_text(encoding="utf-8"))
     home = tmp_path / "home"
 
@@ -2689,7 +2740,7 @@ def test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill(tmp_path)
     locked = json.loads(
         (project / "skills.lock").read_text(encoding="utf-8")
     )["skills"]["adam/tricky"]
-    assert gsl.digest_skill_dir(installed) == locked
+    assert gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(installed) == locked
 
 
 def test_hook_bundle_override_narrows_what_is_installed(tmp_path):
