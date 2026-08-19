@@ -977,7 +977,13 @@ def test_check_current_flags_a_skill_whose_content_changed(registry, tmp_path):
 
 
 def test_check_current_failure_names_the_re_pin_command(registry, tmp_path):
-    """A red check that does not say how to go green is a check people route around."""
+    """A red check that does not say how to go green is a check people route around.
+
+    It must name `--repin` specifically. The bare command it used to print is
+    the ADR's de-federation trap: on a federated lock a plain generate takes
+    `sources` from the command line alone, so following the remediation line
+    literally drops every federated source and exits 0.
+    """
     root, _ = registry
     out = tmp_path / "skills.lock"
     _lock_for(root, out)
@@ -986,7 +992,7 @@ def test_check_current_failure_names_the_re_pin_command(registry, tmp_path):
 
     proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
     assert proc.returncode == 1
-    assert "scripts/generate_skills_lock.py" in proc.stdout
+    assert "scripts/generate_skills_lock.py --repin" in proc.stdout
 
 
 def test_check_current_failure_names_the_merge_cause(registry, tmp_path):
@@ -1237,6 +1243,531 @@ def test_unwritable_output_errors_cleanly(registry, tmp_path):
     root, _ = registry
     proc = run_generator("--repo", str(root), "-o", str(tmp_path / "nope" / "skills.lock"))
     assert proc.returncode != 0
+    assert "Traceback" not in proc.stderr
+
+
+# --------------------------------------------------------------------------
+# --repin
+#
+# A re-pin is the one WRITE that must not decide afresh what a lock means: it
+# advances an existing lock's `ref` and inherits everything else off the lock
+# itself. The trap it closes is named in _agent-guidance's ADR 0001 — a plain
+# generate takes `sources` from the command line alone, so re-pinning a
+# federated lock by rerunning the generate command drops whatever --source the
+# command line does not repeat, writes a de-federated lock, and exits 0.
+# --------------------------------------------------------------------------
+
+def _head(root: Path) -> str:
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _move_head(root: Path, message: str = "move HEAD") -> str:
+    """Commit an unrelated file so HEAD advances without any skill changing.
+
+    The body carries the CURRENT head, so calling this twice with the same
+    message still changes the file. Writing the message alone made the second
+    call a no-op commit, which `_git`'s `check=True` turned into a bare
+    CalledProcessError with both streams sent to DEVNULL — the least legible
+    failure available, in a helper whose docstring advertises it as reusable.
+    """
+    _write(root / f"{message.replace(' ', '-')}.txt", f"{message} from {_head(root)}\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", message)
+    return _head(root)
+
+
+def _edit_lock(path: Path, **fields) -> None:
+    """Hand-edit a lock's top-level fields, the way a bad merge resolution would.
+
+    A field set to `_DROP` is deleted rather than assigned, which is the shape
+    a conflict resolution actually leaves behind.
+    """
+    document = json.loads(path.read_text(encoding="utf-8"))
+    for key, value in fields.items():
+        if value is _DROP:
+            document.pop(key, None)
+        else:
+            document[key] = value
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+
+_DROP = object()
+
+
+def test_repin_on_a_federated_lock_preserves_every_source_verbatim(federated, tmp_path):
+    """The ADR's named trap, made unrepresentable rather than merely avoidable.
+
+    The re-pin repeats no --source at all, which is exactly the invocation that
+    de-federates a lock through a plain generate. Every field of every source
+    has to come back byte-identical, and the federated skills have to still be
+    in the map — a `sources` array that survived while its skills did not
+    would be a lock that promises a registry it no longer digests.
+
+    The EXTRA registry's HEAD moves too, and that is what gives the
+    byte-identical assertion teeth: with only the primary advancing, the extra
+    source's pinned ref already equals its repo's HEAD, so "inherited" and
+    "silently re-resolved to HEAD" produce the same bytes and the test cannot
+    tell them apart. A re-pin that re-resolved a federated ref would pull
+    unreviewed content from another registry into every consumer's bootstrap
+    under the banner of a routine bump.
+    """
+    primary, primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = json.loads(out.read_text(encoding="utf-8"))
+
+    _move_head(extra)
+    advanced = _move_head(primary)
+    proc = run_generator("--repo", str(primary), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["sources"] == before["sources"]
+    assert "cms-platform/deploy" in after["skills"]
+    assert after["skills"]["cms-platform/deploy"] == before["skills"]["cms-platform/deploy"]
+    # ...and the pin actually moved, which is the half that makes it a re-pin.
+    assert after["ref"] == advanced != primary_sha
+    assert after["generated_from"] == advanced
+
+
+def test_a_plain_generate_still_does_not_inherit_the_locks_sources(federated, tmp_path):
+    """Asserted so nobody 'fixes' the trap by teaching generate to inherit.
+
+    That would silently change what a fresh lock means: today its `sources` are
+    exactly what the command line says, and a consumer setting one up reads the
+    command to know what it federates. --repin is where inheritance belongs,
+    because it is advancing something whose identity is already decided.
+    """
+    primary, _primary_sha, _extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    advanced = _move_head(primary)
+    proc = run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", advanced, "--bundles", "adam", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    de_federated = json.loads(out.read_text(encoding="utf-8"))
+    assert "sources" not in de_federated
+    assert "cms-platform/deploy" not in de_federated["skills"]
+
+
+def test_repin_inherits_the_locks_registry_and_bundles(tmp_path):
+    """Identity comes off the lock, so a re-pin needs no flag to stay itself.
+
+    The bundle is deliberately not `adam`: inheriting DEFAULT_BUNDLES by
+    accident would be indistinguishable from inheriting the lock's own.
+    """
+    root = tmp_path / "registry"
+    make_registry(root, {"extras/alpha": SKILL_A})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "--registry", "owner/elsewhere",
+                         "--ref", _head(root), "--bundles", "extras",
+                         "-o", str(out)).returncode == 0
+
+    _move_head(root)
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert lock["registry"] == "owner/elsewhere"
+    assert lock["bundles"] == ["extras"]
+    assert "extras/alpha" in lock["skills"]
+
+
+def test_repin_on_a_single_source_lock_still_omits_the_sources_key(registry, tmp_path):
+    """Not `"sources": []` — a re-pin must not churn a lock into a new shape."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+
+    _move_head(root)
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert '"sources"' not in out.read_text(encoding="utf-8")
+
+
+def test_repin_pins_exactly_the_ref_it_is_given(registry, tmp_path):
+    """--ref wins over HEAD, so a re-pin can land on a reviewed commit."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+
+    # Both with the DEFAULT message, which is also the case that used to die
+    # inside _move_head: identical content staged nothing and `git commit`
+    # exited 1 through a check=True call with both streams at DEVNULL.
+    target = _move_head(root)
+    head = _move_head(root)
+    assert head != target
+
+    proc = run_generator("--repo", str(root), "--repin", "--ref", target, "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert lock["ref"] == target
+    assert lock["generated_from"] == target
+
+
+def test_repin_reports_the_same_wrote_line_a_generate_does(registry, tmp_path):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+
+    advanced = _move_head(root)
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.startswith(f"Wrote {out}:")
+    assert advanced in proc.stdout
+
+
+def test_repin_on_a_missing_lock_refuses_rather_than_creating_one(tmp_path):
+    """A lock that does not exist has no identity to inherit.
+
+    Creating one decides which registry and which bundles a consumer installs,
+    which is a decision rather than a bump — so it stays a plain generate, and
+    the refusal says so instead of quietly guessing the defaults.
+    """
+    root = tmp_path / "registry"
+    make_registry(root, {"adam/alpha": SKILL_A})
+    out = tmp_path / "absent.lock"
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert str(out) in proc.stderr
+    assert "--repin" in proc.stderr
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("verify_flag", ["--check", "--check-current"])
+def test_repin_with_a_verify_flag_is_an_argparse_error(registry, tmp_path, verify_flag):
+    """One writes and one verifies: a run asking for both has no answer to give.
+
+    Rejected by argparse rather than resolved by precedence — silently picking
+    a side would report on a lock the caller did not mean, and the lock on disk
+    is what everyone reads afterwards.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    before = out.read_text(encoding="utf-8")
+    _move_head(root)
+
+    proc = run_generator("--repo", str(root), "--repin", verify_flag, "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert not _rejected(proc)    # argparse refused it, not the generator
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_a_repinned_lock_passes_check_immediately(registry, tmp_path):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+
+    _move_head(root)
+    assert run_generator("--repo", str(root), "--repin", "-o", str(out)).returncode == 0
+
+    proc = run_generator("--repo", str(root), "--check", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_a_repinned_federated_lock_still_matches_the_source_stated_on_the_command_line(
+        federated, tmp_path):
+    """--check must be told the source INDEPENDENTLY, or it cannot see a drop.
+
+    A bare `--check` inherits `registry` / `ref` / `bundles` / `sources` from
+    the very lock it is checking, so after a re-pin that dropped or rewrote a
+    source it rebuilds from the damaged lock, compares it with itself, and goes
+    green. Passing the ORIGINAL --source spec on the command line is what makes
+    this a guard rather than a smoke test: the expectation is reconstructed
+    from outside the file under test.
+    """
+    primary, _primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _move_head(primary)
+    assert run_generator("--repo", str(primary), "--repin", "-o", str(out)).returncode == 0
+
+    repinned_ref = json.loads(out.read_text(encoding="utf-8"))["ref"]
+    proc = run_generator(
+        "--repo", str(primary), "--check",
+        "--registry", primary.resolve().as_uri(), "--ref", repinned_ref,
+        "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("identity_flag,value", [
+    ("--registry", "owner/elsewhere"),
+    ("--bundles", "extras"),
+    ("--source", "other=owner/other@" + "0" * 40),
+])
+def test_repin_refuses_a_flag_that_would_override_the_inherited_identity(
+        registry, tmp_path, identity_flag, value):
+    """The ADR trap, reached through the flag written to close it.
+
+    `--source` did not add to the inherited array, it REPLACED it — so an
+    operator advancing the pin while bumping one federated source lost every
+    other registry, silently, at exit 0, with --check green afterwards. The
+    same precedence applied to --registry and --bundles. Advancing a pin and
+    deciding what a lock means are two decisions, so they are two commands, and
+    argparse says so rather than a precedence rule resolving it quietly.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    before = out.read_text(encoding="utf-8")
+    _move_head(root)
+
+    proc = run_generator("--repo", str(root), "--repin", identity_flag, value,
+                         "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert identity_flag in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_still_accepts_source_repo_which_is_not_the_locks_identity(federated, tmp_path):
+    """Where a source's checkout lives is a property of the MACHINE, not the lock.
+
+    Refusing it alongside --repin would leave a federated lock un-re-pinnable
+    on any machine whose sibling clones are not at the default `../<repo>`,
+    which is the case --source-repo exists for.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    relocated = tmp_path / "elsewhere" / "cms-platform"
+    relocated.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(extra), str(relocated))
+
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", _head(primary), "--bundles", "adam",
+        "--source", f"cms-platform={relocated.resolve().as_uri()}@{_head(relocated)}:skills",
+        "--source-repo", f"cms-platform={relocated}", "-o", str(out)).returncode == 0
+
+    _move_head(primary)
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--source-repo", f"cms-platform={relocated}", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "cms-platform/deploy" in json.loads(out.read_text(encoding="utf-8"))["skills"]
+
+
+def test_repin_refuses_a_lock_whose_bundle_name_escapes_the_pinned_tree(registry, tmp_path):
+    """The inherited bundle list reaches a filesystem path, and now a WRITE.
+
+    `bundles` is substituted into `layout_dir` and into every skills key, and
+    was only ever type-checked as a list. `../../../outside` globs its way out
+    of the scratch `git archive` extraction entirely, so the lock records a
+    digest for content that is in no commit of any registry — an attestation
+    over bytes nobody published — and the hook then refuses the WHOLE lock over
+    the traversal key, installing nothing. Before --repin that value could only
+    be reached by --check, which never writes.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+
+    outside = tmp_path / "outside" / "skills" / "pwned"
+    _write(outside / "SKILL.md", "---\nname: pwned\n---\nnot in any commit\n")
+    _edit_lock(out, bundles=["../../../outside"])
+    before = out.read_text(encoding="utf-8")
+    _move_head(root)
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert "bundles" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("bad", [123, None, True, {"a": 1}, ["nested"]])
+def test_repin_reports_a_type_confused_bundle_rather_than_tracebacking(registry, tmp_path, bad):
+    """GeneratorError is this file's convention: a message, never a traceback.
+
+    Unvalidated elements reached `str.replace` (a TypeError inside
+    `layout_dir`) or a dict lookup (`unhashable type`) instead.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _edit_lock(out, bundles=[bad])
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+@pytest.mark.parametrize("registry_value", [_DROP, "", None])
+def test_repin_refuses_a_lock_with_no_usable_registry(registry, tmp_path, registry_value):
+    """Defaulting here re-points a consumer at a DIFFERENT repository, at exit 0.
+
+    A plain generate falls back to DEFAULT_REGISTRY because nothing was
+    inherited. Under --repin the lock is the authority, so a missing field is a
+    refusal — otherwise the lock silently starts naming this repo, `--check`
+    goes green against the substitution, and the consumer fetches its
+    instruction text from somewhere it never declared.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "--registry", "owner/consumer",
+                         "--ref", _head(root), "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    _edit_lock(out, registry=registry_value)
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert "registry" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("bundles_value", [_DROP, [], "adam,extras"])
+def test_repin_refuses_a_lock_with_no_usable_bundles(tmp_path, bundles_value):
+    """Defaulting here silently stops delivering a whole bundle.
+
+    `[]` and a comma STRING are both falsy-or-wrong-typed, so the generate
+    path's fall-through would narrow a two-bundle lock to DEFAULT_BUNDLES and
+    drop the other bundle's skills — and the operator usually arrives at
+    --repin because the hook told them the lock was unreadable, which is
+    exactly when nobody is looking for a narrowing.
+    """
+    root = tmp_path / "registry"
+    make_registry(root, {"adam/alpha": SKILL_A, "extras/zeta": SKILL_B})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "--registry", "owner/consumer",
+                         "--ref", _head(root), "--bundles", "adam,extras",
+                         "-o", str(out)).returncode == 0
+    _edit_lock(out, bundles=bundles_value)
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert "bundles" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_refuses_a_sources_value_that_is_not_a_list(federated, tmp_path):
+    """A wrong-typed `sources` is a DELETION on the write path, not a fallback.
+
+    `--check` reports it (the rebuilt document has no sources, so the
+    comparison goes red and names the field) and the hook calls it fatal. The
+    silent fallthrough only became destructive when --repin put it on a write
+    path: the federated half would be written away under a normal `Wrote ...`
+    line at exit 0, with --check green against the de-federated result.
+    """
+    primary, _primary_sha, _extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    _edit_lock(out, sources={"0": document["sources"][0]})
+    before = out.read_text(encoding="utf-8")
+    _move_head(primary)
+
+    proc = run_generator("--repo", str(primary), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert "sources" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_refuses_a_repo_that_is_not_the_registry_the_lock_names(tmp_path):
+    """The lock names a registry; --repo names a clone. Nothing else ties them.
+
+    Re-pinning a consumer's lock from the wrong checkout wrote one repo's
+    commit under the other's name: exit 0, --check green (it re-derives from
+    the same wrong clone), and the failure surfaced only at a consumer's
+    session start, where the hook cannot fetch that sha from that registry and
+    reports DEGRADED. The pin the lock already carries is the probe — a clone
+    that IS this registry has that commit.
+    """
+    registry_root = tmp_path / "registry"
+    make_registry(registry_root, {"adam/alpha": SKILL_A})
+    other = tmp_path / "other-registry"
+    make_registry(other, {"adam/beta": SKILL_B})
+
+    out = tmp_path / "consumer.lock"
+    assert run_generator("--repo", str(registry_root),
+                         "--registry", registry_root.resolve().as_uri(),
+                         "--ref", _head(registry_root), "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(other), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert str(other) in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_refuses_the_consumer_checkout_rather_than_emptying_its_lock(tmp_path):
+    """The same guard, in the shape the flag's own use case produces.
+
+    A consumer repo holds the lock but ships none of the bundles, so re-pinning
+    with `--repo <consumer>` used to write the CONSUMER's HEAD under the
+    REGISTRY's name, digest zero skills, print `Wrote ...: 0 skills` and exit
+    0 — destroying a populated lock. Getting --repo wrong is the one mistake
+    this workflow invites, since the two repositories differ by construction.
+    """
+    registry_root = tmp_path / "registry"
+    make_registry(registry_root, {"adam/alpha": SKILL_A})
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    _write(consumer / "README.md", "a consumer that ships no bundles\n")
+    _git(consumer, "init", "-q", "-b", "main")
+    _git(consumer, "config", "user.email", "test@example.com")
+    _git(consumer, "config", "user.name", "Test")
+    _git(consumer, "add", "-A")
+    _git(consumer, "commit", "-q", "-m", "consumer")
+
+    out = consumer / "skills.lock"
+    assert run_generator("--repo", str(registry_root), "--registry", "owner/registry",
+                         "--ref", _head(registry_root), "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(consumer), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+    assert json.loads(before)["skills"]    # the lock it refused to empty was populated
+
+
+def test_repin_refuses_a_lock_with_no_ref_to_advance(registry, tmp_path):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _edit_lock(out, ref=_DROP)
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert "ref" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("mode", ["--repin", "--check"])
+def test_a_directory_at_the_output_path_errors_cleanly(registry, tmp_path, mode):
+    """`-o <a directory>` is 'the lock is not usable', not an IsADirectoryError.
+
+    A plain generate already reported this cleanly, because its write catches
+    OSError; every mode that READS the lock tracebacked instead.
+    """
+    root, _ = registry
+    a_directory = tmp_path / "not-a-lock"
+    a_directory.mkdir()
+
+    proc = run_generator("--repo", str(root), mode, "-o", str(a_directory))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+@pytest.mark.parametrize("mode", ["--repin", "--check"])
+def test_a_lock_that_is_valid_json_but_not_an_object_errors_cleanly(registry, tmp_path, mode):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    out.write_text("[]\n", encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), mode, "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
     assert "Traceback" not in proc.stderr
 
 

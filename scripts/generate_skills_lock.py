@@ -133,6 +133,76 @@ newly pinned ref. The merge itself never manufactures a red check out of two
 green branches; it carries an already-red `main` past the point where someone
 was looking, and relabels which ref the complaint names.
 
+What `--repin` inherits, and the one field it must not
+------------------------------------------------------
+Re-pinning is a WRITE, but it is not a fresh generate: it advances an existing
+lock rather than deciding afresh what that lock means. So `--repin` loads the
+lock at `--output` and inherits its identity — `registry`, `bundles` and the
+whole `sources` array — the same way `--check` does, and re-resolves only `ref`.
+
+`ref` is the one field a re-pin must NOT inherit, because advancing it is the
+entire operation; inheriting it would produce a lock identical to the one on
+disk and report success for having done nothing. The new value is HEAD of the
+`--repo` checkout, or `--ref`. Nothing here enforces that it is NEWER — a
+re-pin onto a reviewed commit, or back onto a known-good one after a bad bump,
+is a legitimate use — so "advance" describes the intent, not a check.
+
+The inheritance is what makes the ADR's named trap unrepresentable rather than
+merely avoidable. A plain generate deliberately does not inherit — a fresh lock
+means exactly what its flags say — so re-pinning a FEDERATED lock by rerunning
+the generate command silently drops every source the command line does not
+repeat, writes a de-federated lock, and exits 0. Nothing downstream notices: the
+lock is internally consistent, `--check` is green against it, and the missing
+half simply stops being delivered.
+
+`--repin` cannot express that, and the word is literal: the flags that would
+override an inherited identity — `--registry`, `--bundles`, `--source` — are an
+argparse ERROR alongside it. Leaving them merely unnecessary was not enough.
+`--source` is the one way `--repin` offers to advance a federated source's own
+pin, so an operator whose cms-platform sibling had moved would reach for exactly
+`--repin --source '...'` — which took precedence over the inherited array and
+REPLACED it, dropping every other registry. The trap, through the flag written
+to close it. Changing a lock's identity and advancing its pin are two different
+decisions and are now two different commands.
+
+Inheritance also means the lock's fields are REQUIRED, not merely preferred.
+A plain generate falls back to `DEFAULT_REGISTRY` / `DEFAULT_BUNDLES` because
+nothing was inherited and a default is the only answer; under `--repin` that
+same fallback silently re-points a consumer at a different repository, or
+narrows its bundle set and drops a bundle's skills, whenever the lock's own
+field is missing, empty or the wrong type — at exit 0, with `--check` green
+afterwards because it repeats the identical substitution. So `--repin` reads
+those fields strictly and refuses the lock by name instead. The bundle names in
+particular are VALIDATED on this path: `bundles` is substituted into a
+filesystem path (`layout_dir`) and into every skills key, and before `--repin`
+existed the inherited value could only ever be read by `--check`, which does not
+write. A `"bundles": ["../../../outside"]` digests content from outside the
+`git archive` extraction entirely, and writes an attestation over bytes that
+were in no commit of any registry.
+
+`--repin` refuses to CREATE a lock. A lock that does not exist yet has no
+identity to inherit, and deciding a consumer's registry and bundle set is a
+deliberate act — that is a plain generate, run by whoever is making the
+decision.
+
+The `--repo` checkout must BE the registry the lock names
+---------------------------------------------------------
+`registry` says which repository the lock describes; `--repo` says which local
+clone the new pin and every primary digest are read OUT of. A plain generate
+takes both off the command line, side by side, where a mismatch is the
+operator's own assertion. `--repin` reads one from the file and the other from
+the filesystem, and nothing correlates them — so re-pinning a consumer's lock
+with the wrong `--repo` (the multi-registry workflow this flag exists for is
+exactly where the two differ) writes a lock naming a commit its registry does
+not contain, at exit 0, with `--check` green because it re-derives from that
+same wrong clone. The damage lands at somebody else's session start, where the
+hook cannot fetch that sha from that registry and downgrades to
+`skills: DEGRADED` — delivery silently stops.
+
+The pin the lock already carries is the deterministic probe for this: a clone
+that IS the registry has that commit. `--repin` checks it before writing, and
+names both sides when it does not.
+
 The digest
 ----------
 Per skill, sha256 over a manifest built from the skill directory: for every
@@ -175,6 +245,8 @@ Usage:
                                           [--bundles a,b] [-o PATH]
                                           [--source 'b1,b2=OWNER/REPO@REF[:LAYOUT]']
                                           [--source-repo 'KEY=PATH']
+  python3 scripts/generate_skills_lock.py --repin [--ref REF] [--repo PATH]
+                                          [--source-repo 'KEY=PATH'] [-o PATH]
   python3 scripts/generate_skills_lock.py --check [same flags]
   python3 scripts/generate_skills_lock.py --check-current [same flags]
   python3 scripts/generate_skills_lock.py --digest DIR
@@ -184,7 +256,10 @@ where that source's git checkout lives on this machine, defaulting to the
 sibling `../<repo-name>` (the convention scripts/skills_registries.yml already
 uses), and is keyed by the source's registry, its comma-joined bundle list, or
 any one of its bundle names. `--check` / `--check-current` inherit `sources`
-from the lock the same way they inherit `registry` / `ref` / `bundles`.
+from the lock the same way they inherit `registry` / `ref` / `bundles`;
+`--repin` inherits all of those EXCEPT `ref`, requires them to be present and
+well-formed rather than falling back to a default, and refuses the flags that
+would override them.
 """
 
 import argparse
@@ -789,12 +864,28 @@ def serialize(document: dict) -> str:
 
 
 def load_lock(path: Path) -> dict:
+    # OSError, not FileNotFoundError alone: `-o <a directory>` and an unreadable
+    # file are both "the lock is not usable", and both used to escape as a raw
+    # traceback naming internal line numbers. GeneratorError is this file's
+    # stated convention — "reported as a message, never a traceback" — and the
+    # reader arriving here has usually been sent by the hook's DEGRADED verdict,
+    # which is the worst moment to hand them a stack trace.
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise GeneratorError(f"{path} does not exist; generate it first") from None
+    except OSError as exc:
+        raise GeneratorError(f"cannot read {path}: {exc}") from None
     except json.JSONDecodeError as exc:
         raise GeneratorError(f"{path} is not valid JSON: {exc}") from None
+    # Valid JSON is not enough: a top-level array or string reaches every
+    # `.get()` below as an AttributeError.
+    if not isinstance(document, dict):
+        raise GeneratorError(
+            f"{path} is valid JSON but not an object: a lock is "
+            f"{{registry, ref, bundles, skills, ...}}, got {type(document).__name__}"
+        )
+    return document
 
 
 def _parse_bundles(raw: Optional[str], where: str = "--bundles") -> Optional[List[str]]:
@@ -807,6 +898,65 @@ def _parse_bundles(raw: Optional[str], where: str = "--bundles") -> Optional[Lis
         if not _NAME_RE.fullmatch(bundle):
             raise GeneratorError(f"{where}: {bundle!r} is not a plausible bundle name")
     return bundles
+
+
+def _inherited_registry(existing: dict, output: Path) -> str:
+    """The primary registry, read off a lock that `--repin` is advancing.
+
+    Strict where the generate path is permissive, and that asymmetry is the
+    point: a plain generate falls back to DEFAULT_REGISTRY because nothing was
+    inherited, while a re-pin whose lock has lost its `registry` — a botched
+    merge-conflict resolution is the realistic route — would be silently
+    re-pointed at THIS repo, a different repository than the consumer declared,
+    at exit 0. `--check` reports that same lock as stale and names the field;
+    the write path must not launder what the verify path correctly rejects.
+    """
+    registry = existing.get("registry")
+    if not isinstance(registry, str) or not registry:
+        raise GeneratorError(
+            f"{output}: 'registry' is missing or unusable ({registry!r}), so there is "
+            "nothing for --repin to inherit — and defaulting would silently re-point "
+            "this lock at another repository. Fix the field, or generate the lock "
+            "without --repin."
+        )
+    return registry
+
+
+def _inherited_bundles(existing: dict, output: Path) -> List[str]:
+    """The primary bundle list, read off a lock that `--repin` is advancing.
+
+    Validated per element, not merely type-checked as a list. A bundle name is
+    substituted into a filesystem path by `layout_dir` and into every skills
+    key, and until `--repin` existed the inherited value could only be reached
+    by `--check`, which never writes — so nothing downstream of it was ever a
+    write. `["../../../outside"]` escapes the `git archive` extraction and
+    digests content that is in no commit of any registry, writing an
+    attestation over bytes nobody published; a non-string element reaches
+    `str.replace` or a dict lookup and escapes as a traceback. Both are refused
+    here, before `plan_sources` can be handed either.
+
+    An empty list is refused for the same reason a missing key is: it is falsy,
+    so the generate path's `or list(DEFAULT_BUNDLES)` would narrow the lock to
+    the default bundle and drop every other bundle's skills, at exit 0.
+    """
+    bundles = existing.get("bundles")
+    if not isinstance(bundles, list) or not bundles:
+        raise GeneratorError(
+            f"{output}: 'bundles' is missing or is not a non-empty list ({bundles!r}), "
+            "so there is nothing for --repin to inherit — and defaulting would silently "
+            f"narrow this lock to {list(DEFAULT_BUNDLES)}, dropping every other bundle's "
+            "skills. Fix the field, or generate the lock without --repin."
+        )
+    for bundle in bundles:
+        if not isinstance(bundle, str) or not _NAME_RE.fullmatch(bundle):
+            raise GeneratorError(
+                f"{output}: {bundle!r} in 'bundles' is not a plausible bundle name "
+                f"(must match {_NAME_RE.pattern}) — a bundle name becomes a directory "
+                "path under the fetched tree and a key in 'skills', so re-pinning one "
+                "would digest content from outside the pinned tree and write a lock "
+                "the bootstrap hook refuses WHOLESALE. Fix the field."
+            )
+    return list(bundles)
 
 
 def _source_spec(source: dict) -> str:
@@ -866,12 +1016,64 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "working tree is read verbatim, so an untracked skill directory "
                              "counts; what git ignores is excluded, so a local __pycache__ "
                              "does not.")
+    parser.add_argument("--repin", action="store_true",
+                        help="advance an EXISTING lock onto another commit, and write it. "
+                             "The lock's own identity is inherited — registry, bundles and "
+                             "the whole 'sources' array — and only 'ref' is re-resolved, to "
+                             "HEAD of --repo or to --ref. That inheritance is the point: a "
+                             "plain generate takes 'sources' from the command line alone, so "
+                             "re-pinning a federated lock by rerunning it drops every "
+                             "--source not repeated, writes a de-federated lock and exits "
+                             "0, with --check green against the result. --registry / "
+                             "--bundles / --source are therefore an ERROR alongside it — "
+                             "changing a lock's identity is a separate decision, and a "
+                             "separate command. The inherited fields must be present and "
+                             "well-formed; a default would silently re-point or narrow the "
+                             "lock. --repo must be a clone of the registry the lock names "
+                             "(checked against the commit it already pins), because that is "
+                             "where the new pin and every digest are read from. Refuses to "
+                             "create a lock that does not exist yet: there is no identity to "
+                             "inherit, and choosing one is a plain generate.")
     parser.add_argument("--digest", metavar="DIR", default=None,
                         help="print the sha256 digest of one skill directory and exit "
                              "(the bootstrap hook's integrity check calls this)")
     parser.add_argument("--repo", metavar="PATH", default=None,
                         help=f"git repo to read content from (default: {REPO_ROOT})")
     args = parser.parse_args(argv)
+
+    # An argparse error, not a precedence rule: --repin writes and --check
+    # verifies, so a run asking for both has no single answer to give, and
+    # silently picking one would report on a lock the caller did not mean.
+    if args.repin and (args.check or args.check_current):
+        parser.error("--repin writes a lock; --check / --check-current verify one. "
+                     "Run them as separate commands.")
+
+    # The same reasoning one field further in. --repin's premise is that the
+    # lock's identity is authoritative, so a flag that OVERRIDES that identity
+    # has no coherent meaning here — and `--source` did not merely override, it
+    # REPLACED the entire inherited array, so naming one source dropped every
+    # other registry silently, at exit 0. That is the ADR's de-federation trap
+    # reached through the flag written to close it. Refusing is what makes
+    # "inherits its identity" a property of the code rather than of the
+    # docstring. --source-repo is deliberately NOT here: it says where a
+    # source's checkout lives on this machine, which is not the lock's identity
+    # and is exactly what a federated re-pin needs on a machine whose siblings
+    # are not at the default path.
+    if args.repin:
+        overriding = [
+            flag for flag, value in (("--registry", args.registry),
+                                     ("--bundles", args.bundles),
+                                     ("--source", args.source))
+            if value
+        ]
+        if overriding:
+            parser.error(
+                f"--repin inherits the lock's identity; {', '.join(overriding)} would "
+                "override it (--source REPLACES the whole inherited 'sources' array, "
+                "de-federating the lock). Advance the pin and change what the lock "
+                "means as separate commands: a plain generate is where identity is "
+                "decided."
+            )
 
     if args.digest is not None:
         print(digest_skill_dir(Path(args.digest)))
@@ -881,23 +1083,92 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output = Path(args.output) if args.output else DEFAULT_LOCK
 
     verifying = args.check or args.check_current
-    existing = load_lock(output) if verifying else {}
-    registry = args.registry or existing.get("registry") or DEFAULT_REGISTRY
-    bundles = (
-        _parse_bundles(args.bundles)
-        or (existing.get("bundles") if isinstance(existing.get("bundles"), list) else None)
-        or list(DEFAULT_BUNDLES)
-    )
-    ref = args.ref or existing.get("ref") or resolve_ref(repo, "HEAD")
-    # Sources are inherited from the lock for exactly the reason `ref` is: a
+    # --repin joins the verify modes in reading the lock's identity back out of
+    # it, and departs from them on `ref` alone (below). load_lock already
+    # reports a missing file as a GeneratorError; --repin restates it, because
+    # "generate it first" is the wrong instruction for a flag whose entire job
+    # is advancing something that already exists.
+    inheriting = verifying or args.repin
+    # `is_file`, not `exists`: a directory at --output exists, and would fall
+    # through to `read_text` as a raw IsADirectoryError traceback.
+    if args.repin and not output.is_file():
+        what = "is not a file" if output.exists() else "does not exist"
+        raise GeneratorError(
+            f"{output} {what}; --repin advances an existing lock and cannot "
+            "create one. A new lock decides which registry and which bundles a "
+            "consumer installs, which is a deliberate act — generate it without "
+            "--repin."
+        )
+    existing = load_lock(output) if inheriting else {}
+    if args.repin:
+        # Strict, because this is the path that WRITES what it inherited. See
+        # the helpers: the generate path's fall-through to DEFAULT_REGISTRY /
+        # DEFAULT_BUNDLES is correct when nothing was inherited and silently
+        # destructive when something should have been.
+        registry = _inherited_registry(existing, output)
+        bundles = _inherited_bundles(existing, output)
+    else:
+        registry = args.registry or existing.get("registry") or DEFAULT_REGISTRY
+        bundles = (
+            _parse_bundles(args.bundles)
+            or (existing.get("bundles") if isinstance(existing.get("bundles"), list) else None)
+            or list(DEFAULT_BUNDLES)
+        )
+    if args.repin:
+        # The lock names a registry; --repo names a clone. Nothing else ties the
+        # two together, and when they are different repositories the re-pin
+        # writes a commit from one under the name of the other — exit 0, and
+        # --check green because it re-derives from the same wrong clone. The pin
+        # already in the lock is the probe: a clone that IS this registry has
+        # that commit. Deliberately checked even when --ref is given, because
+        # the question is whether this clone is the registry, not which commit
+        # was asked for.
+        pinned = existing.get("ref")
+        if not isinstance(pinned, str) or not pinned:
+            raise GeneratorError(
+                f"{output}: 'ref' is missing or unusable ({pinned!r}); --repin advances "
+                "an existing pin and this lock has none to advance."
+            )
+        if _git(repo, "cat-file", "-e", f"{pinned}^{{commit}}").returncode != 0:
+            raise GeneratorError(
+                f"{repo} does not contain {pinned}, the commit {output} pins for "
+                f"'{registry}' — so this checkout is not that registry, and re-pinning "
+                "from it would write a commit the registry does not have (the hook then "
+                "cannot fetch it, and every consumer session reports DEGRADED). Point "
+                "--repo at a clone of that registry, or fetch the pinned commit into "
+                "this one."
+            )
+    # `ref` is the ONE field --repin does not inherit, and the asymmetry is the
+    # whole flag: advancing the pin is the operation, so inheriting it would
+    # rewrite the lock to what it already said and report success for a no-op.
+    # A verify mode inherits it for the opposite reason — see the docstring:
+    # --check asks whether the lock is faithful to the ref it PINS.
+    ref = args.ref or (existing.get("ref") if verifying else None) or resolve_ref(repo, "HEAD")
+    # Inherited by every mode that reads the lock at all, verify and re-pin
+    # alike — the one field with a mode-dependent answer is `ref` above. A
     # --check that silently dropped the federated half would go green while
-    # verifying only some of what the lock promises.
+    # verifying only some of what the lock promises; a --repin that dropped it
+    # would WRITE that half away, and then pass --check for having done so.
+    raw_sources = existing.get("sources")
     if args.source:
         extras = [parse_source(spec) for spec in args.source]
-    elif isinstance(existing.get("sources"), list):
+    elif args.repin and raw_sources is not None and not isinstance(raw_sources, list):
+        # Present but the wrong JSON type. Falling through to "no sources" is
+        # harmless on --check (the rebuilt document has none, so the comparison
+        # goes red and names it) and is a DELETION here: the federated half
+        # would be written away under a normal `Wrote ...` line at exit 0, and
+        # --check green afterwards. The hook calls the same shape fatal
+        # ("lock: 'sources' must be a list"), so the repair tool must not
+        # "fix" it by discarding the array.
+        raise GeneratorError(
+            f"{output}: 'sources' must be a list, got {type(raw_sources).__name__} — "
+            "--repin will not silently drop a federated source list it cannot read. "
+            "Fix the field (the bootstrap hook refuses this lock for the same reason)."
+        )
+    elif isinstance(raw_sources, list):
         extras = [
             normalize_source(raw, f"sources[{index}]")
-            for index, raw in enumerate(existing["sources"])
+            for index, raw in enumerate(raw_sources)
         ]
     else:
         extras = []
@@ -936,7 +1207,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"FAILED: the bundle has moved on since {ref}, which {output} still "
                       "pins — nothing added or changed since then reaches an ephemeral "
                       "surface. Re-pin it (after committing the content) with:")
-                print("  python3 scripts/generate_skills_lock.py")
+                # --repin, not a bare re-run: this lock may federate, and a
+                # plain generate takes `sources` from the command line alone,
+                # so following that instruction literally would de-federate it
+                # at exit 0. The remediation line is the one place a reader is
+                # told which command to type, so it must name the safe one.
+                print("  python3 scripts/generate_skills_lock.py --repin")
                 print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
                 print("  before another commit touched a locked skill: the lock is still faithful")
                 print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")

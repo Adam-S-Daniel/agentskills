@@ -242,8 +242,11 @@ write is the delivery channel for ephemeral surfaces. What works where:
   What it installs is pinned and integrity-checked by
   [`skills.lock`](skills.lock) — registry, an immutable commit SHA, and a sha256
   per skill — because fetching instruction text at session start is a
-  supply-chain surface; regenerate it with
-  `python3 scripts/generate_skills_lock.py`. The hook is a no-op on a durable
+  supply-chain surface; re-pin it with
+  `python3 scripts/generate_skills_lock.py --repin`, which inherits the lock's
+  registry, bundles and federated `sources` instead of taking them off the
+  command line (a bare re-run drops every source the command line does not
+  repeat, and exits 0). The hook is a no-op on a durable
   machine (the marketplace install is authoritative there), it skips any skill
   the project already owns in `.claude/skills/` (personal skills shadow project
   ones), and it always exits 0 — a failure downgrades to a one-line
