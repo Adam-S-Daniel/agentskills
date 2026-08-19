@@ -627,18 +627,42 @@ def _extract_hook_lock_reader() -> str:
     return text[start:end] + "\n"
 
 
-def _hook_reader_accepts(lock: dict, tmp_path: Path) -> bool:
-    """True iff the hook's lock reader accepts `lock` (exit 0)."""
+def _run_hook_reader(lock: dict, tmp_path: Path) -> subprocess.CompletedProcess:
+    """Run the hook's lock reader standalone against `lock`.
+
+    Returned whole rather than reduced to a bool, because for this reader the
+    exit CODE is not the whole verdict: the hook renders one fixed sentence for
+    every non-zero exit, so a test that wants to know WHY the lock was refused
+    has to read stderr.
+    """
     lock_path = tmp_path / "probe.lock"
     lock_path.write_text(json.dumps(lock), encoding="utf-8")
     out = tmp_path / "reader-out"
     out.mkdir(exist_ok=True)
-    proc = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-c", _extract_hook_lock_reader()],
         env={"LOCK_PATH": str(lock_path), "OUT_DIR": str(out),
              "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
         capture_output=True, text=True,
     )
+
+
+def _hook_reader_accepts(lock: dict, tmp_path: Path) -> bool:
+    """True iff the hook's lock reader accepts `lock` (exit 0).
+
+    A traceback is a HARNESS failure, not a rejection, and is asserted away here
+    rather than reported as False -- the same standard `_rejected` holds the
+    generator to, applied to the hook's copy. It matters because the hook fails
+    soft on ANY non-zero exit from this reader and emits one fixed verdict
+    (`could not read $LOCK (invalid JSON or a bad field ...)`) whatever the
+    cause: a deliberate `sys.exit` and an uncaught exception are the same exit
+    code and the same verdict, and the $LOG that verdict points the operator at
+    is the only surface where they differ. Reading the code alone would let every
+    rejection test in this file pass against a reader that had lost its check and
+    merely crashed instead.
+    """
+    proc = _run_hook_reader(lock, tmp_path)
+    assert "Traceback" not in proc.stderr, proc.stderr
     return proc.returncode == 0
 
 
@@ -2202,6 +2226,258 @@ def test_hook_reports_a_digest_mismatch(tmp_path, registry):
     verdict = _verdict(proc)
     assert verdict.startswith("skills: 1/2 ")
     assert "1 digest mismatch (alpha)" in verdict
+
+
+# --------------------------------------------------------------------------
+# both lock digest shapes: "<64 hex>" and "sha256:<64 hex>"
+#
+# The prefixed shape exists because a committed lock of bare 64-hex values
+# trips gitleaks' `generic-api-key` rule on any keyword-bearing skill basename
+# (issue #87). The hook's tolerance has to LAND AND BE DELIVERED to every
+# consumer before the generator starts emitting it, so these tests pin the
+# reader against a shape nothing writes yet -- deliberately, and they are what
+# stops the tolerance being deleted as dead code in the interval.
+#
+# `scripts/generate_skills_lock.py` still emits bare hex, so a prefixed lock is
+# built here by rewriting one the generator wrote, never by hand-rolling a
+# digest: the fixture's digests stay the ones the generator actually computes.
+# --------------------------------------------------------------------------
+
+def _prefix_lock_digests(lock_path: Path) -> None:
+    """Rewrite `lock_path` with every digest carrying the `sha256:` prefix."""
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["skills"] = {key: "sha256:" + digest
+                      for key, digest in lock["skills"].items()}
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+
+def test_both_digest_shapes_install_and_record_identically(tmp_path, registry):
+    """A prefixed lock installs, and is indistinguishable downstream from bare.
+
+    RED before the reader normalised: a `sha256:`-prefixed lock was refused
+    wholesale and the session reported DEGRADED with nothing installed.
+
+    Asserted as EQUALITY against the bare-hex run rather than as a second set of
+    hand-written expectations, because "the prefix changes the value the reader
+    hands to bash" is the whole failure mode -- the integrity check
+    (`[ "$got" = "$want" ]`, against `digest_dir`'s always-bare hex) and the
+    install record both read that one value. Two runs that agree on the tree AND
+    on the record can only agree if the prefix was normalised away.
+    """
+    root, sha = registry
+    bare_project = tmp_path / "bare"
+    prefixed_project = tmp_path / "prefixed"
+    make_project(bare_project, root, sha)
+    prefixed_lock = make_project(prefixed_project, root, sha)
+    _prefix_lock_digests(prefixed_lock)
+    # The fixture is only worth anything if the two locks really do differ.
+    assert all(digest.startswith("sha256:") for digest in
+               json.loads(prefixed_lock.read_text(encoding="utf-8"))["skills"].values())
+
+    bare_home = tmp_path / "bare-home"
+    prefixed_home = tmp_path / "prefixed-home"
+    bare = _run_hook(bare_home, bare_project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    prefixed = _run_hook(prefixed_home, prefixed_project,
+                         {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert bare.returncode == 0, bare.stderr
+    assert prefixed.returncode == 0, prefixed.stderr
+
+    verdict = _verdict(prefixed)
+    assert verdict.startswith("skills: 2/2 "), verdict
+    assert verdict.endswith("OK"), verdict
+    assert _verdict(bare) == verdict, _verdict(bare)
+
+    # The skills actually landed -- a verdict is not delivery.
+    for name in ("alpha", "beta"):
+        assert (prefixed_home / ".claude" / "skills" / name / "SKILL.md").is_file()
+    assert (prefixed_home / ".claude" / "skills" / "alpha" / "notes.md").is_file()
+    assert _tree(prefixed_home / ".claude" / "skills") == _tree(
+        bare_home / ".claude" / "skills")
+
+    # Stated directly as well as by equality: the record is read back next run
+    # by two separate `[0-9a-f]{64}` validators (the may_replace reader and the
+    # orphan pruner). A record of prefixed values fails both, which is silent --
+    # every installed skill reads as unrecognised.
+    for entry in _record(prefixed_home)["installed"]:
+        assert re.fullmatch(r"[0-9a-f]{64}", entry["digest"]), entry
+
+
+def test_a_second_run_against_a_prefixed_lock_is_a_clean_no_op(tmp_path, registry):
+    """The ordinary repeat run, driven from a prefixed lock.
+
+    The `rm -rf "$DEST/$name"` before the install `cp -R` only ever runs on a
+    second pass, and `cp -R src dest` copies INTO an existing dest -- so a
+    repeat run is where a prefixed lock would surface a nested re-copy. Nothing
+    else in this suite runs the hook twice against one.
+
+    It is NOT the test that covers the install record: see
+    `test_a_skill_leaving_a_prefixed_lock_is_still_reaped` below for why a
+    repeat run stays green even with an unreadable record.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    _prefix_lock_digests(make_project(project, root, sha))
+    home = tmp_path / "home"
+
+    first = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert first.returncode == 0, first.stderr
+    assert _verdict(first).startswith("skills: 2/2 "), _verdict(first)
+    installed = _tree(home / ".claude" / "skills")
+    record = _record(home)
+    assert [entry["name"] for entry in record["installed"]] == ["alpha", "beta"]
+
+    second = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert second.returncode == 0, second.stderr
+    assert _verdict(second) == _verdict(first), _verdict(second)
+    assert _tree(home / ".claude" / "skills") == installed
+    assert _record(home) == record
+
+
+def test_a_skill_leaving_a_prefixed_lock_is_still_reaped(tmp_path, registry):
+    """The record-with-teeth case, which a repeat run does NOT cover.
+
+    A repeat run alone is a weak probe: `may_replace` has a second way to say
+    yes -- the bytes on disk still digest to what the lock names -- so a record
+    of unreadable values still yields an identical tree and an identical record,
+    and the run looks clean. Measured against a hook deliberately mutated to
+    write `sha256:`-prefixed values into the record: the no-op test above passed.
+
+    The prune is where the record is the ONLY evidence. A skill that has left
+    the lock is removed only if the record proves this hook installed it and
+    nobody has edited it since; an entry failing the pruner's `[0-9a-f]{64}` is
+    SKIPPED, so a prefixed record leaks every dropped skill forever under a
+    verdict that reads OK. That is the silent half of the 910/1248 trap, and
+    this is the assertion that fails on it.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    lock_path = make_project(project, root, sha)
+    _prefix_lock_digests(lock_path)
+    full = json.loads(lock_path.read_text(encoding="utf-8"))
+    home = tmp_path / "home"
+
+    first = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert first.returncode == 0, first.stderr
+    assert _verdict(first).startswith("skills: 2/2 "), _verdict(first)
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file()
+
+    _relock(lock_path, full, {"beta"})
+    second = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert second.returncode == 0, second.stderr
+    verdict = _verdict(second)
+    assert verdict.startswith("skills: 1/1 "), verdict
+    # Named, not merely gone -- the same rule the bare-hex prune test holds to.
+    assert "removed 1 skill no longer in the lock (alpha)" in verdict, verdict
+    assert not (home / ".claude" / "skills" / "alpha").exists(), verdict
+    assert (home / ".claude" / "skills" / "beta" / "SKILL.md").is_file()
+    assert [entry["name"] for entry in _record(home)["installed"]] == ["beta"]
+
+
+_GOOD_DIGESTS = ("ab" * 32, "sha256:" + "ab" * 32)
+_BAD_DIGESTS = (
+    "sha256:" + "ab" * 31 + "a",        # 63 hex -- one short of a digest
+    "sha256:sha256:" + "ab" * 32,       # the prefix is not repeatable
+    "SHA256:" + "ab" * 32,              # PINNED: case-sensitive, one spelling
+    "not-a-digest",                     # bare, non-hex
+    12345,                              # not a string at all
+    # The one non-string that LOOKS like one: `str()` of a 64-digit JSON number
+    # is 64 characters drawn entirely from `[0-9a-f]`, so a reader that coerced
+    # instead of type-checking would ACCEPT it. See the end-to-end test below
+    # for what accepting it costs.
+    int("1" * 64),
+)
+
+
+def _lock_with_digest(digest) -> dict:
+    """A minimal, otherwise-valid one-skill lock carrying `digest`."""
+    return {"registry": "owner/primary", "ref": "0" * 40, "bundles": ["adam"],
+            "skills": {"adam/alpha": digest}}
+
+
+@pytest.mark.parametrize("digest", _GOOD_DIGESTS)
+def test_the_lock_reader_takes_either_digest_shape(digest, tmp_path):
+    """The positive control for the rejection test below.
+
+    Without it, a reader that refused EVERYTHING would pass that test while
+    delivering nothing -- "the bad shapes stopped being accepted" and "the
+    harness stopped accepting anything" are the same observation otherwise.
+    """
+    assert _hook_reader_accepts(_lock_with_digest(digest), tmp_path)
+
+
+@pytest.mark.parametrize("digest", _BAD_DIGESTS)
+def test_the_lock_reader_still_refuses_a_malformed_digest(digest, tmp_path):
+    """Tolerating one more shape must not turn the check into a substring match.
+
+    `re.fullmatch` with the prefix OPTIONAL is what keeps these out; a `re.search`
+    or a `lstrip("sha256:")` would take every one of them. The uppercase case is a
+    decision, not an oversight: the generator emits exactly one spelling, and hex
+    is lower-case only, so a case-insensitive reader would be tolerance for a
+    shape nothing writes -- and a lock hand-edited that far is one to refuse.
+
+    Refused BY NAME, not merely non-zero. The hook's verdict for every non-zero
+    exit from this reader is one fixed sentence pointing at $LOG, so the message
+    below is the operator's ONLY statement of which field is wrong -- and a
+    reader that had lost the check and crashed instead would exit non-zero too,
+    passing any test that read the code alone.
+    """
+    proc = _run_hook_reader(_lock_with_digest(digest), tmp_path)
+    assert proc.returncode != 0, proc.stdout
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "has no sha256 digest" in proc.stderr, proc.stderr
+
+
+def test_a_digest_typed_as_a_number_does_not_delete_an_installed_skill(
+        tmp_path, registry):
+    """The fail-closed half of the normalisation, driven end to end.
+
+    Every lock the generator writes types a digest as a STRING, so this shape
+    only arrives by hand-edit -- but it is the one malformed value whose `str()`
+    is 64 characters of `[0-9a-f]`, so a tolerance that coerced rather than
+    type-checked would take it. Taking it is not merely a wrong read: the install
+    loop runs `rm -rf "$DEST/$name"` BEFORE it copies and verifies, so a lock
+    that is refused wholesale today would instead DELETE a skill this hook had
+    already installed and verified, leaving the session with less than it started
+    with under an honest-looking mismatch verdict.
+
+    End to end rather than through the extracted reader because the deletion is
+    in bash, downstream of the exit code the rejection test above asserts: the
+    reader's refusal is only worth anything if it lands on the one verdict that
+    carries $LEFT_IN_PLACE and runs no purge.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    lock_path = make_project(project, root, sha)
+    home = tmp_path / "home"
+
+    first = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert first.returncode == 0, first.stderr
+    assert _verdict(first).startswith("skills: 2/2 "), _verdict(first)
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file()
+    installed = _tree(home / ".claude" / "skills")
+
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["skills"]["adam/alpha"] = int("1" * 64)
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+    # The fixture is only the case it names if the digest really is unquoted.
+    assert '"adam/alpha": 1111' in lock_path.read_text(encoding="utf-8")
+
+    second = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert second.returncode == 0, second.stderr
+    verdict = _verdict(second)
+    # The HARM first, so a regression reddens on the deletion rather than on the
+    # wording of a verdict: with the type check gone, the install loop has
+    # already `rm -rf`'d alpha by the time the digest fails to verify, and this
+    # is the line that catches it.
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+    # Nothing touched AT ALL -- tree and record both, so "left in place" means
+    # exactly that rather than the weaker "alpha happened to survive".
+    assert _tree(home / ".claude" / "skills") == installed, verdict
+    assert "DEGRADED" in verdict, verdict
+    assert "could not read" in verdict, verdict
+    # And the cause reaches the log the verdict sends the operator to, which is
+    # the only place it is ever stated.
+    assert "has no sha256 digest" in _bootstrap_log(home), verdict
 
 
 def test_hook_fails_soft_when_the_lock_is_missing(tmp_path):
