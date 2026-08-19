@@ -313,14 +313,16 @@ ref for review, not the setting, to catch.
   bundles that lock names directly into those sessions, verified against a
   pinned commit and per-skill digests. Such a session opens with a `skills:`
   verdict naming what loaded, or why nothing did — read it instead of guessing.
-- **That adoption is opt-in and per-repo; most repos have not adopted.**
-  Delivery is allowlisted in `_agent-guidance`'s `repos.yml` *and* requires the
-  repo to have committed a `skills.lock` of its own first — the fleet sync
-  never writes one, because the lock is each repo's own declaration of which
-  bundles it installs (some federate several registries). So in an unfamiliar
-  repo, look for `skills.lock` rather than assuming either way. Bundles cost
-  always-on context in every session that carries them, which is why this is a
-  deliberate per-repo decision and not a fleet default.
+- **Adoption is opt-in and double-keyed, and no longer rare.** Delivery needs
+  an allowlist entry in `_agent-guidance`'s `repos.yml` AND a `skills.lock` the
+  repo committed itself — the fleet sync never writes one, because the lock is
+  where a repo declares which bundles it installs (some federate several
+  registries). A repo holds both keys, or is mid-adoption holding one, or is
+  deliberately out for a reason — a propagation experiment the bundle would
+  contaminate, a dormant repo whose sessions never happen. Which of the three
+  fits an unfamiliar repo is not guessable: look for `skills.lock`. Bundles
+  cost always-on context in every session that carries them, which is why this
+  stays a deliberate per-repo decision and not a fleet default.
 - New reusable skills graduate **into** the registry (sensitive ones into
   `agentskills-private`) rather than living on in a consumer repo. A long skill
   splits across files rather than growing into one wall of text.
