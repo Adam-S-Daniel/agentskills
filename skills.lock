@@ -1,18 +1,18 @@
 {
   "registry": "Adam-S-Daniel/agentskills",
-  "ref": "8a0ca6e321c628318cf2e72fe2c101420104a32c",
+  "ref": "f92569e2be0031e8e54acf8f3294c1c89f31f5eb",
   "bundles": [
     "adam"
   ],
   "skills": {
-    "adam/adam-writing-style": "a6f71e6d91694783225d4a7bb9e89be2264f46a7d28cde4c22d48cdd5acb8fa5",
-    "adam/debug-github-workflows": "a695b854250e5c6b8255558354108a406ba2197c500d27173cb7a83b9beb1ffd",
-    "adam/finding-unknowns": "a67b7663b5b44d07cfddeb923ce19f3cf79447e052658a69cf7fcb985fc0130d",
-    "adam/github-actions-repo-settings": "fbe2e8cc76a6b67b7a7d146b7e457c0d4da31a78ce5e864c123ae162835822d6",
-    "adam/review-bash-ci-reliability": "1e1c2993689cfe79b6f1345de09101ff7d3b4b902a34ae5b458ee86e3f28f8b9",
-    "adam/skills-doctor": "37aeccfd4e1b8801a751e0154a9ebd4c0db20e42dc68443bafe7e7c98f8fbff9",
-    "adam/workflow-path-audit": "4986398a43997fd0b03ecc2e1f4dc46831b9c3903cef66d429bf0c070042c54f",
-    "adam/writing-adrs": "4e9a4b9472bd3d92501bf0d7f882544ba66e8b03aa48bac7fa1689c45d903820"
+    "adam/adam-writing-style": "sha256:a6f71e6d91694783225d4a7bb9e89be2264f46a7d28cde4c22d48cdd5acb8fa5",
+    "adam/debug-github-workflows": "sha256:a695b854250e5c6b8255558354108a406ba2197c500d27173cb7a83b9beb1ffd",
+    "adam/finding-unknowns": "sha256:a67b7663b5b44d07cfddeb923ce19f3cf79447e052658a69cf7fcb985fc0130d",
+    "adam/github-actions-repo-settings": "sha256:fbe2e8cc76a6b67b7a7d146b7e457c0d4da31a78ce5e864c123ae162835822d6",
+    "adam/review-bash-ci-reliability": "sha256:1e1c2993689cfe79b6f1345de09101ff7d3b4b902a34ae5b458ee86e3f28f8b9",
+    "adam/skills-doctor": "sha256:37aeccfd4e1b8801a751e0154a9ebd4c0db20e42dc68443bafe7e7c98f8fbff9",
+    "adam/workflow-path-audit": "sha256:4986398a43997fd0b03ecc2e1f4dc46831b9c3903cef66d429bf0c070042c54f",
+    "adam/writing-adrs": "sha256:4e9a4b9472bd3d92501bf0d7f882544ba66e8b03aa48bac7fa1689c45d903820"
   },
-  "generated_from": "8a0ca6e321c628318cf2e72fe2c101420104a32c"
+  "generated_from": "f92569e2be0031e8e54acf8f3294c1c89f31f5eb"
 }
