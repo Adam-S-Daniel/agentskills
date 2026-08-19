@@ -257,6 +257,65 @@ is the case with no automation watching it: check the publish date
 the 7 days rather than the freshest one, and pin it exact (no caret) so `npm ci`
 cannot drift onto a version that has had no cooling-off at all.
 
+## A name you choose becomes data a scanner reads
+
+gitleaks' `generic-api-key` rule fires on a **keyword** next to a
+high-entropy value. The keyword list is short and ordinary:
+
+```
+access  auth  api  credential  creds  key  passwd  password  secret  token
+```
+
+Nothing warns you that those words are reserved, because they are not — they
+are only reserved *in the position a scanner looks at*. Name a skill, a config
+key, a job output, an artifact or a fixture with one of them, and every
+generated file that serialises `name: value` alongside a hash, id or digest
+starts looking like a leak.
+
+That is not hypothetical. A skill named **`cms-platform-secrets`** put the line
+`"cms-platform/cms-platform-secrets": "<64-hex>"` into `skills.lock`, which is
+generated, committed, and scanned. Both consumer sites went red on every push
+to `main` — adamdaniel.ai for eight consecutive pushes, each one a blocked
+editorial publish. An audit of all 34 skill names across both registries found
+exactly one hit: that name. One word, one outage.
+
+The shape that makes it hard to catch:
+
+- **The repo that chooses the name is not the repo that breaks.** cms-platform
+  named the skill; the two sites that install its bundle are what went red.
+  cms-platform's own lock lists only `adam/*` skills, so it stayed green and
+  the author had no signal at all.
+- **A pull request cannot see it.** The PR lane scans `base..head`; the push,
+  schedule and dispatch lanes scan full history. A finding that lives in an
+  older commit is invisible to every PR and fires on every push.
+- **History is immutable, so the name outlives the rename.** Fixing the
+  generator or renaming the skill fixes the working tree and nothing else. The
+  old line stays in every clone until history is rewritten.
+
+So:
+
+- **Check a name against that list before you commit to it**, whenever the name
+  will land in a generated or serialised artifact. It costs one grep. Prefer a
+  name that says what the thing is for over one that names the sensitive noun —
+  `consumer-repo-provisioning` carries the same meaning as
+  `cms-platform-secrets` and trips nothing.
+- **Fix it at the source, not with an allowlist.** An allowlist entry is
+  per-repo; a `.gitleaksignore` fingerprint is `<commit>:<file>:<rule>:<line>`
+  and commit shas are repo-unique, so it cannot be propagated *at all* — copied
+  to another repo it names a commit that does not exist there and silently
+  suppresses nothing while looking like coverage. One rename immunises every
+  consumer at once; N exclusions immunise N repos until the next one adopts.
+- **Do not lean on a scanner's internals.** Labelling a digest `sha256:<hex>`
+  currently dodges the rule because `:` falls outside its capture class — a
+  welcome side effect, and a bad thing to depend on. Justify such a label as
+  self-documentation (it says which algorithm produced the digest); if the
+  upstream regex ever widens, every lock in the fleet goes red at once.
+- **Suppress by value, never by path.** A `paths` entry does not filter
+  findings, it skips the file before any rule runs, so a real credential pasted
+  into it is never reported (cms-platform#260 — 29KB of a public repo left
+  unscanned that way, suppressing nothing that the value regexes did not
+  already cover).
+
 ## Pinning GitHub Actions
 
 **Every `uses:` is pinned to a full 40-character commit SHA** — in workflows,
