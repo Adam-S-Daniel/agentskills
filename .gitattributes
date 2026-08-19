@@ -23,10 +23,24 @@
 # is nothing this can mangle.
 #
 # An existing Windows clone made before this file needs its working tree
-# refreshed once, so the CRLF copies are replaced by the blobs' own bytes:
-#     git reset --hard HEAD        (commit or stash your work first)
+# refreshed once, so the CRLF copies are replaced by the blobs' own bytes.
+# Commit or stash your work first, then:
 #
-# NOT `git add --renormalize .`: under `-text` that reads the working tree
-# without converting and writes the CRLF bytes back as new blobs, committing
-# the problem instead of clearing it.
+#     git ls-files -z | xargs -0 rm -f && git checkout -- .
+#
+# Two more obvious commands do NOT work, both measured on ZENDA:
+#
+#   * `git reset --hard` (and `git checkout-index -a -f`) leave the CRLF files
+#     exactly as they are. Git decides a file is up to date from the index's
+#     cached STAT data, and nothing about adding this file changes any working
+#     file's size or mtime — so it never re-reads them and never rewrites them.
+#     Deleting them first is what removes that shortcut.
+#   * `git add --renormalize .` is worse than useless here: under `-text` it
+#     reads the working tree WITHOUT converting and writes the CRLF bytes back
+#     as new blobs, committing the problem instead of clearing it.
+#
+# The same stat cache is why `git status` reports a stale clone CLEAN while
+# every file in it is still CRLF. A clone in that state passes `git status` and
+# fails the digest checks, which is the confusing pair this note exists for; it
+# only starts reporting the files as modified once something else touches them.
 * -text
