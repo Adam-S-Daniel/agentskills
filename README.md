@@ -262,7 +262,11 @@ write is the delivery channel for ephemeral surfaces. What works where:
   uploading skills as ZIPs via Settings → Capabilities. This is the *only*
   channel that reaches claude.ai chat, Cowork, Claude in Chrome, and mobile —
   and it loads in Claude Code on the web / cloud sessions too, alongside
-  whatever the repo delivers. It can't be repo-scoped (see
+  whatever the repo delivers. Where both channels carry the same skill NAME the
+  hook's copy wins and the name is listed once — measured in
+  [E5](docs/experiments/E5-account-store-vs-hook-precedence.md), which is also
+  why a stale account copy is shadowed in a hook session and still live in chat,
+  Cowork, mobile and any multi-repo session. It can't be repo-scoped (see
   [ADR 0002](docs/decisions/0002-limit-account-store-to-repo-independent-skills.md)),
   so it's reserved for skills that should be live everywhere, not per-repo
   ones. The [`sync-skills`](plugins/adam-local/skills/sync-skills) skill (in
