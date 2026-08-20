@@ -371,6 +371,11 @@ def mirror_skill(account_dir, skill_src, name, transform=None):
         target.write_bytes(transform(data) if transform else data)
 
 
+# The declaration this skill actually ships, by its real path. Needed
+# explicitly because tests redirect ACCOUNT_SKILLS_FILE to stay hermetic.
+REAL_DECLARATION = Path(__file__).parent.parent / "account-skills.txt"
+
+
 def write_declaration(path, names):
     """Write an account-store membership list in the real on-disk format."""
     path.write_text(
@@ -1986,3 +1991,1580 @@ class TestOrgIdFromCliConfig:
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nonexistent"))
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "nohome"))
         assert sync_skills.get_org_id_hint() is None
+
+
+# ---------------------------------------------------------------------------
+# --report-issue: the account-store upload tracking issue
+#
+# The state this mode exists to make visible is INVISIBLE TO EVERY OTHER CHECK
+# in this repo, and deliberately so. test_shipped_declaration_is_the_ruled_set
+# above CI-locks WHICH names belong on the account store, but nothing can
+# check whether the account store received them — that needs a laptop with a
+# logged-in browser session. So the window between "the declaration merged"
+# and "a laptop uploaded it" is a green CI run either way, and the policy is
+# that it must be TRACKED, never BLOCKED.
+#
+# That non-blocking half is what most of these tests defend. The failure this
+# feature could plausibly introduce is not a missed alert — it is a tracker
+# that raises, or fails a push, or opens a duplicate issue every morning, or
+# (worst, and the #258 shape cms-platform already shipped once) CLOSES a live
+# tracking issue because a probe it could not run came back empty.
+# ---------------------------------------------------------------------------
+
+class FakeGh:
+    """Stand-in for ``sync_skills._gh_api``: records calls, answers canned JSON.
+
+    Monkeypatching at ``_gh_api`` rather than at ``subprocess`` covers
+    ``_gh_json`` too (it is a thin parse on top) and keeps every test free of
+    a real ``gh`` binary — which the CI runners here do not have and which
+    would make these tests network-dependent if they did.
+    """
+
+    def __init__(self, repo="Adam-S-Daniel/agentskills", issues=None,
+                 comments=None, fail=False):
+        self.repo = repo
+        self.issues = [] if issues is None else issues
+        self.comments = comments or {}
+        self.fail = fail
+        self.calls = []
+
+    def __call__(self, endpoint, method=None, fields=None):
+        self.calls.append((endpoint, method, tuple(fields or ())))
+        if self.fail:
+            return None
+        if "?" in endpoint:
+            if "/issues?state=open" in endpoint:
+                # Paginate for real. The lookup walks pages, and a stub that
+                # serves the whole list on every page cannot tell a found
+                # marker from a lookup that never got past page 1.
+                page = int(endpoint.split("&page=")[1])
+                start = (page - 1) * 100
+                return json.dumps(self.issues[start:start + 100])
+            if "/comments?" in endpoint:
+                number = int(endpoint.split("/issues/")[1].split("/")[0])
+                # `&page=`, not `page=`: `per_page=` matches first otherwise.
+                page = int(endpoint.split("&page=")[1])
+                return json.dumps(self.comments.get(number, []) if page == 1 else [])
+            raise AssertionError(f"unexpected GET endpoint: {endpoint}")
+        if method == "PATCH":
+            return json.dumps({"number": 1, "state": "closed"})
+        if endpoint.endswith("/comments"):
+            return json.dumps({"id": 999})
+        if endpoint.endswith("/issues"):
+            return json.dumps({"number": 42, "html_url": "https://example.test/42"})
+        raise AssertionError(f"unexpected write endpoint: {endpoint}")
+
+    # -- assertions helpers ------------------------------------------------
+    def created_bodies(self):
+        return [
+            f[len("body="):]
+            for endpoint, method, fields in self.calls
+            if endpoint.endswith("/issues") and method is None
+            for f in fields if f.startswith("body=")
+        ]
+
+    def comment_bodies(self):
+        return [
+            f[len("body="):]
+            for endpoint, method, fields in self.calls
+            if endpoint.endswith("/comments") and method is None
+            for f in fields if f.startswith("body=")
+        ]
+
+    def patches(self):
+        return [c for c in self.calls if c[1] == "PATCH"]
+
+    def writes(self):
+        """Every call that MUTATES something on GitHub."""
+        return [c for c in self.calls if "?" not in c[0]]
+
+
+def gap_pending(*names):
+    return sync_skills.UploadGap("pending", sorted(names), "test")
+
+
+def open_issue(number=7, body=None, pending=()):
+    """An open tracking issue carrying the marker (and optionally a set)."""
+    if body is None:
+        body = sync_skills.ACCOUNT_UPLOAD_ISSUE_MARKER + "\n\n" + (
+            sync_skills.hidden_pending_block(list(pending)) if pending else ""
+        )
+    return {"number": number, "body": body}
+
+
+class TestAccountUploadGap:
+    """The verdict itself: pending / clean / unknown, computed from two inputs."""
+
+    @pytest.fixture(autouse=True)
+    def _hermetic_declaration_path(self, tmp_path, monkeypatch):
+        """Point ACCOUNT_SKILLS_FILE away from the real one, for every test here.
+
+        ``account_upload_gap`` consults the shipped declaration's git
+        provenance (``declaration_differs_from_committed``), so a test that
+        left this pointing at the real file would pass or fail on whether THIS
+        working tree happens to have account-skills.txt staged or edited —
+        exactly the environment dependence the suite is not allowed to have.
+        A tmp path is untracked, which is the documented "cannot establish,
+        so do not guess" branch.
+        """
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_FILE", tmp_path / "declaration.txt"
+        )
+
+    def _mirror(self, tmp_path, monkeypatch, present=(), age_seconds=0,
+                manifest_names=None):
+        account = tmp_path / "account"
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account)
+        account.mkdir(parents=True, exist_ok=True)
+        for name in present:
+            (account / name).mkdir(parents=True, exist_ok=True)
+            (account / name / "SKILL.md").write_text("body\n", encoding="utf-8")
+        names = list(present) if manifest_names is None else list(manifest_names)
+        write_manifest(account, names, age_seconds=age_seconds)
+        return account
+
+    def test_declared_but_absent_is_pending(self, tmp_path, monkeypatch):
+        self._mirror(tmp_path, monkeypatch, present=["alpha"])
+        gap = sync_skills.account_upload_gap(
+            {"alpha", "beta"}, sync_skills.account_manifest(), verify_ok=False,
+            verified_names={"alpha", "beta"},
+        )
+        assert gap.state == "pending"
+        assert gap.missing == ["beta"]
+
+    def test_pending_is_reported_even_though_verify_went_red(
+        self, tmp_path, monkeypatch
+    ):
+        """The ordering that keeps the verify_ok gate from silencing the alert.
+
+        A declared-but-absent skill IS a --verify failure, so if the gate ran
+        before the absence check every real backlog would compute as UNKNOWN
+        and the issue would never open in the one case it exists for.
+        """
+        self._mirror(tmp_path, monkeypatch, present=[])
+        gap = sync_skills.account_upload_gap(
+            {"alpha"}, sync_skills.account_manifest(), verify_ok=False,
+            verified_names={"alpha"},
+        )
+        assert gap.state == "pending"
+
+    def test_everything_declared_is_present_is_clean(self, tmp_path, monkeypatch):
+        self._mirror(tmp_path, monkeypatch, present=["alpha", "beta"])
+        gap = sync_skills.account_upload_gap(
+            {"alpha", "beta"}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={"alpha", "beta"},
+        )
+        assert gap.state == "clean"
+        assert gap.missing == []
+
+    def test_nothing_absent_but_verify_failed_is_unknown_not_clean(
+        self, tmp_path, monkeypatch
+    ):
+        """F1. The account copies are all THERE; --verify still exited 1.
+
+        DRIFT, MISMATCH and 'on the account without a membership ruling' are
+        all present-and-wrong, and absence is the only thing this function can
+        measure. Calling that clean is what let the reporter post an
+        affirmative all-clear and close the tracking issue on a red run.
+        """
+        self._mirror(tmp_path, monkeypatch, present=["alpha", "beta"])
+        gap = sync_skills.account_upload_gap(
+            {"alpha", "beta"}, sync_skills.account_manifest(), verify_ok=False,
+            verified_names={"alpha", "beta"},
+        )
+        assert gap.state == "unknown"
+        assert gap.missing == []
+        assert "--verify did not pass" in gap.reason
+
+    def test_verify_ok_is_required_not_defaulted(self):
+        """No caller can reach the CLEAN arm by forgetting a parameter."""
+        with pytest.raises(TypeError):
+            sync_skills.account_upload_gap({"alpha"}, {})
+
+    def test_verified_names_is_required_not_defaulted(self):
+        """Same rule for the evidence set: a default would restore the hole."""
+        with pytest.raises(TypeError):
+            sync_skills.account_upload_gap({"alpha"}, {}, verify_ok=True)
+
+    def test_an_EMPTY_declaration_is_unknown_not_clean(self, tmp_path, monkeypatch):
+        """The vacuous CLEAN. Nothing declared -> nothing absent -> "complete".
+
+        Every later gate passes vacuously alongside it: verify() compares no
+        account copy and returns True, so verify_ok=True is not evidence
+        either. Measured before the fix: this exact state closed a live
+        tracking issue and posted an affirmative all-clear.
+        """
+        self._mirror(tmp_path, monkeypatch, present=["alpha"])
+        gap = sync_skills.account_upload_gap(
+            set(), sync_skills.account_manifest(), verify_ok=True,
+            verified_names=set(),
+        )
+        assert gap.state == "unknown"
+        assert "EMPTY" in gap.reason
+
+    def test_a_declared_skill_never_compared_is_unknown_not_clean(
+        self, tmp_path, monkeypatch
+    ):
+        """Present on the account, but nothing opened it on this run.
+
+        verify() selects skills from the resolved repos; a declared skill
+        those repos do not carry is never reached, and verify still returns
+        True. "Present" was already weaker than "correct"; "never opened" is
+        weaker still, and only the strongest of the three licenses a close.
+        """
+        self._mirror(tmp_path, monkeypatch, present=["alpha", "beta"])
+        gap = sync_skills.account_upload_gap(
+            {"alpha", "beta"}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={"alpha"},          # beta was never compared
+        )
+        assert gap.state == "unknown"
+        assert "never compared" in gap.reason
+        assert "beta" in gap.reason
+
+    def test_verified_names_None_is_not_evidence(self, tmp_path, monkeypatch):
+        """A caller that cannot say what it compared has not said "all of it"."""
+        self._mirror(tmp_path, monkeypatch, present=["alpha"])
+        gap = sync_skills.account_upload_gap(
+            {"alpha"}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names=None,
+        )
+        assert gap.state == "unknown"
+
+    def test_an_uncommitted_declaration_is_unknown_not_clean(
+        self, tmp_path, monkeypatch
+    ):
+        """The route that needs no unusual flag at all.
+
+        A locally-edited account-skills.txt is outside the CI lock the write
+        speaks for. Removing a name locally makes the rest verify clean and
+        CLOSES the issue; adding one makes the issue announce a backlog item
+        that does not exist on main. Both directions, one guard.
+        """
+        self._mirror(tmp_path, monkeypatch, present=["alpha"])
+        monkeypatch.setattr(
+            "sync_skills.declaration_differs_from_committed",
+            lambda path=None: "uncommitted local changes (test)",
+        )
+        gap = sync_skills.account_upload_gap(
+            {"alpha"}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={"alpha"},
+        )
+        assert gap.state == "unknown"
+        assert "uncommitted" in gap.reason
+
+    def test_an_uncommitted_declaration_blocks_the_PENDING_write_too(
+        self, tmp_path, monkeypatch
+    ):
+        """Not just the close: the issue must not name a locally-added skill."""
+        self._mirror(tmp_path, monkeypatch, present=[])
+        monkeypatch.setattr(
+            "sync_skills.declaration_differs_from_committed",
+            lambda path=None: "uncommitted local changes (test)",
+        )
+        gap = sync_skills.account_upload_gap(
+            {"locally-added"}, sync_skills.account_manifest(), verify_ok=False,
+            verified_names=set(),
+        )
+        assert gap.state == "unknown"
+        assert gap.missing == []
+
+    def test_empty_account_directory_is_not_clean(self, tmp_path, monkeypatch):
+        """F3(b). ``account_skill_payload`` returns {} — which is not None.
+
+        So the directory reads as PRESENT to both this module and verify(),
+        while verify() goes on to call it MISMATCH and exit 1. This function
+        cannot tell the difference and must not try; the verify_ok gate is
+        what stops it closing an issue on that run.
+        """
+        account = tmp_path / "account"
+        (account / "alpha").mkdir(parents=True)
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account)
+        write_manifest(account, ["alpha"])
+
+        assert sync_skills.account_skill_payload("alpha") == {}
+        gap = sync_skills.account_upload_gap(
+            {"alpha"}, sync_skills.account_manifest(), verify_ok=False,
+            verified_names={"alpha"},
+        )
+        assert gap.state == "unknown"
+
+    def test_undeclared_skill_on_the_account_is_not_a_gap(self, tmp_path, monkeypatch):
+        """The account holding extra skills is verify's business, not this one's."""
+        self._mirror(tmp_path, monkeypatch, present=["alpha", "stowaway"])
+        gap = sync_skills.account_upload_gap(
+            {"alpha"}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={"alpha"},
+        )
+        assert gap.state == "clean"
+
+    def test_missing_is_always_a_subset_of_the_declaration(self, tmp_path, monkeypatch):
+        """The guarantee that keeps the issue from becoming a second declaration."""
+        self._mirror(tmp_path, monkeypatch, present=["stowaway"])
+        declared = {"alpha", "beta"}
+        gap = sync_skills.account_upload_gap(
+            declared, sync_skills.account_manifest(), verify_ok=False,
+            verified_names=declared,
+        )
+        assert set(gap.missing) <= declared
+        assert "stowaway" not in gap.missing
+
+    def test_stale_mirror_is_unknown_not_clean(self, tmp_path, monkeypatch):
+        """A pre-upload snapshot answers 'present' for uploads that never landed.
+
+        Asserted with ``verify_ok=True`` deliberately: a passing verify must
+        not rescue a mirror whose freshness could not be established.
+        """
+        self._mirror(
+            tmp_path, monkeypatch, present=["alpha", "beta"],
+            age_seconds=sync_skills.MIRROR_MAX_AGE_SECONDS + 60,
+        )
+        gap = sync_skills.account_upload_gap(
+            {"alpha", "beta"}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={"alpha", "beta"},
+        )
+        assert gap.state == "unknown"
+        assert "stale" in gap.reason
+
+    def test_absent_mirror_is_unknown_not_pending(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", tmp_path / "nope")
+        gap = sync_skills.account_upload_gap(
+            {"alpha"}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={"alpha"},
+        )
+        assert gap.state == "unknown"
+        assert gap.missing == []
+
+    def test_unreadable_declaration_is_unknown_not_clean(self, tmp_path, monkeypatch):
+        """declared=None must not compute as an empty backlog."""
+        self._mirror(tmp_path, monkeypatch, present=[])
+        gap = sync_skills.account_upload_gap(
+            None, sync_skills.account_manifest(), verify_ok=True,
+            verified_names=set(),
+        )
+        assert gap.state == "unknown"
+        assert "declaration" in gap.reason
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            pytest.param("alpha --> beta", id="closes-the-hidden-block"),
+            pytest.param("alpha beta", id="space-splits-the-block"),
+            pytest.param("../escape", id="path-traversal"),
+            pytest.param("a`b", id="backtick"),
+            pytest.param("..", id="bare-parent-directory"),
+            pytest.param(".", id="bare-current-directory"),
+            pytest.param("...", id="all-dots"),
+        ],
+    )
+    def test_illegal_declared_name_is_unknown_not_clean(
+        self, tmp_path, monkeypatch, bad
+    ):
+        """F6. A corrupt declaration must drive no write in any direction."""
+        self._mirror(tmp_path, monkeypatch, present=["alpha"])
+        gap = sync_skills.account_upload_gap(
+            {"alpha", bad}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={"alpha", bad},
+        )
+        assert gap.state == "unknown"
+        assert "not legal skill names" in gap.reason
+        assert repr(bad) in gap.reason
+
+    def test_bare_parent_reads_files_from_OUTSIDE_the_mirror(
+        self, tmp_path, monkeypatch
+    ):
+        """Why ".." had to be rejected, pinned at the mechanism.
+
+        The old character class admitted it, and ".." is not a name a
+        directory can have — it is the PARENT. account_skill_payload("..")
+        resolved to ACCOUNT_SKILLS_DIR/.. and rglob'd the tree ABOVE the
+        mirror, so it returned a non-None payload, counted as PRESENT, and a
+        declaration containing it computed as CLEAN: the guard produced the
+        one verdict it exists to withhold. Asserting the payload first so
+        this pins the mechanism, not just the verdict.
+        """
+        account = tmp_path / "nest" / "account"
+        account.mkdir(parents=True)
+        (tmp_path / "nest" / "sibling.txt").write_text("outside the mirror\n")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account)
+        write_manifest(account, [])
+
+        # The traversal itself still works - this is a path resolution, not
+        # something the name guard can undo. What changed is that the name
+        # can no longer reach it through the declaration.
+        assert sync_skills.account_skill_payload("..") is not None
+        assert not sync_skills.SKILL_NAME_RE.fullmatch("..")
+
+        gap = sync_skills.account_upload_gap(
+            {".."}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={".."},
+        )
+        assert gap.state == "unknown"
+
+    def test_dotted_names_that_are_real_directories_stay_legal(self):
+        """The fix must reject only the pure-dot tokens, not every dot."""
+        for legal in ("..a", ".hidden", "a.b", "sync-skills", "a_b-c.d"):
+            assert sync_skills.SKILL_NAME_RE.fullmatch(legal), legal
+
+    def test_ordinary_skill_names_are_all_legal(self):
+        """The guard must not reject the real declaration it ships beside.
+
+        Reads the shipped path EXPLICITLY: the hermetic fixture above
+        redirects ACCOUNT_SKILLS_FILE, and this is the one test in the class
+        whose entire point is the real file's real contents.
+        """
+        real = sync_skills.load_account_declaration(REAL_DECLARATION)
+        assert real, "the shipped declaration should be readable"
+        assert [n for n in real if not sync_skills.SKILL_NAME_RE.fullmatch(n)] == []
+
+    def test_manifest_entry_without_a_local_copy_counts_as_missing(
+        self, tmp_path, monkeypatch
+    ):
+        """Half-written mirror: index refreshed, directory not.
+
+        verify() calls that skill's upload missing (account_skill_payload is
+        None), and so does this — the two agree, which is the point.
+        """
+        self._mirror(
+            tmp_path, monkeypatch, present=[], manifest_names=["alpha"]
+        )
+        gap = sync_skills.account_upload_gap(
+            {"alpha"}, sync_skills.account_manifest(), verify_ok=False,
+            verified_names={"alpha"},
+        )
+        assert gap.state == "pending"
+        assert gap.missing == ["alpha"]
+
+    def test_local_copy_absent_from_the_manifest_is_still_PRESENT(
+        self, tmp_path, monkeypatch
+    ):
+        """F3(a), the other direction of the old 'lockstep' claim.
+
+        The mirror holds a readable copy but the account's manifest.json does
+        not index it. verify() reads that as present (it only ever calls
+        ``account_skill_payload``); the old reporter read it as ABSENT and
+        named an already-uploaded skill in the tracking issue, every run.
+        """
+        self._mirror(
+            tmp_path, monkeypatch, present=["alpha"], manifest_names=[]
+        )
+        assert sync_skills.account_skill_payload("alpha") is not None
+        assert sync_skills.account_present_names({"alpha"}) == {"alpha"}
+        gap = sync_skills.account_upload_gap(
+            {"alpha"}, sync_skills.account_manifest(), verify_ok=True,
+            verified_names={"alpha"},
+        )
+        assert gap.state == "clean"
+        assert gap.missing == []
+
+
+class TestPendingBlockDedupe:
+    def test_round_trips_the_set(self):
+        block = sync_skills.hidden_pending_block(["beta", "alpha"])
+        assert sync_skills.extract_reported_pending([block]) == {"alpha", "beta"}
+
+    def test_takes_the_LAST_block_not_the_union(self):
+        """The set shrinks as uploads land; a union could only ever grow."""
+        texts = [
+            sync_skills.hidden_pending_block(["alpha", "beta"]),
+            sync_skills.hidden_pending_block(["beta"]),
+        ]
+        assert sync_skills.extract_reported_pending(texts) == {"beta"}
+
+    def test_no_block_anywhere_is_none_not_empty_set(self):
+        """None routes to 'changed'; set() would suppress the first comment."""
+        assert sync_skills.extract_reported_pending(["hand-written issue"]) is None
+
+    def test_ignores_non_string_bodies(self):
+        assert sync_skills.extract_reported_pending([None, 17]) is None
+
+    def test_a_name_containing_an_arrow_breaks_the_round_trip(self):
+        """F6, end to end: why SKILL_NAME_RE exists at all.
+
+        The dedupe channel is an HTML comment delimited by ``-->``. A name
+        containing ``-->`` closes the block early, so the block written and
+        the set read back out of it are not the same set — and since the
+        comparison in report_account_upload_gap can then never be equal, the
+        tool would comment on EVERY run, which is exactly the daily-identical
+        -comment noise the dedupe exists to prevent.
+
+        This is a CHARACTERISATION test of the un-escaped channel, not a spec
+        for it: the fix is upstream refusal (see
+        test_illegal_declared_name_is_unknown_not_clean), because these names
+        are directory names and one outside [A-Za-z0-9._-] is a broken
+        declaration rather than a string to make safe.
+        """
+        block = sync_skills.hidden_pending_block(["alpha --> beta", "gamma"])
+        assert block == "<!-- pending-uploads: alpha --> beta gamma -->"
+        read_back = sync_skills.extract_reported_pending([block])
+
+        assert read_back == {"alpha"}
+        assert read_back != {"alpha --> beta", "gamma"}
+        # ...and the guard upstream is what keeps such a name out of here.
+        assert not sync_skills.SKILL_NAME_RE.fullmatch("alpha --> beta")
+
+
+class TestReportAccountUploadGap:
+    """The issue lifecycle. Every gh call is faked; nothing touches a network."""
+
+    REPO = "Adam-S-Daniel/agentskills"
+
+    def _wire(self, monkeypatch, fake):
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+    def test_pending_with_no_issue_opens_one(self, monkeypatch, capsys):
+        fake = FakeGh()
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha", "beta"), repo=self.REPO)
+
+        bodies = fake.created_bodies()
+        assert len(bodies) == 1
+        assert sync_skills.ACCOUNT_UPLOAD_ISSUE_MARKER in bodies[0]
+        assert "`alpha`" in bodies[0] and "`beta`" in bodies[0]
+        assert "opened #42" in capsys.readouterr().out
+
+    def test_issue_body_names_the_remedy_and_the_refresh_order(self, monkeypatch):
+        """Actionable by someone who did not write it (and did not read SKILL.md)."""
+        fake = FakeGh()
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        body = fake.created_bodies()[0]
+        assert "CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'" in body
+        assert "--prepare --skill NAME --zip-dir" in body
+        # The refresh must come BEFORE the upload command, not merely appear.
+        assert body.index("CLAUDE_CODE_SYNC_SKILLS") < body.index("--prepare --skill")
+
+    def test_issue_never_names_a_skill_outside_the_declaration(self, monkeypatch):
+        """The issue is derived from the declaration; it is not a second one."""
+        fake = FakeGh()
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        assert "stowaway" not in fake.created_bodies()[0]
+
+    def test_unchanged_set_does_not_re_comment(self, monkeypatch, capsys):
+        """A daily identical comment is the noise the alert exists to cut through."""
+        fake = FakeGh(issues=[open_issue(pending=["alpha", "beta"])])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha", "beta"), repo=self.REPO)
+
+        assert fake.writes() == []
+        assert "No comment posted" in capsys.readouterr().out
+
+    def test_changed_set_comments(self, monkeypatch):
+        fake = FakeGh(issues=[open_issue(pending=["alpha"])])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha", "beta"), repo=self.REPO)
+
+        bodies = fake.comment_bodies()
+        assert len(bodies) == 1
+        assert "`beta`" in bodies[0]
+        assert sync_skills.hidden_pending_block(["alpha", "beta"]) in bodies[0]
+        assert fake.patches() == []
+
+    def test_set_that_shrank_still_counts_as_changed(self, monkeypatch):
+        """Two of three landed: real progress, and a union-based dedupe misses it."""
+        fake = FakeGh(issues=[open_issue(pending=["alpha", "beta", "gamma"])])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("gamma"), repo=self.REPO)
+
+        assert len(fake.comment_bodies()) == 1
+
+    def test_latest_comment_wins_over_the_issue_body(self, monkeypatch):
+        fake = FakeGh(
+            issues=[open_issue(number=7, pending=["alpha", "beta"])],
+            comments={7: [{"body": sync_skills.hidden_pending_block(["beta"])}]},
+        )
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("beta"), repo=self.REPO)
+
+        assert fake.writes() == []
+
+    def test_clean_closes_the_open_issue(self, monkeypatch, capsys):
+        fake = FakeGh(issues=[open_issue(number=7, pending=["alpha"])])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(
+            sync_skills.UploadGap("clean", [], "done"), repo=self.REPO
+        )
+
+        assert len(fake.comment_bodies()) == 1
+        patches = fake.patches()
+        assert len(patches) == 1
+        assert "state=closed" in patches[0][2]
+        assert "closed #7" in capsys.readouterr().out
+
+    def test_clean_comments_BEFORE_it_closes(self, monkeypatch):
+        """A closed issue with no explanation is a state someone reconstructs later."""
+        fake = FakeGh(issues=[open_issue(number=7)])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(
+            sync_skills.UploadGap("clean", [], "done"), repo=self.REPO
+        )
+
+        kinds = [m for _, m, _ in fake.writes()]
+        assert kinds == [None, "PATCH"]
+
+    def test_clean_with_no_issue_writes_nothing(self, monkeypatch):
+        fake = FakeGh(issues=[])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(
+            sync_skills.UploadGap("clean", [], "done"), repo=self.REPO
+        )
+
+        assert fake.writes() == []
+
+    def test_lookup_uses_the_marker_and_ignores_a_same_titled_issue(self, monkeypatch):
+        """Never a title search: a title can be edited, a marker cannot drift."""
+        fake = FakeGh(issues=[{"number": 3, "body": "no marker here"}])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        assert len(fake.created_bodies()) == 1  # opened fresh, did not adopt #3
+
+    def test_pull_requests_are_filtered_out_of_the_issue_listing(self, monkeypatch):
+        """GET /issues returns PRs too; commenting on one is not tracking."""
+        pr = {
+            "number": 5,
+            "body": sync_skills.ACCOUNT_UPLOAD_ISSUE_MARKER,
+            "pull_request": {"url": "https://example.test/pull/5"},
+        }
+        fake = FakeGh(issues=[pr])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        assert len(fake.created_bodies()) == 1
+        assert not any("/issues/5/" in e for e, _, _ in fake.calls)
+
+    # -- the UNKNOWN arm: no write, in any direction ------------------------
+
+    @pytest.mark.parametrize(
+        "issues",
+        [
+            pytest.param([], id="no-issue-open"),
+            pytest.param([open_issue(number=7, pending=["alpha"])], id="issue-open"),
+        ],
+    )
+    def test_unknown_touches_nothing(self, monkeypatch, capsys, issues):
+        """#258 verbatim: an unreadable probe is not a clean answer.
+
+        Not merely 'does not close' — it makes no gh call at all, so it can
+        neither open a backlog it cannot see nor retire a live one.
+        """
+        fake = FakeGh(issues=issues)
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(
+            sync_skills.UploadGap("unknown", [], "mirror is stale"), repo=self.REPO
+        )
+
+        assert fake.calls == []
+        err = capsys.readouterr().err
+        assert "UNKNOWN, not clean" in err
+        assert "mirror is stale" in err
+
+    # -- gh that cannot answer ---------------------------------------------
+
+    def test_failing_gh_never_raises_and_writes_nothing(self, monkeypatch):
+        """A lookup that failed is not 'there is no issue' — that opens a duplicate."""
+        fake = FakeGh(issues=[open_issue()], fail=True)
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        assert fake.writes() == []
+
+    def test_unreadable_comments_leave_the_issue_alone(self, monkeypatch, capsys):
+        """Cannot tell whether the set changed; the alert is already delivered."""
+
+        def gh(endpoint, method=None, fields=None):
+            gh.calls.append((endpoint, method, tuple(fields or ())))
+            if "/issues?state=open" in endpoint:
+                return json.dumps([open_issue(number=7, pending=["alpha"])])
+            if "/comments?" in endpoint:
+                return None
+            raise AssertionError(f"should not have been called: {endpoint}")
+
+        gh.calls = []
+        monkeypatch.setattr("sync_skills._gh_api", gh)
+
+        sync_skills.report_account_upload_gap(gap_pending("beta"), repo=self.REPO)
+
+        assert [c for c in gh.calls if "?" not in c[0]] == []
+        assert "comments could not be read" in capsys.readouterr().err
+
+    def test_failed_close_comment_leaves_the_issue_open(self, monkeypatch, capsys):
+        def gh(endpoint, method=None, fields=None):
+            gh.calls.append((endpoint, method, tuple(fields or ())))
+            if "/issues?state=open" in endpoint:
+                return json.dumps([open_issue(number=7)])
+            return None  # the close comment fails to post
+
+        gh.calls = []
+        monkeypatch.setattr("sync_skills._gh_api", gh)
+
+        sync_skills.report_account_upload_gap(
+            sync_skills.UploadGap("clean", [], "done"), repo=self.REPO
+        )
+
+        assert [c for c in gh.calls if c[1] == "PATCH"] == []
+        assert "left issue #7 OPEN" in capsys.readouterr().err
+
+    def test_unresolvable_repo_writes_nothing(self, monkeypatch, capsys):
+        fake = FakeGh()
+        self._wire(monkeypatch, fake)
+        monkeypatch.setattr("sync_skills._self_repo", lambda: None)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=None)
+
+        assert fake.calls == []
+        assert "--report-repo OWNER/NAME" in capsys.readouterr().err
+
+    def test_malformed_report_repo_names_the_value_and_writes_nothing(
+        self, monkeypatch, capsys
+    ):
+        """F5 at the reporter: the message points at the cause, not the flag."""
+        fake = FakeGh()
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(
+            gap_pending("alpha"), repo="bad slug here"
+        )
+
+        assert fake.calls == []
+        err = capsys.readouterr().err
+        assert "'bad slug here'" in err
+        assert "not an OWNER/NAME slug" in err
+
+    # -- F2: the marker lookup is paginated ---------------------------------
+
+    def test_marker_issue_on_page_two_is_found_not_duplicated(
+        self, monkeypatch, capsys
+    ):
+        """F2. GitHub returns PRs in /issues and sorts created-descending.
+
+        So an AGEING tracking issue — exactly the one still open and still
+        needing an update — falls off page 1 the moment 100 newer open items
+        exist. A single un-paginated request then found nothing and opened a
+        SECOND tracking issue beside the first.
+        """
+        filler = [{"number": 1000 + i, "body": "unrelated"} for i in range(100)]
+        fake = FakeGh(issues=filler + [open_issue(number=7, pending=["alpha"])])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha", "beta"),
+                                              repo=self.REPO)
+
+        assert fake.created_bodies() == []  # no duplicate opened
+        assert len(fake.comment_bodies()) == 1  # it UPDATED the real issue
+        pages = [e for e, _, _ in fake.calls if "issues?state=open" in e]
+        assert len(pages) == 2  # it actually walked past page 1
+
+    def test_a_failed_page_is_not_read_as_no_issue_exists(self, monkeypatch):
+        """A lookup that broke mid-walk must not license opening a duplicate."""
+        filler = [{"number": 1000 + i, "body": "unrelated"} for i in range(100)]
+
+        def gh(endpoint, method=None, fields=None):
+            gh.calls.append((endpoint, method, tuple(fields or ())))
+            if "issues?state=open" in endpoint:
+                if endpoint.endswith("page=1"):
+                    return json.dumps(filler)
+                return None  # page 2 fails
+            raise AssertionError(f"should not have been called: {endpoint}")
+
+        gh.calls = []
+        monkeypatch.setattr("sync_skills._gh_api", gh)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        assert [c for c in gh.calls if "?" not in c[0]] == []
+
+    def test_running_out_of_pages_is_not_read_as_no_issue_exists(
+        self, monkeypatch, capsys
+    ):
+        """'I stopped looking' is not 'it is not there'."""
+        fake = FakeGh(issues=[
+            {"number": i, "body": "unrelated"}
+            for i in range(100 * sync_skills.GH_MAX_PAGES + 50)
+        ])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        assert fake.writes() == []
+        assert "unknown" in capsys.readouterr().err.lower()
+
+    # -- F4: every give-up branch says why ----------------------------------
+
+    def test_gh_exiting_zero_with_a_json_object_notes_and_writes_nothing(
+        self, monkeypatch, capsys
+    ):
+        """F4. `{"message":"Not Found"}` parses fine and is not a list.
+
+        gh exits 0, _gh_api succeeds, _gh_json parses — and the old lookup
+        returned (None, False) without a word, under a caller comment that
+        claimed '_gh_api already said why on stderr'. It had not: measured
+        zero report-issue lines on stderr.
+        """
+        monkeypatch.setattr(
+            "sync_skills._gh_api",
+            lambda endpoint, method=None, fields=None: '{"message":"Not Found"}',
+        )
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        err = capsys.readouterr().err
+        notes = [line for line in err.splitlines() if "--report-issue" in line]
+        assert notes, f"a give-up branch said nothing; stderr was {err!r}"
+        assert any("not a list of issues" in line for line in notes)
+
+    def test_a_failed_open_says_the_backlog_is_untracked(self, monkeypatch, capsys):
+        """The one state this mode exists to prevent, going unannounced."""
+
+        def gh(endpoint, method=None, fields=None):
+            if "issues?state=open" in endpoint:
+                return json.dumps([])
+            return None  # the POST fails
+
+        monkeypatch.setattr("sync_skills._gh_api", gh)
+
+        sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
+
+        err = capsys.readouterr().err
+        assert "could NOT open a tracking issue" in err
+        assert "alpha" in err
+
+    # -- F1: a red verify may never produce a close or an all-clear ---------
+
+    def test_unknown_never_emits_the_all_clear_text(self, monkeypatch, capsys):
+        """Stated as text, not just as 'no PATCH'.
+
+        The affirmative comment is half the damage: it tells a reader the
+        account store is complete on a run that proved no such thing.
+        """
+        fake = FakeGh(issues=[open_issue(number=7, pending=["alpha"])])
+        self._wire(monkeypatch, fake)
+
+        sync_skills.report_account_upload_gap(
+            sync_skills.UploadGap(
+                "unknown", [], "--verify did not pass on this run"
+            ),
+            repo=self.REPO,
+        )
+
+        all_clear = "now holds every skill declared"
+        assert all_clear in sync_skills.build_upload_close_comment()
+        assert not any(
+            all_clear in f for _, _, fields in fake.calls for f in fields
+        )
+        assert fake.calls == []
+        assert fake.patches() == []
+
+
+class TestGhWrapper:
+    """_gh_api is the whole safety story: it may never raise, and never leak."""
+
+    def test_missing_gh_binary_returns_none(self, monkeypatch, capsys):
+        def boom(*a, **k):
+            raise FileNotFoundError("gh")
+
+        monkeypatch.setattr(sync_skills.subprocess, "run", boom)
+        assert sync_skills._gh_api("repos/o/r/issues") is None
+        assert "could not run gh" in capsys.readouterr().err
+
+    def test_timeout_returns_none(self, monkeypatch):
+        def boom(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="gh", timeout=1)
+
+        monkeypatch.setattr(sync_skills.subprocess, "run", boom)
+        assert sync_skills._gh_api("repos/o/r/issues") is None
+
+    def test_non_zero_exit_echoes_only_the_first_stderr_line(self, monkeypatch, capsys):
+        """gh's later stderr lines can quote the request; keep them out of the log."""
+
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: HTTP 401\nAuthorization: Bearer SENTINEL-DO-NOT-ECHO\n"
+
+        monkeypatch.setattr(sync_skills.subprocess, "run", lambda *a, **k: Result())
+        assert sync_skills._gh_api("repos/o/r/issues") is None
+        err = capsys.readouterr().err
+        assert "HTTP 401" in err
+        assert "SENTINEL-DO-NOT-ECHO" not in err
+
+    def test_unparseable_json_returns_none(self, monkeypatch, capsys):
+        monkeypatch.setattr("sync_skills._gh_api", lambda *a, **k: "not json")
+        assert sync_skills._gh_json("repos/o/r/issues") is None
+        assert "unparseable JSON" in capsys.readouterr().err
+
+    def test_gh_is_invoked_as_an_argv_list_never_a_shell_string(self, monkeypatch):
+        """No shell: a skill name reaching a shell string would be an injection."""
+        seen = {}
+
+        class Result:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+
+        def fake_run(args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            return Result()
+
+        monkeypatch.setattr(sync_skills.subprocess, "run", fake_run)
+        sync_skills._gh_api("repos/o/r/issues", method="PATCH", fields=["state=closed"])
+
+        assert seen["args"] == [
+            "gh", "api", "repos/o/r/issues", "-X", "PATCH", "-f", "state=closed",
+        ]
+        assert not seen["kwargs"].get("shell", False)
+
+
+class TestGithubSlug:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "git@github.com:Adam-S-Daniel/agentskills.git",
+            "https://github.com/Adam-S-Daniel/agentskills.git",
+            "https://github.com/Adam-S-Daniel/agentskills",
+            "ssh://git@github.com/Adam-S-Daniel/agentskills.git",
+        ],
+    )
+    def test_parses_every_remote_form_this_clone_can_carry(self, url):
+        assert sync_skills.github_slug_from_remote(url) == "Adam-S-Daniel/agentskills"
+
+    @pytest.mark.parametrize("url", [None, "", "https://gitlab.com/o/r.git", "garbage"])
+    def test_non_github_remote_is_none(self, url):
+        assert sync_skills.github_slug_from_remote(url) is None
+
+    def test_explicit_repo_wins_and_is_shape_checked(self, monkeypatch):
+        monkeypatch.setattr("sync_skills._self_repo", lambda: None)
+        assert sync_skills.resolve_report_repo("owner/name") == ("owner/name", None)
+        repo, why = sync_skills.resolve_report_repo("not-a-slug")
+        assert repo is None
+        assert why
+
+    def test_a_malformed_explicit_value_is_not_diagnosed_as_a_missing_origin(self):
+        """F5. The old message told the operator to pass the flag they passed.
+
+        Both failures returned a bare None, so the caller could only print one
+        sentence for two causes, and it named the wrong one whenever
+        --report-repo was present and malformed.
+        """
+        repo, why = sync_skills.resolve_report_repo("bad slug here")
+        assert repo is None
+        assert "'bad slug here'" in why
+        assert "OWNER/NAME slug" in why
+        assert "origin" not in why.split("fall back")[0]
+
+    def test_a_malformed_explicit_value_NEVER_falls_back_to_origin(self, monkeypatch):
+        """The safety property the message fix must not cost.
+
+        Retargeting a WRITE to a repo the operator did not name is worse than
+        not writing: asserted by making origin resolve to a real, valid slug
+        and proving it is not returned.
+        """
+        called = []
+
+        def fake_git(args, cwd, timeout=None):
+            called.append(args)
+            return "git@github.com:someone-else/their-repo.git"
+
+        monkeypatch.setattr("sync_skills._git", fake_git)
+        monkeypatch.setattr("sync_skills._self_repo", lambda: Path("/tmp"))
+
+        repo, why = sync_skills.resolve_report_repo("bad slug here")
+
+        assert repo is None
+        assert "someone-else" not in (why or "")
+        assert called == []  # origin was never even consulted
+
+    def test_no_origin_remote_says_origin_not_bad_flag(self, monkeypatch):
+        monkeypatch.setattr("sync_skills._self_repo", lambda: Path("/tmp"))
+        monkeypatch.setattr("sync_skills._git", lambda *a, **k: None)
+        repo, why = sync_skills.resolve_report_repo(None)
+        assert repo is None
+        assert "origin" in why
+
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            pytest.param("owner/name?state=all", id="query-string"),
+            pytest.param("o/n#frag", id="fragment"),
+            pytest.param("../x", id="dot-dot-owner"),
+            pytest.param("-oops/x", id="hyphen-leading-owner"),
+            pytest.param("o/..", id="dot-dot-repo"),
+        ],
+    )
+    def test_url_significant_characters_are_not_a_usable_target(self, slug):
+        """The slug is interpolated into f"repos/{target}/issues" un-quoted.
+
+        None of these could retarget the OWNER (that needs a "/" in the first
+        component, which is forbidden either way) and "?"/"#" truncate the
+        path back to a non-write endpoint, so this is hardening rather than a
+        live hole. It is here because "a write must go where you said or
+        nowhere" should be a property the validator enforces, not one the
+        endpoint's shape happens to preserve.
+        """
+        repo, why = sync_skills.resolve_report_repo(slug)
+        assert repo is None
+        assert why
+
+    def test_real_slugs_still_resolve(self):
+        for good in ("Adam-S-Daniel/agentskills", "o/r", "a/b.c_d-e"):
+            assert sync_skills.resolve_report_repo(good)[0] == good
+
+    def test_an_unusable_origin_slug_is_refused_too(self, monkeypatch):
+        """Same validator on both arms; a remote URL is operator data too."""
+        monkeypatch.setattr("sync_skills._self_repo", lambda: Path("/tmp"))
+        monkeypatch.setattr("sync_skills._git", lambda *a, **k: "x")
+        monkeypatch.setattr(
+            "sync_skills.github_slug_from_remote", lambda url: "-bad/name"
+        )
+        repo, why = sync_skills.resolve_report_repo(None)
+        assert repo is None
+        assert "not a usable OWNER/NAME slug" in why
+
+
+class TestDeclarationProvenance:
+    """Is the declaration on disk the one the repo committed?
+
+    Stubbed at ``_git`` like the slug tests above, not driven against a real
+    ``git init``: the suite must stay runnable (and identical) on a box with
+    no git, which is also how every other git-touching path here is tested.
+    """
+
+    def _wire(self, monkeypatch, tmp_path, answers):
+        repo = tmp_path / "repo"
+        (repo / "plugins").mkdir(parents=True)
+        decl = repo / "account-skills.txt"
+        decl.write_text("alpha\n", encoding="utf-8")
+        monkeypatch.setattr("sync_skills._self_repo", lambda: repo)
+        calls = []
+
+        def fake_git(args, cwd, timeout=None):
+            calls.append(list(args))
+            for key, value in answers.items():
+                if key in args:
+                    return value
+            return None
+
+        monkeypatch.setattr("sync_skills._git", fake_git)
+        return decl, calls
+
+    def test_a_locally_modified_declaration_is_named(self, monkeypatch, tmp_path):
+        decl, calls = self._wire(
+            monkeypatch, tmp_path,
+            {"ls-files": "account-skills.txt", "status": " M account-skills.txt"},
+        )
+        why = sync_skills.declaration_differs_from_committed(decl)
+        assert why and "uncommitted" in why
+        assert any("ls-files" in c for c in calls)
+
+    def test_a_clean_declaration_passes(self, monkeypatch, tmp_path):
+        decl, _ = self._wire(
+            monkeypatch, tmp_path, {"ls-files": "account-skills.txt", "status": ""}
+        )
+        assert sync_skills.declaration_differs_from_committed(decl) is None
+
+    def test_an_untracked_file_is_not_reported_as_modified(
+        self, monkeypatch, tmp_path
+    ):
+        """No committed version to differ FROM - `status` would say `??`.
+
+        This is the branch the whole test suite runs on: every fixture points
+        ACCOUNT_SKILLS_FILE at a tmp file. Reading `??` as "locally modified"
+        would make the guard fire on every test and on any operator running
+        from a tarball.
+        """
+        decl, calls = self._wire(
+            monkeypatch, tmp_path, {"status": "?? account-skills.txt"}
+        )  # ls-files answers None -> untracked
+        assert sync_skills.declaration_differs_from_committed(decl) is None
+        assert not any("status" in c for c in calls), (
+            "tracked-ness must be settled before status is consulted"
+        )
+
+    def test_a_path_outside_the_checkout_is_not_guessed_at(
+        self, monkeypatch, tmp_path
+    ):
+        self._wire(monkeypatch, tmp_path, {"ls-files": "x", "status": " M x"})
+        outside = tmp_path / "elsewhere.txt"
+        outside.write_text("alpha\n", encoding="utf-8")
+        assert sync_skills.declaration_differs_from_committed(outside) is None
+
+    def test_not_a_checkout_at_all_is_not_guessed_at(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("sync_skills._self_repo", lambda: None)
+        decl = tmp_path / "account-skills.txt"
+        decl.write_text("alpha\n", encoding="utf-8")
+        assert sync_skills.declaration_differs_from_committed(decl) is None
+
+    def test_the_real_git_path_runs_without_raising(self):
+        """Smoke: the un-stubbed call, against the real file and real git.
+
+        Deliberately asserts the TYPE, not the verdict. Asserting "clean"
+        would make the suite fail whenever a contributor has account-skills.txt
+        edited but not yet committed - which is a normal moment in the middle
+        of the very membership change this file exists to gate, and is a fact
+        about the working tree rather than about the code.
+        """
+        result = sync_skills.declaration_differs_from_committed()
+        assert result is None or isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# --report-issue end to end through main()
+#
+# Driven in-process (argv + monkeypatch) rather than as a subprocess, because
+# the load-bearing assertions are about what gh was and was NOT asked to do,
+# and a subprocess cannot be asked that without a real gh on PATH.
+# ---------------------------------------------------------------------------
+
+def tmp_path_of(wired):
+    """The tmp dir the ``wired`` fixture was built in."""
+    return wired["repo"].parent
+
+
+def run_main(argv, monkeypatch):
+    """Run main() with argv, returning its exit code."""
+    monkeypatch.setattr(sys, "argv", ["sync_skills.py", *argv])
+    with pytest.raises(SystemExit) as excinfo:
+        sync_skills.main()
+    return excinfo.value.code
+
+
+class TestReportIssueCli:
+    @pytest.fixture()
+    def wired(self, tmp_path, monkeypatch):
+        """A repo with skill-a, an account mirror, and a declaration for both."""
+        account = tmp_path / "account"
+        account.mkdir(parents=True)
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", account)
+
+        repo = tmp_path / "repo"
+        skill = repo / "skills" / "skill-a"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: skill-a\n---\nbody\n")
+
+        write_manifest(account, [])
+        declared = write_declaration(tmp_path / "declared.txt", ["skill-a"])
+        # ACCOUNT_SKILLS_FILE, not --account-list: --report-issue refuses that
+        # flag (it swaps out the declaration the issue text claims to speak
+        # for), so this seam is the only one that exercises the real write
+        # path. The suite used to pass --account-list on every one of these
+        # runs, which is why the missing guard was invisible from in here.
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_FILE", declared)
+        return {
+            "account": account, "repo": repo, "skill": skill, "declared": declared,
+            "argv": ["--verify", "--all", "--repos", str(repo)],
+        }
+
+    def test_flag_is_opt_in_no_gh_call_without_it(self, wired, monkeypatch):
+        """Absent the flag, the reporting layer must not run at all.
+
+        Asserted on a RECORDER, not on a stub that raises: main() wraps the
+        reporter in a catch-all (so a broken tracker can never fail a sync),
+        and that catch-all would swallow an AssertionError raised from inside
+        it — leaving this test green against a mode that ran unconditionally.
+        """
+        fake = FakeGh()
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(wired["argv"], monkeypatch)
+
+        assert code == 1  # verify fails: skill-a is declared and not uploaded
+        assert fake.calls == []
+
+    def test_flag_requires_verify(self, monkeypatch, capsys):
+        """Silently ignoring it would read as 'reported, nothing pending'."""
+        code = run_main(["--report-issue"], monkeypatch)
+        assert code == 2
+        assert "--report-issue requires --verify" in capsys.readouterr().err
+
+    def test_report_repo_alone_is_an_error(self, monkeypatch, capsys):
+        code = run_main(["--verify", "--report-repo", "o/r"], monkeypatch)
+        assert code == 2
+        assert "only means anything with --report-issue" in capsys.readouterr().err
+
+    def test_pending_opens_and_the_exit_code_is_still_verify_s(
+        self, wired, monkeypatch
+    ):
+        fake = FakeGh()
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 1  # verify failed: skill-a is declared and not uploaded
+        assert len(fake.created_bodies()) == 1
+        assert "`skill-a`" in fake.created_bodies()[0]
+
+    def test_clean_closes_and_verify_still_exits_zero(self, wired, monkeypatch):
+        mirror_skill(wired["account"], wired["skill"], "skill-a")
+        write_manifest(wired["account"], ["skill-a"])
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 0
+        assert len(fake.patches()) == 1
+
+    def test_failing_gh_does_not_change_the_exit_code(self, wired, monkeypatch):
+        """The point of the whole mode: a broken tracker breaks nothing else."""
+        mirror_skill(wired["account"], wired["skill"], "skill-a")
+        write_manifest(wired["account"], ["skill-a"])
+        monkeypatch.setattr("sync_skills._gh_api", FakeGh(fail=True))
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 0  # verify passed; the failed report must not flip it
+
+    def test_a_raising_reporter_does_not_change_the_exit_code(
+        self, wired, monkeypatch, capsys
+    ):
+        """Belt and braces: even an unexpected exception is contained."""
+        mirror_skill(wired["account"], wired["skill"], "skill-a")
+        write_manifest(wired["account"], ["skill-a"])
+
+        def boom(*a, **k):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr("sync_skills.report_account_upload_gap", boom)
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 0
+        assert "--report-issue failed (RuntimeError" in capsys.readouterr().err
+
+    def test_stale_mirror_reports_unknown_and_touches_nothing(
+        self, wired, monkeypatch, capsys
+    ):
+        """The arm most likely to be silently wrong, driven end to end."""
+        mirror_skill(wired["account"], wired["skill"], "skill-a")
+        write_manifest(
+            wired["account"], ["skill-a"],
+            age_seconds=sync_skills.MIRROR_MAX_AGE_SECONDS + 60,
+        )
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 1  # verify already fails on a stale mirror
+        assert fake.calls == []
+        assert "UNKNOWN, not clean" in capsys.readouterr().err
+
+    # -- F1 end to end: a red --verify may never close or post an all-clear --
+
+    def _assert_no_write_and_no_all_clear(self, fake, err):
+        # `err` is passed in, not re-read: capsys.readouterr() DRAINS the
+        # buffer, so a helper that reads it a second time silently asserts
+        # against an empty string and passes on anything.
+        assert fake.calls == [], f"gh was called: {fake.calls}"
+        assert fake.patches() == []
+        assert "UNKNOWN, not clean" in err
+        assert "--verify did not pass" in err
+        assert "now holds every skill declared" not in err
+
+    def test_drift_run_closes_nothing_and_claims_nothing(
+        self, wired, monkeypatch, capsys
+    ):
+        """F1, the reproduced case: DRIFT on skill-a, --verify exits 1.
+
+        Every declared name is PRESENT, so absence-only logic computed
+        'clean', printed 'closed #7 ... account store complete.' and posted
+        'The claude.ai account store now holds every skill declared ...' — on
+        the same run whose own output read
+        'DRIFT skill-a () content differs: SKILL.md'.
+        """
+        mirror_skill(wired["account"], wired["skill"], "skill-a")
+        (wired["account"] / "skill-a" / "SKILL.md").write_text(
+            "---\nname: skill-a\n---\nSTALE UPLOAD\n"
+        )
+        write_manifest(wired["account"], ["skill-a"])
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert "DRIFT" in captured.out
+        self._assert_no_write_and_no_all_clear(fake, captured.err)
+
+    def test_empty_account_directory_closes_nothing_and_claims_nothing(
+        self, wired, monkeypatch, capsys
+    ):
+        """F3(b), the second close-while-red route, independent of drift.
+
+        ``account_skill_payload`` returns ``{}`` for an empty directory, and
+        ``{} is not None``, so the skill counted as PRESENT and the gap
+        computed 'clean' — while verify reported MISMATCH and exited 1.
+        """
+        (wired["account"] / "skill-a").mkdir()
+        write_manifest(wired["account"], ["skill-a"])
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert "MISMATCH" in captured.out
+        self._assert_no_write_and_no_all_clear(fake, captured.err)
+
+    # -- F7: the write may not be broader than the verify it reports on -----
+
+    def test_narrowing_verify_to_one_skill_refuses_the_repo_wide_write(
+        self, wired, monkeypatch, capsys
+    ):
+        """F7. `--verify --skill sync-skills --report-issue` CLOSED the issue.
+
+        The gap is computed across the whole declaration, so a per-skill
+        verify cannot license a repo-wide open/comment/close. Refused rather
+        than silently widened (the write would exceed the request) or
+        silently narrowed (a per-skill backlog is not a thing one shared
+        tracking issue can represent).
+        """
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(
+            ["--verify", "--skill", "skill-a", "--repos", str(wired["repo"]),
+             "--report-issue", "--report-repo", "o/r"],
+            monkeypatch,
+        )
+
+        assert code == 2
+        assert fake.calls == []
+        assert "--report-issue requires --all" in capsys.readouterr().err
+
+    def test_default_changed_selection_also_refuses(self, wired, monkeypatch, capsys):
+        """The git-changed default is a subset too, and reads like 'everything'."""
+        fake = FakeGh()
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(
+            ["--verify", "--repos", str(wired["repo"]),
+             "--report-issue", "--report-repo", "o/r"],
+            monkeypatch,
+        )
+
+        assert code == 2
+        assert fake.calls == []
+        assert "--report-issue requires --all" in capsys.readouterr().err
+
+    def test_the_documented_invocation_is_the_one_that_is_allowed(
+        self, wired, monkeypatch
+    ):
+        """--verify --all --report-issue: what SKILL.md and the issue body say."""
+        fake = FakeGh()
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 1  # skill-a is declared and not uploaded
+        assert len(fake.created_bodies()) == 1
+
+    # -- the write must speak for the COMMITTED declaration ----------------
+
+    def test_report_issue_refuses_account_list(self, wired, monkeypatch, capsys):
+        """--account-list REPLACES the basis of the answer, and was ungated.
+
+        --skill was refused for narrowing the verify; --account-list swaps
+        the whole declaration out, which is the larger substitution, and its
+        own --help advertises it as a way to dry-run a proposed membership
+        change. Reproduced before the guard: `--verify --all --report-issue
+        --account-list <file declaring only what the mirror happens to hold>`
+        CLOSED the live tracking issue and posted "the account store now
+        holds every skill declared in `account-skills.txt`" - naming a file
+        that run never opened, and which really declared ten skills of which
+        nine were absent.
+        """
+        other = write_declaration(tmp_path_of(wired) / "proposed.txt", ["skill-a"])
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(
+            wired["argv"] + ["--report-issue", "--report-repo", "o/r",
+                             "--account-list", str(other)],
+            monkeypatch,
+        )
+
+        assert code == 2
+        assert fake.calls == []
+        err = capsys.readouterr().err
+        assert "cannot be combined with --account-list" in err
+
+    def test_an_EMPTY_account_list_cannot_close_anything(
+        self, wired, monkeypatch, capsys
+    ):
+        """The minimal repro: a zero-name list made every gate pass vacuously.
+
+        Belt and braces on top of the flag refusal - the guard that stops it
+        is the parser, and this asserts the OUTCOME (no write) rather than
+        the mechanism, so moving the refusal elsewhere still has to keep it.
+        """
+        empty = write_declaration(tmp_path_of(wired) / "empty.txt", [])
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        run_main(
+            wired["argv"] + ["--report-issue", "--report-repo", "o/r",
+                             "--account-list", str(empty)],
+            monkeypatch,
+        )
+
+        assert fake.calls == []
+        assert "now holds every skill declared" not in capsys.readouterr().out
+
+    def test_account_list_alone_is_still_the_documented_dry_run(
+        self, wired, monkeypatch, capsys
+    ):
+        """The refusal must not cost the use case --account-list exists for."""
+        other = write_declaration(tmp_path_of(wired) / "proposed.txt", [])
+        code = run_main(
+            wired["argv"] + ["--account-list", str(other)], monkeypatch
+        )
+        assert code == 0            # nothing declared, so nothing to upload
+        assert "cannot be combined" not in capsys.readouterr().err
+
+    def test_an_empty_shipped_declaration_closes_nothing(
+        self, wired, monkeypatch, capsys
+    ):
+        """Same vacuous CLEAN reached through the shipped file, no flags."""
+        write_declaration(wired["declared"], [])
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                 monkeypatch)
+
+        assert fake.patches() == []
+        out, err = capsys.readouterr()
+        assert "now holds every skill declared" not in out
+        assert "EMPTY" in err
+
+    def test_a_declared_skill_no_repo_carries_closes_nothing(
+        self, wired, monkeypatch, capsys
+    ):
+        """verify() returns True having opened no account copy at all.
+
+        skill-b is declared and sits on the account; no resolved repo carries
+        it, so verify never reaches it and passes over zero comparisons. The
+        account copy could hold anything.
+        """
+        write_declaration(wired["declared"], ["skill-a", "skill-b"])
+        for name in ("skill-a", "skill-b"):
+            (wired["account"] / name).mkdir(parents=True, exist_ok=True)
+        # skill-a's account copy matches the repo, so absence is not the story.
+        (wired["account"] / "skill-a" / "SKILL.md").write_text(
+            (wired["skill"] / "SKILL.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (wired["account"] / "skill-b" / "SKILL.md").write_text("anything\n")
+        write_manifest(wired["account"], ["skill-a", "skill-b"])
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-b"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+                        monkeypatch)
+
+        assert code == 0                      # verify itself passed
+        assert fake.patches() == []           # and still closed nothing
+        out, err = capsys.readouterr()
+        assert "now holds every skill declared" not in out
+        assert "never compared" in err
+
+    def test_a_malformed_declaration_drives_no_write_end_to_end(
+        self, wired, tmp_path, monkeypatch, capsys
+    ):
+        """F6 through main(): the corrupt name never reaches a gh call."""
+        bad = write_declaration(tmp_path / "bad.txt", ["skill-a --> evil"])
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_FILE", bad)
+        fake = FakeGh(issues=[open_issue(number=7, pending=["skill-a"])])
+        monkeypatch.setattr("sync_skills._gh_api", fake)
+
+        code = run_main(
+            wired["argv"] + ["--report-issue", "--report-repo", "o/r"],
+            monkeypatch,
+        )
+
+        assert fake.calls == []
+        err = capsys.readouterr().err
+        assert "not legal skill names" in err
+        assert code in (0, 1)  # verify's own verdict, whatever it is
+
+
+# ---------------------------------------------------------------------------
+# The shipped SKILL.md must not overstate what this mode has been tested on
+# ---------------------------------------------------------------------------
+
+class TestReportIssueDocsAreHonest:
+    """SKILL.md is the only place a reader learns what is UNVERIFIED here.
+
+    Every test of --report-issue stubs gh — monkeypatched ``_gh_api`` in this
+    file, a recording script on PATH by hand. That is the right call for a
+    suite that must never write to a real repo, and it means gh's actual
+    acceptance of these calls is untested. A doc that omits that reads as
+    coverage the code does not have, so the omission is a defect and this
+    pins it.
+    """
+
+    SKILL_MD = Path(__file__).parent.parent / "SKILL.md"
+
+    def _text(self):
+        return self.SKILL_MD.read_text(encoding="utf-8")
+
+    def test_it_names_the_stub_gh_limitation(self):
+        text = self._text()
+        assert "not* been tested against the real GitHub API" in text, (
+            "SKILL.md must carry the section that says which --report-issue "
+            "behaviours have only ever run against a stub gh"
+        )
+        for unverified in ("state_reason", "POST when `-f` fields are present"):
+            assert unverified in text, f"{unverified!r} not named as unverified"
+
+    def test_the_three_state_table_says_a_red_verify_closes_nothing(self):
+        """The table is the thing an operator reads instead of the code."""
+        text = self._text()
+        assert "nothing absent **and `--verify` passed**" in text
+        assert "nothing absent but `--verify` **failed**" in text
+
+    def test_it_documents_the_scope_guards_on_the_write(self):
+        """Both refusals, and both must stay named where an operator reads.
+
+        --all was already documented; --account-list was not, and its absence
+        from the docs was the same absence as its absence from the parser.
+        """
+        text = self._text()
+        assert "**`--all` is required, and `--account-list` is refused.**" in text
+        assert "refused with `--report-issue`" in text
+
+    def test_it_documents_the_three_vacuous_clean_routes(self):
+        """Each closed a reproduced false close; each needs to stay written down."""
+        text = self._text()
+        for clause in ("empty declaration.", "never compared.",
+                       "uncommitted declaration."):
+            assert clause in text, f"{clause!r} not documented"
+

@@ -572,7 +572,10 @@ on the account is an operator mistake, not a pass.
 `--account-list PATH` points the gate at a different membership list — use
 it to dry-run a proposed membership change before committing one. A path
 that isn't readable is an error rather than a silent fall-back to the
-shipped list.
+shipped list. It is **refused with `--report-issue`** (exit 2): that write
+speaks for the committed `account-skills.txt` by name, so a run reading some
+other file could only describe a file it never opened. Dry-run with
+`--account-list` alone.
 
 `--prepare` warns on stderr if the payload contains an undeclared skill. It
 does **not** filter the payload — you decide what to POST — but the warning
@@ -594,6 +597,130 @@ account store's line endings vary by upload batch and are not a content
 change. Do **not** "fix" that by normalising newlines in `zip_skill()` —
 that would rewrite the bytes of every upload to chase a legacy artefact of
 one 2026-05-11 batch, and the compare-time normalisation already handles it.
+
+### Tracking a pending upload with an issue (`--report-issue`)
+
+A skill can be added to `account-skills.txt` and merged long before any
+laptop uploads it. Nothing catches that window: the declaration's membership
+*is* CI-locked (`test_shipped_declaration_is_the_ruled_set` pins the exact
+name set in the required `pytest` job), but the account store itself is
+reachable only from a machine with a logged-in browser session, so every
+check stays green whether the upload happened or not.
+
+`--report-issue` makes that window visible without closing it. After
+`--verify` has reached its verdict, it opens, updates or closes **one**
+GitHub tracking issue for skills that `account-skills.txt` declares and the
+account store does not hold:
+
+```bash
+CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'                     # 1. refresh
+python3 "$SKILL_DIR/sync_skills.py" --verify --all --report-issue   # 2. verify + report
+```
+
+**Run it in that order, and only in that order.** The mode reads the same
+account mirror `--verify` does, so an un-refreshed mirror gives it the same
+pre-upload snapshot — and it will say so rather than guess (see the three
+states below). `--report-repo OWNER/NAME` overrides the destination, which
+otherwise comes from this checkout's `origin` remote; there is no built-in
+fallback, because a guessed destination for a *write* files an issue in
+somebody else's repo. A malformed `--report-repo` value is refused by name
+and **never** falls back to `origin` — a write goes where you said or
+nowhere.
+
+**`--all` is required, and `--account-list` is refused.** The backlog is
+computed across the whole declaration, so `--verify --skill NAME
+--report-issue` would drive a repo-wide open/comment/close off a single
+skill's verdict — a write broader than the question asked. `--account-list`
+is the same defect one step further out: it does not narrow the verify, it
+**replaces the declaration the issue text names**, and pointed at a list of
+two invented skills it opened an issue over the words "account-skills.txt
+declares 2 skill(s)". Both exit 2 with that explanation rather than silently
+widening the check or narrowing the issue.
+
+Three states, and only these:
+
+| Account store, as this run established it | What happens |
+| --- | --- |
+| a declared skill is **absent** | opens the issue, or comments **only if the pending set changed** since the last write (an identical daily comment is noise, not an alert). Happens whether or not `--verify` passed — a missing upload *is* a `--verify` failure, and that is the case the issue exists for |
+| nothing absent **and `--verify` passed** over an actual comparison of every declared skill | posts a closing comment and closes the issue |
+| **unknown** — nothing absent but `--verify` **failed**; or a declared skill's account copy was never *compared* this run; or the mirror is stale, absent or unstamped; or the declaration is unreadable, **empty**, **uncommitted** or holds an illegal name | **nothing at all**, and says so on stderr |
+
+Three of those UNKNOWN clauses are newer than the rest and each closed a
+live false close, reproduced end to end:
+
+* **empty declaration.** "No declared skill is absent" is vacuously true of
+  an empty list, and every downstream gate passes vacuously with it —
+  `--verify` compares nothing and returns *true*. A zero-name list closed a
+  live tracking issue and posted an all-clear, in a run whose own output read
+  "no account copy was verified."
+* **never compared.** `--verify` selects skills from the resolved repos; a
+  declared skill those repos do not carry is never reached, so a green
+  verdict can rest on zero comparisons while the account copy holds anything.
+  "Present" is weaker than "correct", and "never opened" is weaker still.
+* **uncommitted declaration.** What makes the declaration worth writing an
+  issue off is that its membership is CI-locked. A local edit is outside that
+  lock and breaks the write in *both* directions — a locally-added name makes
+  the issue announce a backlog that does not exist on `main`, a locally
+  removed one lets the rest verify clean and close it. This route needs no
+  unusual flag: the documented invocation reaches it on a dirty tree.
+
+That third row is the one to preserve, and it is wider than it first looks.
+"I could not tell" is not "nothing is missing": closing a live tracking issue
+on the strength of a probe that never ran is a bug this fleet has already
+shipped once (cms-platform #258). The mode makes no API call whatsoever in
+that state.
+
+The *first* clause of that row is the one that was got wrong here. Absence is
+the only thing the reporter can measure, and **"present" is a weaker claim
+than "correct"**: `DRIFT`, `MISMATCH`, an empty account directory, and a
+skill on the account with no membership ruling are all present-and-wrong, and
+all four exit 1. An earlier build read "no declared name is absent" as clean,
+so a run that printed `DRIFT skill-a content differs: SKILL.md` and exited 1
+went on to close the tracking issue and post "the claude.ai account store now
+holds every skill declared". A **red `--verify` can now never produce a close
+or an affirmative comment**: it routes to `unknown` instead.
+
+It is **best-effort and cannot fail your run.** A `gh` that is missing,
+logged out, rate-limited or timing out prints a note on stderr and changes
+nothing else — `--verify`'s exit code is exactly what it would have been
+without the flag. Absent the flag, no GitHub call is made at all. Every
+branch that gives up says why on stderr, including the one where `gh` exits
+0 and hands back well-formed JSON that is not a list (`{"message": "Not
+Found"}` is the one that actually happens).
+
+Scope is **absence only** for what gets *reported*. `DRIFT` / `MISMATCH` — on
+the account but stale — are deliberately not tracked by this issue: those
+mean the upload path misbehaved and need a human reading which paths differ,
+which `--verify` already names. But "not reported" must never become
+"reported as fine", which is what the `unknown` routing above is for.
+
+**Do not wire this into the pre-push hook or a workflow.** The hook prints a
+reminder and always exits 0 by design, a pending upload is tracked and never
+blocked, and turning every push into a GitHub API write is not wanted. It is
+a thing you run at the end of a sync, deliberately.
+
+#### What has *not* been tested against the real GitHub API
+
+Every test of this mode — and every manual exercise of it during
+development — runs against a **stub `gh`**: either `_gh_api` monkeypatched in
+the unit tests, or a recording script on `PATH` that fabricates responses and
+makes no network call. That is deliberate (a test suite must not write to a
+real repo), and it leaves a real gap. Specifically **unverified against the
+live API**:
+
+- that `gh api -X PATCH -f state=closed -f state_reason=completed` is
+  accepted as written — the flag spelling, and `state_reason` being a legal
+  field on that endpoint;
+- that `gh api` switches to **POST when `-f` fields are present** and no
+  `-X` is given, which is what the open-issue and comment calls rely on;
+- the real shape of `GET /issues` paging — that `per_page=100&page=N` walks
+  as assumed, and that pull requests appear with a `pull_request` key;
+- every real error surface: rate limits, 403 from a fine-grained token
+  lacking `issues: write`, and SAML/SSO interception.
+
+So the **first** live run of `--report-issue` is an experiment, not a
+routine: run it against a throwaway repo with `--report-repo`, read the three
+gh invocations it makes, and only then point it at a repo that matters.
 
 ## 8. Reporting
 
