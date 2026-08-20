@@ -1,0 +1,56 @@
+{
+  "_comment": "Digest of each declared skill AS THE CLAUDE.AI ACCOUNT STORE HELD IT when this was recorded. Written by `sync_skills.py --record-account-state` from a session that has ~/.claude/skills/synced; read by `--account-drift`, which CI can run and which cannot see the account itself. Re-record after uploading.",
+  "recorded_at": "2026-08-20T20:26:20+00:00",
+  "skills": {
+    "adam-writing-style": {
+      "digest": "sha256:7b809ee7c303878ff61acbbd94e903ff02ca214dd6bcb6f49642eede9fe4b441",
+      "updatedAt": "2026-08-18T13:17:49.862730Z",
+      "files": 1
+    },
+    "fastmail": {
+      "digest": "sha256:84ba88c622853b9d203058e1660fa71c42e35f7ee7a24f12adeb78e636da1d4d",
+      "updatedAt": "2026-08-18T13:17:29.154538Z",
+      "files": 1
+    },
+    "finding-unknowns": {
+      "digest": "sha256:7e08b6263712dc9f3ccc3dec7c4637f3214f5f132dddb46365bda7dc7a176236",
+      "updatedAt": "2026-08-18T14:19:46.967043Z",
+      "files": 3
+    },
+    "ocr-pdfs": {
+      "digest": "sha256:32d1bb1d787618c2487227e9079d0046dde3d6ff5f8113c1049a2d6b682ab701",
+      "updatedAt": "2026-08-18T13:17:15.009446Z",
+      "files": 1
+    },
+    "pdf-ocr-audit": {
+      "digest": "sha256:33e52fbecf90e4bb2641c75f0496258ee67409a656dd59cfa6dd463762f4553e",
+      "updatedAt": "2026-04-05T14:58:26.446199Z",
+      "files": 2
+    },
+    "rename-pdfs": {
+      "digest": "sha256:5ecdaaab837dba5939e20c3e46a22be3988e564bfa3e237bea2d0627c5398896",
+      "updatedAt": "2026-08-18T13:17:00.666196Z",
+      "files": 3
+    },
+    "sync-cc-settings-between-wsl-and-windows": {
+      "digest": "sha256:ac4e85e871326eda84079e0541c2abd73711766061a5eb35b79d6946dbf69267",
+      "updatedAt": "2026-08-18T21:44:16.878495Z",
+      "files": 2
+    },
+    "sync-skills": {
+      "digest": "sha256:5720de8a64fdc99e68d89f996667c82f042eef8b60ef28230212b10495b5aeba",
+      "updatedAt": "2026-08-18T21:54:44.532847Z",
+      "files": 6
+    },
+    "wj-next-break": {
+      "digest": "sha256:9a9094f22482d3f6af7e4428d386ac5f9ac67ee1bc8b366e5eec8bc8285e6e3d",
+      "updatedAt": "2026-05-11T23:30:32.710922Z",
+      "files": 1
+    },
+    "writing-adrs": {
+      "digest": "sha256:8977fb056ea016f18537e554407aac3c1bbadff4fcb3f95ce983437dfb474f95",
+      "updatedAt": "2026-08-18T14:30:55.088004Z",
+      "files": 2
+    }
+  }
+}

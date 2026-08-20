@@ -1,0 +1,160 @@
+# Build one downloadable ZIP per account-store skill that needs re-uploading,
+# so the upload can be done from a phone: download the artifact in Safari, then
+# hand the same file to claude.ai Settings -> Capabilities.
+#
+# WHAT THIS CAN AND CANNOT KNOW
+# A runner has no ~/.claude/skills/synced, so it cannot ask the account store
+# anything (ADR 0002). It reads the COMMITTED recording,
+# plugins/adam-local/skills/sync-skills/account-state.json, written by
+# `sync_skills.py --record-account-state` from a session that does have a
+# mirror. So "needs upload" means "the registry moved since someone last
+# looked at the account" - strong evidence, not proof. Re-record after
+# uploading or the same skill keeps being offered.
+#
+# WHY THE ARTIFACT IS THE SKILL'S FILES AND NOT A .zip FILE
+# GitHub hands you an artifact AS a zip named after the artifact, so an
+# artifact named `sync-skills` downloads as `sync-skills.zip` with SKILL.md at
+# its root - the exact shape `zip_skill()` uploads (SKILL.md at root,
+# ZIP_STORED). `compression-level: 0` keeps it stored rather than deflated.
+# Putting a .zip INSIDE the artifact would instead force an extract step on the
+# phone, and a nested .zip would upload as part of the skill.
+#
+# NO `concurrency:` BLOCK, DELIBERATELY. It publishes no required status
+# context, and a dispatch is a human asking for a build right now - grouping
+# would let one dispatch cancel another's pending run. See AGENTS.md,
+# "A required status check gets no `concurrency` group".
+name: Account skill ZIPs
+
+on:
+  workflow_dispatch:
+    inputs:
+      selection:
+        description: "stale (default) | all | comma-separated skill names"
+        required: false
+        default: stale
+  push:
+    branches: [main]
+    # Salient paths only: the skills that can be declared, the recording that
+    # decides staleness, the tool that computes it, and this file.
+    paths:
+      - 'plugins/*/skills/**'
+      - '.github/workflows/account-skill-zips.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    outputs:
+      names: ${{ steps.drift.outputs.names }}
+      count: ${{ steps.drift.outputs.count }}
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: '3.12'
+      - name: Decide which skills need a ZIP
+        id: drift
+        # SELECTION is read from the environment, never interpolated into the
+        # run: body - an `${{ inputs.* }}` expansion is echoed into the log and
+        # is attacker-controlled shell. See AGENTS.md, "Data exposure in CI".
+        env:
+          SELECTION: ${{ inputs.selection || 'stale' }}
+        run: |
+          set -euo pipefail
+          python3 plugins/adam-local/skills/sync-skills/sync_skills.py \
+            --account-drift --repos "$GITHUB_WORKSPACE" > drift.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          rep = json.load(open("drift.json"))
+          sel = (os.environ.get("SELECTION") or "stale").strip()
+          rows = {r["name"]: r for r in rep["skills"]}
+          if sel == "all":
+              names = [r["name"] for r in rep["skills"]
+                       if r["status"] != "missing-from-registry"]
+              why = "every declared skill (`all` requested)"
+          elif sel in ("", "stale"):
+              names = rep["needs_upload"]
+              why = "changed since the account store was last recorded"
+          else:
+              asked = [n.strip() for n in sel.split(",") if n.strip()]
+              names = [n for n in asked if n in rows]
+              why = "named on the dispatch"
+              unknown = [n for n in asked if n not in rows]
+              if unknown:
+                  print(f"> Not declared in `account-skills.txt`, skipped: "
+                        f"{', '.join(unknown)}\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"names={json.dumps(names)}\n")
+              fh.write(f"count={len(names)}\n")
+          print("## Account skill ZIPs\n")
+          print(f"Recording last taken: **{rep['recorded_at'] or 'never'}**\n")
+          if not names:
+              print("Nothing to upload - every declared skill matches the "
+                    "recording.\n")
+          else:
+              print(f"{len(names)} skill(s) {why}:\n")
+              for n in names:
+                  st = rows[n]["status"]
+                  print(f"- **{n}** — `{st}`")
+              print("\n### From your phone\n")
+              print("1. Scroll to **Artifacts** at the bottom of this run page.")
+              print("2. Tap a skill's artifact — it downloads as `<name>.zip`.")
+              print("3. In Safari open claude.ai → Settings → Capabilities → "
+                    "upload that `.zip` as-is. No unzipping.")
+              print("4. It replaces the account copy of the same name.\n")
+              print("> After uploading, re-run `sync_skills.py "
+                    "--record-account-state` from a session that has "
+                    "`~/.claude/skills/synced` and commit the result — "
+                    "otherwise these keep being offered.\n")
+          if rep["missing_from_registry"]:
+              print(f"\n⚠️ Declared but absent from the registry: "
+                    f"{', '.join(rep['missing_from_registry'])}\n")
+          PY
+
+  zip:
+    needs: pick
+    if: needs.pick.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.pick.outputs.names) }}
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: '3.12'
+      - name: Build the upload payload
+        # Built by the REAL uploader (`--prepare --zip-dir`), then unpacked, so
+        # the artifact's members are exactly what an upload would carry -
+        # `_include_in_zip`'s exclusions included. Re-walking the directory here
+        # would be a second implementation free to drift from the first.
+        # --yes: the runner is on a detached HEAD, which is not a dirty tree.
+        env:
+          SKILL: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          python3 plugins/adam-local/skills/sync-skills/sync_skills.py \
+            --prepare --skill "$SKILL" --repos "$GITHUB_WORKSPACE" --yes \
+            --zip-dir "$RUNNER_TEMP/zips" > /dev/null
+          python3 - <<'PY'
+          import os, pathlib, zipfile
+          name = os.environ["SKILL"]
+          src = pathlib.Path(os.environ["RUNNER_TEMP"]) / "zips" / f"{name}.zip"
+          out = pathlib.Path("payload")
+          out.mkdir()
+          with zipfile.ZipFile(src) as zf:
+              zf.extractall(out)
+              print(f"{name}: {len(zf.namelist())} member(s)")
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.name }}
+          path: payload/
+          # Stored, not deflated - matches zip_skill()'s ZIP_STORED, which its
+          # docstring keeps "for maximum server compatibility".
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30

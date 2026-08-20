@@ -3568,3 +3568,115 @@ class TestReportIssueDocsAreHonest:
                        "uncommitted declaration."):
             assert clause in text, f"{clause!r} not documented"
 
+
+
+# ---------------------------------------------------------------------------
+# Recorded account state (--record-account-state / --account-drift)
+# ---------------------------------------------------------------------------
+
+
+class TestAccountState:
+    """The CI-visible half of the account arm.
+
+    CI cannot read ~/.claude/skills/synced, so staleness on a runner is decided
+    against a committed recording. These pin the properties that make that
+    substitution honest rather than merely convenient.
+    """
+
+    @pytest.fixture()
+    def registry(self, tmp_path):
+        """A fake registry holding two declared skills."""
+        repo = tmp_path / "reg"
+        for name in ("alpha", "beta"):
+            p = repo / "plugins" / "bundle" / "skills" / name
+            p.mkdir(parents=True)
+            (p / "SKILL.md").write_text(f"---\nname: {name}\n---\nbody\n")
+        return repo
+
+    @pytest.fixture()
+    def mirror(self, tmp_path, monkeypatch):
+        """A fake account mirror; holds `alpha` only."""
+        acct = tmp_path / "account"
+        (acct / "alpha").mkdir(parents=True)
+        (acct / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n")
+        (acct / "manifest.json").write_text(json.dumps({
+            "lastUpdated": 0,
+            "skills": [{"name": "alpha", "updatedAt": "2026-01-01T00:00:00Z"}],
+        }))
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", acct)
+        return acct
+
+    def test_digest_is_labelled_like_skills_lock(self):
+        d = sync_skills.payload_digest({"SKILL.md": b"x"})
+        assert d.startswith("sha256:")
+        assert len(d) == len("sha256:") + 64
+
+    def test_digest_ignores_line_endings(self):
+        """CRLF is an upload-batch artefact, not a content change."""
+        assert (sync_skills.payload_digest({"a": b"one\r\ntwo\r\n"})
+                == sync_skills.payload_digest({"a": b"one\ntwo\n"}))
+
+    def test_digest_separates_a_rename_from_a_content_change(self):
+        """The length delimiter earns its place here.
+
+        Without it, `{"ab": b"c"}` and `{"a": b"bc"}` concatenate identically
+        and a rename would be indistinguishable from an edit.
+        """
+        assert (sync_skills.payload_digest({"ab": b"c"})
+                != sync_skills.payload_digest({"a": b"bc"}))
+
+    def test_absent_from_the_mirror_is_recorded_as_null_not_omitted(self, mirror):
+        """"Observed absent" and "never looked at" must stay distinguishable."""
+        state = sync_skills.build_account_state(declared={"alpha", "beta"})
+        assert state["skills"]["alpha"]["digest"] is not None
+        assert state["skills"]["beta"]["digest"] is None
+        assert "beta" in state["skills"]
+
+    def test_drift_reports_each_status(self, registry, mirror):
+        state = sync_skills.build_account_state(declared={"alpha", "beta"})
+        rows = {r["name"]: r for r in sync_skills.account_drift(
+            [registry], declared={"alpha", "beta", "gamma"}, state=state)}
+        assert rows["alpha"]["status"] == "in-sync"
+        assert rows["beta"]["status"] == "never-uploaded"
+        assert rows["gamma"]["status"] == "missing-from-registry"
+
+        # Move the registry copy on: that, and only that, is `stale`.
+        (registry / "plugins" / "bundle" / "skills" / "alpha"
+         / "SKILL.md").write_text("---\nname: alpha\n---\nCHANGED\n")
+        rows = {r["name"]: r for r in sync_skills.account_drift(
+            [registry], declared={"alpha"}, state=state)}
+        assert rows["alpha"]["status"] == "stale"
+        assert rows["alpha"]["registry_digest"] != rows["alpha"]["recorded_digest"]
+
+    def test_an_unrecorded_skill_is_offered_not_assumed_clean(
+            self, registry, mirror):
+        rows = list(sync_skills.account_drift(
+            [registry], declared={"alpha"}, state={"skills": {}}))
+        assert rows[0]["status"] == "unrecorded"
+        assert "alpha" in sync_skills.account_drift_report(rows, None)["needs_upload"]
+
+    def test_no_recording_reads_as_unknown_never_as_in_sync(
+            self, registry, mirror, tmp_path):
+        """An absent record is the least informed state, not the healthiest."""
+        assert sync_skills.load_account_state(tmp_path / "nope.json") is None
+        (tmp_path / "junk.json").write_text("{not json")
+        assert sync_skills.load_account_state(tmp_path / "junk.json") is None
+        rows = sync_skills.account_drift([registry], declared={"alpha"}, state=None)
+        assert rows[0]["status"] == "unrecorded"
+
+    def test_the_recording_never_lives_inside_a_skill_it_records(self):
+        """Regression: recording inside sync-skills made it eternally stale.
+
+        `zip_skill()` uploads a skill's whole directory, so a recording kept in
+        this skill's own folder ships inside this skill - every
+        `--record-account-state` would change the skill it had just recorded,
+        so `sync-skills` could never once read as in-sync. Caught by simulating
+        the workflow, not by review.
+        """
+        skill_root = Path(sync_skills.__file__).resolve().parent
+        if not (skill_root.parents[3] / ".claude-plugin"
+                / "marketplace.json").is_file():
+            pytest.skip("not a registry checkout; ACCOUNT_STATE_FILE falls back")
+        assert skill_root not in sync_skills.ACCOUNT_STATE_FILE.parents
+        assert not any("account-state" in member
+                       for member in sync_skills.skill_payload(skill_root))

@@ -735,3 +735,66 @@ Synced 3 skills:
 
 If any skill failed, explain the error and suggest remedies (re-authenticate
 on claude.ai, check org_id, try overwrite flag).
+
+## 9. Uploading from a phone (no laptop)
+
+§7's `--verify` needs the account mirror, so it only runs where you are signed
+in. When the laptop is not to hand, CI can still hand you a ready-to-upload ZIP
+— it just cannot check the account first, so it compares against a **recorded**
+observation instead.
+
+**The recording.** `account-state.json` at the registry root holds one digest
+per declared skill, taken from the mirror:
+
+```bash
+python3 "$SKILL_DIR/sync_skills.py" --record-account-state   # needs the mirror
+```
+
+It lives at the root, beside `skills.lock`, and **never inside a skill
+directory** — `zip_skill()` uploads a skill's whole folder, so a recording kept
+in this skill's folder would ship inside this skill, making every recording
+change the thing it recorded. Both are recorded state about a delivery channel;
+that is where they belong.
+
+**The check.** Runs anywhere, including a runner with no mirror at all:
+
+```bash
+python3 "$SKILL_DIR/sync_skills.py" --account-drift --repos "$PWD"
+```
+
+JSON to stdout (`needs_upload`, `in_sync`, `missing_from_registry`, per-skill
+`status`), a human summary to stderr, exit 0 either way — drift is the finding,
+not an error.
+
+**The phone flow.** `.github/workflows/account-skill-zips.yml` runs that check
+and uploads one artifact per skill needing an upload. Dispatch it from the
+GitHub UI (`selection`: `stale` — the default — or `all`, or specific names);
+it also runs on any push to `main` that touches a skill.
+
+1. Open the run, scroll to **Artifacts**.
+2. Tap a skill's artifact — it downloads as `<name>.zip`.
+3. claude.ai → Settings → Capabilities → upload that file **as-is**.
+
+No unzipping: GitHub serves an artifact *as* a ZIP, and the artifact holds the
+skill's files at its root with `compression-level: 0`, which is the shape
+`zip_skill()` produces (`SKILL.md` at root, `ZIP_STORED`).
+
+**Then close the loop.** Re-record and commit, or the same skill is offered
+forever:
+
+```bash
+CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'                     # refresh mirror
+python3 "$SKILL_DIR/sync_skills.py" --record-account-state   # re-record
+```
+
+### What a verdict does and does not mean
+
+`stale` means the registry moved since the last recording — evidence of a
+needed upload, not proof of one. `in-sync` means nothing changed *since that
+recording*; it says nothing about an upload made afterwards, and nothing at all
+about the account if the recording is old. `recorded_at` is in every report for
+that reason. Only §7's `--verify`, run where the mirror exists, compares
+against the account itself.
+
+Digests are content, never timestamps: E5 measured `updatedAt`-vs-`git log` and
+it flagged 3 of 10 skills with 2 false positives.

@@ -1111,6 +1111,209 @@ def verify(
 
 
 # ---------------------------------------------------------------------------
+# Recorded account state — the only half of the account arm CI can see
+# ---------------------------------------------------------------------------
+#
+# WHY A RECORDED STATE EXISTS AT ALL
+# `--verify` answers "does the account copy match the registry?" by reading
+# ~/.claude/skills/synced, which exists ONLY in a session signed in to the
+# account (ADR 0002: "check_skills.py reads filesystem registries and cannot
+# see claude.ai"). A GitHub runner has no such directory, so on CI that
+# question is unanswerable, not merely unanswered.
+#
+# What a runner CAN answer is the next question down: "has the registry moved
+# since anyone last LOOKED at the account?" That needs the observation to be
+# committed, which is what account-state.json is — a digest per declared
+# skill, taken from the mirror by `--record-account-state` on a machine that
+# has one, and read by `--account-drift` anywhere.
+#
+# THE HONEST LIMIT, STATED SO NOBODY READS MORE INTO IT
+# A `stale` verdict means "the registry changed after the last recording",
+# which is evidence of a needed upload, not proof of one. An `in-sync`
+# verdict means "nothing changed since the recording" — it says nothing
+# about an upload made after it, and nothing about the account at all if the
+# recording is old. Re-record after uploading, or the same skill keeps being
+# offered. `recorded_at` is in the report for exactly that reason: an old
+# stamp devalues every verdict computed from it.
+#
+# WHY THE DIGEST AND NOT A TIMESTAMP
+# E5 measured the timestamp heuristic and it does not work: comparing the
+# account's `updatedAt` against `git log` flagged 3 of 10 skills and 2 were
+# false positives (`pdf-ocr-audit`, `wj-next-break` — PR #62 moved them into
+# git without changing a byte). Content is the only signal that discriminates,
+# so this digests the same CRLF-normalised member set `--verify` compares.
+
+def _registry_root() -> Path:
+    """Nearest ancestor that is a plugin marketplace, else this skill's dir.
+
+    The recording lives at the REGISTRY ROOT, beside skills.lock, and not in
+    this skill's own directory - both are recorded state about a delivery
+    channel, and a skill directory is the one place this file cannot go.
+    `zip_skill()` uploads a skill's whole directory, so a recording kept
+    inside sync-skills would ship inside sync-skills: every `--record-account-
+    state` would change the very skill it had just recorded, making it stale
+    the instant it was recorded and re-stale after every upload. Measured, not
+    theorised - the first cut of this file did exactly that.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / ".claude-plugin" / "marketplace.json").is_file():
+            return parent
+    return here.parent
+
+
+ACCOUNT_STATE_FILE = _registry_root() / "account-state.json"
+
+
+def payload_digest(payload: Dict[str, bytes]) -> str:
+    """SHA-256 over a CRLF-normalised member set.
+
+    The unit of comparison is the same one ``--verify`` uses — the members
+    ``zip_skill()`` would upload, CRLF-normalised — so the two arms cannot
+    disagree about what counts as drift.
+
+    Each member contributes ``relpath\0len\0bytes``. The length delimiter is
+    what stops a rename from colliding with a content change: without it,
+    moving a byte from the end of a path into the start of its body leaves
+    the concatenation identical.
+    """
+    h = hashlib.sha256()
+    for rel in sorted(payload):
+        body = normalise(payload[rel])
+        h.update(f"{rel}\0{len(body)}\0".encode("utf-8"))
+        h.update(body)
+    # Labelled `sha256:<hex>` exactly as skills.lock labels its digests: it
+    # says which algorithm produced the value, and it keeps a bare 64-hex
+    # string from sitting next to a key in a committed, scanned artifact.
+    # See AGENTS.md, "A name you choose becomes data a scanner reads".
+    return f"sha256:{h.hexdigest()}"
+
+
+def load_account_state(path: Optional[Path] = None) -> Optional[Dict]:
+    """Parse the recorded account state, or None if missing/unreadable.
+
+    None is "I have no record", which `--account-drift` reports as every
+    declared skill being `unrecorded`. It is never treated as "in sync":
+    an absent record is the least informed state, not the healthiest.
+    """
+    path = path or ACCOUNT_STATE_FILE
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def build_account_state(
+    declared: Optional[Set[str]] = None,
+    now: Optional[datetime.datetime] = None,
+) -> Dict:
+    """Record what the local account mirror holds, for every declared skill.
+
+    Digests the ACCOUNT copy (not the registry copy): the recording is an
+    observation of the store, so a later registry change is what shows up as
+    drift. A declared skill the mirror does not hold is recorded with a null
+    digest rather than omitted — "observed absent" and "never looked at" are
+    different states and the report distinguishes them.
+    """
+    if declared is None:
+        declared = load_account_declaration() or set()
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    manifest = account_manifest() or {}
+    updated_at = manifest_updated_at(manifest)
+    skills: Dict[str, Dict] = {}
+    for name in sorted(declared):
+        payload = account_skill_payload(name)
+        skills[name] = {
+            "digest": payload_digest(payload) if payload is not None else None,
+            "updatedAt": updated_at.get(name),
+            "files": len(payload) if payload is not None else 0,
+        }
+    return {
+        "_comment": (
+            "Digest of each declared skill AS THE CLAUDE.AI ACCOUNT STORE HELD IT "
+            "when this was recorded. Written by `sync_skills.py "
+            "--record-account-state` from a session that has "
+            "~/.claude/skills/synced; read by `--account-drift`, which CI can run "
+            "and which cannot see the account itself. Re-record after uploading."
+        ),
+        "recorded_at": now.replace(microsecond=0).isoformat(),
+        "skills": skills,
+    }
+
+
+def account_drift(
+    repos: List[Path],
+    declared: Optional[Set[str]] = None,
+    state: Optional[Dict] = None,
+) -> List[Dict]:
+    """Compare each declared skill's registry payload against the recording.
+
+    Per-skill status:
+
+    ``stale``                 registry digest differs from the recorded one
+    ``in-sync``               digests match
+    ``unrecorded``            declared, but the recording does not cover it
+    ``never-uploaded``        recorded as absent from the account store
+    ``missing-from-registry`` declared, but no repo holds the skill
+
+    Both ``stale`` and ``unrecorded`` and ``never-uploaded`` are "offer this
+    one"; only ``in-sync`` is "leave it alone". ``missing-from-registry`` is a
+    declaration bug and is reported rather than skipped.
+    """
+    if declared is None:
+        declared = load_account_declaration() or set()
+    recorded = (state or {}).get("skills") or {}
+    rows: List[Dict] = []
+    for name in sorted(declared):
+        path = None
+        for repo in repos:
+            path = _skill_dir(repo, name)
+            if path is not None:
+                break
+        row: Dict = {"name": name, "path": str(path) if path else None}
+        if path is None:
+            row.update(status="missing-from-registry", registry_digest=None,
+                       recorded_digest=None)
+            rows.append(row)
+            continue
+        reg = payload_digest(skill_payload(path))
+        row["registry_digest"] = reg
+        if name not in recorded:
+            row.update(status="unrecorded", recorded_digest=None)
+        else:
+            rec = (recorded[name] or {}).get("digest")
+            row["recorded_digest"] = rec
+            row["recorded_updatedAt"] = (recorded[name] or {}).get("updatedAt")
+            if rec is None:
+                row["status"] = "never-uploaded"
+            elif rec == reg:
+                row["status"] = "in-sync"
+            else:
+                row["status"] = "stale"
+        rows.append(row)
+    return rows
+
+
+NEEDS_UPLOAD = ("stale", "unrecorded", "never-uploaded")
+
+
+def account_drift_report(rows: List[Dict], state: Optional[Dict]) -> Dict:
+    """Shape ``account_drift`` rows for a machine consumer (the workflow)."""
+    return {
+        "recorded_at": (state or {}).get("recorded_at"),
+        "needs_upload": [r["name"] for r in rows if r["status"] in NEEDS_UPLOAD],
+        "in_sync": [r["name"] for r in rows if r["status"] == "in-sync"],
+        "missing_from_registry": [
+            r["name"] for r in rows if r["status"] == "missing-from-registry"
+        ],
+        "skills": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Account-store upload tracking issue (--report-issue)
 #
 # THE GAP THIS FILLS. Membership in the account store is already CI-locked:
@@ -2111,6 +2314,32 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--record-account-state", action="store_true",
+        help=(
+            "Record what the local account mirror (~/.claude/skills/synced) "
+            "holds for every declared skill, into account-state.json. Needs a "
+            "session signed in to the account; this is the observation CI "
+            "cannot make for itself. Re-run after uploading."
+        ),
+    )
+    parser.add_argument(
+        "--account-drift", action="store_true",
+        help=(
+            "Compare each declared skill's registry payload against "
+            "account-state.json and print a JSON report to stdout. Runs "
+            "anywhere, including CI: it reads the committed recording, never "
+            "the account. Exits 0 whether or not anything drifted - drift is "
+            "the finding, not an error."
+        ),
+    )
+    parser.add_argument(
+        "--account-state", metavar="PATH",
+        help=(
+            f"Recorded-account-state file to read or write "
+            f"(default: {ACCOUNT_STATE_FILE.name} beside this script)."
+        ),
+    )
+    parser.add_argument(
         "--report-issue", action="store_true",
         help=(
             "With --verify --all: open, update or close ONE GitHub tracking "
@@ -2192,12 +2421,78 @@ def main() -> None:
         print(f"Marked {parts[0]} as synced (hash={parts[1]})")
         return
 
+    # Reads the account mirror and the declaration; no repo is involved, so
+    # this returns before repo resolution exactly as --mark-synced does.
+    if args.record_account_state:
+        state_path = (
+            Path(args.account_state).expanduser()
+            if args.account_state else ACCOUNT_STATE_FILE
+        )
+        declared_now = load_account_declaration(
+            Path(args.account_list).expanduser() if args.account_list else None
+        )
+        if declared_now is None:
+            sys.exit(
+                "ERROR: the account-store membership declaration is missing or "
+                "unreadable, so there is nothing to record against."
+            )
+        if not ACCOUNT_SKILLS_DIR.is_dir():
+            sys.exit(
+                f"ERROR: no account mirror at {ACCOUNT_SKILLS_DIR}. Only a "
+                f"session signed in to the claude.ai account has one - "
+                f"refresh it with `CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'` "
+                f"and re-run. Recording an absent mirror would write a file "
+                f"claiming every skill was never uploaded."
+            )
+        state = build_account_state(declared_now)
+        state_path.write_text(
+            json.dumps(state, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+        )
+        held = sum(1 for v in state["skills"].values() if v["digest"])
+        print(
+            f"Recorded {held}/{len(state['skills'])} declared skills as held by "
+            f"the account store -> {state_path}"
+        )
+        return
+
     repos = resolve_repos(args.repos)
     if not repos:
         sys.exit(
             f"ERROR: no repo could be resolved, so nothing was inspected. "
             f"This is not the same as having nothing to sync. {REPO_HINT}"
         )
+
+    # Reads the trees but writes nothing and uploads nothing, so it runs
+    # before check_repo_state: a CI runner sits on a detached HEAD, and
+    # failing there would make the report unavailable exactly where it is the
+    # only report obtainable.
+    if args.account_drift:
+        declared_now = load_account_declaration(
+            Path(args.account_list).expanduser() if args.account_list else None
+        )
+        if declared_now is None:
+            sys.exit(
+                "ERROR: the account-store membership declaration is missing or "
+                "unreadable, so there is nothing to compare."
+            )
+        state_path = (
+            Path(args.account_state).expanduser()
+            if args.account_state else ACCOUNT_STATE_FILE
+        )
+        state = load_account_state(state_path)
+        rows = account_drift(repos, declared_now, state)
+        report = account_drift_report(rows, state)
+        print(json.dumps(report, indent=2))
+        if state is None:
+            print(
+                f"WARNING: no recording at {state_path}, so every declared "
+                f"skill reports as `unrecorded`. That is 'nobody has looked', "
+                f"not 'everything drifted'.",
+                file=sys.stderr,
+            )
+        for row in rows:
+            print(f"{row['status']:22} {row['name']}", file=sys.stderr)
+        return
 
     # Everything below builds an upload out of these working trees, so their
     # state is a precondition, not a detail. --mark-synced returned above and
