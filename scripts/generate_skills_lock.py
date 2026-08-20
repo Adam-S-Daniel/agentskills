@@ -164,16 +164,29 @@ question therefore gets a distinct flag.
 
 So `--check-format` asks one thing — are this lock's stored digests in the
 canonical shape — and answers it from the FILE ALONE: no registry checkout, no
-network, no `--repo`, not one git call. That is the calling convention rather
-than an economy. The bumper runs it per consumer lock, before it has cloned
-anything.
+network, not one git call. That is the calling convention rather than an
+economy. The bumper runs it per consumer lock, before it has cloned anything.
+`--repo` is accepted and never read on this path — it stays legal because the
+flag composes with `--check`, which does read it, and refusing it in one
+composition while requiring it in the other would make a NIT into a
+mode-dependent argparse error across a repo boundary. Accepted-and-ignored is
+therefore the promise, and `test_check_format_ignores_repo_entirely` is what
+holds it: the verdict is byte-identical with no `--repo`, with a nonexistent
+one, and with a real clone of a DIFFERENT registry.
 
-An EMPTY `skills` map FAILS rather than passing vacuously. A generate over a
-bundle with no skills writes one legitimately (see
+An EMPTY `skills` map FAILS THE RUN rather than passing vacuously. A generate
+over a bundle with no skills writes one legitimately (see
 `test_an_empty_bundle_yields_an_empty_skills_map`), so "every digest is
 well-shaped" is trivially true of it — and a gate that cannot tell "nothing to
 fix" from "nothing there" is the shape every green check that was measuring
 nothing has had.
+
+It fails as `ERROR:`, not `FAILED:`, and so does a missing or non-map `skills`.
+The prefix is a CONTRACT with the fleet bumper, which greps `^FAILED:` to
+decide whether to re-pin a consumer's lock: `FAILED:` means "these digests are
+malformed, and a re-pin is the repair", and nothing else may say it. See
+`report_digest_format` for what that closes — including a nightly re-pin loop
+an empty map would otherwise have had no exit from.
 
 What `--repin` inherits, and the one field it must not
 ------------------------------------------------------
@@ -302,8 +315,9 @@ any one of its bundle names. `--check` / `--check-current` inherit `sources`
 from the lock the same way they inherit `registry` / `ref` / `bundles`;
 `--repin` inherits all of those EXCEPT `ref`, requires them to be present and
 well-formed rather than falling back to a default, and refuses the flags that
-would override them. `--check-format` inherits nothing and reads `skills`
-alone — it is the one mode that never asks a registry anything.
+would override them. `--check-format` inherits nothing and reads `skills`,
+plus `ref` — only to name it in the remediation it prints, never to resolve
+it — so it is still the one mode that never asks a registry anything.
 """
 
 import argparse
@@ -919,31 +933,111 @@ def digest_format_offenders(skills: Dict[str, str]) -> List[str]:
     return offenders
 
 
+def _suggested_repin_ref(document: dict) -> Optional[str]:
+    """The lock's own `ref`, if it is one this generator would have written.
+
+    Charset-guarded because the caller below prints it into a COPY-PASTEABLE
+    shell command, and the fleet bumper slices that command verbatim into a PR
+    body. The document arrives as found on disk, so a hand-edited `ref` is
+    arbitrary text; `_REF_RE` is the predicate the rest of this file already
+    uses for "a ref we would write and the hook would accept", and its charset
+    is exactly what is safe unquoted in a shell. Reused rather than re-spelled,
+    for the reason stated above `_LOCK_DIGEST_RE`.
+
+    Shell-safe is not the whole job, though, so `_REF_RE` alone is not the
+    whole guard: its charset admits a leading `-`, and a ref of `--repo`
+    renders as `--ref --repo --repo <clone>`, where the echoed value is no
+    longer a value but an OPTION to the command it lands in. Measured across
+    `--repo` / `-o` / `--repin` / `-1` / `-`: every one fails loudly and
+    leaves the lock untouched (argparse exit 2, or exit 1 from git), so this
+    is a printed command that cannot RUN rather than one that runs wrong. That
+    is still the defect this pair exists to close — a remediation line that
+    does not do what the sentence above it promises — so a dash-leading ref
+    takes the placeholder path instead. Nothing legitimate is lost: a commit
+    sha never starts with `-`, and git itself will not take a refname that
+    does.
+    """
+    ref = document.get("ref")
+    if isinstance(ref, str) and _REF_RE.fullmatch(ref) and not ref.startswith("-"):
+        return ref
+    return None
+
+
 def report_digest_format(document: dict, output: Path) -> int:
     """Print --check-format's verdict for one lock and return its exit status.
 
-    Reads `skills` and nothing else — no `ref`, no `registry`, no `sources`, no
-    git — because the fleet bumper calls this per consumer lock before it has a
-    clone of anything to read from. Written defensively for the same reason
-    `_render_sources` is: the document arrives as found ON DISK and may be
-    hand-edited into any shape at all, and a verdict that raises instead of
-    printing is a verdict nobody gets.
+    Reads `skills`, and `ref` only to name it in the remediation command below
+    — no `registry`, no `sources`, and no git — because the fleet bumper calls
+    this per consumer lock before it has a clone of anything to read from.
+    Written defensively for the same reason `_render_sources` is: the document
+    arrives as found ON DISK and may be hand-edited into any shape at all, and
+    a verdict that raises instead of printing is a verdict nobody gets.
+
+    WHICH PREFIX, and why it is load-bearing rather than cosmetic. `FAILED:` is
+    reserved for ONE verdict — "this lock's stored digests are malformed" —
+    because a caller keys a WRITE off it. _agent-guidance's
+    `scripts/bump-consumer-locks.sh` greps `^FAILED:` in this flag's output to
+    set `repin_reason=format` and re-pin the consumer's lock; anything else it
+    routes to a `fail` that reports and counts the repo without rewriting it,
+    under a comment reading "Only the flag's own FAILED: means 'these digests
+    are malformed'; anything else means the question could not be answered".
+    That was true of a missing file, a directory at -o, a top-level array and
+    invalid JSON — all `ERROR:`, from the GeneratorError handler — and FALSE of
+    the two conditions below, which said `FAILED:` while being no answer about
+    digest shape at all: no `skills` map, and an empty one. Both mean "there is
+    nothing here whose shape could be wrong", which is a different answer and
+    one a re-pin is the wrong repair for. They say `ERROR:` now, the prefix
+    this generator already uses for "the question could not be answered", so
+    the caller's existing safe branch takes them. Exit status cannot carry the
+    distinction: all three exit 1.
+
+    TWO SIBLING SITES MOVE WITH THIS, and neither is editable from here.
+    _agent-guidance carries a STUB generator for its own bump tests
+    (`test/run-tests.sh`) which reproduces this prefix split on purpose and
+    says so — "The FAILED:/ERROR: split is reproduced faithfully because the
+    bumper branches on it". As of this change it is no longer faithful: it
+    still prints `FAILED:` for both conditions above. Nothing is red, because
+    no test there feeds an empty map to `--check-format` — its fixtures fill
+    the map via `--repin` before checking it — so the divergence is latent,
+    and a bump test written against that stub today would model the SUPERSEDED
+    contract and "prove" the very belief this change removed. The bumper's own
+    prose has gone stale in the other direction: it still describes the empty
+    map as something that "gets re-pinned, has the re-pin refused, counts a
+    failure, and does the same thing again tomorrow night", which is the loop
+    the paragraph below closed. Both are one-line edits over there; make them
+    when that repo is next open, and do not read either as evidence about what
+    this generator does.
     """
     skills = document.get("skills")
     if not isinstance(skills, dict):
-        print(f"FAILED: {output} has no usable 'skills' map "
+        print(f"ERROR: {output} has no usable 'skills' map "
               f"(got {type(skills).__name__}), so it holds no digests whose shape "
               "could be right. The bootstrap hook refuses a lock of this shape "
               "outright; regenerate it.")
         return 1
-    # An empty map FAILS rather than passing vacuously, and the distinction is
-    # the point of the flag: a generate over a bundle with no skills writes one
-    # legitimately, so "every digest is well-shaped" is trivially true of it.
-    # This flag gates a REPAIR, where "nothing to fix" and "nothing there" are
-    # different answers — collapsing them is the shape of every green check
-    # that turned out to be measuring nothing.
+    # An empty map still FAILS THE RUN rather than passing vacuously, and the
+    # distinction is the point of the flag: a generate over a bundle with no
+    # skills writes one legitimately, so "every digest is well-shaped" is
+    # trivially true of it. This flag gates a REPAIR, where "nothing to fix"
+    # and "nothing there" are different answers — collapsing them is the shape
+    # of every green check that turned out to be measuring nothing.
+    #
+    # THE ONE SHAPE NO REPAIR REACHES, named here because here is where it is
+    # decided rather than left to be met as a red scheduled run. A re-pin over
+    # a registry with no skills writes the same empty map straight back, and
+    # the bumper's shrink guard then refuses to propose the result — correctly,
+    # because an emptied lock reaps the installed skills of every ephemeral
+    # session in that repo. While this verdict said `FAILED:`, that composed
+    # into a loop with no automated exit: re-pin nightly, have the re-pin
+    # refused nightly, go red nightly. The `ERROR:` prefix closes the churn
+    # half — the bumper's `^FAILED:` no longer matches, so it reports and
+    # counts the repo without cloning it, re-pinning it or opening a PR. It
+    # stays RED, which is right: an empty map means a registry whose bundles
+    # have all vanished, and that is a human's decision, not a lock chore. What
+    # must not happen is someone meeting that red while holding a re-pin that
+    # cannot work and "fixing" it by loosening the shrink guard.
     if not skills:
-        print(f"FAILED: {output} lists no skills at all, so nothing in it has a "
+        print(f"ERROR: {output} lists no skills at all, so nothing in it has a "
               "digest to be in the right shape — 'no work' is not 'no errors'. "
               "Regenerate it against the bundles it means to install.")
         return 1
@@ -958,8 +1052,49 @@ def report_digest_format(document: dict, output: Path) -> int:
           "out — not a hand edit, which would paste a label onto a value nobody "
           "recomputed and turn the lock into an attestation over unverified "
           "bytes:")
-    print("  python3 scripts/generate_skills_lock.py --repin "
+    # `--ref` is part of the command, not decoration. `--repin` deliberately
+    # does NOT inherit `ref` (advancing it is the whole operation), so a
+    # remediation printed without one falls through to `resolve_ref(repo,
+    # "HEAD")` and repairs the shape against whatever commit that clone happens
+    # to be sitting on. Measured on a copy of repo-settings' real lock before
+    # this line carried a ref: the printed command moved the pin off 94cdcc81
+    # onto the clone's HEAD and recomputed all eight digests from the NEW
+    # tree. They came out byte-identical only because the `adam` bundle had not
+    # moved between the two commits; re-pin that same lock at 283b2f0c, where
+    # it had, and three of the eight differ (further back, at a9828bf, four
+    # do). The count is whatever the two trees make it — the ref is named here
+    # because an unanchored "N of eight" is a number the next reader cannot
+    # check, and two readers of this comment already disagreed about it. So the
+    # latent failure is a "format repair" that
+    # silently re-attests a lock over a different tree — one line under a
+    # sentence promising the digests are recomputed "from the pinned ref".
+    #
+    # Naming the lock's own ref makes that sentence true and keeps the repair
+    # what it claims to be: with it, the re-pin is a pure RELABEL of the same
+    # stored values (measured on that same copy — 8 bare in, the same 8 hexes
+    # labelled out), which is the only repair a complaint about SHAPE has any
+    # business proposing. Advancing a pin is a separate decision, and the fleet
+    # bumper already treats it as one — its own comment calls the extra `ref`
+    # churn "the honest cost" of healing through a re-pin. A cost stated
+    # deliberately there must not be one an operator's terminal hands them by
+    # omission here.
+    #
+    # One consequence to expect rather than re-discover: the bumper's OWN
+    # re-pin passes no `--ref`, so a format-repair PR it opens does advance the
+    # pin — deliberately, and its PR body says so. That body also quotes this
+    # report verbatim, so the command a reviewer reads there names the OLD pin
+    # and would not reproduce the diff beneath it. That is the asymmetry
+    # working as intended, not a mismatch to reconcile: the bot's pin advance
+    # is a decision someone wrote down, and this line is for a human at a
+    # terminal who asked only about shape.
+    suggested_ref = _suggested_repin_ref(document)
+    print(f"  python3 scripts/generate_skills_lock.py --repin "
+          f"--ref {suggested_ref or '<the commit this lock pins>'} "
           "--repo <a clone of the registry this lock names> -o <this lock>")
+    if suggested_ref is None:
+        print("  (this lock carries no usable 'ref' of its own, so name the commit it "
+              "should describe: --repin will not repair a lock whose pin it cannot "
+              "read.)")
     for name in offenders[:_FORMAT_REPORT_CAP]:
         print(f"  - {name}")
     if len(offenders) > _FORMAT_REPORT_CAP:
@@ -1209,8 +1344,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "'digest changed' — so a lock of bare hex is green on the "
                              "first and indistinguishable from content drift on the "
                              "second. Reads the file ALONE: no registry checkout, no "
-                             "network, no --repo, no git. An empty 'skills' map fails "
-                             "rather than passing vacuously.")
+                             "network, not one git call. --repo is accepted (it is "
+                             "meaningful when this composes with --check) but is never "
+                             "READ here, so the verdict cannot depend on which clone, or "
+                             "no clone, is at hand. An empty 'skills' map is an ERROR "
+                             "rather than a vacuous pass; only malformed digests are "
+                             "reported as FAILED.")
     parser.add_argument("--repin", action="store_true",
                         help="advance an EXISTING lock onto another commit, and write it. "
                              "The lock's own identity is inherited — registry, bundles and "
