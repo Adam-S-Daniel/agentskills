@@ -349,19 +349,31 @@ So:
 ## Pinning GitHub Actions
 
 **Every `uses:` is pinned to a full 40-character commit SHA** — in workflows,
-composite actions, and reusable-workflow references alike, with exactly one
-carve-out, named below. Never a tag, never a branch, never an abbreviated SHA. A
-tag is a movable pointer: pinning to one gives whoever can retag the upstream
-repo a shell on the runner, holding that job's token.
+composite actions, and reusable-workflow references alike. The one carve-out,
+named below, is a ref into this account's own `cms-platform`, and it covers both
+of the shapes such a ref takes. Never a tag, never a branch, never an
+abbreviated SHA. A tag is a movable pointer: pinning to one gives whoever can
+retag the upstream repo a shell on the runner, holding that job's token.
 
 ```yaml
-uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1 (2023-10-17)
+uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 ```
 
-- **The trailing `# vX.Y.Z (YYYY-MM-DD)` comment is part of the pin.** Forty hex
-  characters say nothing on their own; the version says what it is and the date
-  says how stale it is. Dependabot rewrites the SHA and the version but not the
-  date, so dates drift — cosmetic, a chore, never an incident.
+- **A pin carries NO trailing version comment.** `@<sha>` and nothing after it.
+  The argument for one is intuitive and will be re-derived by the next person, so
+  here is why it lost: forty hex characters do say nothing on their own, but the
+  comment is not maintained by anything, and an unmaintained label does not stay
+  silent — it starts lying. Dependabot's rewriting of it is **inconsistent**, not
+  merely incomplete: measured 2026-08-20, it rewrote a bare `# v5` to `# v7.0.0`
+  in GHA-bench#52 while leaving `# v4` stale on the line above **in the same
+  file**, and it left every `# vX.Y.Z (YYYY-MM-DD)` comment untouched in
+  skills-evals #38/#39/#40 while moving their SHAs. The result in one repo:
+  `actions/checkout` at v7.0.1 labelled `# v4.3.1` in one file and `# v6.0.0` in
+  two others. A wrong label is worse than no label, because it is read and
+  believed — a reviewer trusts it instead of resolving the SHA, and the
+  staleness the comment was supposed to advertise is exactly what it hides. The
+  SHA is the truth. When you need the version, resolve it:
+  `git ls-remote <url> | grep <sha>`, or read the Dependabot PR title.
 - **Wait 7 days after a release before adopting it** — the cooling-off above,
   applied by hand. If the newest release is younger than that, pin the previous
   one.
@@ -370,16 +382,21 @@ uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1 (2023-1
   commit's, and pinning that fails at runtime. Follow it with
   `git/tags/<that-sha>`, or ask git directly:
   `git ls-remote <url> 'refs/tags/<tag>^{}'`.
-- **The one carve-out: a reusable *workflow* from a repo this account owns stays
-  on a tag.** `uses: Adam-S-Daniel/cms-platform/.github/workflows/<x>.yml@v0.1.85`
-  is correct as written — do not "fix" it to a SHA. The tag is the platform's
-  release identity: `platform-bump.yml` moves the `uses:@` refs, the theme gem,
-  `platform.lock` and every `platform_ref:` input to one release in a single PR,
-  and `check-platform-pin-consistency.js` asserts each of those refs equals
-  `platform.lock`'s `platform_ref` — a SHA there fails the lint and strands the
-  bump. It stops there: the platform's own composite actions under
-  `.github/actions/` take a SHA and the usual `# vX.Y.Z` comment, and nothing
-  third-party is ever a tag.
+- **The one carve-out: a ref into `cms-platform` — a repo this account owns —
+  stays on a tag, in either shape that ref takes.** Both of these are correct as
+  written, and neither is a SHA-pinning violation to be "fixed" — a reusable
+  **workflow**, `Adam-S-Daniel/cms-platform/.github/workflows/<x>.yml@v0.1.88`,
+  and a **composite action** referenced from another repo,
+  `Adam-S-Daniel/cms-platform/.github/actions/<x>@v0.1.88`. The tag is the
+  platform's release identity: `platform-bump.yml` moves the `uses:@` refs, the
+  theme gem, `platform.lock` and every `platform_ref:` input to one release in a
+  single PR, and `check-platform-pin-consistency.js` asserts each of those refs
+  equals `platform.lock`'s `platform_ref` — a SHA in either shape fails that lint
+  and strands the bump. The composite shape used to be the exception to the
+  exception, pinned by SHA plus a `# vX.Y.Z` comment; that comment was the only
+  thing tying such a pin to `platform_ref`, and with the comment gone the tag is
+  what ties it. It stops there — nothing third-party is ever a tag, in either
+  shape.
 - `./local/path` and `docker://` refs have nothing to pin. Leave them.
 
 `sha_pinning_required: true` enforces the rule at the repo level — set by
