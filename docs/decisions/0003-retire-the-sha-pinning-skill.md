@@ -1,6 +1,6 @@
 # 0003. Retire the SHA-pinning skill and carry its rule in managed guidance
 
-- **Status:** Accepted
+- **Status:** Accepted (superseded in part by [0004](0004-drop-the-version-comment-from-sha-pins.md))
 - **Date:** 2026-08-17
 - **Deciders:** Adam Daniel
 
@@ -72,6 +72,10 @@ The generalisation this encodes:
   never an abbreviated SHA.
 - The trailing `# vX.Y.Z (YYYY-MM-DD)` comment as *part of the pin*, plus the
   note that Dependabot rewrites the SHA and version but not the date.
+  **Reversed on 2026-08-20 by [ADR 0004](0004-drop-the-version-comment-from-sha-pins.md):**
+  Dependabot's rewriting turned out to be inconsistent rather than partial, so
+  the comment goes stale silently and then misinforms the reader it exists to
+  serve. The pin is now the SHA alone. Every other bullet in this list stands.
 - The 7-day cooling-off before adopting a release, and what to do when the
   newest release is younger than that.
 - Annotated-tag dereferencing — the failure where

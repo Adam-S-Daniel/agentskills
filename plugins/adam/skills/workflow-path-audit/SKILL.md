@@ -74,7 +74,7 @@ jobs:
   the-job:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@<sha>  # v<x>.<y>.<z> (<release-date>)
+      - uses: actions/checkout@<sha>
         with:
           fetch-depth: 0  # need history to diff base..head
 
