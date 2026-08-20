@@ -204,11 +204,41 @@ Three consequences, and the first is why this section sits where it does:
   `repo-settings` even though the account can push there, while both read a
   public non-attached repo fine.
 - **A 404 means "not visible to THIS connector"** — never that a repo or file
-  does not exist. Re-check on the other one before concluding anything.
+  does not exist. Re-check on the other one before concluding anything; the
+  next section is how to tell the two apart.
 
 Prefer `mcp__github__` for everything. Reach for `github-mcp` only when the
 other genuinely cannot see a repo, and say so out loud when you do. When you
 report a verification, name the connector it came from.
+
+## A GitHub 404 means "not authorized", not "not there"
+
+GitHub answers **404 rather than 403** when a caller is not authorized to know a
+private repo exists — it will not confirm the repo either way. So a 404 from any
+GitHub API or MCP call is ambiguous by design: either the thing is gone, or the
+credential simply lacks that repo. The body says "Not Found" in both cases,
+which is why the wrong reading — telling someone their PR was deleted — is the
+easy one to reach for.
+
+- **Probe the repo, not the object.** If `GET /repos/<owner>/<repo>/pulls` 404s
+  as well, the whole repo is invisible to that credential: a scope gap, not a
+  missing PR. If the repo answers and only the object 404s, it is genuinely
+  gone.
+- **Try the other connector before concluding anything.** The two servers above
+  do not share an installation, so one can be blind to a repo the other reads
+  fine. (Real incident, 2026-08-19: a mid-session MCP reconnect brought up a
+  second GitHub server whose credential could not see a private repo. Every call
+  against it 404ed — including on a PR the *other* connector had read
+  successfully minutes earlier — and the repo was neither deleted nor unshared.
+  `add_repo` reported it already attached, which is about session scope and does
+  not widen a connector's own installation.)
+- **Git is a separate credential path** and often still works when the API
+  token does not. `git ls-remote origin '<ref>'` answers "does this branch
+  exist"; `git merge-base --is-ancestor <sha> origin/main` answers "was it
+  merged". Neither touches the API, so both stay available to report real state
+  while a connector is blind.
+- Never report a repo, PR, or branch as gone on a 404 alone. Say which
+  credential could not see it, and what you checked with.
 
 ## "The watch finished" is not "CI passed"
 
