@@ -1227,6 +1227,11 @@ def build_account_state(
     for name in sorted(declared):
         payload = account_skill_payload(name)
         skills[name] = {
+            # `observed` is the strong basis: this ran against a real mirror and
+            # hashed what the account actually held. `--assert-uploaded` writes
+            # `asserted` instead, and a full recording overwrites it here -
+            # an observation always supersedes an assertion, never the reverse.
+            "basis": "observed",
             "digest": payload_digest(payload) if payload is not None else None,
             "updatedAt": updated_at.get(name),
             "files": len(payload) if payload is not None else 0,
@@ -1242,6 +1247,96 @@ def build_account_state(
         "recorded_at": now.replace(microsecond=0).isoformat(),
         "skills": skills,
     }
+
+
+def assert_uploaded(
+    name: str,
+    repos: List[Path],
+    ref: Optional[str] = None,
+    run_id: Optional[str] = None,
+    state_path: Optional[Path] = None,
+    declared: Optional[Set[str]] = None,
+    now: Optional[datetime.datetime] = None,
+) -> Tuple[bool, str]:
+    """Record ``name`` as uploaded, on the operator's word rather than a mirror.
+
+    Returns ``(changed, message)``. Raises ValueError on anything it refuses.
+
+    THIS WRITES A CLAIM, NOT A MEASUREMENT, and the file says so: the entry is
+    stamped ``basis: asserted`` with the ref and run it came from, so a reader
+    can tell it apart from a `--record-account-state` row that actually opened
+    the account store. The distinction is the whole point - an assertion that
+    the upload landed is exactly as good as the operator's certainty, and if a
+    truncated upload gets asserted, nothing downstream can ever contradict it
+    (CI has no mirror; that is why this arm exists at all).
+
+    The digest is taken from ``repos`` - which the caller points at the tree the
+    UPLOADED artifact was built from, not necessarily the current one. Recording
+    the current tree's digest for an upload made from an older one is the
+    specific error this signature exists to prevent.
+
+    ``recorded_at`` at the top of the file is deliberately NOT bumped: it stamps
+    when the STORE was last observed, and asserting does not observe it. Bumping
+    it would make a stale file look freshly verified, which inverts its meaning.
+    """
+    if declared is None:
+        declared = load_account_declaration() or set()
+    if name not in declared:
+        raise ValueError(
+            f"{name!r} is not declared in {ACCOUNT_SKILLS_FILE.name}, so it is "
+            f"not supposed to be on the account store at all (ADR 0002). "
+            f"Declare it there first, deliberately - adding a name is close to "
+            f"a one-way door."
+        )
+    path = None
+    for repo in repos:
+        path = _skill_dir(repo, name)
+        if path is not None:
+            break
+    if path is None:
+        raise ValueError(
+            f"{name!r} is declared but no tree in {[str(r) for r in repos]} "
+            f"holds it, so there is nothing to digest."
+        )
+    digest = payload_digest(skill_payload(path))
+
+    state_path = state_path or ACCOUNT_STATE_FILE
+    state = load_account_state(state_path)
+    if state is None:
+        raise ValueError(
+            f"no recording at {state_path} to amend. Seed one with "
+            f"--record-account-state from a session that has a mirror: "
+            f"asserting into an absent file would produce a state whose every "
+            f"other skill silently reads as never-recorded."
+        )
+    entry = dict((state.get("skills") or {}).get(name) or {})
+    if entry.get("digest") == digest:
+        return False, (
+            f"{name} already records {digest} - nothing to change. Either the "
+            f"upload was recorded already, or the tree you uploaded from has "
+            f"not moved since."
+        )
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    previous = entry.get("digest")
+    entry.update({
+        "basis": "asserted",
+        "digest": digest,
+        # An assertion cannot know the account's own stamp - only the mirror
+        # carries that - and keeping the old one would attribute this content
+        # to the previous upload's timestamp.
+        "updatedAt": None,
+        "files": len(skill_payload(path)),
+        "asserted_at": now.replace(microsecond=0).isoformat(),
+        "asserted_from": {"ref": ref, "run_id": run_id},
+    })
+    state.setdefault("skills", {})[name] = entry
+    state_path.write_text(
+        json.dumps(state, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+    )
+    return True, (
+        f"{name}: recorded {digest} as uploaded (was {previous or 'unrecorded'}), "
+        f"basis=asserted, ref={ref or 'unspecified'}, run={run_id or 'unspecified'}"
+    )
 
 
 def account_drift(
@@ -2340,6 +2435,24 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--assert-uploaded", metavar="NAME",
+        help=(
+            "Record NAME as uploaded to the account store on your word, "
+            "without a mirror to check it against. The entry is stamped "
+            "basis=asserted so it stays distinguishable from a "
+            "--record-account-state row. Digests the tree --repos points at, "
+            "which must be the tree the uploaded artifact was built from."
+        ),
+    )
+    parser.add_argument(
+        "--asserted-ref", metavar="SHA",
+        help="Commit the asserted upload was built from; recorded as provenance.",
+    )
+    parser.add_argument(
+        "--asserted-run", metavar="ID",
+        help="Workflow run that built the uploaded artifact; recorded as provenance.",
+    )
+    parser.add_argument(
         "--report-issue", action="store_true",
         help=(
             "With --verify --all: open, update or close ONE GitHub tracking "
@@ -2461,6 +2574,36 @@ def main() -> None:
             f"ERROR: no repo could be resolved, so nothing was inspected. "
             f"This is not the same as having nothing to sync. {REPO_HINT}"
         )
+
+    # Same placement rationale as --account-drift below: it reads the trees to
+    # digest one skill and writes only the recording, never an upload, so a
+    # detached-HEAD runner must not be turned away by check_repo_state.
+    if args.assert_uploaded:
+        try:
+            changed, message = assert_uploaded(
+                args.assert_uploaded,
+                repos,
+                ref=args.asserted_ref,
+                run_id=args.asserted_run,
+                state_path=(
+                    Path(args.account_state).expanduser()
+                    if args.account_state else None
+                ),
+                declared=load_account_declaration(
+                    Path(args.account_list).expanduser()
+                    if args.account_list else None
+                ),
+            )
+        except ValueError as exc:
+            sys.exit(f"ERROR: {exc}")
+        print(message)
+        if changed:
+            print(
+                "This is a CLAIM that the upload landed whole. Nothing can "
+                "check it - re-run --record-account-state from a session with "
+                "a mirror to replace it with a measurement."
+            )
+        return
 
     # Reads the trees but writes nothing and uploads nothing, so it runs
     # before check_repo_state: a CI runner sits on a detached HEAD, and

@@ -3680,3 +3680,140 @@ class TestAccountState:
         assert skill_root not in sync_skills.ACCOUNT_STATE_FILE.parents
         assert not any("account-state" in member
                        for member in sync_skills.skill_payload(skill_root))
+
+
+# ---------------------------------------------------------------------------
+# --assert-uploaded: recording an upload nobody can verify
+# ---------------------------------------------------------------------------
+
+def _tree_with(tmp_path, name, body, sub="plugins/adam-local/skills"):
+    """A minimal repo holding one skill, in the plugin layout."""
+    d = tmp_path / sub / name
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n{body}\n", encoding="utf-8")
+    return tmp_path
+
+
+def _seed_state(path, entries, recorded_at="2026-01-01T00:00:00+00:00"):
+    path.write_text(
+        json.dumps({"recorded_at": recorded_at, "skills": entries}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestAssertUploaded:
+    @pytest.fixture(autouse=True)
+    def _declared(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_FILE",
+            write_declaration(tmp_path / "declared.txt", ["alpha"]),
+        )
+
+    def test_it_refuses_a_skill_the_declaration_does_not_carry(self, tmp_path):
+        """ADR 0002: a name not declared is not supposed to be on the account.
+
+        Asserting one would record an upload for a skill nothing sanctioned,
+        which is how the store accumulated the orphans PR #62 had to recover.
+        """
+        repo = _tree_with(tmp_path / "repo", "beta", "x")
+        state = _seed_state(tmp_path / "state.json", {})
+        with pytest.raises(ValueError, match="not declared"):
+            sync_skills.assert_uploaded("beta", [repo], state_path=state)
+
+    def test_it_refuses_when_there_is_no_recording_to_amend(self, tmp_path):
+        """An absent file is not an empty one to fill in.
+
+        Writing a fresh state here would leave every OTHER declared skill
+        silently unrecorded, which reads downstream as "nobody has looked" -
+        a much larger claim than the one being made.
+        """
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        with pytest.raises(ValueError, match="no recording"):
+            sync_skills.assert_uploaded(
+                "alpha", [repo], state_path=tmp_path / "absent.json"
+            )
+
+    def test_it_records_the_digest_basis_and_provenance(self, tmp_path):
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        state = _seed_state(tmp_path / "state.json", {"alpha": {"digest": "sha256:old"}})
+        changed, _ = sync_skills.assert_uploaded(
+            "alpha", [repo], ref="c0ffee", run_id="42", state_path=state,
+            now=datetime.datetime(2026, 3, 4, tzinfo=datetime.timezone.utc),
+        )
+        entry = json.loads(state.read_text())["skills"]["alpha"]
+        expected = sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(repo, "alpha"))
+        )
+        assert changed
+        assert entry["digest"] == expected
+        assert entry["basis"] == "asserted"
+        assert entry["asserted_from"] == {"ref": "c0ffee", "run_id": "42"}
+        assert entry["asserted_at"] == "2026-03-04T00:00:00+00:00"
+        # An assertion cannot know the account's own stamp, and keeping the
+        # previous one would attribute this content to the older upload.
+        assert entry["updatedAt"] is None
+
+    def test_it_digests_the_tree_it_was_given_not_the_current_one(self, tmp_path):
+        """The signature's whole reason for existing.
+
+        The artifact was built from one commit; the repo may have moved since.
+        Recording today's digest for yesterday's upload claims an upload that
+        never happened - and nothing downstream could ever detect it.
+        """
+        uploaded = _tree_with(tmp_path / "at-sha", "alpha", "AS UPLOADED")
+        current = _tree_with(tmp_path / "now", "alpha", "MOVED SINCE")
+        state = _seed_state(tmp_path / "state.json", {"alpha": {"digest": "sha256:old"}})
+        sync_skills.assert_uploaded("alpha", [uploaded], state_path=state)
+        recorded = json.loads(state.read_text())["skills"]["alpha"]["digest"]
+        assert recorded == sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(uploaded, "alpha"))
+        )
+        assert recorded != sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(current, "alpha"))
+        )
+
+    def test_recording_the_same_digest_twice_changes_nothing(self, tmp_path):
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        digest = sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(repo, "alpha"))
+        )
+        state = _seed_state(tmp_path / "state.json", {"alpha": {"digest": digest}})
+        before = state.read_text()
+        changed, message = sync_skills.assert_uploaded("alpha", [repo], state_path=state)
+        assert not changed
+        assert "nothing to change" in message
+        assert state.read_text() == before
+
+    def test_it_leaves_the_file_level_observation_stamp_alone(self, tmp_path):
+        """`recorded_at` means "when the STORE was last observed".
+
+        Asserting does not observe the store, so bumping it would make a stale
+        file read as freshly verified - inverting the one signal that tells a
+        reader how much the rest of the file is worth.
+        """
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        state = _seed_state(
+            tmp_path / "state.json",
+            {"alpha": {"digest": "sha256:old"}, "other": {"digest": "sha256:keep"}},
+            recorded_at="2026-01-01T00:00:00+00:00",
+        )
+        sync_skills.assert_uploaded("alpha", [repo], state_path=state)
+        after = json.loads(state.read_text())
+        assert after["recorded_at"] == "2026-01-01T00:00:00+00:00"
+        assert after["skills"]["other"] == {"digest": "sha256:keep"}
+
+    def test_an_observation_supersedes_an_assertion(self, tmp_path, monkeypatch):
+        """A full recording overwrites `asserted` with `observed`, never back.
+
+        The mirror is ground truth; the assertion was a stand-in for it.
+        """
+        mirror = tmp_path / "synced"
+        (mirror / "alpha").mkdir(parents=True)
+        (mirror / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\nx\n")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", mirror)
+        state = sync_skills.build_account_state(
+            declared={"alpha"},
+            now=datetime.datetime(2026, 5, 6, tzinfo=datetime.timezone.utc),
+        )
+        assert state["skills"]["alpha"]["basis"] == "observed"

@@ -798,3 +798,37 @@ against the account itself.
 
 Digests are content, never timestamps: E5 measured `updatedAt`-vs-`git log` and
 it flagged 3 of 10 skills with 2 false positives.
+
+### Closing the loop from the phone too
+
+The re-record above needs the mirror, so on a phone the loop stays open and the
+same skill keeps being offered. `.github/workflows/record-account-upload.yml`
+closes it without one — dispatch it with the skill name and the **run ID of the
+`Account skill ZIPs` run whose artifact you uploaded**:
+
+```bash
+# what it runs, if you ever need it by hand
+python3 "$SKILL_DIR/sync_skills.py" --assert-uploaded NAME \
+  --repos <tree the artifact was built from> --asserted-ref SHA --asserted-run ID
+```
+
+It resolves that run, **refuses** it unless it is the ZIP workflow and actually
+published an artifact of that name, and digests the tree that run was built
+from — not today's `main`. Recording the current digest for an upload made from
+an older tree would claim an upload that never happened, and nothing
+downstream could detect it.
+
+**The entry it writes is stamped `basis: asserted`,** with the ref and run it
+came from, so it stays distinguishable from a `--record-account-state` row
+(`basis: observed`). That distinction is the point: an assertion is exactly as
+good as your certainty that the upload landed whole, and a truncated upload
+asserted as complete can never be contradicted — CI has no mirror. Run
+`--record-account-state` whenever you are next at a signed-in surface; an
+observation always overwrites an assertion, never the reverse.
+
+It **pushes a branch and stops**, linking a prefilled compare URL in the job
+summary. It does not open the PR itself, and that is deliberate rather than
+unfinished: `pytest-windows` is a required check on `main`, GitHub raises no
+workflow events for anything `GITHUB_TOKEN` does, so a PR this workflow opened
+would never run CI and could never merge. You open it; the checks run under
+your identity.
