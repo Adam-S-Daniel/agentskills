@@ -81,6 +81,17 @@ EPHEMERAL, DURABLE, UNSURE = "ephemeral", "durable", "unsure"
 # checked, in this order, and the first that exists answers.
 USER_SETTINGS_NAMES = ("settings.json", "cowork_settings.json")
 
+# The two files a PROJECT-scope settings chain can be called, in the order the
+# chain reads them. ADR 0005 records `<cwd>/.claude/settings.local.json` AHEAD of
+# `<cwd>/.claude/settings.json`, and `settings.local.json` is the GITIGNORED
+# machine-local one — which is exactly where someone applies the `hook-not-wired`
+# fix without committing it to a repo they may not own. Reading only
+# `settings.json` therefore fired the finding at the one person who had already
+# fixed it, over a file sitting one line higher in the same chain, and told them
+# "nothing here or at the user scope does" while their own file did. Same defect
+# class as the `cowork_settings.json` name below, one scope down.
+PROJECT_SETTINGS_NAMES = ("settings.local.json", "settings.json")
+
 
 class Entry(NamedTuple):
     name: str
@@ -100,6 +111,19 @@ class Lock(NamedTuple):
     names: Set[str]
     claims: Set[Tuple[str, str]]
     reason: Optional[str] = None
+
+
+class Surface(NamedTuple):
+    """What kind of machine this is, and the three readings that decided it.
+
+    `forced` is carried rather than folded away because the verdict PRINTS the
+    inputs it judged from: an ephemeral reading with an unset entrypoint and no
+    session id looks like a contradiction unless the third arm is named.
+    """
+    kind: str
+    entrypoint: str
+    remote: str
+    forced: bool = False
 
 
 class Row(NamedTuple):
@@ -193,8 +217,8 @@ def remote_url(registry: object) -> Optional[str]:
     return None
 
 
-def read_surface(env: Optional[Dict[str, str]] = None) -> Tuple[str, str, str]:
-    """(kind, entrypoint, remote session id) for the machine this is running on.
+def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
+    """Which kind of machine this is, decided by the hook's own three arms.
 
     The whole point of asking is that an empty personal store means opposite
     things on the two kinds of machine. On a durable one the marketplace install
@@ -204,12 +228,26 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Tuple[str, str, str]:
     doctor ended up reporting "healthy" in precisely the session where it was not
     (#85).
 
-    The test is `CLAUDE_CODE_REMOTE_SESSION_ID`, never the SHAPE of
-    `CLAUDE_CODE_ENTRYPOINT`. A prefix match on `remote` looks equivalent and is
-    not: the binary's own display classifier groups `remote_cowork` with
-    `local-agent`, so whether every entrypoint beginning with `remote` is
-    ephemeral is unproven and is being held deliberately (#85 §5). A session id
-    is issued by the remote environment and needs no such guess.
+    THE THREE ARMS ARE COPIED FROM `.claude/hooks/skills-bootstrap.sh`, which
+    installs when a remote session id is set, OR `CLAUDE_CODE_ENTRYPOINT` is
+    EXACTLY `remote`, OR `SKILLS_BOOTSTRAP_FORCE` is set, and skips otherwise.
+    Reading a narrower test than the hook it diagnoses is not caution, it is
+    disagreement — and it is silent, because the narrower reading returns
+    `unsure`/`durable`, which is the quiet answer. Measured: on a surface the
+    hook treats as ephemeral and installs onto, a doctor keyed on the session id
+    alone reported `surface unsure`, withheld every promotion and exited 0 over
+    eight undelivered locked skills. That is #85's headline defect surviving on a
+    surface the hook itself installs on.
+
+    WHAT IS NOT COPIED, AND MUST NOT BE: any widening to the six `remote_*`
+    spellings. A prefix match on `remote` is the fix that looks equivalent and is
+    held deliberately (#85 §5) — the binary's own display classifier groups
+    `remote_cowork` with `local-agent`, so "no durable entrypoint starts with
+    `remote`" is unproven, and assuming it would call a durable Cowork machine
+    ephemeral and report its correctly-empty store as a delivery failure. The
+    EXACT value `remote` is a different question, already settled in this repo's
+    own hook, so matching it is agreement rather than a widening. `remote_cowork`
+    stays UNSURE.
 
     Anything else — an entrypoint with no session id — is UNSURE rather than
     durable. It is treated as durable everywhere a judgement depends on it,
@@ -219,11 +257,16 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Tuple[str, str, str]:
     env = os.environ if env is None else env
     entrypoint = env.get("CLAUDE_CODE_ENTRYPOINT", "") or ""
     remote = env.get("CLAUDE_CODE_REMOTE_SESSION_ID", "") or ""
-    if remote:
-        return EPHEMERAL, entrypoint, remote
+    # PRESENCE, not value, and that is the hook's semantics rather than a
+    # shortcut: it tests `[ -z "${SKILLS_BOOTSTRAP_FORCE:-}" ]`, so
+    # `SKILLS_BOOTSTRAP_FORCE=0` forces the install too. Reading the value here
+    # would disagree with the hook in the one direction nobody thinks to check.
+    forced = bool(env.get("SKILLS_BOOTSTRAP_FORCE", ""))
+    if remote or entrypoint == "remote" or forced:
+        return Surface(EPHEMERAL, entrypoint, remote, forced)
     if not entrypoint:
-        return DURABLE, entrypoint, remote
-    return UNSURE, entrypoint, remote
+        return Surface(DURABLE, entrypoint, remote, forced)
+    return Surface(UNSURE, entrypoint, remote, forced)
 
 
 def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
@@ -320,9 +363,17 @@ def hook_wiring(project_dir: Path, home: Optional[Path] = None
     That state is invisible from inside any one repo — every file it needs is
     present and correct — which is why it is worth a finding rather than a
     comment. See docs/decisions/0005.
+
+    BOTH scopes are read as CHAINS, not as single filenames. The project scope is
+    `settings.local.json` then `settings.json`; the user scope is `settings.json`
+    then `cowork_settings.json`. Either narrowing produces the same wrong verdict
+    — `hook-not-wired` reported at a machine where the fix has already been
+    applied — and `settings.local.json` is the likelier of the two to carry it,
+    being the gitignored file you reach for in a repo you would rather not commit
+    to. What remains genuinely unreadable from here is named on the finding.
     """
     home = Path.home() if home is None else home
-    here = _settings_wired(project_dir / ".claude")
+    here = _settings_wired(project_dir / ".claude", PROJECT_SETTINGS_NAMES)
     user = _settings_wired(home / ".claude", USER_SETTINGS_NAMES)
     children: List[Path] = []
     try:
@@ -575,12 +626,18 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             if origin == UNATTRIBUTED and not in_lock:
                 findings.append(Finding(
                     "untracked", name,
-                    "in the skills directory, named by neither the lock nor the "
-                    "install record. The hook will never update it and never "
-                    "remove it. Three ways to land here: it is yours (right), "
-                    "you expected the bundle to own it (a delivery gap), or the "
-                    "hook installed it and then rewrote the record after failing "
-                    "to read one, which forgets what came before."))
+                    "in the skills directory, named by neither the install "
+                    "record nor the lock this was judged against (the LOCK "
+                    "line below says which). Nothing that lock declares would "
+                    "update it, and the hook removes only what the record "
+                    "proves it installed — so on that expectation alone it is "
+                    "left alone indefinitely. Where a session has several locks "
+                    "this is one lock's reading, not a verdict about the name: "
+                    "another lock may name it, and would report it separately. "
+                    "Three ways to land here: it is yours (right), you expected "
+                    "the bundle to own it (a delivery gap), or the hook "
+                    "installed it and then rewrote the record after failing to "
+                    "read one, which forgets what came before."))
             elif origin == UNATTRIBUTED:
                 findings.append(Finding(
                     "hand-placed-over-locked", name,
@@ -881,7 +938,7 @@ def render(record: Record, record_path: Path, skills_dir: Path,
            results: List[LockResult], findings: List[Finding],
            notes: List[Finding], stamped: List[Tuple[str, float]],
            store_state: str = PRESENT,
-           surface: Tuple[str, str, str] = (DURABLE, "", "")) -> str:
+           surface: Surface = Surface(DURABLE, "", "", False)) -> str:
     """The verdict line first, then the evidence behind it."""
     rows = results[0].rows if results else []
     hook_rows = [row for row in rows if row.origin == HOOK]
@@ -931,17 +988,23 @@ def render(record: Record, record_path: Path, skills_dir: Path,
         out += _para("unreadable — the file is there and is not the shape the hook "
                      "writes. See FINDINGS.")
 
-    kind, entrypoint, remote = surface
+    kind, entrypoint, remote, forced = surface
     out += ["", f"SURFACE  {kind}"]
+    # All THREE arms, because the reading has to account for the verdict. An
+    # ephemeral call made on `SKILLS_BOOTSTRAP_FORCE` alone prints an unset
+    # entrypoint and no session id, and a reader who cannot see the third input
+    # is looking at what appears to be a contradiction.
     reading = (f"CLAUDE_CODE_ENTRYPOINT={entrypoint or '(unset)'}, "
                f"CLAUDE_CODE_REMOTE_SESSION_ID="
-               f"{'set' if remote else '(unset)'}.")
+               f"{'set' if remote else '(unset)'}, "
+               f"SKILLS_BOOTSTRAP_FORCE={'set' if forced else '(unset)'}.")
     if kind == EPHEMERAL:
-        out += _para(f"{reading} A cloud session, CI runner or container: the "
-                     f"bootstrap hook is the only channel that delivers a locked "
-                     f"bundle here, so a locked skill missing from the personal "
-                     f"store is a delivery failure rather than the empty store a "
-                     f"durable machine correctly has.")
+        out += _para(f"{reading} A cloud session, CI runner or container — the "
+                     f"same three readings the bootstrap hook installs on. It is "
+                     f"the only channel that delivers a locked bundle here, so a "
+                     f"locked skill missing from the personal store is a delivery "
+                     f"failure rather than the empty store a durable machine "
+                     f"correctly has.")
     elif kind == DURABLE:
         out += _para(f"{reading} A durable machine: the marketplace install is "
                      f"authoritative and the personal store is SUPPOSED to hold "

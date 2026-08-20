@@ -131,6 +131,13 @@ def durable_surface(monkeypatch):
     """
     monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_REMOTE_SESSION_ID", raising=False)
+    # The third arm, and it arrived with the same rule the docstring above
+    # describes. `read_surface` now mirrors the hook's full test, and
+    # `SKILLS_BOOTSTRAP_FORCE=1` is how this repo's own hook suite forces a run
+    # — so a developer who exported it while debugging the hook would flip every
+    # test in this file to an ephemeral surface, on identical bytes. Clearing it
+    # is what keeps the fixture's promise once the surface test widened.
+    monkeypatch.delenv("SKILLS_BOOTSTRAP_FORCE", raising=False)
 
 
 @pytest.fixture
@@ -457,6 +464,17 @@ def test_a_skill_in_neither_the_lock_nor_the_record_is_a_finding(store, capsys):
 
     It is invisible everywhere else — no verdict mentions it, no lock names it,
     and it will sit there through every future session.
+
+    The finding's text is scoped to THE LOCK THAT RAISED IT rather than to the
+    hook in general, and that is a correction rather than a hedge. In a
+    multi-repo session `classify` runs once per lock, so a name that lock A
+    declares and lock B does not raises B's `untracked` — and the old wording,
+    "the hook will never update it and never remove it", is then false on its
+    face: lock A's judgement of the same directory is `hand-placed-over-locked`,
+    which says the next session start REPLACES it. Two findings, one directory,
+    flatly contradicting each other. Only one lock was ever observed to be in
+    play when the sentence was written, so it now says only what that one lock
+    can support.
     """
     skills, lock = store
     make_skill(skills, "hand-copied")
@@ -464,7 +482,58 @@ def test_a_skill_in_neither_the_lock_nor_the_record_is_a_finding(store, capsys):
 
     assert code == 1, out
     assert "[untracked] hand-copied" in flat(out), out
-    assert "never remove it" in flat(out), out
+    assert "the lock this was judged against" in flat(out), out
+    # It must not make the unqualified claim again. A single lock is still only
+    # a single lock's reading.
+    assert "The hook will never update it" not in flat(out), out
+
+
+def test_untracked_does_not_contradict_another_locks_verdict_on_the_same_name(
+        tmp_path, capsys, monkeypatch):
+    """Divergent multi-repo locks make an absolute claim about "the hook" false.
+
+    `classify` runs once per lock and names no winner — deliberately, since
+    picking one would answer ADR 0005's first open question by being convenient.
+    The cost is that two locks can reach opposite conclusions about one
+    directory, and until now the text did not admit it: lock A names `shared`,
+    so A reports `hand-placed-over-locked` — "will not survive the next session
+    start, which replaces the directory". Lock B does not name it, so B reported
+    `untracked` — "the hook will never update it and never remove it". Both in
+    one findings list, about one directory, in direct contradiction.
+
+    Latent while every lock in the fleet declared the same names (9 = 9, empty
+    symmetric difference) and live the moment they diverge, which ADR 0005 notes
+    they can. The fix is in the text, not the judgement: `untracked` now says
+    what the lock that raised it can support, and the LOCK line says which lock
+    that was.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "shared")
+    # A record that is PRESENT and does not name it — the state that makes the
+    # directory attributable-to-nobody rather than merely unknown, which is what
+    # separates the two contradicting findings from a single quiet one.
+    write_record(store)
+
+    project = tmp_path / "repos"
+    # A names `shared`; B does not.
+    _repo_with_lock(project, "repo-a", "shared")
+    _repo_with_lock(project, "repo-b", "other")
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 1, out
+    flattened = flat(out)
+    # Both readings are still reported — suppressing either would be the merge
+    # this deliberately does not do.
+    assert "[untracked] shared" in flattened, out
+    assert "[hand-placed-over-locked] shared" in flattened, out
+    # ...and the untracked one no longer asserts what the other one disproves.
+    assert "The hook will never update it" not in flattened, out
+    assert "another lock may name it" in flattened, out
 
 
 def test_the_untracked_finding_still_fires_without_a_record(tmp_path, capsys):
@@ -692,6 +761,92 @@ def test_locked_skills_absent_on_an_ephemeral_surface_are_findings(
     assert "2 not in the store" in flat(out), out
 
 
+@pytest.mark.parametrize("arm", [
+    {"CLAUDE_CODE_REMOTE_SESSION_ID": "cse_deadbeef"},
+    {"CLAUDE_CODE_ENTRYPOINT": "remote"},
+    {"SKILLS_BOOTSTRAP_FORCE": "1"},
+])
+def test_every_arm_the_hook_installs_on_promotes_an_undelivered_skill(
+        tmp_path, capsys, monkeypatch, arm):
+    """A doctor narrower than the hook it diagnoses is silently wrong.
+
+    `.claude/hooks/skills-bootstrap.sh` installs when a remote session id is
+    set, OR `CLAUDE_CODE_ENTRYPOINT` is exactly `remote`, OR
+    `SKILLS_BOOTSTRAP_FORCE` is set. Keying on the session id alone left the
+    other two arms reading `unsure` and `durable` — the QUIET answers — so on a
+    surface the hook installs onto, the doctor withheld every promotion and
+    exited 0 over undelivered locked skills. That is #85's headline defect
+    surviving on a surface this repo's own hook installs on, which is why each
+    arm is asserted end to end rather than only on the reader.
+
+    One arm per case deliberately: a single environment setting all three would
+    still pass with two of them broken.
+    """
+    for name, value in arm.items():
+        monkeypatch.setenv(name, value)
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    lock = write_lock(tmp_path / "skills.lock", store)
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    data["skills"] = {"adam/alpha": "a" * 64, "adam/beta": "b" * 64}
+    lock.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "surface ephemeral" in flat(out), out
+    assert "FINDINGS (2)" in flat(out), out
+    assert "[not-in-the-store] alpha" in flat(out), out
+    assert "no hook run has ever finished here" in flat(out), out
+
+
+def test_the_surface_reading_names_the_arm_that_decided_it(tmp_path, capsys,
+                                                           monkeypatch):
+    """`SKILLS_BOOTSTRAP_FORCE` alone reads ephemeral with the other two unset.
+
+    The hook prints the values it judged from precisely so a MISCLASSIFIED
+    surface is legible to whoever reads the transcript. A report that named only
+    the entrypoint and the session id would, on this arm, print two unset
+    readings above the word `ephemeral` and look like a contradiction — which is
+    the same illegibility, one level down.
+    """
+    monkeypatch.setenv("SKILLS_BOOTSTRAP_FORCE", "1")
+    store = tmp_path / "skills"
+    store.mkdir()
+    lock = write_lock(tmp_path / "skills.lock", store)
+
+    _, out = run(store, lock, capsys)
+    assert "surface ephemeral" in flat(out), out
+    assert "SKILLS_BOOTSTRAP_FORCE=set" in flat(out), out
+    assert "CLAUDE_CODE_ENTRYPOINT=(unset)" in flat(out), out
+    assert "CLAUDE_CODE_REMOTE_SESSION_ID=(unset)" in flat(out), out
+
+
+def test_the_widened_surface_still_leaves_a_durable_machine_alone(tmp_path,
+                                                                  capsys):
+    """The negative control for the three arms, and it is the load-bearing half.
+
+    Widening the surface test is only correct if it widened where the hook
+    installs and NOWHERE else. Without this, "the promotion fires now" would be
+    indistinguishable from "the promotion fires always" — the second being a
+    regression that turns every durable machine's correctly-empty store into a
+    findings list. Identical bytes to the ephemeral cases above; only the
+    environment differs, and `durable_surface` clears all three arms.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    lock = write_lock(tmp_path / "skills.lock", store)
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    data["skills"] = {"adam/alpha": "a" * 64, "adam/beta": "b" * 64}
+    lock.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "surface durable" in flat(out), out
+    assert "FINDINGS (0)" in flat(out), out
+    assert "[not-in-the-store] alpha" in flat(out), out
+
+
 def test_the_promotion_needs_all_three_of_its_preconditions(tmp_path, capsys,
                                                             ephemeral):
     """Ephemeral AND record-absent AND a lock — drop any one and it stays quiet.
@@ -786,6 +941,36 @@ def test_the_surface_is_read_from_the_session_id_not_the_entrypoints_shape(
     # for `FOO=` and truthiness is what separates them.
     assert prov.read_surface({"CLAUDE_CODE_REMOTE_SESSION_ID": ""})[0] \
         == prov.DURABLE
+
+
+def test_the_surface_test_is_the_hooks_own_three_arms():
+    """Copied from `skills-bootstrap.sh`, and copied EXACTLY — no wider, no narrower.
+
+    The sibling test above holds the widening that is NOT settled (the six
+    `remote_*` spellings, where `remote_cowork` may well be durable). This one
+    holds the three arms that ARE settled, because they are the hook's own: it
+    installs on a remote session id, on the exact entrypoint `remote`, or on
+    `SKILLS_BOOTSTRAP_FORCE`. Agreeing with the hook is not the same act as
+    guessing past it, and only the second is on hold.
+
+    Asserted on the reader as well as end to end, so the rule survives someone
+    reading only the rendered output.
+    """
+    assert prov.read_surface({"CLAUDE_CODE_REMOTE_SESSION_ID": "cse_x"})[0] \
+        == prov.EPHEMERAL
+    assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": "remote"})[0] \
+        == prov.EPHEMERAL
+    assert prov.read_surface({"SKILLS_BOOTSTRAP_FORCE": "1"})[0] == prov.EPHEMERAL
+    # PRESENCE, not value. The hook tests `[ -z ... ]`, so `0` forces the
+    # install too — reading the value here would disagree with it in the one
+    # direction nobody would think to check.
+    assert prov.read_surface({"SKILLS_BOOTSTRAP_FORCE": "0"})[0] == prov.EPHEMERAL
+    # An empty string IS unset to `-z`, and so must be unset here.
+    assert prov.read_surface({"SKILLS_BOOTSTRAP_FORCE": ""})[0] == prov.DURABLE
+    # The EXACT value only: `remoteish` starts with `remote` and is not it, so a
+    # prefix match — the widening on hold — fails this line.
+    assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": "remoteish"})[0] \
+        == prov.UNSURE
 
 
 def test_a_locked_skill_the_account_store_delivers_is_not_called_missing(
@@ -1746,6 +1931,51 @@ def test_the_user_scope_settings_filename_is_surface_dependent(tmp_path, capsys,
 
     _, out = run_autolock(store, project, capsys)
     assert "[hook-not-wired]" not in out, out
+
+
+def test_the_project_scope_reads_settings_local_json_too(tmp_path, capsys,
+                                                         ephemeral, monkeypatch):
+    """The gitignored machine-local file sits AHEAD of `settings.json` in the chain.
+
+    ADR 0005 records the order as managed/policy -> `--settings` ->
+    `<cwd>/.claude/settings.local.json` -> `<cwd>/.claude/settings.json` ->
+    `$HOME/.claude/settings.json`. Reading only the second of those fired
+    `hook-not-wired` at a project that wires the hook in the first — telling the
+    one person who had already applied the fix that "nothing here or at the user
+    scope does", and exiting 1 at them. Wrong exactly for the reader it exists
+    to serve, and the same defect class as the `cowork_settings.json` name one
+    scope up.
+
+    `settings.local.json` is the LIKELIER of the two to carry this fix: it is
+    the file you reach for in a repo you would rather not commit the change to.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+
+    wired = _repo_with_lock(tmp_path / "staging", "wired", hook=True)
+    settings = (wired / ".claude" / "settings.json").read_text(encoding="utf-8")
+    (project / ".claude").mkdir()
+    local = project / ".claude" / "settings.local.json"
+    local.write_text(settings, encoding="utf-8")
+    assert not (project / ".claude" / "settings.json").exists()
+
+    _, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" not in out, out
+
+    # NEGATIVE CONTROL, in the same test and on the same bytes: remove the one
+    # file and the finding must come back. Without it, "the finding stopped
+    # firing" is indistinguishable from "the finding stopped working" — and a
+    # gate that cannot fire is worth less than no gate, because it reads as one.
+    local.unlink()
+    _, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" in out, out
 
 
 def test_a_child_hook_with_no_lock_anywhere_is_not_a_finding(tmp_path, capsys,

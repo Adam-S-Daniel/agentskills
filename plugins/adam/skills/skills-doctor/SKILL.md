@@ -44,24 +44,32 @@ Expectations differ per surface, so establish which one this is before judging
 anything:
 
 ```bash
-echo "entry=$CLAUDE_CODE_ENTRYPOINT remote=$CLAUDE_CODE_REMOTE_SESSION_ID env=$CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE"
+echo "entry=$CLAUDE_CODE_ENTRYPOINT remote=$CLAUDE_CODE_REMOTE_SESSION_ID force=$SKILLS_BOOTSTRAP_FORCE env=$CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE"
 ```
 
 | Reading | Surface | What SHOULD be true |
 |---|---|---|
-| non-empty remote session id | ephemeral (cloud session, CI, container) | the bootstrap hook installed the locked bundle into `~/.claude/skills/`; **no** marketplace plugins (cloud gets none from repo-declared settings) |
-| both empty | durable machine | the marketplace install is authoritative; `~/.claude/skills/` should hold **no** hook-installed bundle skills — finding them there means double delivery |
-| an entrypoint, no session id | unsure | not a shade of either row. Judge it as durable — the quiet reading — and settle it against the session's own `skills:` verdict rather than the entrypoint's name |
+| a non-empty remote session id, OR `entry=remote` exactly, OR `SKILLS_BOOTSTRAP_FORCE` set | ephemeral (cloud session, CI, container) | the bootstrap hook installed the locked bundle into `~/.claude/skills/`; **no** marketplace plugins (cloud gets none from repo-declared settings) |
+| all three empty | durable machine | the marketplace install is authoritative; `~/.claude/skills/` should hold **no** hook-installed bundle skills — finding them there means double delivery |
+| some other entrypoint, no session id, not forced | unsure | not a shade of either row. Judge it as durable — the quiet reading — and settle it against the session's own `skills:` verdict rather than the entrypoint's name |
 
 A durable machine with a full set of bundle skills in `~/.claude/skills/` is a
 finding, not a pass.
 
-**Read the session id, not the entrypoint's shape.** Every ephemeral entrypoint
-measured so far begins with `remote`, which makes a prefix match look
-equivalent; it is not. The binary's own display classifier groups
+**Match the hook's test exactly — no wider, and no narrower.**
+`skills-bootstrap.sh` installs on any of those three readings, so a diagnostic
+that recognises fewer of them disagrees with the hook silently: it answers
+`unsure`, which is the quiet reading, on a surface the hook has just installed
+onto. That is how #85's headline defect survived its own fix.
+
+**But do not widen to the entrypoint's SHAPE.** Every ephemeral entrypoint
+measured so far begins with `remote`, which makes a prefix match look like the
+same rule; it is not. The binary's own display classifier groups
 `remote_cowork` with `local-agent`, so "no durable entrypoint starts with
 `remote`" is unproven, and assuming it would call a durable Cowork machine
-ephemeral and report its correctly-empty store as a delivery failure.
+ephemeral and report its correctly-empty store as a delivery failure. The exact
+string `remote` is settled and matched; `remote_cowork` and the other `remote_*`
+spellings stay `unsure`.
 
 ## 2. Read the expectation
 
@@ -147,15 +155,24 @@ locks are folded into one that names them all.
 **It reads the surface, and the surface changes the verdict.** A locked skill
 missing from the personal store is the correct state on a durable machine and a
 delivery failure on an ephemeral one, so the same three facts are a NOTE on one
-and a FINDING on the other. The test is `CLAUDE_CODE_REMOTE_SESSION_ID`, never
-the shape of `CLAUDE_CODE_ENTRYPOINT` — a prefix match on `remote` is unproven
-against `remote_cowork` and is held deliberately. An entrypoint with no session
-id reports as `unsure` and is judged as durable, which is the quiet reading.
+and a FINDING on the other. The test is the bootstrap hook's own three arms,
+copied: a remote session id, OR `CLAUDE_CODE_ENTRYPOINT` exactly `remote`, OR
+`SKILLS_BOOTSTRAP_FORCE`. Reading fewer of them than the hook does is
+disagreement, not caution. What is NOT copied is any prefix match on the
+entrypoint's shape — unproven against `remote_cowork`, held deliberately — so
+any other entrypoint with no session id reports as `unsure` and is judged as
+durable, which is the quiet reading.
 
 **`hook-not-wired` is the finding to look for in a multi-repo session.** A lock
 plus a SessionStart hook wired only in a *child* of the project dir means no
 hook is consulted at all, so nothing is delivered and nothing says so — there is
-no `skills:` verdict because the script that prints one never runs. See
+no `skills:` verdict because the script that prints one never runs. Both scopes
+are read as chains — `settings.local.json` then `settings.json` at the project,
+`settings.json` then `cowork_settings.json` at the user scope — so a fix applied
+in any of them silences the finding. Two links are unreadable from here and
+neither is a file this can open: a managed/policy settings file, and a
+`--settings` path given on the command line. If the finding fires on a session
+you believe is wired through one of those, that is the gap. See
 `docs/decisions/0005` in the registry.
 
 Produce one row per expected skill, and report `registry` and `bundle` on it,
