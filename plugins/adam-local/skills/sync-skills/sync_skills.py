@@ -5,6 +5,7 @@ Usage:
   python sync_skills.py [--prepare] [--all] [--skill NAME] [--dry-run]
                         [--verify] [--mark-synced NAME:HASH] [--repos PATH ...]
                         [--account-list PATH] [--yes]
+                        [--report-issue [--report-repo OWNER/NAME]]
 
 Repos are located by --repos, then $AGENTSKILLS_REPOS, then the checkout this
 file lives in (for its own name only). There are no built-in clone paths.
@@ -25,7 +26,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 STATE_FILE = Path.home() / ".sync-skills-state.json"
 
@@ -867,6 +868,7 @@ def verify(
     declared: Optional[Set[str]] = None,
     named: Optional[bool] = None,
     selection: Optional[str] = None,
+    verified_out: Optional[Set[str]] = None,
 ) -> bool:
     """Compare each skill's expected upload against its account copy.
 
@@ -914,6 +916,16 @@ def verify(
     problem) — and reporting the second when the first happened is precisely
     the misdiagnosis this parameter exists to end. It defaults to the older
     inference so existing callers keep their behaviour.
+
+    ``verified_out``, if given, is filled with the declared names whose
+    account copy this run actually COMPARED. The bool return cannot carry
+    that: True means "nothing I looked at failed", and a run that looked at
+    no account copy at all returns True while saying so on stderr. That
+    distinction is invisible to a caller holding only the bool, and
+    ``account_upload_gap`` needs it — "no declared skill is absent" plus a
+    green verify still is not "the account is correct" if no declared skill
+    was ever opened. An out-parameter rather than a changed return type
+    because the bool IS the exit code and every caller and test reads it.
 
     Returns True only if the declaration was readable, the mirror was fresh,
     at least one skill was selected, and nothing failed.
@@ -1000,6 +1012,8 @@ def verify(
                 continue
 
             verified += 1
+            if verified_out is not None:
+                verified_out.add(name)
             expected = skill_payload(skill_path)
 
             if actual is None:
@@ -1097,6 +1111,923 @@ def verify(
 
 
 # ---------------------------------------------------------------------------
+# Account-store upload tracking issue (--report-issue)
+#
+# THE GAP THIS FILLS. Membership in the account store is already CI-locked:
+# tests/test_sync_skills.py::test_shipped_declaration_is_the_ruled_set reads
+# the REAL shipped account-skills.txt and pins its exact name set, and it runs
+# in the REQUIRED pytest / pytest-windows jobs. So adding a name is a
+# deliberate two-file edit that a human reviews. What NOTHING checks is the
+# other half: whether the claude.ai account store has actually RECEIVED the
+# skill that name declares. It cannot — the account store is reachable only
+# from a laptop with a logged-in browser session, never from CI — so the
+# window between "the declaration merged" and "a laptop uploaded it" is
+# invisible. Every job stays green throughout.
+#
+# THAT GREENNESS IS DELIBERATE AND MUST SURVIVE THIS FEATURE. The standing
+# ruling is that a pending upload must be TRACKED, never BLOCKED: the pre-push
+# hook prints a reminder and always exits 0, nothing advertises the state as
+# broken, and this mode changes none of that. It only makes the window
+# visible, by opening / updating / closing ONE tracking issue.
+#
+# WHY AN ISSUE AND NOT AN EXIT CODE. The upload cannot happen in CI, so a red
+# check would be a permanently-red check nobody can clear from the machine
+# that sees it — the fastest possible route to a check everyone learns to
+# ignore. An issue is the alert channel that matches who can act (the laptop
+# owner, who watches their own repo) and it self-clears the moment the upload
+# lands.
+#
+# WHAT IT IS MODELLED ON. cms-platform's scripts/audit-scheduled-runs.js —
+# specifically four of its properties, each load-bearing here:
+#   1. a HIDDEN HTML MARKER identifies THE tracking issue among open issues
+#      (never a title search — a title can be edited, and a near-miss match
+#      opens a duplicate against an API that will happily hold both);
+#   2. the /issues listing includes PULL REQUESTS, so they are filtered out;
+#   3. COMMENT ONLY ON CHANGE, deduped through a hidden block, because a
+#      daily identical comment is exactly the noise the alert exists to cut
+#      through;
+#   4. NEVER ACT ON AN UNKNOWN ANSWER. That is #258 verbatim: that audit once
+#      CLOSED a live tracking issue because a probe it could not run came back
+#      empty and empty read as clean. Here the probe that can come back
+#      unreadable is the local account mirror, and an unreadable mirror means
+#      "I could not tell", never "nothing is missing".
+# Deliberately NOT taken from skills-evals' propagation.yml `report` job: it
+# dedupes by full-text TITLE SEARCH with an exact-title re-check and has no
+# marker and no close branch, so its issue can only accumulate.
+#
+# SCOPE — ABSENCE IS WHAT IT REPORTS; DRIFT IS WHAT IT REFUSES TO OVERRULE.
+# The finding set is "declared for the account store, and the account store
+# does not hold it". A skill that IS on the account with stale contents
+# (verify's DRIFT / MISMATCH) is deliberately NOT reported here: those two
+# verdicts mean the upload path MISBEHAVED and need a human reading which
+# paths differ, which is a different bug with a different remedy (SKILL.md §7,
+# "Read the two FAIL wordings as different bugs"). Widening this to drift
+# would put a second, coarser channel on top of a verdict that already names
+# the failing files.
+#
+# But "not reported" must never become "reported as fine", and it did once.
+# Absence alone drove the verdict, so a run where every declared name was
+# PRESENT-but-wrong (DRIFT, MISMATCH, or an empty account directory) computed
+# as "clean" and the reporter posted an affirmative all-clear and CLOSED the
+# tracking issue — on a run whose own --verify had just exited 1. That is
+# property #4 above failing in its most expensive direction, from inside the
+# module that quotes it. Hence ``verify_ok``: the CLEAN verdict — the only one
+# that can close an issue or post an all-clear — additionally requires that
+# --verify PASSED on this run. No absentees and a red verify is not clean; it
+# is UNKNOWN, and UNKNOWN writes nothing in either direction.
+#
+# SCOPE OF THE WRITE. The gap is computed GLOBALLY (the whole declaration
+# against the whole mirror) while --verify can be narrowed to one skill. A
+# narrowed verify driving a repo-wide close is a write broader than what the
+# operator asked for, so --report-issue requires --all; see main().
+# ---------------------------------------------------------------------------
+
+# Hidden marker that identifies THE tracking issue among this repo's open
+# issues — stable forever; never change it or the next run opens a duplicate
+# alongside the issue it can no longer see.
+ACCOUNT_UPLOAD_ISSUE_MARKER = "<!-- account-store-upload-pending -->"
+ACCOUNT_UPLOAD_ISSUE_TITLE = (
+    "Skills declared for the account store are not uploaded yet"
+)
+# The dedupe channel: the pending set AS OF the most recent write, recorded in
+# the issue body and in every comment. Deliberately the LATEST block rather
+# than a union of all of them (which is what audit-scheduled-runs.js wants for
+# run ids): a run id is an event that stays reported forever, whereas this set
+# both GROWS (a name declared) and SHRINKS (an upload lands), and a union could
+# only ever grow — it would mistake "two of the three landed" for "no change".
+ACCOUNT_UPLOAD_PENDING_RE = re.compile(r"<!--\s*pending-uploads:([^\n]*?)-->")
+
+# What a declared skill name may contain before it is allowed anywhere near a
+# GitHub write. The declaration is a plain text file, so nothing upstream
+# constrains its contents, and the dedupe channel above is an HTML comment
+# delimited by ``-->``: a name containing ``-->`` closes the block early, so
+# ``hidden_pending_block(["alpha --> beta", "gamma"])`` writes
+# ``<!-- pending-uploads: alpha --> beta gamma -->`` and reads back as
+# ``{"alpha"}``. The set then never compares equal to the real one, so the
+# tool comments on EVERY run — precisely the daily-identical-comment noise
+# that dedupe property #3 exists to prevent, plus arbitrary text injected into
+# an issue body.
+#
+# Rejecting rather than escaping, deliberately: this character set is exactly
+# what a skill DIRECTORY name can be (it is a path component that ships in a
+# ZIP and becomes a folder on the account), so any name outside it is a broken
+# declaration to fix at source, not a string to make safe. A rejected name
+# makes the whole verdict UNKNOWN — never "clean", never "pending" — so a
+# malformed declaration can drive no write at all.
+# The leading lookahead is not decoration. The character class alone admits
+# ".", ".." and "..." — and ".." is not a name a directory can have, it is the
+# PARENT. `account_skill_payload("..")` then resolves to ACCOUNT_SKILLS_DIR/..
+# and rglobs the whole tree above the mirror, returning a non-None payload, so
+# ".." counted as PRESENT and a declaration containing it computed as CLEAN:
+# the guard produced the one verdict it exists to withhold. Rejecting every
+# all-dots name is the fix; "..a" and ".hidden" stay legal because they are
+# legal directory names.
+SKILL_NAME_RE = re.compile(r"(?!\.+$)[A-Za-z0-9._-]+")
+
+# gh is a network client; a hung call must not hang a sync that has already
+# done its real work. The whole reporting layer is best-effort, so a timeout
+# is just one more "could not tell".
+GH_TIMEOUT_SECONDS = 30
+
+
+def declaration_differs_from_committed(
+    path: Optional[Path] = None,
+) -> Optional[str]:
+    """A reason string if the declaration on disk is not the committed one.
+
+    The tracking issue is a shared, durable artifact, and what makes the
+    declaration trustworthy enough to write one off is that its membership is
+    CI-locked (``test_shipped_declaration_is_the_ruled_set`` pins the exact
+    name set in the required jobs). An UNCOMMITTED edit is outside that lock
+    entirely, and it breaks the write in both directions: a locally-added
+    name makes the issue announce a backlog item the committed declaration
+    does not contain, and a locally-removed one makes the remaining names
+    verify clean and CLOSE the issue on a declaration nobody agreed to.
+    Neither needs an unusual flag — the documented invocation reaches both.
+
+    Returns None when the file matches HEAD, and ALSO when the question
+    cannot be answered — not running from a checkout, the path outside it,
+    git absent or the file untracked. That is deliberately not the module's
+    "never act on an unknown" rule, and the difference is worth stating: that
+    rule governs the INPUTS to the verdict (the declaration, the mirror),
+    each of which is read and can come back unreadable. This is a PROVENANCE
+    check on an input that was already read successfully, and it is a second
+    line of defence behind the CI lock rather than the thing creating the
+    guarantee. Failing to establish provenance therefore falls back to the
+    behaviour that shipped before this check existed; failing to READ the
+    declaration is still UNKNOWN, above.
+    """
+    path = (path or ACCOUNT_SKILLS_FILE).resolve()
+    repo = _self_repo()
+    if repo is None:
+        return None
+    try:
+        rel = path.relative_to(repo).as_posix()
+    except ValueError:
+        return None
+    # Tracked-ness first: an untracked file has no committed version for the
+    # working copy to differ FROM, so `status` reporting it as untracked must
+    # not read as "locally modified".
+    if _git(["ls-files", "--error-unmatch", "--", rel], repo) is None:
+        return None
+    # Staged counts as uncommitted too: the point is what `main` holds, not
+    # what the index holds.
+    dirty = _git(["status", "--porcelain", "--", rel], repo)
+    if not dirty:
+        return None
+    return (
+        f"the account-store membership declaration at {path} has uncommitted "
+        f"local changes ({dirty.strip().splitlines()[0]}), so it is not the "
+        f"CI-locked list the tracking issue speaks for. Writing off it would "
+        f"either announce a backlog item nobody has agreed to or close the "
+        f"issue against a declaration that does not exist on main. Commit or "
+        f"revert the file, then re-run"
+    )
+
+
+class UploadGap(NamedTuple):
+    """The account store's upload backlog, or the reason it is unknown.
+
+    ``state`` is one of:
+
+    ``"pending"``  ``missing`` names declared skills the account lacks.
+    ``"clean"``    the account holds every declared skill.
+    ``"unknown"``  the question could not be answered; ``reason`` says why.
+                   NOT a synonym for ``"clean"`` — see the module note above.
+    """
+
+    state: str
+    missing: List[str]
+    reason: str
+
+
+def account_present_names(names: Set[str]) -> Set[str]:
+    """Of ``names``, the ones the account store holds — on ``verify()``'s test.
+
+    Present means exactly what ``verify()`` means by it: ``account_skill_payload``
+    returns something other than None, i.e. there is a directory for the skill
+    under ``ACCOUNT_SKILLS_DIR``. Nothing else — and specifically NOT "and the
+    account's own manifest.json indexes it too".
+
+    An earlier version required both and called itself "in lockstep with
+    verify()". It was not, in EITHER direction, and only the flattering
+    direction was written down:
+
+    * a payload on disk that ``manifest.json`` does not index read as ABSENT
+      here while ``verify()`` read it as present — so the tracking issue named
+      a skill that is in fact uploaded, and kept naming it. Removing the
+      manifest condition is what fixes that, and is why this now takes a name
+      set rather than a manifest;
+    * an EMPTY account directory reads as PRESENT to both (``{}`` is not
+      None), while ``verify()`` calls it MISMATCH and exits 1. That one is not
+      fixable here at all: "the account holds a copy" and "the copy is right"
+      are different questions and this function only answers the first.
+
+    That second divergence is handled where it belongs — ``account_upload_gap``
+    refuses to call anything CLEAN on a run whose ``--verify`` did not pass.
+    """
+    return {name for name in names if account_skill_payload(name) is not None}
+
+
+def account_upload_gap(
+    declared: Optional[Set[str]],
+    manifest: Optional[Dict] = None,
+    now: Optional[datetime.datetime] = None,
+    *,
+    verify_ok: Optional[bool],
+    verified_names: Optional[Set[str]],
+) -> UploadGap:
+    """Which declared skills the account store has not received yet.
+
+    ``declared`` and ``manifest`` are pre-read by the caller so the answer is
+    computed from the same declaration and the same mirror snapshot
+    ``--verify`` just used. ``verify_ok`` is that run's verdict, and it is
+    keyword-only and REQUIRED on purpose: this verdict cannot be computed
+    without it, so no future caller can reach the CLEAN arm by forgetting a
+    parameter.
+
+    ``verified_names`` is the set of declared skills whose account copy this
+    run actually compared (``verify``'s ``verified_out``). Keyword-only and
+    REQUIRED for the same reason ``verify_ok`` is.
+
+    SEVEN conditions make the answer UNKNOWN rather than clean. The first
+    five are the same mistake in different clothes — concluding "nothing is
+    missing" from a source that could not be read, or was never consulted:
+
+    * the declaration is unreadable (``declared is None``) — with no list of
+      what belongs on the account, every name reads as undeclared and the
+      backlog computes as empty;
+    * the declaration is EMPTY. "No declared name is absent" is then
+      vacuously true and every later gate passes vacuously with it: an empty
+      list makes ``verify`` compare nothing and return True, so the CLEAN arm
+      was reachable with no evidence whatsoever behind it. Measured: an
+      empty ``--account-list`` file closed a live tracking issue with an
+      affirmative all-clear, in a run whose own output said "no account copy
+      was verified";
+    * the declaration on disk is not the committed one
+      (``declaration_differs_from_committed``) — see that function;
+    * a declared name is not a legal skill name (``SKILL_NAME_RE``) — the
+      declaration is corrupt, and one such name silently truncates the dedupe
+      block every write depends on (see the note on ``SKILL_NAME_RE``);
+    * the mirror is absent, unstamped or stale (``check_mirror_freshness``) —
+      a pre-upload snapshot answers "present" for uploads that never landed,
+      and a stale mirror answers "absent" for uploads that did.
+
+    The last two are about evidence rather than readability. The first of
+    them is the one that cost an issue-close on a red run:
+
+    * no declared name is ABSENT, but ``verify_ok`` is not True. Absence is
+      the only thing this function can measure, and "present" is a weaker
+      claim than "correct": DRIFT, MISMATCH and an empty account directory
+      are all present-and-wrong, and all three exit 1. Calling that clean let
+      the reporter post "the account store now holds every skill declared"
+      and close the tracking issue on a run that had just failed. It is
+      UNKNOWN instead — the account may well be complete, but this run did
+      not establish it, and #258's ruling is that an unestablished answer
+      earns no write.
+
+    * a declared name's account copy was never COMPARED this run
+      (``declared - verified_names``). ``verify`` returns True for a run that
+      opened no account copy at all — it selects skills from the resolved
+      repos, and a declared skill those repos do not carry is simply never
+      reached — so a green verdict can rest on zero comparisons. The account
+      copy may hold anything; nothing looked. Same rule as the branch above,
+      one level down: "present" is weaker than "correct", and "never opened"
+      is weaker still.
+
+    Note the ORDER: ``missing`` is returned as PENDING before the
+    ``verify_ok`` gate is consulted. A red verify caused BY the missing
+    upload is exactly the state the tracking issue exists to announce, so
+    gating pending on a green verify would silence the alert in the one case
+    it is for.
+
+    The returned ``missing`` list is always a subset of ``declared``. That
+    makes it a subset of the COMMITTED declaration only because two other
+    things hold: ``--report-issue`` refuses ``--account-list`` (see
+    ``main()``), so ``declared`` always comes from ``ACCOUNT_SKILLS_FILE``,
+    and the provenance branch above rejects a locally-edited copy of it.
+    Remove either and this sentence stops being true — it was not, before
+    both existed.
+    """
+    if declared is None:
+        return UploadGap(
+            "unknown",
+            [],
+            f"the account-store membership declaration at "
+            f"{ACCOUNT_SKILLS_FILE} is missing or unreadable, so there is no "
+            f"list of what the account is supposed to hold",
+        )
+    if not declared:
+        return UploadGap(
+            "unknown",
+            [],
+            "the account-store membership declaration is EMPTY, so 'no "
+            "declared skill is missing' is true of nothing and --verify had "
+            "nothing to compare. An empty list cannot establish that the "
+            "account store is complete; it establishes that this run asked "
+            "no question",
+        )
+    malformed = sorted(n for n in declared if not SKILL_NAME_RE.fullmatch(n))
+    if malformed:
+        return UploadGap(
+            "unknown",
+            [],
+            f"the account-store membership declaration contains "
+            f"{len(malformed)} entr(y/ies) that are not legal skill names "
+            f"(allowed: letters, digits, '.', '_', '-'): "
+            f"{', '.join(repr(n) for n in malformed)}. A name outside that "
+            f"set can truncate the hidden dedupe block and inject text into "
+            f"an issue body, so no issue is written until the declaration is "
+            f"fixed",
+        )
+    uncommitted = declaration_differs_from_committed()
+    if uncommitted:
+        return UploadGap("unknown", [], uncommitted)
+    stale = check_mirror_freshness(manifest, now)
+    if stale:
+        return UploadGap("unknown", [], stale)
+    missing = sorted(declared - account_present_names(declared))
+    if missing:
+        return UploadGap(
+            "pending",
+            missing,
+            f"{len(missing)} declared skill(s) not on the account store",
+        )
+    if not verify_ok:
+        return UploadGap(
+            "unknown",
+            [],
+            "no declared skill is ABSENT from the account store, but --verify "
+            "did not pass on this run — so at least one account copy is "
+            "present-and-wrong (DRIFT, MISMATCH, an empty directory, or a "
+            "skill on the account with no membership ruling). 'Nothing is "
+            "missing' is not 'the account is correct', and only the second "
+            "licenses closing the tracking issue. Read --verify's own output "
+            "above for the failing skill",
+        )
+    unverified = sorted(declared - (verified_names or set()))
+    if unverified:
+        return UploadGap(
+            "unknown",
+            [],
+            f"{len(unverified)} declared skill(s) are present on the account "
+            f"store but their contents were never compared on this run "
+            f"({', '.join(unverified)}) — the resolved repos do not carry "
+            f"them, so --verify passed without opening them. A green verdict "
+            f"over zero comparisons is not evidence the account is correct. "
+            f"Point --repos at the tree that holds them and re-run",
+        )
+    return UploadGap("clean", [], "every declared skill is on the account")
+
+
+# ── issue text ──────────────────────────────────────────────────────────────
+
+def hidden_pending_block(missing: List[str]) -> str:
+    """The dedupe channel for one write: the pending set, sorted."""
+    return f"<!-- pending-uploads: {' '.join(sorted(missing))} -->"
+
+
+def extract_reported_pending(texts: List[Optional[str]]) -> Optional[Set[str]]:
+    """The LAST pending set recorded across issue body + comments, in order.
+
+    Returns None when no block was found at all — an issue body written by
+    hand, or one predating this channel. None is distinct from ``set()`` for
+    the usual reason: an empty set would read as "the last write reported
+    nothing pending", which would suppress the very first comment. None
+    routes to "changed", so the next run states the current set once and
+    every run after that dedupes against it.
+    """
+    found: Optional[Set[str]] = None
+    for text in texts or []:
+        if not isinstance(text, str):
+            continue
+        for match in ACCOUNT_UPLOAD_PENDING_RE.finditer(text):
+            found = {n for n in match.group(1).split() if n}
+    return found
+
+
+def _render_missing(missing: List[str]) -> str:
+    return "\n".join(f"- `{name}`" for name in sorted(missing))
+
+
+def _remedy() -> str:
+    """The concrete laptop recipe, in the order that actually works.
+
+    Written for someone who did not build this: the refresh comes FIRST
+    because every step after it reads the mirror, and skipping it is the
+    documented way to get a confident wrong answer (SKILL.md §7).
+    """
+    script = "plugins/adam-local/skills/sync-skills/sync_skills.py"
+    return (
+        "## How to clear this\n"
+        "\n"
+        "The upload needs a laptop with a logged-in claude.ai tab open in "
+        "Chrome — it cannot be done from CI, which is why this is an issue "
+        "and not a failing check. From a clean `main` checkout:\n"
+        "\n"
+        "1. **Refresh the local account mirror first.** Everything below "
+        "reads it, and a stale mirror compares your uploads against a "
+        "pre-upload snapshot:\n"
+        "\n"
+        "   ```bash\n"
+        "   CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'\n"
+        "   ```\n"
+        "\n"
+        "2. **Build the ZIP and upload it** for each name above, following "
+        "`sync-skills` SKILL.md §1 and §3 (the browser reads the ZIP off "
+        "disk; never paste base64):\n"
+        "\n"
+        "   ```bash\n"
+        f"   python3 {script} --prepare --skill NAME --zip-dir \"$TMPDIR/skillzips\"\n"
+        "   ```\n"
+        "\n"
+        "3. **Re-run the gate.** It closes this issue itself once the "
+        "account holds every declared skill:\n"
+        "\n"
+        "   ```bash\n"
+        "   CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'\n"
+        f"   python3 {script} --verify --all --report-issue\n"
+        "   ```\n"
+        "\n"
+        "Do **not** clear this by deleting the name from `account-skills.txt` "
+        "unless the membership ruling itself changed: adding a name there is "
+        "close to a one-way door, because the upload API has no delete "
+        "(ADR 0002).\n"
+    )
+
+
+def build_upload_issue_body(missing: List[str]) -> str:
+    """The tracking issue body. Names come only from the caller's list."""
+    return (
+        f"{ACCOUNT_UPLOAD_ISSUE_MARKER}\n"
+        "\n"
+        f"`account-skills.txt` declares {len(missing)} skill(s) that the "
+        "claude.ai account store does not hold yet. Nothing else reports "
+        "this: the declaration's membership is CI-locked, but the account "
+        "store itself is reachable only from a laptop, so every check here "
+        "stays green while the upload is outstanding. That is by design — "
+        "a pending upload is tracked, never blocked.\n"
+        "\n"
+        "**Pending upload:**\n"
+        "\n"
+        f"{_render_missing(missing)}\n"
+        "\n"
+        f"{_remedy()}"
+        "\n"
+        f"{hidden_pending_block(missing)}\n"
+    )
+
+
+def build_upload_comment(missing: List[str]) -> str:
+    """Posted only when the pending set CHANGED since the last write."""
+    return (
+        "The set of skills awaiting upload to the account store has "
+        f"changed. Now pending ({len(missing)}):\n"
+        "\n"
+        f"{_render_missing(missing)}\n"
+        "\n"
+        f"{hidden_pending_block(missing)}\n"
+    )
+
+
+def build_upload_close_comment() -> str:
+    """Posted only on a run where NOTHING is absent AND ``--verify`` passed.
+
+    Both halves are load-bearing in the wording. The claim used to be posted
+    on absence alone, so it could and did go out on a run whose ``--verify``
+    had exited 1 on DRIFT — and the "a later run reopens a fresh issue"
+    promise was false for exactly that case, because drift is not something
+    this reporter tracks and reopening is not something it would ever do.
+    """
+    return (
+        "The claude.ai account store now holds every skill declared in "
+        "`account-skills.txt`, and the `--verify` run that established that "
+        "passed — closing.\n"
+        "\n"
+        "A later run opens a fresh tracking issue if another declared skill "
+        "goes un-uploaded. It will NOT reopen for content drift: a skill "
+        "that is on the account with stale contents is `--verify`'s DRIFT / "
+        "MISMATCH verdict, which names the differing files and exits 1, and "
+        "this issue deliberately does not duplicate it."
+    )
+
+
+# ── gh-backed plumbing (best effort: it may never raise, and never blocks) ───
+
+def _gh_api(
+    endpoint: str,
+    method: Optional[str] = None,
+    fields: Optional[List[str]] = None,
+) -> Optional[str]:
+    """One ``gh api`` call. Returns stdout, or None on ANY failure.
+
+    Never raises and never propagates a message that could carry a
+    credential: only gh's FIRST stderr line is echoed, and the environment
+    (which holds GH_TOKEN) is inherited untouched rather than logged.
+
+    A missing gh, a logged-out gh, a rate limit and a network hiccup all
+    land here as None. That is the whole safety story for this mode: a
+    tracker that can break a developer's push is worse than no tracker.
+    """
+    args = ["gh", "api", endpoint]
+    if method:
+        args += ["-X", method]
+    for field in fields or []:
+        args += ["-f", field]
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GH_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # FileNotFoundError, TimeoutExpired, OSError…
+        print(
+            f"NOTE: --report-issue could not run gh ({type(exc).__name__}: "
+            f"{exc}); the tracking issue was left untouched.",
+            file=sys.stderr,
+        )
+        return None
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()
+        print(
+            f"NOTE: --report-issue: `gh api {endpoint}` failed (exit "
+            f"{result.returncode}: {detail[0] if detail else 'no output'}); "
+            f"the tracking issue was left untouched.",
+            file=sys.stderr,
+        )
+        return None
+    return result.stdout
+
+
+def _gh_json(
+    endpoint: str,
+    method: Optional[str] = None,
+    fields: Optional[List[str]] = None,
+) -> Optional[object]:
+    """``_gh_api`` plus a real JSON parse. None on failure, including bad JSON."""
+    raw = _gh_api(endpoint, method=method, fields=fields)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError as exc:
+        print(
+            f"NOTE: --report-issue: `gh api {endpoint}` returned "
+            f"unparseable JSON ({exc}); the tracking issue was left untouched.",
+            file=sys.stderr,
+        )
+        return None
+
+
+def github_slug_from_remote(url: Optional[str]) -> Optional[str]:
+    """``owner/name`` from a git remote URL, or None if it is not a GitHub one.
+
+    Handles the three forms a clone here can carry — ``git@github.com:o/r.git``,
+    ``ssh://git@github.com/o/r.git`` and ``https://github.com/o/r.git``.
+    Parsed rather than hardcoded so a fork, a rename or a second remote host
+    reports against the repo it is actually working in.
+    """
+    if not url:
+        return None
+    text = url.strip()
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+    match = re.search(r"github\.com[/:]+([^/\s]+)/([^/\s]+)/*$", text)
+    if not match:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+# What may be interpolated into an issue endpoint. The old test rejected only
+# "/" and whitespace, which let "owner/name?state=all", "o/n#frag" and "../x"
+# through into f"repos/{target}/issues" — a string that is built by hand and
+# never URL-quoted. None of those could retarget the OWNER (that needs a "/"
+# in the first component, which both versions forbid) and "?"/"#" truncate the
+# path back to a non-write endpoint, so this is hardening rather than a live
+# hole — but "a write must go where you said or nowhere" is a property the
+# validator should enforce, not one the endpoint's shape happens to preserve.
+# GitHub's own rules: owner is alphanumeric-or-hyphen, not hyphen-terminated;
+# repo adds "." and "_" and cannot be "." or "..".
+GITHUB_SLUG_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/(?!\.+$)[A-Za-z0-9._-]+"
+)
+
+
+def resolve_report_repo(
+    explicit: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """``(owner/name, None)`` or ``(None, why_not)`` — where the issue lives.
+
+    ``--report-repo`` wins; otherwise the ``origin`` remote of the checkout
+    this script lives in. There is no fallback constant on purpose: the same
+    reason ``resolve_repos`` refuses to guess clone locations — a guessed
+    destination for a WRITE is how an issue lands in somebody else's repo.
+
+    Two failures, and they are NOT the same message. A bare None for both
+    told an operator who had just passed ``--report-repo 'bad slug here'`` to
+    "pass --report-repo OWNER/NAME" — advice to do the thing they had done,
+    pointing at the wrong cause. The SAFETY property is unchanged and is the
+    reason this returns early: a malformed explicit value never falls through
+    to ``origin``, because silently retargeting a write to a different repo
+    than the one the operator named is worse than not writing at all.
+    """
+    if explicit:
+        if GITHUB_SLUG_RE.fullmatch(explicit):
+            return explicit, None
+        return None, (
+            f"--report-repo was given {explicit!r}, which is not an "
+            f"OWNER/NAME slug (exactly one '/', no spaces). Nothing was "
+            f"written, and this did NOT fall back to the origin remote: a "
+            f"write must go where you said or nowhere"
+        )
+    self_repo = _self_repo()
+    if self_repo is None:
+        return None, (
+            "this script is not running from inside a repo checkout, so "
+            "there is no origin remote to file against; pass "
+            "--report-repo OWNER/NAME"
+        )
+    slug = github_slug_from_remote(_git(["remote", "get-url", "origin"], self_repo))
+    if slug is not None and not GITHUB_SLUG_RE.fullmatch(slug):
+        # Same validator on both arms. A remote URL is operator-controlled
+        # data too, and the property being defended ("a write goes where you
+        # said or nowhere") does not care which arm produced the target.
+        return None, (
+            f"the `origin` remote on {self_repo} parses to {slug!r}, which is "
+            f"not a usable OWNER/NAME slug; pass --report-repo OWNER/NAME"
+        )
+    if slug is None:
+        return None, (
+            f"no GitHub `origin` remote on {self_repo}, so there is nothing "
+            f"to derive the target repo from; pass --report-repo OWNER/NAME"
+        )
+    return slug, None
+
+
+# How many 100-item pages either listing will walk before giving up. Ten is
+# 1000 items, far past anything these repos carry; the cap exists so a
+# pathological or looping API cannot spin here forever, not as a real limit.
+GH_MAX_PAGES = 10
+
+
+def find_upload_tracking_issue(repo: str):
+    """``(issue_or_None, lookup_ok)`` — the open issue carrying the marker.
+
+    The two failure shapes must not be conflated: "there is no such issue"
+    licenses opening one, while "the lookup failed" does not — treating the
+    second as the first is how a duplicate gets opened next to an issue the
+    run simply could not see, against an API that will hold both happily.
+    Hence the explicit ok flag rather than a bare None.
+
+    PAGINATED, for exactly that reason. This used to issue ONE request for
+    ``state=open&per_page=100`` and read a short first page as the whole
+    truth. GitHub's ``/issues`` listing returns PULL REQUESTS as well as
+    issues and defaults to created-descending, so an AGEING tracking issue —
+    which is precisely the one still open and still needing an update — drops
+    off page 1 as soon as 100 newer open items exist. The next run then finds
+    nothing and opens a SECOND tracking issue beside the first, falsifying
+    the one property this module's header claims for the marker.
+
+    Running out of pages is a lookup FAILURE, not an absence: after
+    ``GH_MAX_PAGES`` full pages there may be more, and "I stopped looking"
+    must never license opening a duplicate.
+
+    The ``/issues`` listing includes PULL REQUESTS; they are filtered out.
+    """
+    for page in range(1, GH_MAX_PAGES + 1):
+        endpoint = (
+            f"repos/{repo}/issues?state=open&per_page=100&page={page}"
+        )
+        data = _gh_json(endpoint)
+        if not isinstance(data, list):
+            # Distinct from the None case, which _gh_api has already
+            # explained: here gh exited 0 and returned well-formed JSON that
+            # simply is not a list (``{"message": "Not Found"}`` is the one
+            # that actually happens). Nothing downstream would have said a
+            # word about it, and a silent give-up reads exactly like "no
+            # issue is open".
+            if data is not None:
+                print(
+                    f"NOTE: --report-issue: `gh api {endpoint}` returned "
+                    f"{type(data).__name__}, not a list of issues, so the "
+                    f"tracking issue could not be looked up; it was left "
+                    f"untouched.",
+                    file=sys.stderr,
+                )
+            return None, False
+        for item in data:
+            if not isinstance(item, dict) or item.get("pull_request"):
+                continue
+            body = item.get("body")
+            if isinstance(body, str) and ACCOUNT_UPLOAD_ISSUE_MARKER in body:
+                return item, True
+        if len(data) < 100:
+            return None, True
+    print(
+        f"NOTE: --report-issue: {repo} has more than "
+        f"{GH_MAX_PAGES * 100} open issues/PRs and the marker was not found "
+        f"in them, so whether a tracking issue exists is unknown; it was "
+        f"left untouched.",
+        file=sys.stderr,
+    )
+    return None, False
+
+
+def list_issue_comments(repo: str, number: int):
+    """``(comment_bodies, ok)`` in chronological order (the API's default).
+
+    Same two-shape contract as ``find_upload_tracking_issue``: exhausting
+    ``GH_MAX_PAGES`` is a failure, not "that was all of them", because the
+    caller uses this to decide whether the pending set CHANGED and a
+    truncated history answers that question wrongly.
+    """
+    bodies: List[Optional[str]] = []
+    for page in range(1, GH_MAX_PAGES + 1):
+        endpoint = (
+            f"repos/{repo}/issues/{number}/comments?per_page=100&page={page}"
+        )
+        data = _gh_json(endpoint)
+        if not isinstance(data, list):
+            if data is not None:
+                print(
+                    f"NOTE: --report-issue: `gh api {endpoint}` returned "
+                    f"{type(data).__name__}, not a list of comments.",
+                    file=sys.stderr,
+                )
+            return [], False
+        bodies.extend(c.get("body") for c in data if isinstance(c, dict))
+        if len(data) < 100:
+            return bodies, True
+    print(
+        f"NOTE: --report-issue: issue #{number} on {repo} has more than "
+        f"{GH_MAX_PAGES * 100} comments; its history could not be read in "
+        f"full.",
+        file=sys.stderr,
+    )
+    return bodies, False
+
+
+def report_account_upload_gap(
+    gap: UploadGap,
+    repo: Optional[str] = None,
+) -> None:
+    """Open / comment on / close the single tracking issue. Never raises.
+
+    Returns None in every case: this runs AFTER ``--verify`` has reached its
+    verdict and must not be able to influence it. Every branch that cannot
+    establish something states it on stderr and never leaves the issue in a
+    state it has not explained.
+
+    That is deliberately weaker than "leaves the issue alone", which is what
+    this used to claim and is not true of one branch: on the clean path the
+    closing COMMENT is posted before the close PATCH, so a PATCH that fails
+    leaves an issue that is open while carrying a comment saying it is
+    resolved. Saying so on stderr is the right behaviour — closing silently
+    or pretending the comment was not written would both be worse — but a
+    docstring narrower than its code is how a reader ends up trusting an
+    invariant that does not hold. Repeated clean runs against a persistently
+    failing PATCH will append that comment each time: the comment-only-on-
+    change dedupe covers ``build_upload_comment``, not this one.
+    """
+    if gap.state == "unknown":
+        # The #258 shape: an unreadable probe is not a clean answer. Opening
+        # would invent a backlog; closing would retire a live one.
+        print(
+            f"NOTE: --report-issue made NO change to the tracking issue — the "
+            f"account-store state is UNKNOWN, not clean: {gap.reason}",
+            file=sys.stderr,
+        )
+        return
+
+    target, why_not = resolve_report_repo(repo)
+    if target is None:
+        print(
+            f"NOTE: --report-issue could not work out which repo to file "
+            f"against: {why_not}. The tracking issue was left untouched.",
+            file=sys.stderr,
+        )
+        return
+
+    issue, ok = find_upload_tracking_issue(target)
+    if not ok:
+        # find_upload_tracking_issue (or _gh_api beneath it) has printed the
+        # specific reason. This line is what guarantees the run says SOMETHING
+        # rather than exiting a give-up branch in silence.
+        print(
+            f"NOTE: --report-issue made NO change on {target}: whether a "
+            f"tracking issue is open could not be established.",
+            file=sys.stderr,
+        )
+        return
+
+    if gap.state == "clean":
+        if issue is None:
+            print(
+                f"--report-issue: account store is complete and no tracking "
+                f"issue is open on {target}. Nothing to do.",
+                file=sys.stderr,
+            )
+            return
+        number = issue.get("number")
+        posted = _gh_api(
+            f"repos/{target}/issues/{number}/comments",
+            fields=[f"body={build_upload_close_comment()}"],
+        )
+        if posted is None:
+            # Say WHY it stayed open rather than closing an issue whose
+            # closing comment never landed — a silently-closed issue with no
+            # explanation is the thing a reader has to reconstruct later.
+            print(
+                f"NOTE: --report-issue left issue #{number} OPEN: the closing "
+                f"comment could not be posted.",
+                file=sys.stderr,
+            )
+            return
+        if _gh_api(
+            f"repos/{target}/issues/{number}",
+            method="PATCH",
+            fields=["state=closed", "state_reason=completed"],
+        ) is None:
+            print(
+                f"NOTE: --report-issue left issue #{number} OPEN: the closing "
+                f"comment posted but the close itself did not. The issue now "
+                f"carries a comment saying it is resolved while still being "
+                f"open — close it by hand or re-run.",
+                file=sys.stderr,
+            )
+            return
+        print(f"--report-issue: closed #{number} on {target} — account store complete.")
+        return
+
+    # gap.state == "pending"
+    if issue is None:
+        created = _gh_json(
+            f"repos/{target}/issues",
+            fields=[
+                f"title={ACCOUNT_UPLOAD_ISSUE_TITLE}",
+                f"body={build_upload_issue_body(gap.missing)}",
+            ],
+        )
+        if isinstance(created, dict) and created.get("number"):
+            print(
+                f"--report-issue: opened #{created['number']} on {target} — "
+                f"{len(gap.missing)} skill(s) awaiting upload."
+            )
+        else:
+            # Either the POST failed (_gh_api said so) or it "succeeded" with
+            # a body that is not an issue. Either way the backlog is real and
+            # now goes unannounced, which is the one thing this mode exists
+            # to prevent — so it says so here rather than returning quietly.
+            print(
+                f"NOTE: --report-issue could NOT open a tracking issue on "
+                f"{target}; {len(gap.missing)} skill(s) are still awaiting "
+                f"upload and nothing is tracking them: "
+                f"{', '.join(gap.missing)}",
+                file=sys.stderr,
+            )
+        return
+
+    number = issue.get("number")
+    comments, ok = list_issue_comments(target, number)
+    if not ok:
+        # Cannot establish whether the set changed. The alert is already
+        # delivered (the issue is open), so silence beats a comment that may
+        # be the same one for the third day running.
+        print(
+            f"NOTE: --report-issue left issue #{number} unchanged: its "
+            f"comments could not be read, so whether the pending set changed "
+            f"is unknown.",
+            file=sys.stderr,
+        )
+        return
+    previous = extract_reported_pending([issue.get("body"), *comments])
+    if previous == set(gap.missing):
+        print(
+            f"--report-issue: #{number} on {target} already reports this exact "
+            f"pending set ({len(gap.missing)} skill(s)). No comment posted."
+        )
+        return
+    if _gh_api(
+        f"repos/{target}/issues/{number}/comments",
+        fields=[f"body={build_upload_comment(gap.missing)}"],
+    ) is not None:
+        print(
+            f"--report-issue: commented on #{number} on {target} — pending set "
+            f"changed to {len(gap.missing)} skill(s)."
+        )
+    else:
+        print(
+            f"NOTE: --report-issue: issue #{number} on {target} stays open but "
+            f"its pending set is now out of date — the update comment could "
+            f"not be posted.",
+            file=sys.stderr,
+        )
+
+
+# ---------------------------------------------------------------------------
 # State mutation
 # ---------------------------------------------------------------------------
 
@@ -1173,11 +2104,84 @@ def main() -> None:
         "--account-list", metavar="PATH",
         help=(
             "Declared account-store membership list to read "
-            f"(default: {ACCOUNT_SKILLS_FILE.name} beside this script). Use it "
+            f"(default: {ACCOUNT_SKILLS_FILE.name} beside this script). "
+            f"Rejected with --report-issue: that write speaks for the "
+            f"committed file. Use it "
             "to dry-run a proposed membership change before committing one."
         ),
     )
+    parser.add_argument(
+        "--report-issue", action="store_true",
+        help=(
+            "With --verify --all: open, update or close ONE GitHub tracking "
+            "issue for skills declared in account-skills.txt that the account "
+            "store has not received yet. Requires --all because the backlog is "
+            "computed across the WHOLE declaration, so a narrowed verify would "
+            "drive a repo-wide write. Opt-in, best-effort and non-blocking - it "
+            "never changes --verify's exit code and never fails the run. Needs "
+            "a refreshed mirror, so run the CLAUDE_CODE_SYNC_SKILLS refresh "
+            "first (SKILL.md section 7)"
+        ),
+    )
+    parser.add_argument(
+        "--report-repo", metavar="OWNER/NAME",
+        help=(
+            "Which repo --report-issue files against (default: the origin "
+            "remote of this script's own checkout). There is no built-in "
+            "fallback: a guessed destination for a WRITE lands an issue in "
+            "somebody else's repo"
+        ),
+    )
     args = parser.parse_args()
+
+    # --report-issue reports on a verdict, so it needs one. Silently ignoring
+    # it on a --prepare run would read as "reported, nothing pending".
+    if args.report_issue and not args.verify:
+        parser.error("--report-issue requires --verify")
+    # And the verdict it reports on has to cover the same ground the write
+    # does. The backlog is computed GLOBALLY — the entire declaration against
+    # the entire mirror — while --verify can be narrowed to one skill or to
+    # git-changed skills. `--verify --skill sync-skills --report-issue` was
+    # therefore accepted and went on to CLOSE the repo's tracking issue on the
+    # strength of having checked one skill: a write far broader than the
+    # question asked. Refuse rather than silently widen or silently narrow;
+    # narrowing is not on offer because a per-skill backlog is not a thing
+    # this issue can represent.
+    if args.report_issue and not args.all:
+        parser.error(
+            "--report-issue requires --all. The tracking issue covers the "
+            "WHOLE account-store declaration, so it can only be opened, "
+            "updated or closed on a run that verified all of it; a narrowed "
+            "--verify (--skill NAME, or the default git-changed selection) "
+            "would make a repo-wide write off a subset. Run: "
+            "--verify --all --report-issue"
+        )
+    # And it has to be the COMMITTED declaration the write speaks for.
+    # --account-list does not narrow the question the way --skill does; it
+    # REPLACES the entire basis of the answer with a file the operator names,
+    # which is strictly the larger substitution — and its own --help calls it
+    # a way to "dry-run a proposed membership change before committing one".
+    # Measured: `--verify --all --report-issue --account-list <empty file>`
+    # closed the repo's live tracking issue and posted "the account store now
+    # holds every skill declared in `account-skills.txt`" — a file that run
+    # never opened, which at the time declared ten skills of which nine were
+    # absent. Pointed at a list of invented names it opened an issue naming
+    # them, over the words "account-skills.txt declares 2 skill(s)".
+    # Refused for the same reason --skill is: the write is answerable only
+    # for the declaration the repo actually carries. The dry-run use case is
+    # unaffected — run --account-list WITHOUT --report-issue.
+    if args.report_issue and args.account_list:
+        parser.error(
+            "--report-issue cannot be combined with --account-list. The "
+            "tracking issue speaks for the committed "
+            f"{ACCOUNT_SKILLS_FILE.name}, so it can only be opened, updated "
+            "or closed on a run that read that file; --account-list swaps "
+            "the whole declaration out and the issue text would describe a "
+            "file the run never opened. Dry-run a proposed membership change "
+            "with --account-list alone, and drop it to report."
+        )
+    if args.report_repo and not args.report_issue:
+        parser.error("--report-repo only means anything with --report-issue")
 
     # --mark-synced touches only the state file, so it needs no repo.
     if args.mark_synced:
@@ -1258,10 +2262,40 @@ def main() -> None:
     if args.verify:
         # named=True only for --skill: --all enumerates the registry, and most
         # of the registry is legitimately not on the account.
+        # Filled by verify() with the declared skills it actually compared;
+        # the reporter needs it to tell a green verdict from a green verdict
+        # over zero comparisons. Collected unconditionally so the two calls
+        # cannot drift apart depending on a flag.
+        verified_names: Set[str] = set()
         ok = verify(
             repos, skill_names, declared=declared, named=bool(args.skill),
             selection="skill" if args.skill else ("all" if args.all else "changed"),
+            verified_out=verified_names,
         )
+        # Strictly AFTER the verdict, and strictly unable to affect it. The
+        # reporter is best-effort by construction (every gh call returns None
+        # rather than raising), but the belt-and-braces except is deliberate:
+        # this mode exists to make a quiet state visible, and a tracker that
+        # can turn a developer's clean sync into a traceback has made things
+        # worse than the silence it replaced.
+        if args.report_issue:
+            try:
+                report_account_upload_gap(
+                    # `verify_ok=ok` is the whole F1 fix at the call site:
+                    # the reporter may only post an all-clear and close on a
+                    # run whose --verify actually passed.
+                    account_upload_gap(
+                        declared, account_manifest(), verify_ok=ok,
+                        verified_names=verified_names,
+                    ),
+                    repo=args.report_repo,
+                )
+            except Exception as exc:  # noqa: BLE001 - see above
+                print(
+                    f"NOTE: --report-issue failed ({type(exc).__name__}: "
+                    f"{exc}); --verify's own result is unaffected.",
+                    file=sys.stderr,
+                )
         sys.exit(0 if ok else 1)
 
     # Default: --prepare / JSON output
