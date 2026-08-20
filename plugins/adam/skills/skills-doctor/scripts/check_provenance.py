@@ -74,12 +74,24 @@ HOOK, UNATTRIBUTED, UNKNOWN = "hook", "unattributed", "unknown"
 # as unmeasured rather than rounded to whichever row is convenient.
 EPHEMERAL, DURABLE, UNSURE = "ephemeral", "durable", "unsure"
 
-# The two files a user-scope settings chain can be called. The binary selects
-# `cowork_settings.json` under `coworkPlugins` / `CLAUDE_CODE_USE_COWORK_PLUGINS`,
-# so code that hardcodes `settings.json` reads the wrong file on a Cowork surface
-# and concludes "no user-scope hook" about a machine that has one. Both are
-# checked, in this order, and the first that exists answers.
-USER_SETTINGS_NAMES = ("settings.json", "cowork_settings.json")
+# The two names a USER-scope settings file can have. The binary SELECTS one of
+# them by whether the surface is in Cowork plugin mode (`coworkPlugins` /
+# `CLAUDE_CODE_USE_COWORK_PLUGINS`); it reads that one and does not fall back to
+# the other. So this is a selection, NOT a chain, and the two rules differ in the
+# direction that matters. Checking both — `any(...)` over the pair — answers
+# "does either file wire a hook", which on an ordinary machine reports the user
+# scope as WIRED because `cowork_settings.json` does, while the only file that
+# machine consults, `settings.json`, wires nothing. That SUPPRESSES
+# `hook-not-wired` on a machine whose hook genuinely cannot fire: the quiet wrong
+# answer this whole check exists to eliminate, arrived at from the other side.
+# `user_settings_name` applies the selection.
+#
+# Contrast PROJECT_SETTINGS_NAMES below, which takes the opposite rule for the
+# opposite reason: ADR 0005 records the project scope as a real CHAIN, read in
+# order and merged by precedence, so "either file wires it" is the right
+# question there.
+USER_SETTINGS_DEFAULT = "settings.json"
+USER_SETTINGS_COWORK = "cowork_settings.json"
 
 # The two files a PROJECT-scope settings chain can be called, in the order the
 # chain reads them. ADR 0005 records `<cwd>/.claude/settings.local.json` AHEAD of
@@ -89,8 +101,26 @@ USER_SETTINGS_NAMES = ("settings.json", "cowork_settings.json")
 # `settings.json` therefore fired the finding at the one person who had already
 # fixed it, over a file sitting one line higher in the same chain, and told them
 # "nothing here or at the user scope does" while their own file did. Same defect
-# class as the `cowork_settings.json` name below, one scope down.
+# class as the `cowork_settings.json` name above, one scope down — though the
+# REMEDY differs, because that scope selects where this one chains.
 PROJECT_SETTINGS_NAMES = ("settings.local.json", "settings.json")
+
+# What this check CANNOT see, emitted verbatim on every `hook-not-wired`. Three
+# links of the resolution chain are not files a process can open, and a finding
+# that lists only the ones it read reads as exhaustive — so a reader wired
+# through any of these three is told, with exit 1, that nothing wires the hook,
+# and has no way to tell a real defect from this check's blind spot. Naming it in
+# SKILL.md alone does not reach that reader: the person who runs the script and
+# reads its output is not the person reading the skill. Kept as one constant so
+# both the finding and the durable-surface note carry the same sentence.
+UNREADABLE_LINKS = (
+    "Three links in that chain are unreadable from here, and none of them is a "
+    "file this can open: a managed/policy settings file, a --settings path "
+    "given on the command line, and the `coworkPlugins` config flag that "
+    "selects cowork_settings.json over settings.json at the user scope. If the "
+    "hook is wired through one of those, this finding is wrong about it — that "
+    "is the gap, not a defect on your machine."
+)
 
 
 class Entry(NamedTuple):
@@ -345,11 +375,47 @@ def wires_session_start(path: Path) -> bool:
 
 def _settings_wired(claude_dir: Path, names: Tuple[str, ...] = ("settings.json",)
                     ) -> bool:
-    """Whether any of `names` under `claude_dir` wires a SessionStart hook."""
+    """Whether any of `names` under `claude_dir` wires a SessionStart hook.
+
+    For a CHAIN only — a set of files all of which are read and merged by
+    precedence, which is what ADR 0005 records the project scope to be. The user
+    scope is a SELECTION and must not come through here; see
+    `user_settings_name` for why "either one wires it" is the wrong question
+    there, and which direction the wrong answer points.
+    """
     return any(wires_session_start(claude_dir / name) for name in names)
 
 
-def hook_wiring(project_dir: Path, home: Optional[Path] = None
+def user_settings_name(env: Optional[Dict[str, str]] = None) -> str:
+    """The ONE user-scope settings file this surface's binary consults.
+
+    Selection, not merge. A Cowork surface reads `cowork_settings.json` and an
+    ordinary one reads `settings.json`; neither falls back to the other. So the
+    two names cannot both be consulted, and treating them as a chain reports the
+    user scope as wired off a file the machine in front of you never opens —
+    suppressing `hook-not-wired` exactly where the hook cannot fire.
+
+    `CLAUDE_CODE_USE_COWORK_PLUGINS` is the arm a process can read, and a
+    non-empty value is taken as on. That truthiness rule is NOT copied from a
+    source the way `read_surface`'s is: this repo's own hook is where
+    `SKILLS_BOOTSTRAP_FORCE`'s presence-not-value semantics were read off, and
+    there is no equivalent source here, so an exported empty string reads as off
+    on a convention rather than on a measurement.
+
+    The OTHER arm, `coworkPlugins`, is a config flag and not an environment
+    variable — nothing here can see it. A machine in Cowork mode by that route
+    reads as ordinary, which points `hook-not-wired` the FALSE-POSITIVE way
+    rather than the suppressing way, and is disclosed on the finding itself
+    alongside the other two links this cannot open.
+    """
+    env = os.environ if env is None else env
+    if (env.get("CLAUDE_CODE_USE_COWORK_PLUGINS", "") or "").strip():
+        return USER_SETTINGS_COWORK
+    return USER_SETTINGS_DEFAULT
+
+
+def hook_wiring(project_dir: Path, home: Optional[Path] = None,
+                env: Optional[Dict[str, str]] = None
                 ) -> Tuple[bool, bool, List[Path]]:
     """(wired at the project, wired for the user, children that wire it instead).
 
@@ -364,26 +430,41 @@ def hook_wiring(project_dir: Path, home: Optional[Path] = None
     present and correct — which is why it is worth a finding rather than a
     comment. See docs/decisions/0005.
 
-    BOTH scopes are read as CHAINS, not as single filenames. The project scope is
-    `settings.local.json` then `settings.json`; the user scope is `settings.json`
-    then `cowork_settings.json`. Either narrowing produces the same wrong verdict
-    — `hook-not-wired` reported at a machine where the fix has already been
-    applied — and `settings.local.json` is the likelier of the two to carry it,
-    being the gitignored file you reach for in a repo you would rather not commit
-    to. What remains genuinely unreadable from here is named on the finding.
+    NEITHER scope is a single filename, and the two are not the same shape. The
+    project scope is a CHAIN — `settings.local.json` then `settings.json`, both
+    read and merged by precedence — so either of them wiring the hook is enough,
+    and `settings.local.json` is the likelier to carry the fix, being the
+    gitignored file you reach for in a repo you would rather not commit to. The
+    user scope is a SELECTION: one name, chosen by Cowork mode, and the other
+    name is not consulted at all. Reading the project scope too narrowly reports
+    `hook-not-wired` at a machine where the fix is already applied; reading the
+    user scope as a chain does the opposite and SUPPRESSES the finding at a
+    machine whose hook cannot fire. See `user_settings_name`.
+
+    The child scan reads the same PROJECT chain each child would read if it were
+    the cwd, and counts the first name in it that wires — one path per repo, so a
+    child wiring only through `settings.local.json` is counted rather than
+    silently dropped.
+
+    What remains genuinely unreadable from here is named on the finding, by
+    `hook_findings`, and not only in prose no reader of the output ever sees.
     """
     home = Path.home() if home is None else home
     here = _settings_wired(project_dir / ".claude", PROJECT_SETTINGS_NAMES)
-    user = _settings_wired(home / ".claude", USER_SETTINGS_NAMES)
+    user = wires_session_start(home / ".claude" / user_settings_name(env))
     children: List[Path] = []
     try:
         candidates = sorted(project_dir.iterdir())
     except OSError:
         candidates = []
     for child in candidates:
-        settings = child / ".claude" / "settings.json"
-        if child.is_dir() and wires_session_start(settings):
-            children.append(settings)
+        if not child.is_dir():
+            continue
+        for name in PROJECT_SETTINGS_NAMES:
+            settings = child / ".claude" / name
+            if wires_session_start(settings):
+                children.append(settings)
+                break
     return here, user, children
 
 
@@ -901,14 +982,14 @@ def hook_findings(project_dir: Path, here: bool, user: bool,
             f"authoritative — so nothing was lost by its not being consulted. "
             f"Recorded because it is the answer to why no `skills:` verdict "
             f"appeared, and because the same wiring IS a delivery failure on an "
-            f"ephemeral surface. See docs/decisions/0005.")]
+            f"ephemeral surface. {UNREADABLE_LINKS} See docs/decisions/0005.")]
     return [Finding(
         "hook-not-wired", str(project_dir),
         f"{where} So no bundle is installed here at all, and the hook is the "
         f"only channel that would install one on this surface. Fix it at a "
         f"level the chain reads — a settings file at this directory, or at the "
-        f"user scope — not inside the repos, which are already correct. See "
-        f"docs/decisions/0005.")], []
+        f"user scope — not inside the repos, which are already correct. "
+        f"{UNREADABLE_LINKS} See docs/decisions/0005.")], []
 
 
 def lock_findings(lock: Lock, lock_path: Path) -> List[Finding]:
@@ -999,12 +1080,30 @@ def render(record: Record, record_path: Path, skills_dir: Path,
                f"{'set' if remote else '(unset)'}, "
                f"SKILLS_BOOTSTRAP_FORCE={'set' if forced else '(unset)'}.")
     if kind == EPHEMERAL:
-        out += _para(f"{reading} A cloud session, CI runner or container — the "
-                     f"same three readings the bootstrap hook installs on. It is "
-                     f"the only channel that delivers a locked bundle here, so a "
-                     f"locked skill missing from the personal store is a delivery "
-                     f"failure rather than the empty store a durable machine "
-                     f"correctly has.")
+        para = (f"{reading} A cloud session, CI runner or container — the "
+                f"same three readings the bootstrap hook installs on. It is "
+                f"the only channel that delivers a locked bundle here, so a "
+                f"locked skill missing from the personal store is a delivery "
+                f"failure rather than the empty store a durable machine "
+                f"correctly has.")
+        # The one ephemeral reading that a DURABLE machine can produce by hand.
+        # Agreeing with the hook's third arm is deliberate (see `read_surface`),
+        # and it costs this: export the variable in a shell on your laptop and
+        # every locked skill the marketplace install owns is reported as an
+        # undelivered one. Disclosed rather than narrowed, because narrowing the
+        # arm would disagree with the hook silently — the failure this file
+        # exists to stop — whereas a reader who is told which input carried the
+        # verdict can check it in one command.
+        if forced and not remote and entrypoint != "remote":
+            para += (" That verdict rests on SKILLS_BOOTSTRAP_FORCE ALONE — no "
+                     "remote session id, and no entrypoint of exactly `remote`. "
+                     "The hook agrees, testing only whether the variable is SET "
+                     "(so even =0 forces an install). But if you exported it by "
+                     "hand on a durable machine, this is that machine being read "
+                     "as the hook would read it, and every delivery failure "
+                     "below is about a store that is correctly empty. Unset it "
+                     "and re-run to get the durable reading.")
+        out += _para(para)
     elif kind == DURABLE:
         out += _para(f"{reading} A durable machine: the marketplace install is "
                      f"authoritative and the personal store is SUPPOSED to hold "

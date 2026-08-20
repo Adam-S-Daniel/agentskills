@@ -118,13 +118,31 @@ otherwise recommends, and it is the reason the fix is not simply applied here.
 Two measured details that do not change the decision but will mislead whoever
 implements against it.
 
-**The user-scope settings filename is surface-dependent.** The binary selects
-`cowork_settings.json` under `coworkPlugins` / `CLAUDE_CODE_USE_COWORK_PLUGINS`,
-so anything hardcoding `settings.json` is wrong on a Cowork surface. Fixed where
-it applied: `check_provenance.py` checks both names, and would otherwise report
-`hook-not-wired` at a Cowork machine where the fix had already been applied —
-the same false verdict as #84's, pointing the other way. Anything else that
-learns to read the user scope inherits this and needs the same pair.
+**The user-scope settings filename is surface-dependent, and it is a SELECTION
+rather than a chain.** The binary selects `cowork_settings.json` under
+`coworkPlugins` / `CLAUDE_CODE_USE_COWORK_PLUGINS` and `settings.json`
+otherwise; it reads the selected one and does not fall back to the other. So
+anything hardcoding `settings.json` is wrong on a Cowork surface — but so is the
+obvious repair of reading BOTH, which is the mistake that reads like caution and
+is not. `check_provenance.py` accordingly picks ONE name
+(`user_settings_name()`), and reads it.
+
+The two errors are not symmetric, which is why the repair has to be the right
+one rather than merely a wider one. Hardcoding `settings.json` reports
+`hook-not-wired` at a Cowork machine where the fix has already been applied —
+loud, and the reader who is being told they are broken goes and checks. Reading
+both names does the opposite: on an ordinary machine a wired
+`cowork_settings.json` reports the user scope as wired while the only file that
+machine opens wires nothing, so the finding is SUPPRESSED on a machine whose
+hook genuinely cannot fire, and a check that has gone quiet is indistinguishable
+from a machine that is healthy. Anything else that learns to read the user scope
+inherits the selection, not the pair.
+
+The other arm, `coworkPlugins`, is config and not an environment variable, so no
+process can read it. `check_provenance.py` therefore reads only
+`CLAUDE_CODE_USE_COWORK_PLUGINS` and names the gap on the `hook-not-wired`
+finding itself, alongside the managed/policy file and the `--settings` path —
+the two links of the chain above that are likewise not files it can open.
 
 **The shadow guard is inert, not merely mispointed, in a multi-repo shape.** The
 hook's `$PROJECT_DIR/.claude/skills/<name>/SKILL.md` check — and
@@ -172,7 +190,8 @@ fix it from inside a repo.
   loop no longer deletes what it did not install, which is what lifted the
   ordering constraint on the user-scope direction.
 - `plugins/adam/skills/skills-doctor/scripts/check_provenance.py` —
-  `hook_wiring`, `hook_findings`, `read_surface`, `discover_locks`.
+  `hook_wiring`, `user_settings_name`, `hook_findings`, `read_surface`,
+  `discover_locks`.
 
 ## Note on the quotation
 

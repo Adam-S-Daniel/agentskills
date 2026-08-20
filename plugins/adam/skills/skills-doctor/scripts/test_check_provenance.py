@@ -1910,12 +1910,17 @@ def test_the_user_scope_settings_filename_is_surface_dependent(tmp_path, capsys,
     The binary selects it under `coworkPlugins` / `CLAUDE_CODE_USE_COWORK_PLUGINS`,
     so anything hardcoding `settings.json` reads a file that is not there and
     concludes "no user-scope hook" about a machine that has one — reporting
-    #84's defect at a machine where it has already been fixed. Both names are
-    checked, and this is the half that a `settings.json`-only reader fails.
+    #84's defect at a machine where it has already been fixed.
+
+    The env arm is set here because the selection is what decides which name is
+    read: this is a Cowork surface, and on a Cowork surface `cowork_settings.json`
+    is the file. The companion test below is the same tree with the arm UNSET,
+    where the answer must flip.
     """
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("CLAUDE_CODE_USE_COWORK_PLUGINS", "1")
 
     store = tmp_path / "skills"
     store.mkdir()
@@ -1931,6 +1936,206 @@ def test_the_user_scope_settings_filename_is_surface_dependent(tmp_path, capsys,
 
     _, out = run_autolock(store, project, capsys)
     assert "[hook-not-wired]" not in out, out
+
+
+def test_the_user_scope_selects_one_file_and_does_not_merge_the_pair(
+        tmp_path, capsys, ephemeral, monkeypatch):
+    """A wired `cowork_settings.json` must NOT silence the finding off-Cowork.
+
+    The user scope is a SELECTION, not a chain: the binary reads
+    `cowork_settings.json` under `coworkPlugins` /
+    `CLAUDE_CODE_USE_COWORK_PLUGINS` and `settings.json` otherwise, and never
+    falls back from one to the other. Asking `any(...)` over the pair therefore
+    answers a question nobody is in: on an ordinary machine it reports the user
+    scope as wired because `cowork_settings.json` does, while the only file that
+    machine opens — `settings.json`, present here and wiring nothing — does not.
+
+    That direction is the dangerous one. The sibling defects in this area fire
+    the finding at somebody who already fixed it, which is loud and self-
+    correcting; this one SUPPRESSES the finding on a machine whose hook
+    genuinely cannot fire, and a check that goes quiet is indistinguishable from
+    a machine that is healthy.
+
+    `settings.json` deliberately EXISTS and is empty of hooks. The bug needs a
+    first file that is present and does not wire — a rule of "first that exists
+    answers" and a rule of "either may answer" agree on every other tree.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("CLAUDE_CODE_USE_COWORK_PLUGINS", raising=False)
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+
+    wired = _repo_with_lock(tmp_path / "staging", "wired", hook=True)
+    settings = (wired / ".claude" / "settings.json").read_text(encoding="utf-8")
+    (home / ".claude" / "cowork_settings.json").write_text(settings,
+                                                           encoding="utf-8")
+    (home / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+
+    code, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" in out, out
+    assert code == 1, out
+
+    # NEGATIVE CONTROL, same bytes on disk, one environment variable apart: on a
+    # Cowork surface `cowork_settings.json` IS the file the binary opens, so the
+    # finding must go quiet again. Without this the assertion above is satisfied
+    # by any change that simply stops reading `cowork_settings.json` at all —
+    # which would re-break the Cowork machine this pair exists to keep working.
+    monkeypatch.setenv("CLAUDE_CODE_USE_COWORK_PLUGINS", "1")
+    _, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" not in out, out
+
+
+@pytest.mark.parametrize("value, name", [
+    ("1", prov.USER_SETTINGS_COWORK),
+    ("true", prov.USER_SETTINGS_COWORK),
+    ("", prov.USER_SETTINGS_DEFAULT),
+    ("   ", prov.USER_SETTINGS_DEFAULT),
+], ids=["set", "set-word", "empty", "blank"])
+def test_the_user_scope_name_is_chosen_by_the_cowork_arm(value, name):
+    """One name out, chosen by the arm a process can read.
+
+    A non-empty value is on. Unlike `read_surface`'s presence-not-value rule for
+    `SKILLS_BOOTSTRAP_FORCE` — which was read off this repo's own hook source —
+    there is no source here to copy, so this is a convention and is documented
+    as one on `user_settings_name`.
+    """
+    assert prov.user_settings_name(
+        {"CLAUDE_CODE_USE_COWORK_PLUGINS": value}) == name
+    assert prov.user_settings_name({}) == prov.USER_SETTINGS_DEFAULT
+
+
+def test_the_finding_names_the_links_it_could_not_read(tmp_path, capsys,
+                                                       ephemeral, monkeypatch):
+    """The blind spot is printed where the reader is, not only in SKILL.md.
+
+    Three links of the resolution chain are not files a process can open: a
+    managed/policy settings file, a `--settings` path on the command line, and
+    the `coworkPlugins` config flag that picks the user-scope name. A finding
+    that lists only the files it DID read reads as exhaustive, so a session
+    wired through any of the three gets exit 1 and a verdict with no way to tell
+    a real defect from this check's blind spot — the same "fires at the person
+    who already fixed it" failure as the settings-chain narrowings, one link
+    further out.
+
+    Asserted on the rendered OUTPUT rather than on the docstring, because the
+    docstring is exactly what claimed this while the finding did not carry it.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+
+    _, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" in out, out
+    flattened = flat(out)
+    assert "a managed/policy settings file" in flattened, out
+    assert "a --settings path given on the command line" in flattened, out
+    assert "`coworkPlugins` config flag" in flattened, out
+
+    # The durable-surface NOTE carries the same sentence. It is the same blind
+    # spot, and a reader who only ever sees the note would otherwise never be
+    # told about it.
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE_SESSION_ID")
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT")
+    code, out = run_autolock(store, project, capsys)
+    assert code == 0, out
+    assert "[hook-not-wired]" in out, out
+    assert "a managed/policy settings file" in flat(out), out
+
+
+def test_a_child_wiring_only_settings_local_json_is_still_counted(
+        tmp_path, capsys, ephemeral, monkeypatch):
+    """The child scan reads the same project chain a child would read as cwd.
+
+    `settings.local.json` sits AHEAD of `settings.json` in that chain and is the
+    gitignored file someone reaches for in a repo they would rather not commit
+    to — so enumerating only `settings.json` below the project dir undercounts
+    exactly the repos most likely to have been fixed by hand, and with one such
+    repo alone it withholds the finding entirely.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    repo = _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+    settings = repo / ".claude" / "settings.json"
+    local = repo / ".claude" / "settings.local.json"
+    local.write_text(settings.read_text(encoding="utf-8"), encoding="utf-8")
+    settings.unlink()
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 1, out
+    assert "[hook-not-wired]" in out, out
+    assert str(local) in out, out
+    # One path per repo, not one per name: a child carrying BOTH files is one
+    # child, and a count that double-reports it misdescribes the machine.
+    settings.write_text(local.read_text(encoding="utf-8"), encoding="utf-8")
+    _, out = run_autolock(store, project, capsys)
+    assert "1 settings file(s) below this directory" in flat(out), out
+
+    # NEGATIVE CONTROL: with neither name wiring, there is no child to report
+    # and the finding must not fire at all.
+    local.unlink()
+    settings.write_text("{}", encoding="utf-8")
+    code, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" not in out, out
+    assert code == 1, out  # still red: the locked skills are undelivered
+
+
+def test_an_ephemeral_verdict_carried_by_force_alone_says_so(tmp_path, capsys,
+                                                             monkeypatch):
+    """Export the variable on a laptop and the doctor reads that laptop as cloud.
+
+    Deliberate: `read_surface` copies the hook's third arm, and the hook installs
+    whenever `SKILLS_BOOTSTRAP_FORCE` is set. The cost is that a durable machine
+    can be talked into the ephemeral reading by hand, and then every locked
+    skill the marketplace install owns is reported as an undelivered one.
+
+    Narrowing the arm would disagree with the hook silently, which is the
+    failure the surface gate exists to stop — so the verdict names the input it
+    rests on instead, and the reader can check it in one command.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    monkeypatch.setenv("SKILLS_BOOTSTRAP_FORCE", "1")
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 1, out
+    assert "SURFACE  ephemeral" in out, out
+    assert "rests on SKILLS_BOOTSTRAP_FORCE ALONE" in flat(out), out
+    assert "Unset it and re-run" in flat(out), out
+
+    # NEGATIVE CONTROL: an ephemeral reading carried by a real session id must
+    # NOT carry the caveat — it is not a hand-exported variable, and a caveat on
+    # every cloud session is one the reader learns to skip.
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE_SESSION_ID", "cse_deadbeef")
+    _, out = run_autolock(store, project, capsys)
+    assert "SURFACE  ephemeral" in out, out
+    assert "rests on SKILLS_BOOTSTRAP_FORCE ALONE" not in flat(out), out
 
 
 def test_the_project_scope_reads_settings_local_json_too(tmp_path, capsys,

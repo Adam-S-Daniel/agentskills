@@ -166,14 +166,25 @@ durable, which is the quiet reading.
 **`hook-not-wired` is the finding to look for in a multi-repo session.** A lock
 plus a SessionStart hook wired only in a *child* of the project dir means no
 hook is consulted at all, so nothing is delivered and nothing says so — there is
-no `skills:` verdict because the script that prints one never runs. Both scopes
-are read as chains — `settings.local.json` then `settings.json` at the project,
-`settings.json` then `cowork_settings.json` at the user scope — so a fix applied
-in any of them silences the finding. Two links are unreadable from here and
-neither is a file this can open: a managed/policy settings file, and a
-`--settings` path given on the command line. If the finding fires on a session
-you believe is wired through one of those, that is the gap. See
-`docs/decisions/0005` in the registry.
+no `skills:` verdict because the script that prints one never runs. The two
+scopes are read the way the binary reads them, and they are not the same shape:
+the project scope is a **chain** — `settings.local.json` then `settings.json`,
+both consulted — so a fix in either silences the finding; the user scope is a
+**selection** of one name by Cowork mode — `cowork_settings.json` when
+`CLAUDE_CODE_USE_COWORK_PLUGINS` is set, `settings.json` otherwise — and the
+name not selected is never consulted. Treating that selection as a chain is the
+mistake that points the wrong way: it reports the user scope as wired off a file
+the machine never opens, and so suppresses the finding on a machine whose hook
+genuinely cannot fire.
+
+Three links are unreadable from a process and none is a file this can open: a
+managed/policy settings file, a `--settings` path given on the command line, and
+the `coworkPlugins` config flag (the other arm of the user-scope selection). The
+tool **prints that sentence on the finding itself** — it is not documentation
+you have to have read, because the person running the script is not necessarily
+the person reading this. If the finding fires on a session you believe is wired
+through one of those, that is the gap. See `docs/decisions/0005` in the
+registry.
 
 Produce one row per expected skill, and report `registry` and `bundle` on it,
 not just the channel — "personal copy" does not say whether it came from the
