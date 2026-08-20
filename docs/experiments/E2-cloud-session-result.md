@@ -35,7 +35,10 @@ All four present. None of these exist in the claude.ai account-upload set (see
 `workflow-path-audit` — these appear both at `~/.claude/skills/<name>/` (hook)
 and in `~/.claude/skills/synced/<name>/` (account upload). Each appears exactly
 once in the model's listing, so the two sources are deduplicated rather than
-double-loaded. Which copy won is **inconclusive** from the model's view alone.
+double-loaded. Which copy won was **inconclusive** from the model's view alone;
+[E5](E5-account-store-vs-hook-precedence.md) settled it by measurement — the
+**hook copy wins**, and the Skill tool names `~/.claude/skills/<name>/` as its
+base directory.
 
 **From the account-upload / `synced/` set:**
 `doc-coauthoring`, `docx`, `fastmail`, `learn`, `ocr-pdfs`, `pdf`,
