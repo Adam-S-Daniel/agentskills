@@ -1201,6 +1201,347 @@ def test_check_current_on_an_unreachable_pinned_ref_errors_cleanly(registry, tmp
 
 
 # --------------------------------------------------------------------------
+# --check-format
+#
+# The third question, and the reason it is not a widening of either flag
+# above. `--check-current` compares two freshly digested trees and never reads
+# the lock's stored values at all; `--check` reads them only inside a
+# whole-document comparison, which reports a wrong SHAPE in the same words as
+# content drift. Eight consumer locks in this fleet are stored as bare 64-hex,
+# all pinning 94cdcc81, and the fleet bumper's anti-churn gate is
+# `--check-current` — which says OK, because the bundle content genuinely has
+# not moved. Green gate, skipped re-pin, shape never healed. These tests pin
+# that gap open so it cannot close by accident, and pin the new flag's promise
+# that it reads the FILE and nothing else.
+# --------------------------------------------------------------------------
+
+def _unlabel(path: Path, only: Optional[set] = None) -> None:
+    """Strip `sha256:` back off a lock's stored digests, in place.
+
+    Deliberately self-proving: it asserts each value it rewrites was labelled
+    to begin with, and that it rewrote at least one. A fixture helper that
+    silently mutated nothing would leave every test below asserting that a
+    correct lock is correct.
+    """
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["skills"], "nothing to unlabel — the fixture wrote an empty lock"
+    changed = 0
+    for name, digest in document["skills"].items():
+        if only is not None and name not in only:
+            continue
+        assert digest.startswith(gsl.LOCK_DIGEST_PREFIX), (name, digest)
+        document["skills"][name] = digest[len(gsl.LOCK_DIGEST_PREFIX):]
+        changed += 1
+    assert changed, "unlabelled no digest at all"
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+
+def test_check_format_exits_zero_on_a_lock_this_generator_wrote(registry, tmp_path):
+    """The writer's output is the shape the checker accepts, by construction."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "OK:" in proc.stdout
+    assert "(2 skills)" in proc.stdout    # named, so a silent empty pass is visible
+
+
+def test_this_repos_committed_lock_passes_check_format():
+    """Dogfood. This repo's own lock is the one every consumer copies the shape
+    of, and it is the reference an adopter compares theirs against."""
+    proc = run_generator("--check-format", "-o", str(REPO_ROOT / "skills.lock"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_check_current_is_blind_to_what_check_format_catches(registry, tmp_path):
+    """The stranded-lock defect, in one test — the reason this flag exists.
+
+    A lock whose digests are bare hex still describes the bundle at the ref it
+    pins perfectly: both sides of --check-current are freshly digested trees,
+    so it answers OK. That is the fleet bumper's anti-churn gate, so the heal
+    it would perform (--repin relabels) is never reached, and eight consumer
+    locks have sat in this state for as long as the `adam` bundle has stood
+    still. Only a question asked directly of the STORED values sees it.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+
+    current = run_generator("--repo", str(root), "--check-current", "-o", str(out))
+    shape = run_generator("--check-format", "-o", str(out))
+    assert current.returncode == 0, current.stdout + current.stderr
+    assert "OK:" in current.stdout
+    assert shape.returncode == 1, shape.stdout + shape.stderr
+
+
+def test_a_repin_is_what_heals_a_bare_lock(registry, tmp_path):
+    """--check-format's remediation line names --repin; this is that claim, run.
+
+    The writer was never the broken half — labelling happens at the document
+    boundary on every write — so the repair needs no new code path, only a gate
+    that can tell the bumper to take the one that exists.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+    assert run_generator("--check-format", "-o", str(out)).returncode == 1
+
+    assert run_generator("--repo", str(root), "--repin", "-o", str(out)).returncode == 0
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_check_format_fails_a_bare_lock_and_names_every_offender(registry, tmp_path):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "FAILED:" in proc.stdout
+    assert "adam/alpha" in proc.stdout
+    assert "adam/beta" in proc.stdout
+    # The remediation has to name the SAFE command. A reader told to "regenerate"
+    # would rerun a plain generate, which takes `sources` off the command line
+    # alone and de-federates any consumer lock that has them.
+    assert "--repin" in proc.stdout
+
+
+def test_check_format_fails_a_mixed_lock_and_names_only_the_bare_ones(registry, tmp_path):
+    """Partway-healed is a real state: a hand edit fixes the lines someone read.
+
+    Reported per skill rather than as one verdict for the file, so the count in
+    the summary is the number of digests actually wrong.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out, only={"adam/alpha"})
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "1 of 2 digests" in proc.stdout
+    assert "adam/alpha" in proc.stdout
+    assert "adam/beta" not in proc.stdout
+
+
+def test_check_format_fails_on_an_empty_skills_map(tmp_path):
+    """"No work" and "no errors" must not be the same answer.
+
+    A generate over a bundle with no skills writes an empty map legitimately
+    (test_an_empty_bundle_yields_an_empty_skills_map), so every value in it is
+    trivially well-shaped. This flag gates a REPAIR sweep, and a repair gate
+    that greens on an empty file is how a sweep reports success for having
+    inspected nothing.
+    """
+    root = tmp_path / "registry"
+    make_registry(root, {"adam/alpha": SKILL_A})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "--bundles", "fastmail",
+                         "-o", str(out)).returncode == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["skills"] == {}
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "no skills" in proc.stdout
+
+
+@pytest.mark.parametrize("digest", [
+    "a" * 63,                                  # bare, one short
+    gsl.LOCK_DIGEST_PREFIX + "a" * 63,         # labelled, one short
+    gsl.LOCK_DIGEST_PREFIX + "a" * 65,         # labelled, one long
+    gsl.LOCK_DIGEST_PREFIX + "A" * 64,         # uppercase — hexdigest() is not
+    gsl.LOCK_DIGEST_PREFIX + "g" * 64,         # 64 characters, not hex
+    gsl.LOCK_DIGEST_PREFIX,                    # the label with nothing behind it
+    gsl.LOCK_DIGEST_PREFIX * 2 + "a" * 64,     # labelled twice
+    "sha512:" + "a" * 64,                      # a different algorithm's label
+    " " + gsl.LOCK_DIGEST_PREFIX + "a" * 64,   # leading whitespace
+    gsl.LOCK_DIGEST_PREFIX + "a" * 64 + "\n",  # trailing newline
+])
+def test_check_format_rejects_a_digest_of_the_wrong_length_or_case(
+        registry, tmp_path, digest):
+    """Length AND case AND alphabet, all of them exactly.
+
+    The lock is a byte-for-byte attestation: every reader — the bootstrap hook
+    included — compares a stored digest against one it computed itself, and
+    `hexdigest()` emits 64 lowercase hex characters and nothing else. Anything
+    that merely LOOKS like a digest was not written by this generator, so
+    accepting it here would green a lock whose next integrity check reports
+    tampering.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["skills"]["adam/alpha"] = digest
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "adam/alpha" in proc.stdout
+
+
+@pytest.mark.parametrize("digest", [1, None, True, ["sha256:" + "a" * 64], {}])
+def test_check_format_reports_a_type_confused_digest_rather_than_tracebacking(
+        registry, tmp_path, digest):
+    """The lock arrives as found ON DISK and may be any shape at all.
+
+    A verdict that raises instead of printing is a verdict nobody reads — the
+    same standard `_render_sources` is written to, and the reason the type name
+    is reported rather than the value.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["skills"]["adam/alpha"] = digest
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert "adam/alpha" in proc.stdout
+    assert type(digest).__name__ in proc.stdout
+
+
+@pytest.mark.parametrize("skills_value", ["not a map", ["adam/alpha"], 7, None])
+def test_check_format_reports_a_skills_map_that_is_not_a_map(registry, tmp_path,
+                                                             skills_value):
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["skills"] = skills_value
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert "'skills'" in proc.stdout
+
+
+def test_check_format_never_echoes_the_offending_digest(registry, tmp_path):
+    """The offending value is a bare 64-hex string — the exact token gitleaks'
+    `generic-api-key` rule fires on beside a keyword-bearing name, which is the
+    whole reason LOCK_DIGEST_PREFIX exists. Printing one into a CI log in order
+    to complain about it would put it straight back into scanned text."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+    bare = json.loads(out.read_text(encoding="utf-8"))["skills"]["adam/alpha"]
+    assert re.fullmatch(r"[0-9a-f]{64}", bare), bare
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert bare not in proc.stdout + proc.stderr
+
+
+def test_check_format_bounds_the_names_it_prints(tmp_path):
+    """Every digest in a lock can be wrong at once — all eight stranded consumer
+    locks were, and a 22-skill consumer would be 22. An unbounded list scrolls
+    its own remediation line off the top of a CI log."""
+    root = tmp_path / "registry"
+    many = {f"adam/skill-{index:02d}": SKILL_B for index in range(14)}
+    make_registry(root, many)
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "14 of 14 digests" in proc.stdout
+    listed = [line for line in proc.stdout.splitlines()
+              if line.startswith("  - adam/skill-")]
+    assert len(listed) == gsl._FORMAT_REPORT_CAP, proc.stdout
+    assert f"and {14 - gsl._FORMAT_REPORT_CAP} more" in proc.stdout
+
+
+def test_check_format_reads_the_file_alone_and_needs_no_checkout(registry, tmp_path):
+    """The calling convention, not an implementation detail.
+
+    _agent-guidance's bump-consumer-locks.sh runs this per consumer lock BEFORE
+    it has cloned the registry, so a single git call on this path would fail
+    the sweep's very first use of it. `--repo` is pointed at a path that does
+    not exist; the control is the last leg, where --check with the same bogus
+    `--repo` DOES fail — without it this would pass just as well against a flag
+    that quietly used the default repo.
+
+    The lock with NO `ref` is the leg that actually holds the early return in
+    place. A lock that HAS one never reaches `resolve_ref(repo, "HEAD")` at
+    all, so this test was green against the fall-through too until it grew this
+    case (measured). A missing `ref` is exactly what a botched merge-conflict
+    resolution leaves behind — the state a repair sweep is most likely to meet
+    — and the shape question has an answer regardless: it is asked of `skills`
+    and of nothing else.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    absent = tmp_path / "no-such-clone"
+    assert not absent.exists()
+
+    shape = run_generator("--check-format", "--repo", str(absent), "-o", str(out))
+    assert shape.returncode == 0, shape.stdout + shape.stderr
+
+    refless = tmp_path / "refless.lock"
+    refless.write_text(out.read_text(encoding="utf-8"), encoding="utf-8", newline="")
+    _edit_lock(refless, ref=_DROP)
+    assert "ref" not in json.loads(refless.read_text(encoding="utf-8"))
+    shapeless = run_generator("--check-format", "--repo", str(absent), "-o", str(refless))
+    assert shapeless.returncode == 0, shapeless.stdout + shapeless.stderr
+
+    faithful = run_generator("--check", "--repo", str(absent), "-o", str(out))
+    assert faithful.returncode != 0, faithful.stdout + faithful.stderr
+
+
+def test_check_format_runs_alongside_check_and_the_exit_code_is_the_worst(
+        registry, tmp_path):
+    """Composes the way --check and --check-current always have.
+
+    A bare lock is stale to --check as well (a wrong shape is a wrong byte), so
+    this asserts the composition rather than an independence the two do not
+    have: both verdicts are printed, and the run exits 1.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+
+    proc = run_generator("--repo", str(root), "--check-format", "--check", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "lowercase hex" in proc.stdout          # --check-format's verdict
+    assert "is stale" in proc.stdout               # --check's
+
+
+def test_check_format_alongside_check_current_reports_both_verdicts(registry, tmp_path):
+    """The pairing a heal sweep would actually run: 'has the content moved' and
+    'is the stored shape right' are independent, and a bare lock answers OK to
+    the first and FAILED to the second in the same run."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+
+    proc = run_generator("--repo", str(root), "--check-format", "--check-current",
+                         "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "FAILED:" in proc.stdout    # --check-format's
+    assert "OK: the working tree still matches" in proc.stdout    # --check-current's
+
+
+def test_check_format_on_a_missing_lock_errors_cleanly(tmp_path):
+    proc = run_generator("--check-format", "-o", str(tmp_path / "absent.lock"))
+    assert proc.returncode != 0
+    assert "Traceback" not in proc.stderr
+
+
+# --------------------------------------------------------------------------
 # the merge race (issue #80)
 #
 # A re-pin asserts "the tree at ref X is what this lock describes", and the
@@ -1511,7 +1852,7 @@ def test_repin_on_a_missing_lock_refuses_rather_than_creating_one(tmp_path):
     assert not out.exists()
 
 
-@pytest.mark.parametrize("verify_flag", ["--check", "--check-current"])
+@pytest.mark.parametrize("verify_flag", ["--check", "--check-current", "--check-format"])
 def test_repin_with_a_verify_flag_is_an_argparse_error(registry, tmp_path, verify_flag):
     """One writes and one verifies: a run asking for both has no answer to give.
 

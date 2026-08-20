@@ -133,6 +133,48 @@ newly pinned ref. The merge itself never manufactures a red check out of two
 green branches; it carries an already-red `main` past the point where someone
 was looking, and relabels which ref the complaint names.
 
+What `--check-format` asserts, and why it is a THIRD flag
+---------------------------------------------------------
+Neither flag above reads a lock's STORED digest values *as values*.
+`--check-current` never touches them at all — it compares two freshly digested
+trees, which is exactly what `_label_digests` below promises so that labelling
+could not disturb it — and `--check` reads them only inside a whole-document
+comparison, where a wrong SHAPE comes out in the same words as content drift:
+`digest changed`.
+
+That combination is what stranded eight consumer locks (cms-platform,
+GHA-bench, _agent-guidance, agentskills-private, claude-memory-map,
+fastmail-actions, repo-settings, wsl-automation — every one of them pinning
+94cdcc81). All eight store bare 64-hex where the canonical shape is
+`sha256:<hex>`. The fleet bumper (_agent-guidance's
+`scripts/bump-consumer-locks.sh`) would heal them, because it heals by
+re-pinning and `--repin` relabels — measured on a copy of one of those locks,
+8 bare in, 8 labelled out. It never will, because its anti-churn gate is
+`--check-current`, which answers `OK: the working tree still matches 94cdcc81
+(8 skills).` at exit 0: the bundle content genuinely has not moved, so the
+bumper skips, and the shape is never fixed. Silently, and for as long as the
+`adam` bundle stands still.
+
+`--check` does fail on such a lock — exit 1, eight `digest changed` lines — and
+that is deliberately not the answer to borrow. The bumper's gate comment says
+why about `sources`: handing the generator a different QUESTION cannot drift
+with the generator's wording, while reinterpreting another question's combined
+verdict can, and does, the first time that wording changes. A distinct
+question therefore gets a distinct flag.
+
+So `--check-format` asks one thing — are this lock's stored digests in the
+canonical shape — and answers it from the FILE ALONE: no registry checkout, no
+network, no `--repo`, not one git call. That is the calling convention rather
+than an economy. The bumper runs it per consumer lock, before it has cloned
+anything.
+
+An EMPTY `skills` map FAILS rather than passing vacuously. A generate over a
+bundle with no skills writes one legitimately (see
+`test_an_empty_bundle_yields_an_empty_skills_map`), so "every digest is
+well-shaped" is trivially true of it — and a gate that cannot tell "nothing to
+fix" from "nothing there" is the shape every green check that was measuring
+nothing has had.
+
 What `--repin` inherits, and the one field it must not
 ------------------------------------------------------
 Re-pinning is a WRITE, but it is not a fresh generate: it advances an existing
@@ -249,6 +291,7 @@ Usage:
                                           [--source-repo 'KEY=PATH'] [-o PATH]
   python3 scripts/generate_skills_lock.py --check [same flags]
   python3 scripts/generate_skills_lock.py --check-current [same flags]
+  python3 scripts/generate_skills_lock.py --check-format [-o PATH]
   python3 scripts/generate_skills_lock.py --digest DIR
 
 `--source` is repeatable and adds one federated source; `--source-repo` says
@@ -259,7 +302,8 @@ any one of its bundle names. `--check` / `--check-current` inherit `sources`
 from the lock the same way they inherit `registry` / `ref` / `bundles`;
 `--repin` inherits all of those EXCEPT `ref`, requires them to be present and
 well-formed rather than falling back to a default, and refuses the flags that
-would override them.
+would override them. `--check-format` inherits nothing and reads `skills`
+alone — it is the one mode that never asks a registry anything.
 """
 
 import argparse
@@ -835,6 +879,94 @@ def _label_digests(skills: Dict[str, str]) -> Dict[str, str]:
     return {name: LOCK_DIGEST_PREFIX + digest for name, digest in skills.items()}
 
 
+# The canonical STORED shape, derived from LOCK_DIGEST_PREFIX rather than
+# re-typed. One constant decides what a lock's digests look like; a second
+# spelling of it inside the validator is how a checker ends up asserting a
+# shape the writer stopped emitting, agreeing with nothing and reporting so at
+# exit 0.
+_LOCK_DIGEST_RE = re.compile(re.escape(LOCK_DIGEST_PREFIX) + r"[0-9a-f]{64}")
+# How many offending names a --check-format failure prints before summarising
+# the rest. Every one of a lock's digests can be wrong at once — all eight of
+# the stranded consumer locks were, and a 22-skill consumer would be 22 — and a
+# report that scrolls its own remediation line off the top of a CI log is a
+# report nobody acts on.
+_FORMAT_REPORT_CAP = 10
+
+
+def digest_format_offenders(skills: Dict[str, str]) -> List[str]:
+    """Every `skills` name whose stored digest is not `sha256:<64 lowercase hex>`.
+
+    Names, and TYPE names for a non-string — never the offending VALUE. In the
+    case that motivated this flag the offending value is precisely a bare
+    64-hex string, which is the token gitleaks' `generic-api-key` rule fires on
+    beside a keyword-bearing name; that is the whole reason LOCK_DIGEST_PREFIX
+    exists. Echoing one into a CI log in order to complain about it would put
+    it back into scanned text, and this report is written for CI logs.
+
+    Case is part of the shape rather than pedantry: `hexdigest()` is lowercase,
+    so an uppercase digest was not written by this generator at all, and every
+    reader compares it byte-for-byte against a freshly computed one — the
+    bootstrap hook included, where the mismatch is reported as tampering.
+    """
+    offenders: List[str] = []
+    for name in sorted(skills):
+        value = skills[name]
+        if isinstance(value, str) and _LOCK_DIGEST_RE.fullmatch(value):
+            continue
+        offenders.append(
+            name if isinstance(value, str) else f"{name} ({type(value).__name__})"
+        )
+    return offenders
+
+
+def report_digest_format(document: dict, output: Path) -> int:
+    """Print --check-format's verdict for one lock and return its exit status.
+
+    Reads `skills` and nothing else — no `ref`, no `registry`, no `sources`, no
+    git — because the fleet bumper calls this per consumer lock before it has a
+    clone of anything to read from. Written defensively for the same reason
+    `_render_sources` is: the document arrives as found ON DISK and may be
+    hand-edited into any shape at all, and a verdict that raises instead of
+    printing is a verdict nobody gets.
+    """
+    skills = document.get("skills")
+    if not isinstance(skills, dict):
+        print(f"FAILED: {output} has no usable 'skills' map "
+              f"(got {type(skills).__name__}), so it holds no digests whose shape "
+              "could be right. The bootstrap hook refuses a lock of this shape "
+              "outright; regenerate it.")
+        return 1
+    # An empty map FAILS rather than passing vacuously, and the distinction is
+    # the point of the flag: a generate over a bundle with no skills writes one
+    # legitimately, so "every digest is well-shaped" is trivially true of it.
+    # This flag gates a REPAIR, where "nothing to fix" and "nothing there" are
+    # different answers — collapsing them is the shape of every green check
+    # that turned out to be measuring nothing.
+    if not skills:
+        print(f"FAILED: {output} lists no skills at all, so nothing in it has a "
+              "digest to be in the right shape — 'no work' is not 'no errors'. "
+              "Regenerate it against the bundles it means to install.")
+        return 1
+    offenders = digest_format_offenders(skills)
+    if not offenders:
+        print(f"OK: every digest in {output} is "
+              f"{LOCK_DIGEST_PREFIX}<64 hex> ({len(skills)} skills).")
+        return 0
+    print(f"FAILED: {len(offenders)} of {len(skills)} digests in {output} are not "
+          f"{LOCK_DIGEST_PREFIX}<64 lowercase hex>. The fix is a RE-PIN, which "
+          "recomputes every digest from the pinned ref and labels it on the way "
+          "out — not a hand edit, which would paste a label onto a value nobody "
+          "recomputed and turn the lock into an attestation over unverified "
+          "bytes:")
+    print("  python3 scripts/generate_skills_lock.py --repin "
+          "--repo <a clone of the registry this lock names> -o <this lock>")
+    for name in offenders[:_FORMAT_REPORT_CAP]:
+        print(f"  - {name}")
+    if len(offenders) > _FORMAT_REPORT_CAP:
+        print(f"  - ... and {len(offenders) - _FORMAT_REPORT_CAP} more")
+    return 1
+
+
 def build_lock(
     repo: Path,
     registry: str,
@@ -1067,6 +1199,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "working tree is read verbatim, so an untracked skill directory "
                              "counts; what git ignores is excluded, so a local __pycache__ "
                              "does not.")
+    parser.add_argument("--check-format", action="store_true",
+                        help="verify every STORED digest in the lock is "
+                             f"'{LOCK_DIGEST_PREFIX}<64 lowercase hex>', and exit 1 if not, "
+                             "naming the skills that are not. A THIRD question, not a "
+                             "widening of the two above: --check-current never reads the "
+                             "stored values at all, and --check reads them only inside a "
+                             "whole-document comparison that reports a wrong shape as "
+                             "'digest changed' — so a lock of bare hex is green on the "
+                             "first and indistinguishable from content drift on the "
+                             "second. Reads the file ALONE: no registry checkout, no "
+                             "network, no --repo, no git. An empty 'skills' map fails "
+                             "rather than passing vacuously.")
     parser.add_argument("--repin", action="store_true",
                         help="advance an EXISTING lock onto another commit, and write it. "
                              "The lock's own identity is inherited — registry, bundles and "
@@ -1095,9 +1239,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # An argparse error, not a precedence rule: --repin writes and --check
     # verifies, so a run asking for both has no single answer to give, and
     # silently picking one would report on a lock the caller did not mean.
-    if args.repin and (args.check or args.check_current):
-        parser.error("--repin writes a lock; --check / --check-current verify one. "
-                     "Run them as separate commands.")
+    if args.repin and (args.check or args.check_current or args.check_format):
+        parser.error("--repin writes a lock; --check / --check-current / --check-format "
+                     "verify one. Run them as separate commands.")
 
     # The same reasoning one field further in. --repin's premise is that the
     # lock's identity is authoritative, so a flag that OVERRIDES that identity
@@ -1133,7 +1277,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     repo = Path(args.repo) if args.repo else REPO_ROOT
     output = Path(args.output) if args.output else DEFAULT_LOCK
 
-    verifying = args.check or args.check_current
+    verifying = args.check or args.check_current or args.check_format
     # --repin joins the verify modes in reading the lock's identity back out of
     # it, and departs from them on `ref` alone (below). load_lock already
     # reports a missing file as a GeneratorError; --repin restates it, because
@@ -1151,6 +1295,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "--repin."
         )
     existing = load_lock(output) if inheriting else {}
+
+    # --check-format is answered HERE — off `existing` alone, above the `ref`
+    # resolution and everything that reaches for a checkout — because reading
+    # nothing but the file is this flag's CALLING CONVENTION and not merely how
+    # it happens to be written: the fleet bumper runs it per consumer lock
+    # before it has cloned any registry. The early return is what keeps that
+    # literal. One git call reachable on this path (`resolve_ref(repo, "HEAD")`
+    # below, taken whenever the lock's own `ref` is missing) and the bumper's
+    # very first use of it fails on a machine that has no clone yet — for a
+    # question that never needed one.
+    #
+    # When another verify flag is also present the run continues instead, and
+    # the verdict already printed is folded into the exit code below: the three
+    # compose the way --check and --check-current always have.
+    format_status = 0
+    if args.check_format:
+        format_status = report_digest_format(existing, output)
+        if not (args.check or args.check_current):
+            return format_status
     if args.repin:
         # Strict, because this is the path that WRITES what it inherited. See
         # the helpers: the generate path's fall-through to DEFAULT_REGISTRY /
@@ -1226,7 +1389,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     overrides = dict(parse_source_repo(spec) for spec in args.source_repo or [])
 
     if verifying:
-        status = 0
+        # Seeded with --check-format's verdict, printed above: the exit code is
+        # the worst of whichever flags ran, which is what already made --check
+        # and --check-current safe to pass together.
+        status = format_status
         # Faithfulness first, currency second: "is the lock an honest
         # description of the commit it pins", then "is that commit still the
         # bundle". A lock can pass either one and fail the other.

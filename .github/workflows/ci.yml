@@ -13,6 +13,34 @@ on:
   # platform's cron on the hour and delays it.
   schedule:
     - cron: '17 6 * * *'
+  # The schedule above is the only trigger for `skills-conformance`, and until
+  # this line there was no way to fire it by hand: every fix to a job nobody
+  # can start waits for the next cron before anyone learns whether it worked,
+  # which is a 24-hour edit-test loop on the one job whose verdict can change
+  # with no commit in this repo at all. A manual run still does NOT file the
+  # tracking issue — that step is gated on `event_name == 'schedule'` — so
+  # dispatching is a probe, not a way to open issues.
+  #
+  # SAFE ONLY BECAUSE THIS WORKFLOW HAS NO `concurrency:` BLOCK, and that is a
+  # standing constraint rather than an observation. `pytest-windows` is a
+  # REQUIRED status check on this repo's default branch (declared in
+  # repo-settings' fleet.yml — the only one in that fleet), and a dispatch can
+  # re-fire on a head sha a PR is already using, producing a second run for the
+  # same context + sha. That is only harmless while nothing can CANCEL one of
+  # them: GitHub picks non-deterministically between a cancelled run and a
+  # successful one for the same context + sha, and when cancelled wins the
+  # merge API returns `405 Required status check "pytest-windows" is
+  # cancelled`, which nothing overrides — not auto-merge, not an explicit merge
+  # call — and every open PR wedges with no failing check to point at. With no
+  # concurrency group there is no cancellation to lose to.
+  #
+  # So: never add a `concurrency:` block to this workflow, at either level,
+  # while it publishes a required context. `cancel-in-progress: false` is not
+  # the escape hatch it looks like — GitHub still keeps only the in-progress
+  # run plus the latest pending one per group and cancels the other pending
+  # duplicates. scripts/test_ci_workflow.py parses this file and fails if one
+  # appears.
+  workflow_dispatch:
 
 permissions:
   contents: read
