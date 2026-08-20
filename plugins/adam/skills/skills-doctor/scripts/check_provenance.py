@@ -796,7 +796,8 @@ def store_findings(store_state: str, skills_dir: Path) -> List[Finding]:
 
 
 def hook_findings(project_dir: Path, here: bool, user: bool,
-                  children: List[Path], any_lock: bool) -> List[Finding]:
+                  children: List[Path], any_lock: bool,
+                  surface: str = DURABLE) -> Tuple[List[Finding], List[Finding]]:
     """The lock is right, the hook is right, and nothing will ever run it.
 
     #84's signature exactly, and the reason it took an investigation to find:
@@ -811,24 +812,46 @@ def hook_findings(project_dir: Path, here: bool, user: bool,
     Requires a lock as well as the wiring, because the finding is about delivery
     failing: a child repo with a hook and no lock has nothing to deliver, and
     saying its hook never fires would be true and pointless.
+
+    Returns (findings, notes), because the same wiring costs different things on
+    the two surfaces. On an ephemeral one the hook is the only channel there is,
+    so nothing consulting it means nothing is delivered. On a durable one the
+    hook makes ITSELF a no-op — `skills: skipped — durable session` — and the
+    marketplace install is authoritative, so a hook that never fires costs
+    nothing at all. Reporting it as a defect there would be this change's own
+    thesis inverted: a finding that is harmless on the ordinary case is one the
+    reader learns to scroll past. It stays a NOTE, because it is still the
+    answer to "why was there no `skills:` verdict?".
     """
     if here or user or not children or not any_lock:
-        return []
+        return [], []
     listed = ", ".join(str(path) for path in children[:5])
     if len(children) > 5:
         listed += f", and {len(children) - 5} more"
+    where = (f"{len(children)} settings file(s) below this directory wire a "
+             f"SessionStart hook and nothing here or at the user scope does: "
+             f"{listed}. Hooks resolve from the settings chain at cwd and at "
+             f"$HOME, never from an --add-dir grant — so with the session's "
+             f"project dir set to the parent of these repos, none of those "
+             f"hooks is consulted, whatever each lock declares. Nothing reports "
+             f"it either: there is no `skills:` verdict, because the script "
+             f"that prints one never runs.")
+    if surface != EPHEMERAL:
+        return [], [Finding(
+            "hook-not-wired", str(project_dir),
+            f"{where} Not a defect on this surface: the hook makes itself a "
+            f"no-op on a durable machine, where the marketplace install is "
+            f"authoritative — so nothing was lost by its not being consulted. "
+            f"Recorded because it is the answer to why no `skills:` verdict "
+            f"appeared, and because the same wiring IS a delivery failure on an "
+            f"ephemeral surface. See docs/decisions/0005.")]
     return [Finding(
         "hook-not-wired", str(project_dir),
-        f"{len(children)} settings file(s) below this directory wire a "
-        f"SessionStart hook and nothing here or at the user scope does: "
-        f"{listed}. Hooks resolve from the settings chain at cwd and at $HOME, "
-        f"never from an --add-dir grant — so with the session's project dir set "
-        f"to the parent of these repos, none of those hooks is consulted and no "
-        f"bundle is installed, whatever each lock declares. Nothing reports it: "
-        f"there is no `skills:` verdict, because the script that prints one "
-        f"never runs. Fix it at a level the chain reads — a settings file at "
-        f"this directory, or at the user scope — not inside the repos, which "
-        f"are already correct.")]
+        f"{where} So no bundle is installed here at all, and the hook is the "
+        f"only channel that would install one on this surface. Fix it at a "
+        f"level the chain reads — a settings file at this directory, or at the "
+        f"user scope — not inside the repos, which are already correct. See "
+        f"docs/decisions/0005.")], []
 
 
 def lock_findings(lock: Lock, lock_path: Path) -> List[Finding]:
@@ -1162,13 +1185,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             [note._replace(lock=str(lock_path)) for note in notes]))
 
     here, user, children = hook_wiring(project_dir)
+    hook_raised, hook_noted = hook_findings(
+        project_dir, here, user, children,
+        any(result.lock.state == PRESENT for result in results), surface[0])
     findings = dedupe(
-        hook_findings(project_dir, here, user, children,
-                      any(result.lock.state == PRESENT for result in results))
+        hook_raised
         + store_findings(store_state, skills_dir)
         + record_findings(record, record_path)
         + [finding for result in results for finding in result.findings])
-    notes = dedupe([note for result in results for note in result.notes])
+    notes = dedupe(hook_noted
+                   + [note for result in results for note in result.notes])
 
     stamped: List[Tuple[str, float]] = []
     if record.state != PRESENT:

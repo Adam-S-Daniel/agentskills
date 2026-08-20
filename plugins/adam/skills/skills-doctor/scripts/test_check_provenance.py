@@ -1647,6 +1647,41 @@ def test_a_hook_wired_only_in_a_child_of_the_project_dir_is_a_finding(
     assert "2 settings file(s) below this directory" in flat(out), out
     assert "never from an --add-dir grant" in flat(out), out
     assert str(project / "alpha-repo" / ".claude" / "settings.json") in out, out
+    # A finding, not a note, and it must say what was lost.
+    assert "no bundle is installed here at all" in flat(out), out
+    assert out.index("FINDINGS") < out.index("[hook-not-wired]"), out
+
+
+def test_the_same_wiring_is_only_a_note_on_a_durable_machine(tmp_path, capsys,
+                                                             monkeypatch):
+    """The hook makes ITSELF a no-op there, so nothing was lost by not firing.
+
+    Caught by a negative control rather than by design: forcing the live repro
+    to a durable surface still produced `[hook-not-wired]` as a finding, on a
+    machine where the marketplace install is authoritative and a hook that never
+    runs costs nothing. That is this change's own thesis inverted — a finding
+    that is harmless on the ordinary case is one the reader learns to scroll
+    past — so the same evidence takes the same surface gate as the promotion.
+
+    Still reported, because it is the answer to "why was there no `skills:`
+    verdict?", which is a real question on any surface.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 0, out
+    assert "FINDINGS (0)" in flat(out), out
+    assert "[hook-not-wired]" in out, out
+    assert "Not a defect on this surface" in flat(out), out
+    assert out.index("NOTES") < out.index("[hook-not-wired]"), out
 
 
 @pytest.mark.parametrize("where", ["project", "user"])
