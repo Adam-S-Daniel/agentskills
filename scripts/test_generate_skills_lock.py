@@ -1330,6 +1330,254 @@ def test_check_format_fails_a_mixed_lock_and_names_only_the_bare_ones(registry, 
     assert "adam/beta" not in proc.stdout
 
 
+def _suggested_command(stdout: str) -> str:
+    """The one line of a --check-format failure a reader is meant to RUN.
+
+    Pulled out by its `--repin` rather than by line number: the surrounding
+    prose is what changes, and a helper anchored on prose would keep passing
+    against a report whose command line had gone missing entirely.
+    """
+    lines = [line.strip() for line in stdout.splitlines()
+             if "generate_skills_lock.py --repin" in line]
+    assert len(lines) == 1, stdout
+    return lines[0]
+
+
+def test_check_format_suggests_a_repin_pinned_to_the_locks_own_ref(registry, tmp_path):
+    """The remediation must DO what the sentence one line above it promises.
+
+    `--repin` deliberately does not inherit `ref`, so a suggested command
+    without one falls through to `resolve_ref(repo, "HEAD")` and rebuilds every
+    digest from whatever commit the clone is sitting on — advancing the pin and
+    re-attesting the lock over a different tree, under a sentence promising the
+    digests are recomputed "from the pinned ref". Measured on a copy of
+    repo-settings' real lock before the fix: the pin moved off 94cdcc81 onto
+    the clone's HEAD.
+
+    Both legs matter. The first asserts the printed command, so a reader who
+    runs it verbatim gets a pin-preserving RELABEL. The second runs the same
+    command MINUS `--ref` and asserts it does not — without that control this
+    would pass just as well against a fixture where the two answers coincide,
+    which is exactly why the defect survived review: today, against a bundle
+    that has not moved, they DO coincide.
+    """
+    root, pinned = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    before = json.loads(out.read_text(encoding="utf-8"))["skills"]
+    _unlabel(out)
+
+    # The bundle moves after the lock was pinned — the state the whole hazard
+    # needs, and the one a stranded consumer lock is actually in.
+    _write(root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha" / "notes.md",
+           "a different note\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "move the bundle")
+    assert _head(root) != pinned
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"--ref {pinned}" in _suggested_command(proc.stdout), proc.stdout
+
+    faithful = tmp_path / "faithful.lock"
+    faithful.write_text(out.read_text(encoding="utf-8"), encoding="utf-8", newline="")
+    assert run_generator("--repin", "--ref", pinned, "--repo", str(root),
+                         "-o", str(faithful)).returncode == 0
+    healed = json.loads(faithful.read_text(encoding="utf-8"))
+    assert healed["ref"] == pinned, "a SHAPE repair must not advance the pin"
+    assert healed["skills"] == before, "a SHAPE repair must relabel, not recompute"
+
+    # The control: the command as it used to be printed. Same lock, same clone,
+    # no --ref — and it does neither of the two things asserted above.
+    drifting = tmp_path / "drifting.lock"
+    drifting.write_text(out.read_text(encoding="utf-8"), encoding="utf-8", newline="")
+    assert run_generator("--repin", "--repo", str(root),
+                         "-o", str(drifting)).returncode == 0
+    drifted = json.loads(drifting.read_text(encoding="utf-8"))
+    assert drifted["ref"] != pinned
+    assert drifted["skills"] != before
+
+
+def test_check_format_will_not_echo_a_hand_edited_ref_into_the_command(registry,
+                                                                      tmp_path):
+    """That line is copy-pasteable, and the fleet bumper slices it into a PR body.
+
+    The document arrives as found on disk, so `ref` is arbitrary text until
+    something checks it. A shell metacharacter reaching a reader's terminal
+    through a report ABOUT a malformed lock would be the report becoming the
+    vulnerability. `_REF_RE` is the guard; the placeholder is the fallback, and
+    the run still names the real problem.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+    hostile = "$(touch /tmp/pwned); rm -rf ~"
+    _edit_lock(out, ref=hostile)
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert hostile not in proc.stdout + proc.stderr
+    command = _suggested_command(proc.stdout)
+    assert "--ref <the commit this lock pins>" in command, command
+    assert "lowercase hex" in proc.stdout    # still the verdict it came to give
+
+
+# Both case lists below are NAMED and length-asserted rather than written
+# inline. An empty parametrize list does not fail, it SKIPS — measured: pytest
+# reports "got empty parameter set" and exits 0 — so a list that lost its cases
+# would quietly stop guarding anything while the suite stayed green and only
+# the total count moved. A module-level assert is a collection ERROR instead,
+# the same self-proving discipline `_unlabel` uses on the fixture it edits.
+# "-o" is the case a charset guard alone lets through: it is legal in
+# `_REF_RE`, so before the dash check it was echoed straight into the command
+# as `--ref -o --repo ...`, where the ref stops being a value and becomes an
+# OPTION. That fails loudly (argparse exit 2) rather than silently, but a
+# remediation line that cannot run is still a remediation line that does not
+# do what the sentence above it promises.
+_UNUSABLE_REFS = [None, 7, "", "  ", "a" * 40 + " --repo /elsewhere", "-o"]
+assert len(_UNUSABLE_REFS) == 6
+
+
+@pytest.mark.parametrize("ref_value", _UNUSABLE_REFS)
+def test_check_format_falls_back_to_a_placeholder_ref_rather_than_omitting_it(
+        registry, tmp_path, ref_value):
+    """A lock with no usable `ref` is the state a bad merge resolution leaves.
+
+    Omitting the flag would silently restore the defect this pair exists to
+    close, so the fallback is a PLACEHOLDER the reader must fill in, plus a
+    line saying why. `--repin` refuses such a lock anyway, and saying so here
+    is cheaper than discovering it one failed command later.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+    _edit_lock(out, **({"ref": _DROP} if ref_value is None else {"ref": ref_value}))
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "--ref <the commit this lock pins>" in _suggested_command(proc.stdout)
+    assert "no usable 'ref'" in proc.stdout
+
+
+# --------------------------------------------------------------------------
+# the FAILED: / ERROR: prefix contract
+#
+# A caller keys a WRITE off the prefix. _agent-guidance's
+# bump-consumer-locks.sh greps `^FAILED:` in this flag's output to set
+# `repin_reason=format` and re-pin a consumer's lock, and routes everything
+# else to a branch that reports and counts WITHOUT rewriting anything — under a
+# comment reading "Only the flag's own FAILED: means 'these digests are
+# malformed'". These pin that sentence true from this side, since the caller
+# lives in another repo and cannot be tested from here. The exit code carries
+# none of this: every condition below exits 1.
+# --------------------------------------------------------------------------
+
+def test_only_malformed_digests_are_reported_as_failed(registry, tmp_path):
+    """The one verdict for which a re-pin is the right repair."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("FAILED:"), proc.stdout
+
+
+_NOTHING_TO_CHECK = [
+    ({}, "lists no skills at all"),           # nothing there
+    ("not a map", "no usable 'skills' map"),  # nothing to read
+    (["adam/alpha"], "no usable 'skills' map"),
+    (7, "no usable 'skills' map"),
+    (None, "no usable 'skills' map"),
+]
+assert len(_NOTHING_TO_CHECK) == 5
+
+
+@pytest.mark.parametrize("skills_value, expected", _NOTHING_TO_CHECK)
+def test_nothing_to_check_is_an_error_not_a_failed(registry, tmp_path,
+                                                   skills_value, expected):
+    """"There is nothing here whose shape could be wrong" is not "these digests
+    are malformed", and a re-pin is the wrong repair for it — most sharply for
+    an empty map, which a re-pin reproduces exactly, so keying the repair off
+    it produced a nightly loop with no automated exit (see
+    `report_digest_format`). Still exit 1: this is about which ANSWER the run
+    gives, not about letting it pass."""
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _edit_lock(out, skills=skills_value)
+
+    proc = run_generator("--check-format", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("ERROR:"), proc.stdout
+    assert "FAILED:" not in proc.stdout, proc.stdout
+    assert expected in proc.stdout
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_lock_the_generator_cannot_read_at_all_never_says_failed(tmp_path):
+    """The conditions the caller's comment ALREADY claimed were ERROR:, asserted
+    rather than assumed — a missing file, a directory at -o, a top-level array
+    and invalid JSON. Each is "the question could not be answered", and none of
+    them is a licence to rewrite a consumer's lock."""
+    missing = tmp_path / "absent.lock"
+    directory = tmp_path / "a-directory.lock"
+    directory.mkdir()
+    array = tmp_path / "array.lock"
+    array.write_text("[]\n", encoding="utf-8")
+    garbage = tmp_path / "garbage.lock"
+    garbage.write_text("{not json\n", encoding="utf-8")
+
+    unreadable = (missing, directory, array, garbage)
+    for lock in unreadable:
+        proc = run_generator("--check-format", "-o", str(lock))
+        assert proc.returncode != 0, (lock, proc.stdout, proc.stderr)
+        combined = proc.stdout + proc.stderr
+        assert "FAILED:" not in combined, (lock, combined)
+        assert "ERROR:" in combined, (lock, combined)
+        assert "Traceback" not in proc.stderr, (lock, proc.stderr)
+    # A loop is only a guard while it has something to iterate. Stated, because
+    # emptying the tuple above is the one edit that turns this whole test green
+    # against a generator that says FAILED: to every one of them.
+    assert len(unreadable) == 4
+
+
+def test_check_format_ignores_repo_entirely(registry, tmp_path):
+    """`--repo` is accepted here and never read — the promise the help text makes.
+
+    Left legal rather than refused because the flag COMPOSES with --check,
+    which does read it; an argparse error in one composition and a requirement
+    in the other is a mode-dependence not worth a nit. Accepted-and-ignored is
+    only a promise if something holds it, so: the verdict must be BYTE-
+    IDENTICAL with no --repo, with a nonexistent one, and with a real clone of
+    a DIFFERENT registry whose skills digest differently. The last leg is the
+    one that matters — a flag that quietly consulted the clone would still
+    agree with itself across the first two.
+    """
+    root, _ = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "-o", str(out)).returncode == 0
+    _unlabel(out)
+
+    other = tmp_path / "other-registry"
+    make_registry(other, {"adam/alpha": SKILL_B, "adam/beta": SKILL_A})
+    absent = tmp_path / "no-such-clone"
+    assert not absent.exists()
+
+    baseline = run_generator("--check-format", "-o", str(out))
+    assert baseline.returncode == 1, baseline.stdout + baseline.stderr
+    clones = (str(absent), str(other), str(REPO_ROOT))
+    for repo_arg in clones:
+        other_run = run_generator("--check-format", "--repo", repo_arg, "-o", str(out))
+        assert other_run.returncode == baseline.returncode, repo_arg
+        assert other_run.stdout == baseline.stdout, repo_arg
+    # Same reason as above: an empty tuple here agrees with everything.
+    assert len(clones) == 3
+
+
 def test_check_format_fails_on_an_empty_skills_map(tmp_path):
     """"No work" and "no errors" must not be the same answer.
 
@@ -1349,6 +1597,10 @@ def test_check_format_fails_on_an_empty_skills_map(tmp_path):
     proc = run_generator("--check-format", "-o", str(out))
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "no skills" in proc.stdout
+    # ERROR:, not FAILED: — the caller re-pins off FAILED:, and a re-pin over a
+    # registry with no skills writes this same empty map straight back. See
+    # test_nothing_to_check_is_an_error_not_a_failed.
+    assert proc.stdout.startswith("ERROR:"), proc.stdout
 
 
 @pytest.mark.parametrize("digest", [
@@ -1423,6 +1675,7 @@ def test_check_format_reports_a_skills_map_that_is_not_a_map(registry, tmp_path,
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "Traceback" not in proc.stderr
     assert "'skills'" in proc.stdout
+    assert proc.stdout.startswith("ERROR:"), proc.stdout    # nothing to read != malformed
 
 
 def test_check_format_never_echoes_the_offending_digest(registry, tmp_path):
