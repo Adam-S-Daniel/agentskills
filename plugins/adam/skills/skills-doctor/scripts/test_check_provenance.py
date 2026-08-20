@@ -112,6 +112,38 @@ def write_lock(path: Path, store: Path, *names: str, registry: str = REGISTRY_SL
     return path
 
 
+@pytest.fixture(autouse=True)
+def durable_surface(monkeypatch):
+    """Pin every test to a DURABLE surface unless it deliberately says otherwise.
+
+    Third instance of this file's standing rule, and it arrived the same way the
+    first two did. `main` reads the surface out of the REAL environment, and this
+    suite runs on both kinds of machine — including the cloud sessions where
+    `CLAUDE_CODE_REMOTE_SESSION_ID` is set. Measured before this fixture existed:
+    `test_locked_skills_absent_from_a_store_the_hook_never_ran_on_are_notes`
+    passed on a laptop and failed in a cloud session, on identical bytes, because
+    the promotion below is CORRECT there. A test that flips with where pytest was
+    invoked is the same defect as one that reads the developer's real
+    `~/.claude/skills`, so the environment is supplied here rather than inherited.
+
+    Durable is the default because it is the quiet reading: a test that wants a
+    finding has to ask for the surface that raises it.
+    """
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE_SESSION_ID", raising=False)
+
+
+@pytest.fixture
+def ephemeral(monkeypatch):
+    """A cloud session / CI runner / container: a remote session id is issued.
+
+    Sets the entrypoint too, because a real ephemeral surface has one — but
+    nothing under test reads its VALUE, deliberately (see `read_surface`).
+    """
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "remote_mobile")
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE_SESSION_ID", "cse_deadbeef")
+
+
 @pytest.fixture
 def store(tmp_path):
     """A store holding two hook-installed skills, recorded and locked."""
@@ -617,6 +649,143 @@ def test_locked_skills_absent_from_a_store_the_hook_never_ran_on_are_notes(
     # The headline count still says what is absent — it must not follow the
     # finding-versus-note judgement.
     assert "2 not in the store" in flat(out), out
+    assert "surface durable" in flat(out), out
+
+
+def test_locked_skills_absent_on_an_ephemeral_surface_are_findings(
+        tmp_path, capsys, ephemeral):
+    """The same three facts, the opposite verdict — #85 §1's promotion.
+
+    Sibling of the test above, and the pair is the point: identical bytes on
+    disk, identical lock, identical (absent) record, and the only difference is
+    the machine. On a durable one the marketplace is authoritative and an empty
+    personal store is right. On an ephemeral one the hook is the ONLY channel
+    that delivers a locked bundle, so the same empty store is the delivery
+    failure itself.
+
+    This is the defect the issue reports verbatim: measured in a cloud session
+    with nine locked skills undelivered, the doctor filed all nine as NOTES and
+    exited 0 — answering "yes, healthy" in precisely the session where the
+    answer was no.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    lock = write_lock(tmp_path / "skills.lock", store)
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    data["skills"] = {"adam/alpha": "a" * 64, "adam/beta": "b" * 64}
+    lock.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "FINDINGS (2)" in flat(out), out
+    assert "[not-in-the-store] alpha" in flat(out), out
+    assert "[not-in-the-store] beta" in flat(out), out
+    # Matched on a sentence only the PROMOTED FINDING carries. "delivery
+    # failure" alone would pass on the SURFACE block's own prose, which prints
+    # on every ephemeral run whether or not anything was promoted — an
+    # assertion that cannot fail is not one.
+    assert "no hook run has ever finished here" in flat(out), out
+    assert "surface ephemeral" in flat(out), out
+    # NOTES must not carry them as well — one defect, reported once.
+    assert "NOTES" not in out, out
+    # And the headline count is unchanged by the promotion.
+    assert "2 not in the store" in flat(out), out
+
+
+def test_the_promotion_needs_all_three_of_its_preconditions(tmp_path, capsys,
+                                                            ephemeral):
+    """Ephemeral AND record-absent AND a lock — drop any one and it stays quiet.
+
+    Written against the promotion rather than around it. The interesting half is
+    the record: an UNREADABLE record is not an absent one, and it already raises
+    `record-unreadable` as a finding that names this same delivery gap once.
+    Promoting there too would report one defect once per locked name, which is
+    how a findings list stops being read.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    lock = write_lock(tmp_path / "skills.lock", store)
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    data["skills"] = {"adam/alpha": "a" * 64}
+    lock.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    # All three hold: promoted.
+    code, out = run(store, lock, capsys)
+    assert code == 1 and "FINDINGS (1)" in flat(out), out
+
+    # Record present but empty — a run COMPLETED and installed nothing, so the
+    # locked name gets the `missing` finding that state already had, not this one.
+    (store / prov.RECORD_NAME).write_text(
+        json.dumps({"version": 1, "installed": []}), encoding="utf-8")
+    _, present = run(store, lock, capsys)
+    assert "[missing] alpha" in flat(present), present
+    assert "no hook run has ever finished here" not in flat(present), present
+
+    # Record unreadable — one finding for the record, and the locked name stays
+    # a note rather than restating the same gap.
+    (store / prov.RECORD_NAME).write_text("{ not json", encoding="utf-8")
+    _, unreadable = run(store, lock, capsys)
+    assert "[record-unreadable]" in unreadable, unreadable
+    assert "[not-in-the-store] alpha" in flat(unreadable), unreadable
+    assert "no hook run has ever finished here" not in flat(unreadable), unreadable
+
+    # No lock at all — nothing was declared, so nothing fell short of it.
+    (store / prov.RECORD_NAME).unlink()
+    code, no_lock = run(store, tmp_path / "absent.lock", capsys)
+    assert code == 0, no_lock
+    assert "FINDINGS (0)" in flat(no_lock), no_lock
+
+
+def test_an_unsure_surface_is_named_rather_than_rounded(tmp_path, capsys,
+                                                        monkeypatch):
+    """An entrypoint with no remote session id is a third state, not a shade.
+
+    Judged as durable, because the conservative direction is to keep a note a
+    note. Reported as `unsure`, because telling the reader "durable machine" on
+    a reading nobody has classified is the same fabrication this script exists
+    to stop making about the record.
+    """
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "remote_cowork")
+    store = tmp_path / "skills"
+    store.mkdir()
+    lock = write_lock(tmp_path / "skills.lock", store)
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    data["skills"] = {"adam/alpha": "a" * 64}
+    lock.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "surface unsure" in flat(out), out
+    assert "[not-in-the-store] alpha" in flat(out), out
+    assert "FINDINGS (0)" in flat(out), out
+
+
+def test_the_surface_is_read_from_the_session_id_not_the_entrypoints_shape(
+        monkeypatch):
+    """`remote_cowork` may or may not be ephemeral, and this must not guess.
+
+    A prefix match on `remote` is the fix that looks right: every ephemeral
+    entrypoint measured so far starts with it. It is held deliberately (#85 §5)
+    — the binary's own display classifier groups `remote_cowork` with
+    `local-agent`, so "no durable entrypoint starts with remote" is unproven,
+    and a doctor that assumed it would call a durable Cowork machine ephemeral
+    and report its correctly-empty store as a delivery failure.
+
+    Locked as a unit test on the reader rather than through a report, so the
+    rule cannot be re-derived by someone reading only the rendered output.
+    """
+    assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": "remote_cowork"})[0] \
+        == prov.UNSURE
+    assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": "remote_mobile",
+                              "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_x"})[0] \
+        == prov.EPHEMERAL
+    # A durable CLI session sets an entrypoint and no session id, so the two
+    # empties are the only durable reading this can assert.
+    assert prov.read_surface({})[0] == prov.DURABLE
+    # An empty string is not a session id. `os.environ` hands back exactly that
+    # for `FOO=` and truthiness is what separates them.
+    assert prov.read_surface({"CLAUDE_CODE_REMOTE_SESSION_ID": ""})[0] \
+        == prov.DURABLE
 
 
 def test_a_locked_skill_the_account_store_delivers_is_not_called_missing(
@@ -1267,3 +1436,404 @@ def test_an_environmental_open_failure_does_not_invent_a_corrupt_record(
     present.write_text("{}", encoding="utf-8")
     monkeypatch.setattr("builtins.open", exhausted)
     assert prov.read_record(present).state == prov.UNREADABLE
+
+
+# ---------------------------------------------------------------------------
+# lock auto-discovery — the multi-repo session the default could not see
+# ---------------------------------------------------------------------------
+
+def run_autolock(skills_dir: Path, project_dir: Path, capsys) -> Tuple[int, str]:
+    """`run`, but with `--lock` OMITTED so discovery is what resolves it.
+
+    Still explicit about the other two paths, for the reason the module
+    docstring gives. `--lock` is the one under test here, and it is exactly the
+    argument whose default used to resolve to nothing and report that as health.
+    """
+    assert tempfile.gettempdir() in str(project_dir) or "pytest" in str(project_dir), (
+        f"project dir {project_dir} is outside the test's own tmp tree")
+    code = prov.main(["--skills-dir", str(skills_dir),
+                      "--project-dir", str(project_dir)])
+    return code, capsys.readouterr().out
+
+
+def _repo_with_lock(parent: Path, name: str, *skills: str, hook: bool = False) -> Path:
+    """A child repo carrying a `skills.lock`, and optionally a wired hook."""
+    repo = parent / name
+    repo.mkdir(parents=True, exist_ok=True)
+    lock = write_lock(repo / prov.LOCK_NAME, repo)
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    data["skills"] = {f"adam/{skill}": "a" * 64 for skill in skills}
+    lock.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    if hook:
+        claude = repo / ".claude"
+        claude.mkdir(exist_ok=True)
+        (claude / "settings.json").write_text(json.dumps({
+            "hooks": {"SessionStart": [{
+                "matcher": "startup|resume",
+                "hooks": [{"type": "command",
+                           "command": 'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/'
+                                      'skills-bootstrap.sh"',
+                           "timeout": 90}],
+            }]},
+        }, indent=2) + "\n", encoding="utf-8")
+    return repo
+
+
+def test_the_default_lock_finds_the_repos_one_level_down(tmp_path, capsys,
+                                                         ephemeral):
+    """#85 §1's ordinary repro: `cd <parent> && check_provenance.py`.
+
+    Measured verbatim before this landed, in a cloud session with seven repos
+    under the project dir, three of them carrying a lock AND a bootstrap hook,
+    none of their skills installed and no install record:
+
+        LOCK     — absent
+        FINDINGS (0)
+        EXIT=0
+
+    The bare default `skills.lock` resolved to nothing at the parent, and the
+    absence of a lock was reported as though it were the absence of a problem.
+    A diagnostic that answers "healthy" in exactly the session where the answer
+    is no is worse than no diagnostic, because it ends the investigation.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha")
+    _repo_with_lock(project, "beta-repo", "beta")
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 1, out
+    assert "2 locks were discovered" in flat(out), out
+    assert str(project / "alpha-repo" / prov.LOCK_NAME) in out, out
+    assert str(project / "beta-repo" / prov.LOCK_NAME) in out, out
+    # Both undelivered skills are findings, each attributed to its own lock —
+    # the report names no winner among the locks.
+    assert "[not-in-the-store] alpha" in flat(out), out
+    assert "[not-in-the-store] beta" in flat(out), out
+    assert f"declared by {project / 'alpha-repo' / prov.LOCK_NAME}" in flat(out), out
+    assert "2 not in the store" in flat(out), out
+
+
+def test_a_project_dirs_own_lock_wins_over_scanning_its_children(tmp_path,
+                                                                 capsys):
+    """One repo is the ordinary case and must not become a scan.
+
+    A repo that has its own lock has said what it expects; sweeping its
+    subdirectories as well would judge its store against locks belonging to
+    vendored checkouts it merely contains.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repo"
+    project.mkdir()
+    write_lock(project / prov.LOCK_NAME, store)
+    _repo_with_lock(project, "vendored", "should-not-be-read")
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 0, out
+    assert "locks were discovered" not in flat(out), out
+    assert "should-not-be-read" not in out, out
+    assert str(project / prov.LOCK_NAME) in out, out
+
+
+def test_an_explicit_lock_is_never_widened_into_a_scan(tmp_path, capsys):
+    """Naming a file is a statement about which expectation is meant."""
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    named = _repo_with_lock(project, "named", "alpha")
+    _repo_with_lock(project, "other", "beta")
+
+    code, out = run(store, named / prov.LOCK_NAME, capsys, project_dir=project)
+    assert "beta" not in out, out
+    assert "locks were discovered" not in flat(out), out
+    assert code == 0, out  # durable surface: the absent skill is a note
+
+
+def test_discovery_finding_nothing_still_reports_an_absent_lock(tmp_path, capsys):
+    """A machine with no lock is one this cannot verdict on, not a broken one.
+
+    The whole fix is about not exiting 0 over a lock that resolved to nothing —
+    which makes it tempting to call "no lock anywhere" a finding too. It is not:
+    an absent lock is an absent EXPECTATION, and manufacturing a defect out of
+    one would re-break the durable machines this is quiet on today.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "empty"
+    project.mkdir()
+    (project / "not-a-repo").mkdir()
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 0, out
+    assert "FINDINGS (0)" in flat(out), out
+    assert f"LOCK {project / prov.LOCK_NAME}" in flat(out), out
+    assert "absent — nothing can be called stale or missing" in flat(out), out
+
+
+def test_discovery_looks_one_level_down_and_no_further(tmp_path, capsys):
+    """A lock four levels down belongs to no session that was started here."""
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    (project / "outer" / "inner").mkdir(parents=True)
+    _repo_with_lock(project / "outer", "inner", "too-deep")
+
+    assert prov.discover_locks(None, project) == [project / prov.LOCK_NAME]
+    _, out = run_autolock(store, project, capsys)
+    assert "too-deep" not in out, out
+
+
+def test_one_unreadable_store_is_reported_once_not_once_per_lock(
+        tmp_path, monkeypatch, capsys):
+    """Store-wide facts are store-wide, however many locks judge that store.
+
+    Raised inside the per-lock pass, one unreadable directory would be reported
+    as N defects — the headline count inflating with the number of repos in the
+    session rather than with what is wrong.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha")
+    _repo_with_lock(project, "beta-repo", "beta")
+
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(Path, "iterdir", lambda self: (
+        (_ for _ in ()).throw(PermissionError("simulated"))
+        if self == store else real_iterdir(self)))
+
+    _, out = run_autolock(store, project, capsys)
+    assert out.count("[store-unreadable]") == 1, out
+
+
+# ---------------------------------------------------------------------------
+# hook-not-wired — #84's signature
+# ---------------------------------------------------------------------------
+
+def test_a_hook_wired_only_in_a_child_of_the_project_dir_is_a_finding(
+        tmp_path, capsys, ephemeral, monkeypatch):
+    """#84 exactly: every file present and correct, and nothing ever runs it.
+
+    Claude Code resolves hooks from the settings chain at `cwd` and at `$HOME`.
+    `--add-dir` contributes skills, commands, agents and CLAUDE.md — never hooks
+    and never settings. So a session opened on the PARENT of several repos
+    consults none of their `.claude/settings.json` files, and every SessionStart
+    hook they declare is inert, whatever its command string says.
+
+    Invisible from inside any one repo, which is why it earns a finding rather
+    than a comment: the lock is right, the hook script is right, the settings
+    file is right, and no `skills:` verdict is ever printed to say otherwise —
+    because the script that prints one never runs.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+    _repo_with_lock(project, "beta-repo", "beta", hook=True)
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 1, out
+    assert "[hook-not-wired]" in out, out
+    assert "2 settings file(s) below this directory" in flat(out), out
+    assert "never from an --add-dir grant" in flat(out), out
+    assert str(project / "alpha-repo" / ".claude" / "settings.json") in out, out
+
+
+@pytest.mark.parametrize("where", ["project", "user"])
+def test_a_hook_the_chain_actually_reads_is_not_a_finding(tmp_path, capsys,
+                                                          ephemeral, monkeypatch,
+                                                          where):
+    """Wired at either level the chain consults, and the finding must not fire.
+
+    Both halves matter. The project level is the single-repo session this must
+    stay quiet on; the user level is the candidate fix for #84, and a doctor
+    that kept reporting the defect after it was fixed would be the same false
+    verdict pointing the other way.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+
+    wired = _repo_with_lock(tmp_path / "staging", "wired", hook=True)
+    settings = (wired / ".claude" / "settings.json").read_text(encoding="utf-8")
+    if where == "project":
+        (project / ".claude").mkdir()
+        (project / ".claude" / "settings.json").write_text(settings, encoding="utf-8")
+    else:
+        (home / ".claude" / "settings.json").write_text(settings, encoding="utf-8")
+
+    _, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" not in out, out
+
+
+def test_the_user_scope_settings_filename_is_surface_dependent(tmp_path, capsys,
+                                                               ephemeral,
+                                                               monkeypatch):
+    """`cowork_settings.json` is the user-scope file on a Cowork surface.
+
+    The binary selects it under `coworkPlugins` / `CLAUDE_CODE_USE_COWORK_PLUGINS`,
+    so anything hardcoding `settings.json` reads a file that is not there and
+    concludes "no user-scope hook" about a machine that has one — reporting
+    #84's defect at a machine where it has already been fixed. Both names are
+    checked, and this is the half that a `settings.json`-only reader fails.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "alpha-repo", "alpha", hook=True)
+
+    wired = _repo_with_lock(tmp_path / "staging", "wired", hook=True)
+    (home / ".claude" / "cowork_settings.json").write_text(
+        (wired / ".claude" / "settings.json").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    assert not (home / ".claude" / "settings.json").exists()
+
+    _, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" not in out, out
+
+
+def test_a_child_hook_with_no_lock_anywhere_is_not_a_finding(tmp_path, capsys,
+                                                             ephemeral,
+                                                             monkeypatch):
+    """The finding is about delivery failing, and nothing was declared.
+
+    A repo wiring a hook but shipping no lock has nothing to deliver, so saying
+    its hook never fires would be true and useless — and it would fire on every
+    multi-repo session on the fleet, most of which have no lock at all.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    repo = project / "hook-only"
+    (repo / ".claude").mkdir(parents=True)
+    (repo / ".claude" / "settings.json").write_text(json.dumps({
+        "hooks": {"SessionStart": [{"matcher": "startup", "hooks": [
+            {"type": "command", "command": "true"}]}]},
+    }), encoding="utf-8")
+
+    code, out = run_autolock(store, project, capsys)
+    assert "[hook-not-wired]" not in out, out
+    assert code == 0, out
+
+
+@pytest.mark.parametrize("settings, wired", [
+    ({"hooks": {"SessionStart": [{"hooks": [{"command": "run.sh"}]}]}}, True),
+    ({"hooks": {"SessionStart": []}}, False),
+    ({"hooks": {"SessionStart": [{"hooks": []}]}}, False),
+    ({"hooks": {"SessionStart": [{"hooks": [{"command": "   "}]}]}}, False),
+    ({"hooks": {"SessionStart": [{"hooks": [{"type": "command"}]}]}}, False),
+    ({"hooks": {"PreToolUse": [{"hooks": [{"command": "run.sh"}]}]}}, False),
+    ({"hooks": {"SessionStart": "SessionStart"}}, False),
+    ({"hooks": []}, False),
+    ({"note": "SessionStart is wired in the other file"}, False),
+    ([], False),
+], ids=["wired", "no-matchers", "no-entries", "blank-command", "no-command",
+        "other-event", "not-a-list", "hooks-not-an-object", "only-mentioned",
+        "not-an-object"])
+def test_hook_wiring_is_decided_by_a_parser_not_a_line_scan(tmp_path, settings,
+                                                            wired):
+    """The question is structural, so the answer comes from the JSON parser.
+
+    `"SessionStart"` appears in a settings file that merely mentions it, that
+    declares it with no runnable entry, or that wires some other event — and a
+    grep cannot tell any of those from a hook that will actually fire. The
+    `only-mentioned` case is the one a line scan gets exactly backwards.
+    """
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    assert prov.wires_session_start(path) is wired
+
+
+def test_unreadable_or_absent_settings_are_not_wired(tmp_path):
+    """Neither is a hook, and neither may crash the doctor."""
+    assert prov.wires_session_start(tmp_path / "nope.json") is False
+    broken = tmp_path / "broken.json"
+    broken.write_text("{ not json", encoding="utf-8")
+    assert prov.wires_session_start(broken) is False
+    assert prov.wires_session_start(tmp_path) is False
+
+
+def test_a_path_in_a_finding_survives_wrapping_intact(tmp_path):
+    """The path is the actionable half; a chopped one cannot be copied or grepped.
+
+    textwrap breaks any word wider than the column by default, and every path
+    this reports is one word. Measured: a store under a long tmp prefix came out
+    split across two lines mid-directory, which reads as a typo and defeats the
+    one thing a reader does with a finding's path.
+    """
+    path = "/a-very/long/prefix/" + "x" * 90 + "/skills.lock"
+    wrapped = prov._para(f"the lock at {path} could not be read.", "      ")
+    assert any(path in line for line in wrapped), wrapped
+
+
+def test_one_defect_several_locks_declare_is_reported_once(tmp_path, capsys,
+                                                           ephemeral):
+    """Per-lock attribution must not become per-lock repetition.
+
+    The fleet's locks largely declare the same bundle, so in a multi-repo
+    session one undelivered skill is raised once per lock that names it.
+    Measured on the session that produced #85's repro: eleven locks turned
+    twenty-four distinct defects into ninety-five findings. A count that grows
+    with the number of repos open, rather than with anything wrong, is how a
+    findings list stops being read — which is the same failure this whole
+    change exists to fix, arrived at from the other side.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    for name in ("one", "two", "three", "four"):
+        _repo_with_lock(project, name, "shared")
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 1, out
+    assert out.count("[not-in-the-store] shared") == 1, out
+    assert "FINDINGS (1)" in flat(out), out
+    # Folded, not dropped: the finding still names who declared it, and the
+    # header stays one line however many locks that is.
+    assert f"declared by {project / 'four' / prov.LOCK_NAME}" in flat(out) or \
+        "and 1 more" in flat(out), out
+    assert "and 1 more" in flat(out), out
+
+
+def test_two_locks_disagreeing_about_one_skill_stay_two_findings(tmp_path,
+                                                                 capsys):
+    """Identity is (kind, subject, DETAIL) — a shared name is not a shared fact.
+
+    One lock naming a directory and another not naming it are two different
+    statements about it. Folding on (kind, subject) alone would silently drop
+    whichever the reader needed.
+    """
+    a = prov.Finding("untracked", "alpha", "detail A", "one.lock")
+    b = prov.Finding("untracked", "alpha", "detail B", "two.lock")
+    same = prov.Finding("untracked", "alpha", "detail A", "three.lock")
+
+    merged = prov.dedupe([a, b, same])
+    assert len(merged) == 2, merged
+    assert merged[0].lock == "one.lock, three.lock", merged[0]
+    assert merged[1].lock == "two.lock", merged[1]

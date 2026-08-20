@@ -31,6 +31,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import os
 import re
 import sys
 import textwrap
@@ -38,6 +39,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 RECORD_NAME = ".skills-bootstrap-installed.json"
+LOCK_NAME = "skills.lock"
 # The claude.ai account-sync channel's own directory. It is manifest-gated and is
 # nobody else's to attribute, so it is excluded from the scan rather than reported
 # as an unattributed skill.
@@ -64,6 +66,20 @@ REJECTED = "rejected"
 
 UNCHANGED, EDITED, UNMEASURABLE = "unchanged", "edited", "unmeasurable"
 HOOK, UNATTRIBUTED, UNKNOWN = "hook", "unattributed", "unknown"
+
+# Which kind of machine this is, which is what decides whether an empty personal
+# store is the correct state or a delivery failure. EPHEMERAL and DURABLE are the
+# two rows of the skill's own surface table; UNSURE is the third state that table
+# does not have, and it exists so that a reading nobody has measured is reported
+# as unmeasured rather than rounded to whichever row is convenient.
+EPHEMERAL, DURABLE, UNSURE = "ephemeral", "durable", "unsure"
+
+# The two files a user-scope settings chain can be called. The binary selects
+# `cowork_settings.json` under `coworkPlugins` / `CLAUDE_CODE_USE_COWORK_PLUGINS`,
+# so code that hardcodes `settings.json` reads the wrong file on a Cowork surface
+# and concludes "no user-scope hook" about a machine that has one. Both are
+# checked, in this order, and the first that exists answers.
+USER_SETTINGS_NAMES = ("settings.json", "cowork_settings.json")
 
 
 class Entry(NamedTuple):
@@ -99,6 +115,29 @@ class Finding(NamedTuple):
     kind: str
     subject: str
     detail: str
+    # Which lock produced it, once there is more than one to produce it. A
+    # multi-repo session judges the one store against several declared
+    # expectations, and "alpha is missing" is not a statement anyone can act on
+    # without knowing which repo declared alpha. None means store-wide — the
+    # record, the store itself, the hook wiring — and prints nothing extra.
+    lock: Optional[str] = None
+
+
+class LockResult(NamedTuple):
+    """One declared expectation, and everything judged against it.
+
+    The store is scanned once and judged once per lock, rather than the locks
+    being merged into one expectation first. Merging would be an answer to
+    "which lock wins in a multi-repo session", which is an open policy question
+    (see docs/decisions/0005) and not one a diagnostic gets to settle by being
+    convenient. Reporting per lock needs no winner: every sentence stays
+    attributable to the repo that declared it.
+    """
+    path: Path
+    lock: Lock
+    rows: List[Row]
+    findings: List[Finding]
+    notes: List[Finding]
 
 
 def digest_skill_dir(path: Path) -> Optional[str]:
@@ -152,6 +191,149 @@ def remote_url(registry: object) -> Optional[str]:
     if re.fullmatch(NAME.pattern + "/" + NAME.pattern, registry):
         return "https://github.com/%s.git" % registry
     return None
+
+
+def read_surface(env: Optional[Dict[str, str]] = None) -> Tuple[str, str, str]:
+    """(kind, entrypoint, remote session id) for the machine this is running on.
+
+    The whole point of asking is that an empty personal store means opposite
+    things on the two kinds of machine. On a durable one the marketplace install
+    is authoritative and the store is SUPPOSED to hold no bundle skills; on an
+    ephemeral one the bootstrap hook is the only channel there is, so the same
+    empty store is a delivery failure. Judging both the same way is how the
+    doctor ended up reporting "healthy" in precisely the session where it was not
+    (#85).
+
+    The test is `CLAUDE_CODE_REMOTE_SESSION_ID`, never the SHAPE of
+    `CLAUDE_CODE_ENTRYPOINT`. A prefix match on `remote` looks equivalent and is
+    not: the binary's own display classifier groups `remote_cowork` with
+    `local-agent`, so whether every entrypoint beginning with `remote` is
+    ephemeral is unproven and is being held deliberately (#85 §5). A session id
+    is issued by the remote environment and needs no such guess.
+
+    Anything else — an entrypoint with no session id — is UNSURE rather than
+    durable. It is treated as durable everywhere a judgement depends on it,
+    because the conservative direction is to keep a note a note; it is PRINTED
+    as unsure so the reader is not told a fact nobody measured.
+    """
+    env = os.environ if env is None else env
+    entrypoint = env.get("CLAUDE_CODE_ENTRYPOINT", "") or ""
+    remote = env.get("CLAUDE_CODE_REMOTE_SESSION_ID", "") or ""
+    if remote:
+        return EPHEMERAL, entrypoint, remote
+    if not entrypoint:
+        return DURABLE, entrypoint, remote
+    return UNSURE, entrypoint, remote
+
+
+def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
+    """Every lock to judge against, and where a multi-repo session hides them.
+
+    An explicit `--lock` is taken exactly as given: a caller who names a file has
+    said which expectation they mean, and quietly scanning for others would judge
+    their store against locks they did not ask about.
+
+    Otherwise the project's own `skills.lock` answers when it exists. When it
+    does not, the reason is usually not "this machine has no expectation" but
+    "the project dir is the PARENT of several repos" — the shape a multi-repo
+    session actually has, where every lock sits one level down. Resolving only
+    the bare default there reported the absence of a lock as though it were the
+    absence of a problem, and exited 0 over nine undelivered skills.
+
+    One level only, and directories only. Recursing would sweep in vendored
+    checkouts and `node_modules`, and a lock found four levels down is not one
+    any session was started against.
+
+    Falls back to the project's own path when nothing is found, so a machine that
+    genuinely has no lock still reports `absent` rather than reporting nothing.
+    An absent lock is not a finding: it is a machine this cannot verdict on.
+    """
+    if explicit is not None:
+        return [Path(explicit).expanduser()]
+    own = project_dir / LOCK_NAME
+    if own.is_file():
+        return [own]
+    try:
+        children = sorted(project_dir.iterdir())
+    except OSError:
+        return [own]
+    found = [child / LOCK_NAME for child in children
+             if child.is_dir() and (child / LOCK_NAME).is_file()]
+    return found or [own]
+
+
+def wires_session_start(path: Path) -> bool:
+    """Whether this settings file declares a SessionStart hook command.
+
+    Parsed as JSON rather than grepped: `"SessionStart"` appears in a settings
+    file that mentions it in a disabled block, in a comment-shaped key, or in
+    some unrelated string, and a line scan cannot tell any of those from a wired
+    hook. The question is structural, so the answer comes from the parser.
+
+    Deliberately shallow about the command itself — any entry carrying a
+    non-empty `command` counts. Whether that command WORKS is not knowable from
+    here, and the failure this exists to name (#84) is a hook that is never
+    consulted at all, whatever its command string.
+    """
+    try:
+        settings = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(settings, dict):
+        return False
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    matchers = hooks.get("SessionStart")
+    if not isinstance(matchers, list):
+        return False
+    for matcher in matchers:
+        if not isinstance(matcher, dict):
+            continue
+        entries = matcher.get("hooks")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("command"), str) \
+                    and entry["command"].strip():
+                return True
+    return False
+
+
+def _settings_wired(claude_dir: Path, names: Tuple[str, ...] = ("settings.json",)
+                    ) -> bool:
+    """Whether any of `names` under `claude_dir` wires a SessionStart hook."""
+    return any(wires_session_start(claude_dir / name) for name in names)
+
+
+def hook_wiring(project_dir: Path, home: Optional[Path] = None
+                ) -> Tuple[bool, bool, List[Path]]:
+    """(wired at the project, wired for the user, children that wire it instead).
+
+    Claude Code resolves hooks from the settings chain rooted at `cwd` and at
+    `$HOME` — never from an `--add-dir` grant, whose directories contribute
+    skills, commands, agents and CLAUDE.md but no hooks and no settings. So in a
+    session whose project dir is the parent of several repos, each repo's
+    `.claude/settings.json` is enumerated and none of them is CONSULTED, and no
+    repo's SessionStart hook can fire whatever its command string says.
+
+    That state is invisible from inside any one repo — every file it needs is
+    present and correct — which is why it is worth a finding rather than a
+    comment. See docs/decisions/0005.
+    """
+    home = Path.home() if home is None else home
+    here = _settings_wired(project_dir / ".claude")
+    user = _settings_wired(home / ".claude", USER_SETTINGS_NAMES)
+    children: List[Path] = []
+    try:
+        candidates = sorted(project_dir.iterdir())
+    except OSError:
+        candidates = []
+    for child in candidates:
+        settings = child / ".claude" / "settings.json"
+        if child.is_dir() and wires_session_start(settings):
+            children.append(settings)
+    return here, user, children
 
 
 def read_record(path: Path) -> Record:
@@ -348,13 +530,21 @@ def cluster(stamped: List[Tuple[str, float]]) -> List[List[Tuple[str, float]]]:
 
 def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
              account: Set[str] = frozenset(), repo_owned: Set[str] = frozenset(),
-             store_state: str = PRESENT,
+             store_state: str = PRESENT, surface: str = DURABLE,
              ) -> Tuple[List[Row], List[Finding], List[Finding]]:
     """One row per directory on disk, plus the findings and notes they imply.
 
     A finding is something a human has to decide about. A note is something the
     next bootstrap will handle by itself — reported because "the hook is about to
     delete this" is worth seeing, not because anything is wrong.
+
+    `surface` is what separates those two for a locked skill that is simply not
+    here. It is the same fact on both kinds of machine and the opposite verdict:
+    correct on a durable one, where the marketplace is authoritative, and a
+    delivery failure on an ephemeral one, where the hook is the only channel
+    there is. Defaults to DURABLE because that is the reading under which this
+    stays quiet, and a diagnostic should need evidence to raise a finding rather
+    than evidence to withhold one.
 
     Every judgement of the form "this should not be here" or "this is missing"
     needs BOTH sides: the lock says what was expected, the record says who put
@@ -462,12 +652,6 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 "authority over one bundle and leaves the rest alone."))
 
     on_disk = set(names)
-    if store_state == UNREADABLE:
-        findings.append(Finding(
-            "store-unreadable", str(skills_dir),
-            "the personal store could not be read, so nothing above was "
-            "measured. An empty report here means nothing was looked at, not "
-            "that nothing is wrong."))
     # An unreadable store is not an empty one: "declared by the lock and not in
     # the personal store" is an assertion about a disk nobody read.
     if expected and store_state == PRESENT:
@@ -496,11 +680,33 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "copy on purpose. The session sees the project's."))
                 continue
             if not attributable:
-                # No record means the hook has never delivered into this store, so
-                # the lock's skills being absent from it is the CORRECT state on a
-                # durable machine — §1's "should hold no hook-installed bundle
-                # skills". Reporting all nine as defects is how a doctor teaches
-                # its reader to skip the findings section.
+                # No record means the hook has never delivered into this store.
+                # On a durable machine that is the CORRECT state — §1's "should
+                # hold no hook-installed bundle skills" — and reporting all nine
+                # as defects is how a doctor teaches its reader to skip the
+                # findings section. On an ephemeral surface the same three facts
+                # are the delivery failure itself: the hook is the only channel
+                # there is, it has never run, and a lock says what should have
+                # arrived. Same evidence, opposite verdict, so the surface has to
+                # be part of the judgement rather than a paragraph beside it.
+                #
+                # ABSENT only, not UNREADABLE. A record that is there and corrupt
+                # already raises `record-unreadable` as a finding of its own,
+                # which names the same delivery gap once; promoting here too
+                # would report one defect N times over, once per locked name.
+                if surface == EPHEMERAL and record.state == ABSENT:
+                    findings.append(Finding(
+                        "not-in-the-store", missing,
+                        "declared by the lock and not in the personal store, on "
+                        "an ephemeral surface where the bootstrap hook is the "
+                        "only channel that delivers it — and the install record "
+                        "is absent, so no hook run has ever finished here. This "
+                        "is a delivery failure, not the empty store a durable "
+                        "machine correctly has. Read the session-start `skills:` "
+                        "verdict; if there was none, nothing ran the hook at all "
+                        "— see the hook-not-wired finding if one is reported "
+                        "above."))
+                    continue
                 notes.append(Finding(
                     "not-in-the-store", missing,
                     "declared by the lock and not in the personal store — which "
@@ -573,6 +779,58 @@ def record_findings(record: Record, record_path: Path) -> List[Finding]:
     return findings
 
 
+def store_findings(store_state: str, skills_dir: Path) -> List[Finding]:
+    """What the personal store's own state costs.
+
+    Store-wide rather than per-lock: with several locks in a multi-repo session
+    this would otherwise be raised once per lock, reporting one unreadable
+    directory as N defects.
+    """
+    if store_state != UNREADABLE:
+        return []
+    return [Finding(
+        "store-unreadable", str(skills_dir),
+        "the personal store could not be read, so nothing above was measured. "
+        "An empty report here means nothing was looked at, not that nothing is "
+        "wrong.")]
+
+
+def hook_findings(project_dir: Path, here: bool, user: bool,
+                  children: List[Path], any_lock: bool) -> List[Finding]:
+    """The lock is right, the hook is right, and nothing will ever run it.
+
+    #84's signature exactly, and the reason it took an investigation to find:
+    every file is present and correct, so nothing inside any one repo looks
+    wrong. What is missing is a settings file at a level the chain actually
+    reads. Claude Code resolves hooks from `cwd` and `$HOME` only — an
+    `--add-dir` grant contributes skills, commands, agents and CLAUDE.md, and
+    never hooks — so a session opened on the PARENT of several repos consults
+    none of their settings files, and every SessionStart hook they declare is
+    inert.
+
+    Requires a lock as well as the wiring, because the finding is about delivery
+    failing: a child repo with a hook and no lock has nothing to deliver, and
+    saying its hook never fires would be true and pointless.
+    """
+    if here or user or not children or not any_lock:
+        return []
+    listed = ", ".join(str(path) for path in children[:5])
+    if len(children) > 5:
+        listed += f", and {len(children) - 5} more"
+    return [Finding(
+        "hook-not-wired", str(project_dir),
+        f"{len(children)} settings file(s) below this directory wire a "
+        f"SessionStart hook and nothing here or at the user scope does: "
+        f"{listed}. Hooks resolve from the settings chain at cwd and at $HOME, "
+        f"never from an --add-dir grant — so with the session's project dir set "
+        f"to the parent of these repos, none of those hooks is consulted and no "
+        f"bundle is installed, whatever each lock declares. Nothing reports it: "
+        f"there is no `skills:` verdict, because the script that prints one "
+        f"never runs. Fix it at a level the chain reads — a settings file at "
+        f"this directory, or at the user scope — not inside the repos, which "
+        f"are already correct.")]
+
+
 def lock_findings(lock: Lock, lock_path: Path) -> List[Finding]:
     """A lock the hook refuses is the loudest delivery failure there is.
 
@@ -596,21 +854,27 @@ def lock_findings(lock: Lock, lock_path: Path) -> List[Finding]:
     return []
 
 
-def render(record: Record, record_path: Path, skills_dir: Path, lock: Lock,
-           lock_path: Path, rows: List[Row], findings: List[Finding],
+def render(record: Record, record_path: Path, skills_dir: Path,
+           results: List[LockResult], findings: List[Finding],
            notes: List[Finding], stamped: List[Tuple[str, float]],
-           store_state: str = PRESENT) -> str:
+           store_state: str = PRESENT,
+           surface: Tuple[str, str, str] = (DURABLE, "", "")) -> str:
     """The verdict line first, then the evidence behind it."""
+    rows = results[0].rows if results else []
     hook_rows = [row for row in rows if row.origin == HOOK]
     unattributed = [row for row in rows if row.origin == UNATTRIBUTED]
-    # Counted from the lock, not from the findings: a locked name absent from the
-    # store is a finding on a hook-managed machine and a note on one the hook has
-    # never run on, and the headline count must not change with that judgement.
-    missing = lock.names - {row.name for row in rows}
+    declared: Set[str] = set()
+    for result in results:
+        declared |= result.lock.names
+    # Counted from the locks, not from the findings: a locked name absent from
+    # the store is a finding on an ephemeral surface and a note on a durable one,
+    # and the headline count must not change with that judgement.
+    missing = declared - {row.name for row in rows}
     out = [
         f"provenance: {len(rows)} on disk, "
         f"{_tally(record.state, len(rows), len(hook_rows), len(unattributed))}, "
         f"{len(missing)} not in the store — record {record.state} — "
+        f"surface {surface[0]} — "
         f"{len(findings)} finding{'' if len(findings) == 1 else 's'}",
         "",
         f"RECORD   {record_path}",
@@ -644,18 +908,53 @@ def render(record: Record, record_path: Path, skills_dir: Path, lock: Lock,
         out += _para("unreadable — the file is there and is not the shape the hook "
                      "writes. See FINDINGS.")
 
-    out += ["", f"LOCK     {lock_path}"]
-    if lock.state == PRESENT:
-        out.append(f"  {len(lock.names)} skill(s) declared across "
-                   f"{len(lock.claims)} (registry, bundle) claim(s).")
-    elif lock.state == REJECTED:
-        out += _para(f"rejected — the hook refuses this lock ({lock.reason}), so it "
-                     f"installs NOTHING from it. Nothing below can be called stale "
-                     f"or missing against a lock that never applies. Regenerate it "
-                     f"with scripts/generate_skills_lock.py.")
+    kind, entrypoint, remote = surface
+    out += ["", f"SURFACE  {kind}"]
+    reading = (f"CLAUDE_CODE_ENTRYPOINT={entrypoint or '(unset)'}, "
+               f"CLAUDE_CODE_REMOTE_SESSION_ID="
+               f"{'set' if remote else '(unset)'}.")
+    if kind == EPHEMERAL:
+        out += _para(f"{reading} A cloud session, CI runner or container: the "
+                     f"bootstrap hook is the only channel that delivers a locked "
+                     f"bundle here, so a locked skill missing from the personal "
+                     f"store is a delivery failure rather than the empty store a "
+                     f"durable machine correctly has.")
+    elif kind == DURABLE:
+        out += _para(f"{reading} A durable machine: the marketplace install is "
+                     f"authoritative and the personal store is SUPPOSED to hold "
+                     f"no hook-installed bundle skills. Finding a full set here "
+                     f"is double delivery.")
     else:
-        out.append(f"  {lock.state} — nothing can be called stale or missing "
-                   f"without a declared expectation.")
+        out += _para(f"{reading} Neither shape this can name: an entrypoint with "
+                     f"no remote session id. Judged as durable, which is the "
+                     f"quiet reading — so a delivery failure on such a machine "
+                     f"would be reported below as a note rather than a finding. "
+                     f"Settle it against the session's own `skills:` verdict.")
+
+    for result in results:
+        lock = result.lock
+        out += ["", f"LOCK     {result.path}"]
+        if lock.state == PRESENT:
+            out.append(f"  {len(lock.names)} skill(s) declared across "
+                       f"{len(lock.claims)} (registry, bundle) claim(s).")
+        elif lock.state == REJECTED:
+            out += _para(f"rejected — the hook refuses this lock ({lock.reason}), "
+                         f"so it installs NOTHING from it. Nothing below can be "
+                         f"called stale or missing against a lock that never "
+                         f"applies. Regenerate it with "
+                         f"scripts/generate_skills_lock.py.")
+        else:
+            out.append(f"  {lock.state} — nothing can be called stale or missing "
+                       f"without a declared expectation.")
+    if len(results) > 1:
+        # Said once, plainly, rather than left for the reader to infer from a
+        # column: several locks judging one store is the shape in which "which
+        # one wins" stops being obvious, and this script deliberately does not
+        # answer that (docs/decisions/0005).
+        out += _para(f"{len(results)} locks were discovered one level below the "
+                     f"project directory and each is reported separately. This "
+                     f"names no winner among them: every finding below says "
+                     f"which lock declared it.", "  ")
 
     out += ["", f"SKILLS   {skills_dir} ({len(rows)} directories, "
                 f"excluding the account store {ACCOUNT_DIR}/)"]
@@ -670,20 +969,15 @@ def render(record: Record, record_path: Path, skills_dir: Path, lock: Lock,
         out.append("  (none)")
     for row in rows:
         source = f"{row.registry} # {row.bundle}" if row.registry else "—"
-        if lock.state != PRESENT:
-            # "not in lock" would read as "a lock exists and omits it", which is a
-            # different and much worse fact than "there is no lock".
-            state = f"lock {lock.state}"
-        else:
-            state = "in lock" if row.in_lock else "not in lock"
+        out.append(f"  {row.name:<28} {row.origin:<13} {source}")
+        state = _membership(row.name, results)
         if row.integrity:
             state = f"{state}, {row.integrity} since install"
-        out.append(f"  {row.name:<28} {row.origin:<13} {source}")
         out.append(f"  {'':<28} {'':<13} {state}")
 
     out += ["", f"FINDINGS ({len(findings)})"]
     for finding in findings or []:
-        out.append(f"  [{finding.kind}] {finding.subject}")
+        out.append(f"  [{finding.kind}] {finding.subject}{_whose(finding, results)}")
         out += _para(finding.detail, "      ")
     if not findings:
         out.append("  (none)")
@@ -692,7 +986,7 @@ def render(record: Record, record_path: Path, skills_dir: Path, lock: Lock,
         out += ["", f"NOTES ({len(notes)}) — expected states, or things the next "
                     f"bootstrap handles itself"]
         for note in notes:
-            out.append(f"  [{note.kind}] {note.subject}")
+            out.append(f"  [{note.kind}] {note.subject}{_whose(note, results)}")
             out += _para(note.detail, "      ")
 
     # `main` computes `stamped` only in the states where the fallback applies, so
@@ -716,15 +1010,95 @@ def render(record: Record, record_path: Path, skills_dir: Path, lock: Lock,
     return "\n".join(out)
 
 
+def _membership(name: str, results: List[LockResult]) -> str:
+    """The lock column for one directory, phrased for however many locks there are.
+
+    With one lock this is the two words it has always been. With several, "not in
+    lock" would be a claim about a lock the reader cannot identify, so the ones
+    naming it are named — and when none do, the count says how many were asked.
+    """
+    usable = [result for result in results if result.lock.state == PRESENT]
+    if not usable:
+        # "not in lock" would read as "a lock exists and omits it", which is a
+        # different and much worse fact than "there is no lock".
+        return f"lock {results[0].lock.state}" if results else "lock absent"
+    naming = [result for result in usable if name in result.lock.names]
+    if len(results) == 1:
+        return "in lock" if naming else "not in lock"
+    if not naming:
+        return f"in none of the {len(usable)} readable lock(s)"
+    return "in lock: " + ", ".join(str(result.path) for result in naming)
+
+
+def _whose(finding: Finding, results: List[LockResult]) -> str:
+    """Which lock a finding belongs to, said only when there is a choice."""
+    if finding.lock is None or len(results) < 2:
+        return ""
+    return f" — declared by {finding.lock}"
+
+
+def dedupe(findings: List[Finding]) -> List[Finding]:
+    """Fold findings several locks raise about the same thing into one.
+
+    In a multi-repo session every lock is judged against the same store, and the
+    locks largely declare the same bundle — so an undelivered skill is raised
+    once per lock that names it. Measured on the session that produced #85's
+    repro: eleven locks turned twenty-four distinct defects into ninety-five
+    findings, and `session-start-hook` alone appeared eleven times. That is the
+    same "one defect, N times" inflation `store_findings` exists to avoid, and
+    it is worse here because it scales with the number of repos open rather than
+    with anything wrong.
+
+    Identity is (kind, subject, detail), not (kind, subject). Two locks CAN say
+    different things about one directory — one naming it, the other not — and
+    those are two facts that happen to share a name, so they stay apart.
+
+    Attribution survives the fold: the merged finding names every lock that
+    raised it, which is what keeps "report per-lock" true of the output rather
+    than only of the computation.
+    """
+    order: List[Tuple[str, str, str]] = []
+    locks: Dict[Tuple[str, str, str], List[str]] = {}
+    for finding in findings:
+        key = (finding.kind, finding.subject, finding.detail)
+        if key not in locks:
+            order.append(key)
+            locks[key] = []
+        if finding.lock is not None and finding.lock not in locks[key]:
+            locks[key].append(finding.lock)
+    merged: List[Finding] = []
+    for kind, subject, detail in order:
+        named = locks[(kind, subject, detail)]
+        merged.append(Finding(kind, subject, detail, _joined(named)))
+    return merged
+
+
+def _joined(names: List[str]) -> Optional[str]:
+    """Up to three lock paths, then a count — a header line stays one line."""
+    if not names:
+        return None
+    if len(names) <= 3:
+        return ", ".join(names)
+    return f"{', '.join(names[:3])} and {len(names) - 3} more"
+
+
 def _para(text: str, indent: str = "  ") -> List[str]:
     """One paragraph, wrapped here rather than by hand at the call site.
 
     Hand-wrapped prose put the line breaks in the source, so a sentence could not
     be edited without re-wrapping it — and assertions ended up bound to substrings
     that existed only because of where a break happened to fall.
+
+    `break_long_words=False` because the long words here are FILE PATHS, and the
+    path is the actionable half of a finding. textwrap's default chops anything
+    wider than the column, so a store under a long prefix came out as two halves
+    the reader cannot select, copy or grep for — the same defect as truncating
+    it, arrived at by accident. Overflowing the column is the cheaper cost.
     """
     return textwrap.fill(" ".join(text.split()), width=78,
-                         initial_indent=indent, subsequent_indent=indent).splitlines()
+                         initial_indent=indent, subsequent_indent=indent,
+                         break_long_words=False,
+                         break_on_hyphens=False).splitlines()
 
 
 def _tally(state: str, total: int, hook: int, unattributed: int) -> str:
@@ -750,29 +1124,51 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "install record. Reports; never repairs.")
     parser.add_argument("--skills-dir", default="~/.claude/skills", metavar="DIR",
                         help="the personal skill store (default: ~/.claude/skills)")
-    parser.add_argument("--lock", default="skills.lock", metavar="PATH",
-                        help="the declared expectation (default: ./skills.lock)")
+    parser.add_argument("--lock", default=None, metavar="PATH",
+                        help="the declared expectation. Default: the project "
+                             "dir's own skills.lock, or every */skills.lock one "
+                             "level below it when the project dir is the parent "
+                             "of several repos")
     parser.add_argument("--project-dir", default=".", metavar="DIR",
                         help="the session's project; its .claude/skills/ is a "
                              "delivery channel this has to know about before "
-                             "calling a locked skill missing (default: .)")
+                             "calling a locked skill missing, and its settings "
+                             "chain is what decides whether any hook runs "
+                             "(default: .)")
     args = parser.parse_args(argv)
 
     skills_dir = Path(args.skills_dir).expanduser()
-    lock_path = Path(args.lock).expanduser()
+    project_dir = Path(args.project_dir).expanduser()
     record_path = skills_dir / RECORD_NAME
+    surface = read_surface()
 
     record = read_record(record_path)
-    lock = read_lock(lock_path)
     store_state, names = scan(skills_dir)
-    rows, findings, notes = classify(
-        skills_dir, names, record, lock,
-        account=skill_names(skills_dir / ACCOUNT_DIR),
-        repo_owned=skill_names(Path(args.project_dir).expanduser()
-                               / ".claude" / "skills"),
-        store_state=store_state)
-    findings = lock_findings(lock, lock_path) + record_findings(
-        record, record_path) + findings
+    account = skill_names(skills_dir / ACCOUNT_DIR)
+    repo_owned = skill_names(project_dir / ".claude" / "skills")
+
+    # One store, judged once per declared expectation. See `LockResult`: the
+    # locks are deliberately not merged first.
+    results: List[LockResult] = []
+    for lock_path in discover_locks(args.lock, project_dir):
+        lock = read_lock(lock_path)
+        rows, findings, notes = classify(
+            skills_dir, names, record, lock, account=account,
+            repo_owned=repo_owned, store_state=store_state, surface=surface[0])
+        tagged = [finding._replace(lock=str(lock_path))
+                  for finding in lock_findings(lock, lock_path) + findings]
+        results.append(LockResult(
+            lock_path, lock, rows, tagged,
+            [note._replace(lock=str(lock_path)) for note in notes]))
+
+    here, user, children = hook_wiring(project_dir)
+    findings = dedupe(
+        hook_findings(project_dir, here, user, children,
+                      any(result.lock.state == PRESENT for result in results))
+        + store_findings(store_state, skills_dir)
+        + record_findings(record, record_path)
+        + [finding for result in results for finding in result.findings])
+    notes = dedupe([note for result in results for note in result.notes])
 
     stamped: List[Tuple[str, float]] = []
     if record.state != PRESENT:
@@ -781,8 +1177,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             if when is not None:
                 stamped.append((name, when))
 
-    print(render(record, record_path, skills_dir, lock, lock_path,
-                 rows, findings, notes, stamped, store_state))
+    print(render(record, record_path, skills_dir, results,
+                 findings, notes, stamped, store_state, surface))
     # 1 means "there are findings", never "the tool failed" — this is a doctor and
     # a finding is its normal output. Argparse keeps 2 for a usage error.
     return 1 if findings else 0

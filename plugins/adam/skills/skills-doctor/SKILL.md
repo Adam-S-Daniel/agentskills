@@ -49,11 +49,19 @@ echo "entry=$CLAUDE_CODE_ENTRYPOINT remote=$CLAUDE_CODE_REMOTE_SESSION_ID env=$C
 
 | Reading | Surface | What SHOULD be true |
 |---|---|---|
-| `entry=remote`, non-empty remote session id | ephemeral (cloud session, CI, container) | the bootstrap hook installed the locked bundle into `~/.claude/skills/`; **no** marketplace plugins (cloud gets none from repo-declared settings) |
+| non-empty remote session id | ephemeral (cloud session, CI, container) | the bootstrap hook installed the locked bundle into `~/.claude/skills/`; **no** marketplace plugins (cloud gets none from repo-declared settings) |
 | both empty | durable machine | the marketplace install is authoritative; `~/.claude/skills/` should hold **no** hook-installed bundle skills — finding them there means double delivery |
+| an entrypoint, no session id | unsure | not a shade of either row. Judge it as durable — the quiet reading — and settle it against the session's own `skills:` verdict rather than the entrypoint's name |
 
 A durable machine with a full set of bundle skills in `~/.claude/skills/` is a
 finding, not a pass.
+
+**Read the session id, not the entrypoint's shape.** Every ephemeral entrypoint
+measured so far begins with `remote`, which makes a prefix match look
+equivalent; it is not. The binary's own display classifier groups
+`remote_cowork` with `local-agent`, so "no durable entrypoint starts with
+`remote`" is unproven, and assuming it would call a durable Cowork machine
+ephemeral and report its correctly-empty store as a delivery failure.
 
 ## 2. Read the expectation
 
@@ -124,6 +132,31 @@ registry supplied. A `hashlib.py` dropped in beside it would be what answers.
 Exit 1 means *there are findings*, not that the tool failed; 0 means none.
 `--skills-dir` and `--project-dir` point it at a store and a project other than
 this machine's.
+
+**`--lock` is optional, and leaving it off is usually right.** Omitted, it takes
+the project dir's own `skills.lock`; when the project dir has none it resolves
+every `*/skills.lock` one level below and reports per lock. That second case is
+the multi-repo session, and it is the one the old bare default got wrong: it
+resolved to nothing at the parent and reported the absence of a lock as though
+it were the absence of a problem — 0 findings, exit 0, over nine undelivered
+skills. Naming a lock explicitly is still honoured exactly, and never widened
+into a scan. Several locks judging one store names **no winner** among them;
+every finding says which lock declared it, and identical findings from several
+locks are folded into one that names them all.
+
+**It reads the surface, and the surface changes the verdict.** A locked skill
+missing from the personal store is the correct state on a durable machine and a
+delivery failure on an ephemeral one, so the same three facts are a NOTE on one
+and a FINDING on the other. The test is `CLAUDE_CODE_REMOTE_SESSION_ID`, never
+the shape of `CLAUDE_CODE_ENTRYPOINT` — a prefix match on `remote` is unproven
+against `remote_cowork` and is held deliberately. An entrypoint with no session
+id reports as `unsure` and is judged as durable, which is the quiet reading.
+
+**`hook-not-wired` is the finding to look for in a multi-repo session.** A lock
+plus a SessionStart hook wired only in a *child* of the project dir means no
+hook is consulted at all, so nothing is delivered and nothing says so — there is
+no `skills:` verdict because the script that prints one never runs. See
+`docs/decisions/0005` in the registry.
 
 Produce one row per expected skill, and report `registry` and `bundle` on it,
 not just the channel — "personal copy" does not say whether it came from the
@@ -275,6 +308,18 @@ figure. No remediation is performed — recommend, do not do.
   session, one repo's committed skills are advertised while you are working in
   another. Enumerate all workspace roots before concluding a skill "came from
   nowhere".
+- **The shadow guard is INERT in a multi-repo shape, not merely mispointed.**
+  Both the hook and `check_provenance.py` look for repo-owned skills at
+  `$PROJECT_DIR/.claude/skills/<name>/SKILL.md`. When the project dir is the
+  parent of several repos, that directory does not exist at all — so the guard
+  can never fire for ANY of them, and `delivered-by-the-project` can never be
+  the reason a locked skill is absent. Harmless today only because the one
+  repo-owned project skill on this fleet (`embeddable-tool-pages`) is not among
+  the locked names; it stops being harmless the moment a repo ships a skill a
+  lock also declares. Do the shadowing comparison by hand against each
+  workspace root, per the `comm` recipe above, rather than trusting either
+  tool's silence. Fixing it needs an answer to "which repo's skills win", which
+  is the open question in `docs/decisions/0005`.
 - **Absence from the listing is not absence from disk.** Deduplication and the
   listing budget both drop entries. Check disk *and* listing; a mismatch
   between them is itself a finding.
