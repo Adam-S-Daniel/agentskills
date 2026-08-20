@@ -1,10 +1,20 @@
 {
   "registry": "Adam-S-Daniel/agentskills",
-  "ref": "f92569e2be0031e8e54acf8f3294c1c89f31f5eb",
+  "ref": "75c2af1102d17882eac7be2488f8df96e40424a7",
   "bundles": [
-    "adam"
+    "adam",
+    "adam-local"
   ],
   "skills": {
+    "adam-local/compare-pdfpairs": "sha256:efdb5d8be822ba36bb263f6264f4e5127f6a53ba300896298f7b721293cca888",
+    "adam-local/launch-wsl-claude-session": "sha256:c1eaeef2b734b28f56866dd53efce341e854dba117750648b955d870f6053cd7",
+    "adam-local/migrate-claude-memory": "sha256:2abca5c2009eadee10fd054c4e301c4529de129454f75711385c62c012f47da3",
+    "adam-local/ocr-pdfs": "sha256:d45fe17d163cc62e56d74629d9ea6093c1a004c2b45f6d133394c03a84190e6a",
+    "adam-local/pdf-ocr-audit": "sha256:913b415f8d4fa163e0a19cebcabb7f32248d6150a1cef8ef9047871bd0f57101",
+    "adam-local/rename-pdfs": "sha256:d3f8ff44e740549848581b6c5b220ec80feb814a1b68c3fcbab7e1571018d8c9",
+    "adam-local/sync-cc-settings-between-wsl-and-windows": "sha256:b2a0bfeb90d411425aa1cae6ba859c54efac64a444b88d09919f2d13c1f7969b",
+    "adam-local/sync-skills": "sha256:1e63d440e46623e860ad5a5e1463827e0d0f5d4ad6df9db531a24e1574d8db5e",
+    "adam-local/wj-next-break": "sha256:c0b185c23b5d46cb78bd6a8c48dfb58dfb7bf073c999a01e6e69cba4c641e005",
     "adam/adam-writing-style": "sha256:a6f71e6d91694783225d4a7bb9e89be2264f46a7d28cde4c22d48cdd5acb8fa5",
     "adam/debug-github-workflows": "sha256:a695b854250e5c6b8255558354108a406ba2197c500d27173cb7a83b9beb1ffd",
     "adam/finding-unknowns": "sha256:a67b7663b5b44d07cfddeb923ce19f3cf79447e052658a69cf7fcb985fc0130d",
@@ -14,5 +24,5 @@
     "adam/workflow-path-audit": "sha256:4986398a43997fd0b03ecc2e1f4dc46831b9c3903cef66d429bf0c070042c54f",
     "adam/writing-adrs": "sha256:4e9a4b9472bd3d92501bf0d7f882544ba66e8b03aa48bac7fa1689c45d903820"
   },
-  "generated_from": "f92569e2be0031e8e54acf8f3294c1c89f31f5eb"
+  "generated_from": "75c2af1102d17882eac7be2488f8df96e40424a7"
 }
