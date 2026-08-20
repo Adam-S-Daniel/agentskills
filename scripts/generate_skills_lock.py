@@ -991,22 +991,29 @@ def report_digest_format(document: dict, output: Path) -> int:
     the caller's existing safe branch takes them. Exit status cannot carry the
     distinction: all three exit 1.
 
-    TWO SIBLING SITES MOVE WITH THIS, and neither is editable from here.
-    _agent-guidance carries a STUB generator for its own bump tests
-    (`test/run-tests.sh`) which reproduces this prefix split on purpose and
-    says so — "The FAILED:/ERROR: split is reproduced faithfully because the
-    bumper branches on it". As of this change it is no longer faithful: it
-    still prints `FAILED:` for both conditions above. Nothing is red, because
-    no test there feeds an empty map to `--check-format` — its fixtures fill
-    the map via `--repin` before checking it — so the divergence is latent,
-    and a bump test written against that stub today would model the SUPERSEDED
-    contract and "prove" the very belief this change removed. The bumper's own
-    prose has gone stale in the other direction: it still describes the empty
-    map as something that "gets re-pinned, has the re-pin refused, counts a
-    failure, and does the same thing again tomorrow night", which is the loop
-    the paragraph below closed. Both are one-line edits over there; make them
-    when that repo is next open, and do not read either as evidence about what
-    this generator does.
+    TWO SIBLING SITES IN _agent-guidance MOVE WITH THIS, because the grep
+    above is a WRITE trigger in another repo: change the prefix here and you
+    change what that repo rewrites. Neither is editable from here. One is the
+    STUB generator its bump tests run against (`test/run-tests.sh`), which
+    reproduces this prefix split on purpose and says so. The other is the
+    bumper's own prose about what an empty map costs. Both AGREE with this
+    file today — the stub prints `ERROR:` for both conditions above, and the
+    bumper describes such a lock as counted and LEFT ALONE rather than
+    re-pinned nightly. Nothing compares the three copies automatically, so a
+    prefix change here still has to be carried over there by hand.
+
+    So the agreement is worth re-checking rather than assuming, and it is
+    checkable by name from either end. HERE:
+    `test_nothing_to_check_is_an_error_not_a_failed` pins, per condition, the
+    sentence the caller's comment depends on. THERE:
+    `test_bump_format_gate_empty_skills` drives the real bumper against a
+    lock whose `skills` map is empty and asserts it reports, counts, and
+    pushes no branch — the only test in that repo that reaches either branch
+    above, and therefore the only thing that goes red if the stub drifts back
+    to `FAILED:`. It covers the EMPTY map only; the missing / non-map
+    condition has no test on that side at all, so this file's own is the
+    whole guard for it. If either name stops existing, that side is
+    unguarded.
     """
     skills = document.get("skills")
     if not isinstance(skills, dict):
