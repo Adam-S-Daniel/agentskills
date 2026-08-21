@@ -198,6 +198,42 @@ class TestTheUnionWithThePublishedAudit:
                       status="reported-failure")
         assert "reported drifted by the published audit" in text
 
+    def test_the_audit_cannot_re_admit_a_name_that_left_the_registry(self, tmp_path):
+        """A retired skill has no directory, so it must not reach the matrix.
+
+        The state: `plugins/*/skills/<name>/` was deleted while
+        `account-skills.txt` still declares the name - exactly what the
+        summary's "Declared but absent from the registry" line exists to
+        report. `--account-drift` calls it `missing-from-registry` and keeps it
+        out of `needs_upload`, but it IS a row, so an audit-side check of
+        "declared?" alone re-admits it. And the audit still names it: it
+        measured `registry_ref`, which is older than HEAD by construction, so
+        it read a tree where the directory was still there.
+
+        The consequence is not a wrong report, it is a broken run - the zip
+        job's `--prepare --skill` leg fails on a path that does not exist. The
+        `all` branch has always filtered this status out; the union branch is
+        the same hazard reached from the other source.
+        """
+        out, text = run(tmp_path, report(missing=["retired-skill"]),
+                        latest=artifact(drifted=["retired-skill"],
+                                        checked=DECLARED + ["retired-skill"]),
+                        status="reported-failure")
+        assert json.loads(out["names"]) == []
+        assert out["count"] == "0"
+        # Dropped from the matrix, NOT from the report - which is what makes
+        # dropping it lossless.
+        assert "Declared but absent from the registry" in text
+        assert "retired-skill" in text
+
+    def test_a_registry_absent_name_does_not_suppress_the_ones_that_are_there(self, tmp_path):
+        """The filter is per-name, not a bail-out for the whole contribution."""
+        out, _ = run(tmp_path, report(missing=["retired-skill"]),
+                     latest=artifact(drifted=["retired-skill", "sync-skills"],
+                                     checked=DECLARED + ["retired-skill"]),
+                     status="reported-failure")
+        assert json.loads(out["names"]) == ["sync-skills"]
+
 
 class TestADegradedAuditIsNeverMistakenForAPass:
     def test_a_missing_artifact_degrades_loudly(self, tmp_path):
@@ -249,6 +285,73 @@ class TestADegradedAuditIsNeverMistakenForAPass:
     ])
     def test_any_unrecognised_status_reads_as_unavailable(self, given, expected):
         assert sel.normalise_status(given) == expected
+
+
+class TestAMalformedArtifactDegradesInsteadOfTakingTheJobOut:
+    """`latest.json` is another repo's published output, which ADR 0006 names
+    as untrusted input. Every case here used to raise inside `finding_skills`,
+    and a raise there is not a degraded run - the pick step runs under
+    `set -euo pipefail`, so the `pick` job goes red, the `zip` job never runs,
+    and NO ZIPs are produced. That is the opposite of degrading, in the one
+    module whose entire job is to keep a bad artifact from taking the workflow
+    out.
+    """
+
+    def test_a_non_string_skill_value_does_not_stop_the_valid_ones(self, tmp_path):
+        """Measured: `{"skill": 5}` beside a string makes `sorted()` compare an
+        int with a str and raise `TypeError`. An unhashable value raises one
+        step earlier, in the set comprehension itself.
+        """
+        latest = artifact(drifted=["sync-skills"])
+        latest["findings"] += [
+            {"skill": 5},                      # sorted() cannot order it
+            {"skill": ["finding-unknowns"]},   # unhashable
+            {"skill": {"name": "docx"}},       # unhashable
+            {"skill": None},
+            {"skill": "   "},                  # whitespace is not a name
+            "not-a-dict",
+        ]
+        out, text = run(tmp_path, report(needs_upload=["adam-writing-style"]),
+                        latest=latest, status="reported-failure")
+        assert json.loads(out["names"]) == ["adam-writing-style", "sync-skills"]
+        assert "found drifted: sync-skills" in text
+
+    def test_findings_that_are_all_malformed_leave_the_recording_alone(self, tmp_path):
+        """Nothing usable in the artifact contributes nothing, and the run
+        proceeds on the local recording - the same fallback an absent artifact
+        gets.
+        """
+        latest = artifact(drifted=[])
+        latest["findings"] = [{"skill": 5}, {"skill": {"name": "sync-skills"}}]
+        out, text = run(tmp_path, report(needs_upload=["sync-skills"]),
+                        latest=latest, status="reported-failure")
+        assert json.loads(out["names"]) == ["sync-skills"]
+        assert "found drifted: none" in text
+        assert "Account skill ZIPs" in text
+
+    def test_a_findings_value_that_is_not_a_list_is_no_findings_at_all(self, tmp_path):
+        """A scalar `findings` is not iterable, so the old shape raised before
+        it read a single value.
+        """
+        latest = artifact()
+        latest["findings"] = 5
+        out, text = run(tmp_path, report(needs_upload=["sync-skills"]),
+                        latest=latest, status="reported-failure")
+        assert json.loads(out["names"]) == ["sync-skills"]
+        assert "found drifted: none" in text
+
+    @pytest.mark.parametrize("findings", [
+        None, 5, "sync-skills", {"skill": "sync-skills"}, [None], [[]],
+        [{"skill": 5}], [{"skill": ["sync-skills"]}], [{"skill": ""}],
+    ])
+    def test_no_findings_shape_raises_or_leaks_a_non_name(self, findings):
+        """The unit-level statement of the same rule: this function returns a
+        list of STRINGS or nothing, and never propagates an exception. A value
+        that is merely truthy is not a name - `[5]` reaching the caller is what
+        makes `', '.join(...)` raise in render() one layer up, which is the
+        same job-killing outcome by a slower route.
+        """
+        assert sel.finding_skills({"findings": findings}) == []
 
 
 class TestTheSummaryStillCarriesWhatItCarried:

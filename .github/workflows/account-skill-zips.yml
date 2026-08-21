@@ -173,8 +173,39 @@ jobs:
           # it must not read as one. `unavailable` is not a skills-evals status;
           # the selection module treats it - and any string it does not
           # recognise - as "the audit could not be used".
-          [ -n "$verdict" ] || verdict=unavailable
+          #
+          # IT ALSO RAISES AN ANNOTATION, BECAUSE THIS IS THE ONE PATH THAT
+          # FAILS OPEN. Every other failure in this step warns already, and
+          # this was the one that did not - which is backwards, because it is
+          # the one that fires when the cross-repo IMPORT breaks: skills-evals
+          # moves `account_store.py`, renames `freshness_verdict`, or renames
+          # the `account_audit_max_age_days` fixture key. Both clones then
+          # succeed, neither warning above fires, the heredoc raises, and with
+          # a clean local recording `count=0` skips the zip job - so the run
+          # ends GREEN with zero annotations while the cross-repo half of the
+          # evidence was never read. Nothing else reports it either:
+          # scheduled-run-health.yml scans for FAILED runs, and this one did
+          # not fail.
+          if [ -z "$verdict" ]; then
+            verdict=unavailable
+            echo "::warning::could not compute the published account audit verdict - the clones can succeed while the import inside this step breaks (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
+          fi
           echo "published account audit reads: $verdict"
+          # THE LIVENESS VERDICTS GET AN ANNOTATION FOR THE SAME REASON. Each
+          # of these means the Tier-3 Routine has stopped publishing a usable
+          # result - a fault in the OTHER repo, which this run is the only
+          # thing here positioned to notice, and which otherwise shows up only
+          # inside a step summary nobody opens on a green run. Surfacing it as
+          # an annotation puts it on the Actions list instead.
+          #
+          # The healthy answers stay quiet on purpose - `fresh`, the drift
+          # verdict this workflow exists to react to, and `not-yet-bootstrapped`
+          # (nothing has been published yet, which is a state and not a fault).
+          # A warning on every run is a warning nobody reads.
+          case "$verdict" in
+            stale|missing|unreadable)
+              echo "::warning::the published account audit reads '$verdict' - the Tier-3 Routine has not published a usable result recently, so this run leaned on the local recording. Check that Routine and the eval-results branch of Adam-S-Daniel/skills-evals." ;;
+          esac
           echo "status=$verdict" >> "$GITHUB_OUTPUT"
       - name: Decide which skills need a ZIP
         id: drift

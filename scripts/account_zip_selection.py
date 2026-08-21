@@ -74,12 +74,31 @@ def load_json(path: Path):
 
 
 def finding_skills(summary) -> list:
-    """Every skill named in the artifact's `findings`, for REPORTING only."""
+    """Every skill named in the artifact's `findings`, for REPORTING only.
+
+    EVERY SHAPE HERE IS CHECKED, NOT ASSUMED, AND THE VALUE TYPE IS THE ONE
+    THAT BITES. `latest.json` comes off another repo's `eval-results` branch,
+    which docs/decisions/0006 names as untrusted input, and this module's whole
+    job is to make a bad artifact DEGRADE rather than take the workflow out.
+    Guarding only the finding's shape (`isinstance(f, dict)`) and then trusting
+    `f["skill"]` to be a string does the opposite: a `{"skill": 5}` beside a
+    string makes `sorted()` compare an int with a str and raise, an unhashable
+    value (a list, a dict) blows up the set comprehension before that, and a
+    `findings` that is not a list at all is not iterable. Any of those raises
+    under the pick step's `set -euo pipefail`, which reds the `pick` job, which
+    means the `zip` job never runs and NO ZIPs are produced - a worse outcome
+    than the drift the artifact was reporting. So: a list of dicts, and a
+    non-empty string name, or the finding is simply not there.
+    """
     if not isinstance(summary, dict):
         return []
-    findings = summary.get("findings") or []
-    return sorted({f.get("skill") for f in findings
-                   if isinstance(f, dict) and f.get("skill")})
+    findings = summary.get("findings")
+    if not isinstance(findings, list):
+        return []
+    return sorted({f["skill"] for f in findings
+                   if isinstance(f, dict)
+                   and isinstance(f.get("skill"), str)
+                   and f["skill"].strip()})
 
 
 def audit_drifted(summary, status: str) -> list:
@@ -127,7 +146,20 @@ def select(report: dict, selection: str, summary, status: str) -> dict:
         # no delete (docs/decisions/0002) - so a workflow that reacted to a
         # name it found in an artifact would walk through that door on its own.
         undeclared = [n for n in drifted if n not in rows]
-        contributed = [n for n in drifted if n in rows]
+        # DECLARED IS NOT ENOUGH - the row's status has to be zippable too, the
+        # same guard the `all` branch applies fifteen lines above and for the
+        # same reason: a `missing-from-registry` row has no directory, so the
+        # matrix leg would fail on a path that is not there rather than tell
+        # anyone anything. The union is where that gets easy to miss, because
+        # the name arrives from the OTHER source. Retire a skill from the
+        # registry while `account-skills.txt` still lists it and the audit -
+        # which measured `registry_ref`, older than HEAD by construction - is
+        # still naming a directory that existed in the tree it read and does
+        # not exist here. Nothing is lost by dropping it: render() prints it
+        # under "Declared but absent from the registry", which is the line that
+        # exists to report exactly this state.
+        contributed = [n for n in drifted if n in rows
+                       and rows[n]["status"] != "missing-from-registry"]
         names = sorted(set(report["needs_upload"]) | set(contributed))
         why = "changed since the account store was last recorded"
         if contributed:

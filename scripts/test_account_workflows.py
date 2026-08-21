@@ -24,6 +24,16 @@ RECORD = WORKFLOWS / "record-account-upload.yml"
 SELECTION = Path(__file__).resolve().parent / "account_zip_selection.py"
 
 
+# The prose a `run:` block actually emits, with its comments dropped: the
+# `echo "..."` payloads joined. Asserting on the raw body would let a claim
+# that only survives in a comment count as if it reached the reader.
+ECHOED = re.compile(r'^\s*echo\s+"(.*)"\s*$', re.M)
+
+
+def echoed(body):
+    return " ".join(m.group(1) for m in ECHOED.finditer(body))
+
+
 def load(path):
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     # PyYAML resolves a bare `on:` key to the boolean True (YAML 1.1).
@@ -83,6 +93,45 @@ class TestRecordAccountUpload:
             for step in job.get("steps", []):
                 if step.get("run"):
                     assert "inputs." not in step["run"], step.get("name")
+
+    def _summary(self):
+        return echoed(next(
+            s["run"] for s in load(RECORD)["jobs"]["record"]["steps"]
+            if s.get("name") == "Summarise"
+        ))
+
+    def test_it_never_says_the_reader_is_finished_while_a_step_is_manual(self):
+        """The summary contradicted itself inside one paragraph.
+
+        It opened "Nothing further from you", described the loop closing
+        itself, and then said the last step is done by hand. Both cannot be
+        true, and the reader acts on the first: they are standing there holding
+        the phone they just uploaded from, they are told they are done, they
+        stop - and the drift issue stays open reporting a problem that was
+        already repaired. So the automatic part and the manual part are stated
+        separately, in the present tense, once each.
+        """
+        text = self._summary()
+        assert "Nothing further from you" not in text
+        assert "loop closes itself" not in text
+        assert "still" in text and "manual" in text, (
+            "the summary no longer says which step is still done by hand"
+        )
+
+    def test_every_issue_reference_names_the_repo_it_lives_in(self):
+        """A bare `#48` in an agentskills summary reads as an agentskills
+        issue, and `skills-evals#48` is not a form GitHub resolves either. The
+        issues this text points at live in another repo, so every reference
+        carries the full `owner/repo#n`.
+        """
+        text = self._summary()
+        refs = re.findall(r"(\S*)#(\d+)", text)
+        assert refs, "the summary stopped naming the issues it points at"
+        for prefix, number in refs:
+            assert "Adam-S-Daniel/skills-evals" in prefix, (
+                f"#{number} is written as {prefix}#{number}, which does not "
+                f"resolve to the repo it lives in"
+            )
 
     def test_every_gh_api_call_discards_output_on_failure(self):
         """`gh api --jq` prints the raw error body to STDOUT and exits 1 on an
@@ -260,6 +309,100 @@ class TestAccountSkillZips:
         actual upload uses. The payload comes from `--prepare --zip-dir`.
         """
         assert any("--zip-dir" in body for body in runs(load(ZIPS)))
+
+
+class TestTheAuditStepAnnouncesEveryDegradedVerdict:
+    """The audit step's own tail, EXECUTED - not string-matched.
+
+    THE FAILURE THIS LOCKS OUT IS A GREEN RUN THAT ASKED NOTHING. Every other
+    failure in that step (both clones, the pyyaml install) raises a
+    `::warning::`, and the empty-capture fallback - the one path that fails
+    OPEN - did not. That is the path taken when the cross-repo IMPORT breaks:
+    skills-evals moves `account_store.py`, renames `freshness_verdict`, or
+    renames the `account_audit_max_age_days` fixture key. Both clones succeed,
+    neither existing warning fires, the heredoc raises, and with a clean local
+    recording `count=0` skips the zip job. The run ends GREEN with zero
+    annotations, and scheduled-run-health.yml - which scans for FAILED runs -
+    never reports it either.
+
+    The liveness verdicts are here for the same reason one level out: `stale`,
+    `missing` and `unreadable` all mean the Tier-3 Routine stopped publishing a
+    usable result, which without an annotation is visible only inside a step
+    summary nobody opens on a green run.
+
+    Run rather than grepped because a lint that greps for `::warning::` passes
+    on a warning that sits in the wrong branch.
+    """
+
+    def _tail(self):
+        """Everything the audit step does after the heredoc returns.
+
+        Anchored on the heredoc's own `) || verdict=""` rather than on a line
+        number, so the slice follows the code if it moves.
+        """
+        body = next(
+            s["run"] for s in load(ZIPS)["jobs"]["pick"]["steps"]
+            if s.get("id") == "audit"
+        )
+        marker = ') || verdict=""'
+        assert marker in body, (
+            "the empty-capture fallback changed shape; this test no longer "
+            "knows where the step's verdict handling starts"
+        )
+        return body[body.index(marker) + len(marker):]
+
+    def _run(self, tmp_path, verdict):
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("bash not on PATH")
+        out = tmp_path / "gh_output"
+        # Forward slashes: Git Bash reads the backslashes of a Windows path as
+        # escapes inside the step's own `>> "$GITHUB_OUTPUT"` redirect, and
+        # pytest-windows runs this file too.
+        env = {**os.environ, "GITHUB_OUTPUT": str(out).replace("\\", "/")}
+        # The verdict arrives as an ARGUMENT rather than baked into the script,
+        # so the empty case is delivered as an actual empty string.
+        proc = subprocess.run(
+            [bash, "-c", "set -uo pipefail\nverdict=$1\n" + self._tail(),
+             "_", verdict],
+            capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout, out.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("verdict, recorded, why", [
+        ("", "unavailable",
+         "the heredoc raised - a broken cross-repo import looks exactly like "
+         "this, with both clones green"),
+        ("stale", "stale", "the Tier-3 Routine has stopped publishing"),
+        ("missing", "missing", "nothing has been published to read"),
+        ("unreadable", "unreadable", "what was published cannot be parsed"),
+    ])
+    def test_a_verdict_the_run_could_not_use_raises_an_annotation(
+            self, tmp_path, verdict, recorded, why):
+        log, out = self._run(tmp_path, verdict)
+        assert "::warning::" in log, why
+        # The verdict still reaches the selection module unchanged - the
+        # annotation is additional, not a substitute.
+        assert f"status={recorded}" in out
+
+    @pytest.mark.parametrize("verdict", ["fresh", "not-yet-bootstrapped"])
+    def test_a_healthy_verdict_stays_quiet(self, tmp_path, verdict):
+        """The negative control. A warning on every run is a warning nobody
+        reads, so an annotation here would cost the ones above their meaning -
+        and would also pass the test above for the wrong reason.
+        """
+        log, out = self._run(tmp_path, verdict)
+        assert "::warning::" not in log, verdict
+        assert f"status={verdict}" in out
+
+    def test_the_verdict_still_reaches_the_step_output(self, tmp_path):
+        """Whatever else the step says, `status=` is the only thing the next
+        step consumes. An annotation that swallowed it would be a worse bug
+        than the silence it replaced.
+        """
+        _, out = self._run(tmp_path, "")
+        assert out.strip() == "status=unavailable"
 
 
 class TestSkillInputIsValidatedBeforeUse:
