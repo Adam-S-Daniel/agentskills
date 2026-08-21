@@ -45,10 +45,15 @@
       "files": 2
     },
     "sync-skills": {
-      "basis": "observed",
-      "digest": "sha256:5720de8a64fdc99e68d89f996667c82f042eef8b60ef28230212b10495b5aeba",
-      "updatedAt": "2026-08-18T21:54:44.532847Z",
-      "files": 6
+      "basis": "asserted",
+      "digest": "sha256:ae4a87684da7cdf90e8498ea07018f17dd23376adea9dec9a6a482ea9509226d",
+      "updatedAt": null,
+      "files": 6,
+      "asserted_at": "2026-08-21T01:07:47+00:00",
+      "asserted_from": {
+        "ref": "c4b48a6130c02d888883b77f77ec06cf1ec6b9ea",
+        "run_id": "32434610802"
+      }
     },
     "wj-next-break": {
       "basis": "observed",
