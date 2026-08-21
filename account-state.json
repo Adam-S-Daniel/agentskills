@@ -1,6 +1,6 @@
 {
   "_comment": "Digest of each declared skill AS THE CLAUDE.AI ACCOUNT STORE HELD IT when this was recorded. Written by `sync_skills.py --record-account-state` from a session that has ~/.claude/skills/synced; read by `--account-drift`, which CI can run and which cannot see the account itself. Re-record after uploading.",
-  "recorded_at": "2026-08-20T21:48:27+00:00",
+  "recorded_at": "2026-08-21T01:17:22+00:00",
   "skills": {
     "adam-writing-style": {
       "basis": "observed",
@@ -45,15 +45,10 @@
       "files": 2
     },
     "sync-skills": {
-      "basis": "asserted",
+      "basis": "observed",
       "digest": "sha256:ae4a87684da7cdf90e8498ea07018f17dd23376adea9dec9a6a482ea9509226d",
-      "updatedAt": null,
-      "files": 6,
-      "asserted_at": "2026-08-21T01:07:47+00:00",
-      "asserted_from": {
-        "ref": "c4b48a6130c02d888883b77f77ec06cf1ec6b9ea",
-        "run_id": "32434610802"
-      }
+      "updatedAt": "2026-08-21T01:05:29.896118Z",
+      "files": 6
     },
     "wj-next-break": {
       "basis": "observed",
