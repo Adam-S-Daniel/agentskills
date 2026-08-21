@@ -279,7 +279,11 @@ write is the delivery channel for ephemeral surfaces. What works where:
   it and publishes one artifact per skill that has moved since, each downloading
   as a `<name>.zip` that uploads to claude.ai as-is — the path for uploading
   from a phone. A `stale` verdict is evidence an upload is needed, never proof
-  one happened; re-record after uploading. See `sync-skills` SKILL.md §9.
+  one happened. Close the loop afterwards either by re-recording from a machine
+  with the mirror, or — with no mirror, from the phone — by dispatching
+  [Record an account upload](.github/workflows/record-account-upload.yml),
+  which writes the weaker `basis: asserted` and pushes a branch to merge. An
+  observation always overwrites an assertion. See `sync-skills` SKILL.md §9.
 - **Memory**: hosted sessions see a repo's git-tracked `.claude/memory/` (see the
   Memory section in [`STRATEGY.md`](STRATEGY.md) and the
   [portable-memory guide](https://github.com/Adam-S-Daniel/claude-memory-map/blob/main/docs/portable-memory.md);
