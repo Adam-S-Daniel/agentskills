@@ -194,18 +194,29 @@ jobs:
                 echo "the account is now behind main. Build a fresh ZIP and upload that too."
               fi
               echo
-              # ONE PRESENT TENSE, STATED ONCE. This block used to open with
-              # "Nothing further from you" and close by saying the last step is
-              # done by hand - both cannot be true, and the reader acts on the
-              # first one. They are holding the phone they just uploaded from,
-              # they are told they are finished, they stop, and the drift issue
-              # stays open reporting a problem that was already repaired. So
-              # the automatic part and the manual part are separated, and the
-              # manual part is named as manual.
+              # NO ISSUE NUMBER AND NO PR NUMBER, DELIBERATELY. This block used
+              # to name the live drift issue and the PR that would automate
+              # closing it, dated "as of 2026-08-21". Both references rot, in
+              # different ways and on different clocks. The PR one is false the
+              # moment it merges - it is the companion of the change this text
+              # shipped with, so the sentence was already wrong on the day it
+              # landed. The issue one is wrong from the SECOND drift episode
+              # onward: the drift workflow looks up `--state open`, so a closed
+              # issue is never found again and each episode opens a FRESH one,
+              # while a number baked into a heredoc is updated by nothing.
               #
-              # Issue references carry the full `owner/repo#n` form: a bare
-              # `#52` in an agentskills summary reads - and links - as an
-              # agentskills issue, which is a different issue entirely.
+              # The damage is not a stale link, it is an instruction the reader
+              # carries out. Told the close is manual, an operator closes the
+              # issue from the same phone they just uploaded from. The Tier-3
+              # audit re-measures only once a day, so the published artifact
+              # still reads `fail` when the drift workflow next runs; it finds
+              # no open issue and files a duplicate - the pile that workflow
+              # exists to prevent. It also contradicted the issue body's own
+              # step 4, "leave this issue alone".
+              #
+              # So this says only what the design guarantees, and points at the
+              # workflow that owns the lifecycle rather than at an issue number
+              # nothing here can keep true.
               echo "### What happens after that"
               echo
               echo "Merging lands the recording. The account store itself is re-measured by"
@@ -214,9 +225,12 @@ jobs:
               echo "\`eval-results\` branch; the daily **Account skill ZIPs** run reads that"
               echo "verdict, and a \`pass\` contributes no names to the next run."
               echo
-              echo "Closing \`Adam-S-Daniel/skills-evals#48\`, the drift issue, is still"
-              echo "manual until \`Adam-S-Daniel/skills-evals#52\` lands - as of 2026-08-21"
-              echo "that PR is open and unmerged."
+              echo "**Leave the drift issue alone.** It is opened, edited and closed by"
+              echo "\`account-store-drift.yml\` in \`Adam-S-Daniel/skills-evals\`, and the"
+              echo "next audit that reads \`pass\` closes it - there is nothing here for you"
+              echo "to close by hand. Closing it yourself does not help either: that audit"
+              echo "re-measures once a day, so the next run still reads \`fail\`, finds no"
+              echo "open issue, and opens a duplicate."
             elif [ "${CHANGED:-}" = "false" ]; then
               echo "Nothing to change - **$SKILL** already records the digest of the tree"
               echo "run \`$FROM_RUN\` built. No branch was pushed."

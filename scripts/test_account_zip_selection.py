@@ -234,6 +234,51 @@ class TestTheUnionWithThePublishedAudit:
                      status="reported-failure")
         assert json.loads(out["names"]) == ["sync-skills"]
 
+    def test_dropping_an_audit_named_skill_is_stated_and_not_just_done(self, tmp_path):
+        """A drop the summary does not admit to is the divergence itself.
+
+        The exclusion above is right and it is also a DISAGREEMENT with a
+        published artifact: skills-evals' drift issue names the skill and
+        promises "one downloadable artifact per drifted skill", and this run
+        produces none. Say so, on the page, or the reader is left holding an
+        issue that names a skill, a run with no artifact for it, and no
+        sentence anywhere that connects the two.
+
+        `Declared but absent from the registry` at the foot of the summary is
+        deliberately not accepted as that sentence: it prints off the local
+        report whether or not the audit ever named the skill, so it is one of
+        the two facts and never their contradiction. This asserts on the
+        reconciliation - the audit reported it, it is not zipped, here is why,
+        here is what to do.
+        """
+        out, text = run(tmp_path, report(missing=["retired-skill"]),
+                        latest=artifact(drifted=["retired-skill"],
+                                        checked=DECLARED + ["retired-skill"]),
+                        status="reported-failure")
+        assert out["count"] == "0"
+        say = text[text.index("absent from the registry at this commit"):]
+        assert "retired-skill" in say.split("\n", 1)[0]
+        assert "Reported drifted by the audit" in text
+        assert "Not zipped" in say
+        # The remedy: neither repo can repair this by itself, because both ends
+        # of the contradiction are committed files a human owns.
+        assert "account-skills.txt" in say
+
+    def test_a_registry_absent_name_the_audit_never_named_raises_no_alarm(self, tmp_path):
+        """The negative control, and the reason the block reads off `drifted`
+        rather than off the local row. A skill can be declared and gone from
+        the registry with the audit saying nothing about it - the ordinary
+        state after a retirement, once the audit has caught up. There is no
+        cross-repo disagreement to report then, only the bottom-of-summary line
+        that has always covered it. An alarm on every retired skill would cost
+        the real one its meaning.
+        """
+        _, text = run(tmp_path, report(missing=["retired-skill"]),
+                      latest=artifact(status="pass", drifted=[]),
+                      status="fresh")
+        assert "absent from the registry at this commit" not in text
+        assert "Declared but absent from the registry: retired-skill" in text
+
 
 class TestADegradedAuditIsNeverMistakenForAPass:
     def test_a_missing_artifact_degrades_loudly(self, tmp_path):

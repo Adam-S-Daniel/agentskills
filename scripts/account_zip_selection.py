@@ -116,14 +116,23 @@ def select(report: dict, selection: str, summary, status: str) -> dict:
     """What to zip, and everything the summary needs to explain the choice.
 
     Keys: `names` (feeds the matrix), `why`, `unknown` (asked for but not
-    declared), `undeclared` (audit-drifted but not declared), `contributed`
+    declared), `undeclared` (audit-drifted but not declared), `unzippable`
+    (audit-drifted and declared, but gone from the registry), `contributed`
     (came from the audit rather than the recording), `rows` (the report indexed
     by name).
+
+    EVERY NAME THE AUDIT CARRIES LEAVES HERE IN EXACTLY ONE LIST, and every one
+    of those lists is rendered. A name the audit reported and this module then
+    dropped, with nothing in the summary saying so, is the silent divergence
+    the two-sided design exists to prevent: the drift issue in skills-evals
+    names a skill, this run builds no artifact for it, and neither surface
+    states the disagreement.
     """
     rows = {r["name"]: r for r in report.get("skills") or []}
     sel = (selection or "").strip()
     unknown: list = []
     undeclared: list = []
+    unzippable: list = []
     contributed: list = []
 
     if sel == "all":
@@ -155,11 +164,19 @@ def select(report: dict, selection: str, summary, status: str) -> dict:
         # registry while `account-skills.txt` still lists it and the audit -
         # which measured `registry_ref`, older than HEAD by construction - is
         # still naming a directory that existed in the tree it read and does
-        # not exist here. Nothing is lost by dropping it: render() prints it
-        # under "Declared but absent from the registry", which is the line that
-        # exists to report exactly this state.
+        # not exist here.
+        #
+        # IT IS CARRIED OUT AS ITS OWN LIST RATHER THAN FILTERED AWAY, because
+        # the drop is a disagreement with the published audit and has to be
+        # stated as one. The bottom-of-summary "Declared but absent from the
+        # registry" line is NOT that statement: it fires off the local report
+        # whether or not the audit ever named the skill, so it reports one of
+        # the two facts and never connects them. render() has a 🚨 for this
+        # beside the `undeclared` one.
+        unzippable = [n for n in drifted if n in rows
+                      and rows[n]["status"] == "missing-from-registry"]
         contributed = [n for n in drifted if n in rows
-                       and rows[n]["status"] != "missing-from-registry"]
+                       and n not in set(unzippable)]
         names = sorted(set(report["needs_upload"]) | set(contributed))
         why = "changed since the account store was last recorded"
         if contributed:
@@ -171,7 +188,7 @@ def select(report: dict, selection: str, summary, status: str) -> dict:
         unknown = [n for n in asked if n not in rows]
 
     return {"names": names, "why": why, "unknown": unknown,
-            "undeclared": undeclared, "rows": rows,
+            "undeclared": undeclared, "unzippable": unzippable, "rows": rows,
             "contributed": set(contributed)}
 
 
@@ -230,6 +247,30 @@ def render(report: dict, chosen: dict, summary, status: str, *,
             f"store is close to a one-way door (the upload path has no delete, "
             f"docs/decisions/0002), so this workflow will not declare one on "
             f"its own. Add it by hand if it belongs there.\n")
+    if chosen["unzippable"]:
+        # THE OTHER HALF OF THE SAME OBLIGATION. `undeclared` has always said
+        # "the audit named it and this run did not build it"; the
+        # registry-absent drop was made just as deliberately and said nothing,
+        # which leaves a reader holding a drift issue that names a skill and a
+        # run page with no artifact for it, and no sentence anywhere admitting
+        # the two disagree. The "Declared but absent from the registry" line at
+        # the bottom is NOT that sentence: it fires off the local report
+        # whether or not the audit ever named the skill, so it states one of
+        # the facts and never connects them. Naming the remedy matters as much
+        # as naming the skill - neither repo can repair this on its own,
+        # because both ends of the contradiction are committed files a human
+        # owns.
+        say(f"> 🚨 **Reported drifted by the audit, but absent from the "
+            f"registry at this commit: {', '.join(chosen['unzippable'])}.** "
+            f"Not zipped — there is no `plugins/*/skills/<name>/` here to "
+            f"build a ZIP from, so the build would fail on a path that is not "
+            f"there rather than tell you anything. The audit measured its own "
+            f"`registry_ref`, which is older than HEAD, so it read a tree "
+            f"where that directory still existed. The drift issue in "
+            f"`Adam-S-Daniel/skills-evals` will go on naming these while no "
+            f"artifact appears for them — close the gap at the declaration: "
+            f"drop the name from `account-skills.txt` if the skill is "
+            f"retired, or restore the skill if it is not.\n")
 
     if not names:
         say("Nothing to upload - every declared skill matches the "

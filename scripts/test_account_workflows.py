@@ -100,38 +100,68 @@ class TestRecordAccountUpload:
             if s.get("name") == "Summarise"
         ))
 
-    def test_it_never_says_the_reader_is_finished_while_a_step_is_manual(self):
-        """The summary contradicted itself inside one paragraph.
+    def test_it_never_tells_the_reader_to_close_the_drift_issue(self):
+        """The tail of this summary has now been wrong two ways, both of which
+        cost the reader the same thing: they act on it.
 
-        It opened "Nothing further from you", described the loop closing
-        itself, and then said the last step is done by hand. Both cannot be
-        true, and the reader acts on the first: they are standing there holding
-        the phone they just uploaded from, they are told they are done, they
-        stop - and the drift issue stays open reporting a problem that was
-        already repaired. So the automatic part and the manual part are stated
-        separately, in the present tense, once each.
+        First it contradicted itself inside one paragraph - it opened "Nothing
+        further from you", described the loop closing itself, and then said the
+        last step is done by hand. Both cannot be true and the reader acts on
+        the first, so they stop and the drift issue stays open reporting a
+        problem that was already repaired.
+
+        Then, having named the manual step, it named it WRONGLY: closing the
+        drift issue is not the operator's job at all. skills-evals'
+        `account-store-drift.yml` opens, edits and closes it, and the issue
+        body's own step 4 says to leave it alone. An operator who closes it
+        from their phone gets a DUPLICATE - the Tier-3 audit re-measures once a
+        day, so the next drift run still reads `fail`, looks up `--state open`,
+        finds nothing, and files a fresh issue.
+
+        Both defects live in the same sentence, so one test holds the ground:
+        this summary describes what the machinery does and never hands the
+        reader the issue to close.
         """
         text = self._summary()
         assert "Nothing further from you" not in text
         assert "loop closes itself" not in text
-        assert "still" in text and "manual" in text, (
-            "the summary no longer says which step is still done by hand"
+        assert "Leave the drift issue alone" in text, (
+            "the summary no longer tells the reader who owns the drift issue"
         )
+        # "still manual", "by hand", "until ... lands" - the shapes that put a
+        # close on the operator. `to close by hand` is the sanctioned use: the
+        # sentence saying there is nothing here for them to close.
+        assert "still manual" not in text
+        assert text.count("by hand") == text.count("to close by hand")
 
-    def test_every_issue_reference_names_the_repo_it_lives_in(self):
-        """A bare `#48` in an agentskills summary reads as an agentskills
-        issue, and `skills-evals#48` is not a form GitHub resolves either. The
-        issues this text points at live in another repo, so every reference
-        carries the full `owner/repo#n`.
+    def test_it_pins_no_issue_or_pull_request_number(self):
+        """A number written here cannot be kept true by anything.
+
+        The drift design opens a FRESH issue per episode - the lookup is
+        `--state open`, so a closed one is never found again - which makes a
+        hardcoded issue number wrong from the second episode onward. A PR
+        number is worse: this text shipped alongside the very PR it called
+        "open and unmerged", so it was false the day it landed. Nothing in this
+        repo watches either number, and a summary read on a phone is believed.
+
+        Point at the workflow that owns the lifecycle instead. If a reference
+        ever does come back, it carries the full `owner/repo#n` - a bare `#48`
+        in an agentskills summary reads, and links, as an agentskills issue.
         """
         text = self._summary()
         refs = re.findall(r"(\S*)#(\d+)", text)
-        assert refs, "the summary stopped naming the issues it points at"
+        assert not refs, (
+            f"the summary pins {', '.join(p + '#' + n for p, n in refs)}, "
+            f"which nothing updates when the next episode opens a new issue"
+        )
         for prefix, number in refs:
             assert "Adam-S-Daniel/skills-evals" in prefix, (
                 f"#{number} is written as {prefix}#{number}, which does not "
                 f"resolve to the repo it lives in"
             )
+        # The pointer that replaced them: a workflow name, which is stable
+        # across every episode.
+        assert "account-store-drift.yml" in text
 
     def test_every_gh_api_call_discards_output_on_failure(self):
         """`gh api --jq` prints the raw error body to STDOUT and exits 1 on an
