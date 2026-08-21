@@ -13,5 +13,5 @@ this directory is genuinely volatile: open TODOs, per-machine convergence
 status, and notes narrow enough that they aren't worth a permanent home yet.
 
 <!-- Claude: add one line per topic file below, e.g. `- [Title](topic.md) — hook` -->
-- [Ecosystem state](ecosystem-state.md) — issue #18 pending manual step, per-machine setup.sh convergence status, agentskills-private bundle status, fleet AGENTS.md sync history, skills-evals harness coverage
-- [Gotchas](gotchas.md) — memory-path munging ambiguity, claude-memory-map chromium test breakage, one-time plugin-install touch after a rename migration, _agent-guidance test mock-data trap
+- [Ecosystem state](ecosystem-state.md) — issue #18 pending manual step, per-machine setup.sh convergence status, agentskills-private bundle status, fleet AGENTS.md sync history, skills-evals harness coverage, account-store drift loop's pending skills-evals half
+- [Gotchas](gotchas.md) — memory-path munging ambiguity, claude-memory-map chromium test breakage, one-time plugin-install touch after a rename migration, _agent-guidance test mock-data trap, GitHub reach from a hosted cloud session

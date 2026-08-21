@@ -769,7 +769,52 @@ not an error.
 **The phone flow.** `.github/workflows/account-skill-zips.yml` runs that check
 and uploads one artifact per skill needing an upload. Dispatch it from the
 GitHub UI (`selection`: `stale` — the default — or `all`, or specific names);
-it also runs on any push to `main` that touches a skill.
+it also runs on any push to `main` that touches a skill, the recording, or the
+selection module — and **daily, on a cron**, because the second thing it now
+reads can turn red with no commit in this repo at all.
+
+**The second source: the published Tier-3 audit.** The recording above knows
+today's registry and an account store as old as whoever last ran
+`--record-account-state`. skills-evals' Tier-3 Routine is the one thing that
+actually *looks* at that store, and it publishes what it found to
+`propagation/account/latest.json` on that repo's `eval-results` branch. The
+workflow's `pick` job clones skills-evals and calls **its own**
+`propagation.account_store.freshness_verdict` on that artifact — age limit read
+from skills-evals' fixture, never copied into a constant here — and on a
+`reported-failure` verdict adds the skills that verdict names to the ones the
+recording called `stale`. The union is the point: the recording knows a newer
+registry, the audit knows a newer account, and neither dominates, so the offer
+list is deliberately a **superset** of both.
+
+A `fresh` verdict therefore contributes nothing and **removes nothing**, which
+looks like a bug and is not: a pass describes the registry at the audit's own
+`registry_ref`, and a push-triggered run is by construction the case where that
+ref is already behind. `unavailable` — the clone failed, the harness moved,
+PyYAML was not installed — is not a pass either. The run continues on the
+recording alone and the summary says **DEGRADED** in words, because a run that
+could not ask must never read like a run that asked and was told yes.
+
+**An audit-named skill is zipped only if `account-skills.txt` already declares
+it.** One line, two reasons, and both matter. `eval-results` is a deliberately
+unprotected results branch published by a session's push rather than by a
+reviewed workflow (AGENTS.md, "Automation vs branch protection"), so what it
+says is untrusted input; and declaring a skill for the account store is close to
+a one-way door, because the upload path has no delete
+([ADR 0002](../../../../docs/decisions/0002-limit-account-store-to-repo-independent-skills.md)).
+A name that arrives in the artifact undeclared is called out in the run summary
+and built for nobody — adding it is a human's commit. Why the loop is shaped
+this way at all, and what was rejected, is
+[ADR 0006](../../../../docs/decisions/0006-drive-the-account-store-drift-loop-from-one-published-artifact.md).
+
+Measured 2026-08-21, from a cloud session that turned out to have the account
+mirror: the published audit (10 checked, 1 finding — `sync-skills`,
+`content-drift` in `SKILL.md`) and this repo's own `--account-drift` report,
+run against a recording re-taken the same day, named the same one skill and
+nothing else. So on that day the union and either source alone were the same
+list — which is agreement rather than redundancy, and the two can only be seen
+to agree because both are read.
+
+**Then, on the phone**, whichever source put the skill on the list:
 
 1. Open the run, scroll to **Artifacts**.
 2. Tap a skill's artifact — it downloads as `<name>.zip`.
@@ -806,6 +851,18 @@ recording*; it says nothing about an upload made afterwards, and nothing at all
 about the account if the recording is old. `recorded_at` is in every report for
 that reason. Only §7's `--verify`, run where the mirror exists, compares
 against the account itself.
+
+The published Tier-3 verdict the ZIP workflow now also reads is the one input
+that *did* look at the account, and it does not change that sentence. What
+reaches this repo is a **report of a measurement another session took** — at
+that session's clock (`generated_at`) and against that session's registry
+commit (`registry_ref`) — so `reported-failure` is proof the account had
+drifted at a moment already in the past, never proof that it still has.
+`freshness_verdict`'s four liveness statuses (`stale`, `missing`, `unreadable`,
+`not-yet-bootstrapped`) say the audit is not *reaching* us, which says nothing
+whatever about the account store; none of them may retire a name the recording
+found, and none of them is a pass. `--verify` remains the only thing that
+compares the account against what an upload would send right now.
 
 Digests are content, never timestamps: E5 measured `updatedAt`-vs-`git log` and
 it flagged 3 of 10 skills with 2 false positives.

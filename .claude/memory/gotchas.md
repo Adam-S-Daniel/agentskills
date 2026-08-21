@@ -14,3 +14,10 @@
   results branch), so `git checkout -- drift-report.md` fails with *pathspec did
   not match any file(s) known to git*. Clean it with
   `git clean -fX -- drift-report.md` before committing.
+- Hosted cloud sessions (2026-08-21): there is no `gh` CLI and the
+  `GITHUB_TOKEN`/`GH_TOKEN` env vars are short placeholders, but a bare
+  `curl https://api.github.com/...` is authenticated by the agent proxy and
+  scoped to the session's authorized repos — agentskills and skills-evals
+  answered 200, repo-settings/cms-platform/anthropics 403. So cross-repo claims
+  can be checked from such a session with plain curl; a 403 there means "not in
+  this session's repo set", not "does not exist".

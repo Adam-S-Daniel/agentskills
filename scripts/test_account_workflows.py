@@ -19,6 +19,19 @@ yaml = pytest.importorskip("yaml")
 WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 ZIPS = WORKFLOWS / "account-skill-zips.yml"
 RECORD = WORKFLOWS / "record-account-upload.yml"
+# The ZIP selection lives here rather than in a `run:` heredoc; see the note on
+# test_the_summary_offers_the_route_a_phone_can_take.
+SELECTION = Path(__file__).resolve().parent / "account_zip_selection.py"
+
+
+# The prose a `run:` block actually emits, with its comments dropped: the
+# `echo "..."` payloads joined. Asserting on the raw body would let a claim
+# that only survives in a comment count as if it reached the reader.
+ECHOED = re.compile(r'^\s*echo\s+"(.*)"\s*$', re.M)
+
+
+def echoed(body):
+    return " ".join(m.group(1) for m in ECHOED.finditer(body))
 
 
 def load(path):
@@ -81,6 +94,75 @@ class TestRecordAccountUpload:
                 if step.get("run"):
                     assert "inputs." not in step["run"], step.get("name")
 
+    def _summary(self):
+        return echoed(next(
+            s["run"] for s in load(RECORD)["jobs"]["record"]["steps"]
+            if s.get("name") == "Summarise"
+        ))
+
+    def test_it_never_tells_the_reader_to_close_the_drift_issue(self):
+        """The tail of this summary has now been wrong two ways, both of which
+        cost the reader the same thing: they act on it.
+
+        First it contradicted itself inside one paragraph - it opened "Nothing
+        further from you", described the loop closing itself, and then said the
+        last step is done by hand. Both cannot be true and the reader acts on
+        the first, so they stop and the drift issue stays open reporting a
+        problem that was already repaired.
+
+        Then, having named the manual step, it named it WRONGLY: closing the
+        drift issue is not the operator's job at all. skills-evals'
+        `account-store-drift.yml` opens, edits and closes it, and the issue
+        body's own step 4 says to leave it alone. An operator who closes it
+        from their phone gets a DUPLICATE - the Tier-3 audit re-measures once a
+        day, so the next drift run still reads `fail`, looks up `--state open`,
+        finds nothing, and files a fresh issue.
+
+        Both defects live in the same sentence, so one test holds the ground:
+        this summary describes what the machinery does and never hands the
+        reader the issue to close.
+        """
+        text = self._summary()
+        assert "Nothing further from you" not in text
+        assert "loop closes itself" not in text
+        assert "Leave the drift issue alone" in text, (
+            "the summary no longer tells the reader who owns the drift issue"
+        )
+        # "still manual", "by hand", "until ... lands" - the shapes that put a
+        # close on the operator. `to close by hand` is the sanctioned use: the
+        # sentence saying there is nothing here for them to close.
+        assert "still manual" not in text
+        assert text.count("by hand") == text.count("to close by hand")
+
+    def test_it_pins_no_issue_or_pull_request_number(self):
+        """A number written here cannot be kept true by anything.
+
+        The drift design opens a FRESH issue per episode - the lookup is
+        `--state open`, so a closed one is never found again - which makes a
+        hardcoded issue number wrong from the second episode onward. A PR
+        number is worse: this text shipped alongside the very PR it called
+        "open and unmerged", so it was false the day it landed. Nothing in this
+        repo watches either number, and a summary read on a phone is believed.
+
+        Point at the workflow that owns the lifecycle instead. If a reference
+        ever does come back, it carries the full `owner/repo#n` - a bare `#48`
+        in an agentskills summary reads, and links, as an agentskills issue.
+        """
+        text = self._summary()
+        refs = re.findall(r"(\S*)#(\d+)", text)
+        assert not refs, (
+            f"the summary pins {', '.join(p + '#' + n for p, n in refs)}, "
+            f"which nothing updates when the next episode opens a new issue"
+        )
+        for prefix, number in refs:
+            assert "Adam-S-Daniel/skills-evals" in prefix, (
+                f"#{number} is written as {prefix}#{number}, which does not "
+                f"resolve to the repo it lives in"
+            )
+        # The pointer that replaced them: a workflow name, which is stable
+        # across every episode.
+        assert "account-store-drift.yml" in text
+
     def test_every_gh_api_call_discards_output_on_failure(self):
         """`gh api --jq` prints the raw error body to STDOUT and exits 1 on an
         HTTP error - the filter never runs - so `x=$(cmd) || true` captures
@@ -133,16 +215,123 @@ class TestAccountSkillZips:
         has ~/.claude/skills/synced" - correct, and useless to the reader
         standing there holding the artifact they just uploaded. Both routes are
         named now; this keeps the dispatchable one from being edited back out.
+
+        IT READS THE MODULE NOW, NOT THE `run:` BODY, and that is a deliberate
+        follow of the code rather than a weakening. The summary moved into
+        scripts/account_zip_selection.py when the selection grew a second
+        source, because a heredoc cannot be unit-tested. Asserting on the
+        workflow text alone would now pass on an empty module, so this asserts
+        on the module AND that the pick step still invokes it - the strings
+        have to sit on the path that actually renders. The rendering itself is
+        covered in scripts/test_account_zip_selection.py.
         """
         pick = next(
             s for s in load(ZIPS)["jobs"]["pick"]["steps"]
             if s.get("name") == "Decide which skills need a ZIP"
         )["run"]
-        assert "Record an account upload" in pick, "phone route not offered"
-        assert "--record-account-state" in pick, "mirror route not offered"
+        assert "scripts/account_zip_selection.py" in pick, (
+            "the pick step no longer calls the module this test reads"
+        )
+        text = SELECTION.read_text(encoding="utf-8")
+        assert "Record an account upload" in text, "phone route not offered"
+        assert "--record-account-state" in text, "mirror route not offered"
         # The run ID is filled in for the reader - having to go and find it is
         # the friction this whole path exists to remove.
-        assert "GITHUB_RUN_ID" in pick
+        assert "GITHUB_RUN_ID" in text
+
+    def test_it_runs_daily_on_one_offset_cron(self):
+        """The condition it reacts to can become true with NO commit here.
+
+        skills-evals' Tier-3 Routine publishes on its own schedule, so without
+        a cron this workflow could only ever learn about account drift by
+        accident, on the next unrelated push. Exactly one cron - a second entry
+        would double every day's runs for no new information - and a non-zero
+        minute, because GitHub queues the whole platform's cron on the hour and
+        delays it. Offset from ci.yml's `17 6 * * *` so the two do not contend.
+        """
+        triggers = load(ZIPS)["on"]
+        assert "schedule" in triggers, "no schedule trigger"
+        crons = [entry["cron"] for entry in triggers["schedule"]]
+        assert len(crons) == 1, crons
+        minute = crons[0].split()[0]
+        assert minute not in ("0", "00", "*"), crons[0]
+
+    def test_the_recording_that_decides_staleness_is_a_salient_path(self):
+        """The bug this locks out, found live.
+
+        `account-state.json` sits at the repo ROOT deliberately - a copy inside
+        a skill directory would be uploaded as part of that skill by
+        `zip_skill()` - so it matches neither `plugins/*/skills/**` nor the
+        workflow's own path. A merged `record-account-upload` PR, whose diff is
+        exactly and only that file, therefore did not re-run this workflow at
+        all, and the header comment claimed the filter covered "the recording
+        that decides staleness" while it did not.
+        """
+        paths = load(ZIPS)["on"]["push"]["paths"]
+        assert "account-state.json" in paths, paths
+        # The selection module decides what gets built; a change to it that
+        # nothing re-ran would be the same silent no-op one level up.
+        assert "scripts/account_zip_selection.py" in paths, paths
+
+    def test_the_verdict_is_imported_from_skills_evals_not_re_derived(self):
+        """One predicate, two repos, and only one implementation of it.
+
+        `freshness_verdict` is what opens, updates and closes the tracking
+        issue "Account skill store drifted from registry (automated Tier-3
+        audit)". A copy of that rule here would be free to disagree with the
+        issue - ZIPs for a condition nobody filed, or silence while an issue
+        sat open - and nothing would report the divergence. So the pick job
+        clones skills-evals and calls ITS function, with the age limit read
+        from ITS fixture rather than pasted into a constant.
+        """
+        audit = next(
+            s for s in load(ZIPS)["jobs"]["pick"]["steps"]
+            if s.get("id") == "audit"
+        )["run"]
+        assert "freshness_verdict" in audit, "the verdict is not imported"
+        assert "--branch eval-results" in audit, "the artifact branch is not read"
+        assert "Adam-S-Daniel/skills-evals" in audit
+        assert "account/latest.json" in audit
+        assert "fixture.yaml" in audit, "max_age_days was hard-coded"
+        # Re-deriving staleness would need a comparison against the age limit
+        # right here. Importing means this step does arithmetic on nothing.
+        assert "timedelta" not in audit
+
+    def test_the_cross_repo_condition_is_named_in_exactly_one_place(self):
+        """`reported-failure` is the string both repos key on.
+
+        It has to be written down on this side or the coupling is invisible to
+        a reader, and it has to be DECIDED in one place or the next edit
+        updates one copy of it. So: exactly one string literal, in the module,
+        as a named constant - and in the workflow the name may appear only in a
+        comment explaining the coupling, never in a line that acts on it.
+        """
+        module = SELECTION.read_text(encoding="utf-8")
+        assert "reported-failure" in module
+        assert module.count('"reported-failure"') == 1, (
+            "the predicate is written out more than once in the module"
+        )
+        for line in ZIPS.read_text(encoding="utf-8").splitlines():
+            if "reported-failure" in line:
+                assert line.strip().startswith("#"), (
+                    f"the workflow acts on the predicate itself: {line!r}"
+                )
+
+    def test_no_run_body_interpolates_a_workflow_expression(self):
+        """A `${{ }}` expansion inside `run:` is rendered into the command and
+        echoed to a PUBLIC log, and is attacker-controlled shell. Values reach
+        a script through `env:` only.
+
+        `github.server_url` / `github.repository` / `github.run_id` are the one
+        tolerated exception in these repos (ci.yml builds a run URL that way),
+        so they are allowed here rather than silently forcing a rewrite of a
+        file this change does not touch.
+        """
+        allowed = re.compile(
+            r"\$\{\{\s*github\.(server_url|repository|run_id)\s*\}\}")
+        for path in (ZIPS, RECORD):
+            for body in runs(load(path)):
+                assert "${{" not in allowed.sub("", body), path.name
 
     def test_the_zip_payload_is_built_by_the_real_uploader(self):
         """Re-walking the skill directory here would be a second
@@ -150,6 +339,100 @@ class TestAccountSkillZips:
         actual upload uses. The payload comes from `--prepare --zip-dir`.
         """
         assert any("--zip-dir" in body for body in runs(load(ZIPS)))
+
+
+class TestTheAuditStepAnnouncesEveryDegradedVerdict:
+    """The audit step's own tail, EXECUTED - not string-matched.
+
+    THE FAILURE THIS LOCKS OUT IS A GREEN RUN THAT ASKED NOTHING. Every other
+    failure in that step (both clones, the pyyaml install) raises a
+    `::warning::`, and the empty-capture fallback - the one path that fails
+    OPEN - did not. That is the path taken when the cross-repo IMPORT breaks:
+    skills-evals moves `account_store.py`, renames `freshness_verdict`, or
+    renames the `account_audit_max_age_days` fixture key. Both clones succeed,
+    neither existing warning fires, the heredoc raises, and with a clean local
+    recording `count=0` skips the zip job. The run ends GREEN with zero
+    annotations, and scheduled-run-health.yml - which scans for FAILED runs -
+    never reports it either.
+
+    The liveness verdicts are here for the same reason one level out: `stale`,
+    `missing` and `unreadable` all mean the Tier-3 Routine stopped publishing a
+    usable result, which without an annotation is visible only inside a step
+    summary nobody opens on a green run.
+
+    Run rather than grepped because a lint that greps for `::warning::` passes
+    on a warning that sits in the wrong branch.
+    """
+
+    def _tail(self):
+        """Everything the audit step does after the heredoc returns.
+
+        Anchored on the heredoc's own `) || verdict=""` rather than on a line
+        number, so the slice follows the code if it moves.
+        """
+        body = next(
+            s["run"] for s in load(ZIPS)["jobs"]["pick"]["steps"]
+            if s.get("id") == "audit"
+        )
+        marker = ') || verdict=""'
+        assert marker in body, (
+            "the empty-capture fallback changed shape; this test no longer "
+            "knows where the step's verdict handling starts"
+        )
+        return body[body.index(marker) + len(marker):]
+
+    def _run(self, tmp_path, verdict):
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("bash not on PATH")
+        out = tmp_path / "gh_output"
+        # Forward slashes: Git Bash reads the backslashes of a Windows path as
+        # escapes inside the step's own `>> "$GITHUB_OUTPUT"` redirect, and
+        # pytest-windows runs this file too.
+        env = {**os.environ, "GITHUB_OUTPUT": str(out).replace("\\", "/")}
+        # The verdict arrives as an ARGUMENT rather than baked into the script,
+        # so the empty case is delivered as an actual empty string.
+        proc = subprocess.run(
+            [bash, "-c", "set -uo pipefail\nverdict=$1\n" + self._tail(),
+             "_", verdict],
+            capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout, out.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("verdict, recorded, why", [
+        ("", "unavailable",
+         "the heredoc raised - a broken cross-repo import looks exactly like "
+         "this, with both clones green"),
+        ("stale", "stale", "the Tier-3 Routine has stopped publishing"),
+        ("missing", "missing", "nothing has been published to read"),
+        ("unreadable", "unreadable", "what was published cannot be parsed"),
+    ])
+    def test_a_verdict_the_run_could_not_use_raises_an_annotation(
+            self, tmp_path, verdict, recorded, why):
+        log, out = self._run(tmp_path, verdict)
+        assert "::warning::" in log, why
+        # The verdict still reaches the selection module unchanged - the
+        # annotation is additional, not a substitute.
+        assert f"status={recorded}" in out
+
+    @pytest.mark.parametrize("verdict", ["fresh", "not-yet-bootstrapped"])
+    def test_a_healthy_verdict_stays_quiet(self, tmp_path, verdict):
+        """The negative control. A warning on every run is a warning nobody
+        reads, so an annotation here would cost the ones above their meaning -
+        and would also pass the test above for the wrong reason.
+        """
+        log, out = self._run(tmp_path, verdict)
+        assert "::warning::" not in log, verdict
+        assert f"status={verdict}" in out
+
+    def test_the_verdict_still_reaches_the_step_output(self, tmp_path):
+        """Whatever else the step says, `status=` is the only thing the next
+        step consumes. An annotation that swallowed it would be a worse bug
+        than the silence it replaced.
+        """
+        _, out = self._run(tmp_path, "")
+        assert out.strip() == "status=unavailable"
 
 
 class TestSkillInputIsValidatedBeforeUse:

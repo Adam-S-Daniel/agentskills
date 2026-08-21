@@ -271,15 +271,24 @@ write is the delivery channel for ephemeral surfaces. What works where:
   so it's reserved for skills that should be live everywhere, not per-repo
   ones. The [`sync-skills`](plugins/adam-local/skills/sync-skills) skill (in
   the `adam-local` bundle) automates pushing this registry's skills there.
-  Nothing in CI can see that store, so what a runner compares against is
+  Nothing in CI can see that store — a *surface* limit, not a permissions one:
+  it is files under `~/.claude/skills/synced/`, which a runner simply does not
+  have — so what a runner compares against is
   [`account-state.json`](account-state.json) — a digest per declared skill,
   recorded from a session that *does* have the mirror
   (`sync_skills.py --record-account-state`). The
   [Account skill ZIPs](.github/workflows/account-skill-zips.yml) workflow reads
-  it and publishes one artifact per skill that has moved since, each downloading
-  as a `<name>.zip` that uploads to claude.ai as-is — the path for uploading
-  from a phone. A `stale` verdict is evidence an upload is needed, never proof
-  one happened. Close the loop afterwards either by re-recording from a machine
+  it, and daily also reads the account audit
+  [skills-evals](https://github.com/Adam-S-Daniel/skills-evals) publishes to its
+  `eval-results` branch — the one thing that does look at the store — building
+  one artifact per skill *either* source calls drifted, each downloading as a
+  `<name>.zip` that uploads to claude.ai as-is: the path for uploading from a
+  phone. The union is deliberate (each source knows something the other cannot),
+  and intersecting the audit's names with the declared list is the guard on
+  reading an unprotected branch — see
+  [ADR 0006](docs/decisions/0006-drive-the-account-store-drift-loop-from-one-published-artifact.md).
+  A `stale` verdict is evidence an upload is needed, never proof one
+  happened. Close the loop afterwards either by re-recording from a machine
   with the mirror, or — with no mirror, from the phone — by dispatching
   [Record an account upload](.github/workflows/record-account-upload.yml),
   which writes the weaker `basis: asserted` and pushes a branch to merge. An
