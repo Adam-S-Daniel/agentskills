@@ -12,6 +12,26 @@
 # looked at the account" - strong evidence, not proof. Re-record after
 # uploading or the same skill keeps being offered.
 #
+# THE SECOND SOURCE, AND WHY IT IS THE SAME CONDITION THAT FILES THE ISSUE
+# The recording above goes stale on its own. The one thing that actually LOOKS
+# at the account store is skills-evals' Tier-3 Routine, which publishes
+# `propagation/account/latest.json` to that repo's `eval-results` branch, and
+# whose `reported-failure` verdict is what opens or updates the tracking issue
+# "Account skill store drifted from registry (automated Tier-3 audit)"
+# (`fresh` closes it). The `pick` job below clones that repo and calls
+# skills-evals' OWN `account_store.freshness_verdict` on the published
+# artifact, so the ZIPs appear under exactly the condition that files the
+# issue - the report of the problem and the fix for it arrive together, and
+# neither repo can quietly start using a different predicate.
+#
+# CONSEQUENCE, STATED SO IT IS NOT DISCOVERED AS A SURPRISE: this workflow now
+# has a CROSS-REPO DEPENDENCY whose verdict can change with NO COMMIT IN THIS
+# REPO AT ALL - the same property ci.yml's `skills-conformance` job has, and
+# the reason both carry a schedule. The audit half is best effort: if the clone
+# or the import fails the verdict is `unavailable`, the run continues on the
+# local recording alone, and the summary says DEGRADED in words. It must never
+# be possible to mistake "we could not ask" for "we asked and it passed".
+#
 # WHY THE ARTIFACT IS THE SKILL'S FILES AND NOT A .zip FILE
 # GitHub hands you an artifact AS a zip named after the artifact, so an
 # artifact named `sync-skills` downloads as `sync-skills.zip` with SKILL.md at
@@ -33,12 +53,36 @@ on:
         description: "stale (default) | all | comma-separated skill names"
         required: false
         default: stale
+  # DAILY, BECAUSE THE CONDITION CAN BECOME TRUE WITH NO EVENT HERE. The
+  # Tier-3 Routine publishes at about 05:04 UTC, but GitHub queues cron across
+  # the whole platform and delays it by an unbounded amount, so no cron can be
+  # "just after" that publish - aligning them exactly is not something this
+  # side can arrange. That is precisely why the run reads the published
+  # CONDITION (the artifact's own `generated_at`, judged by
+  # `freshness_verdict`) instead of trusting the clock: an early run sees a
+  # yesterday's-but-still-fresh result and says so, and a Routine that stopped
+  # firing reads as `stale` rather than as a pass. :23 rather than :00 for the
+  # queueing reason above, and offset from ci.yml's `17 6 * * *` so the two
+  # daily jobs do not contend for the same runner minute.
+  schedule:
+    - cron: '23 6 * * *'
   push:
     branches: [main]
     # Salient paths only: the skills that can be declared, the recording that
-    # decides staleness, the tool that computes it, and this file.
+    # decides staleness, the tool that computes it, the module that selects,
+    # and this file.
+    #
+    # `account-state.json` is listed EXPLICITLY and is not covered by any glob
+    # above it: the recording lives at the repo ROOT, deliberately (a copy
+    # inside a skill directory would be uploaded as part of that skill by
+    # `zip_skill()`), so it matches neither `plugins/*/skills/**` nor the
+    # workflow path. Without this line, merging a `record-account-upload` PR -
+    # whose diff is exactly and only that file - did not re-run this workflow,
+    # so the offer list stayed stale until some unrelated push moved it.
     paths:
       - 'plugins/*/skills/**'
+      - 'account-state.json'
+      - 'scripts/account_zip_selection.py'
       - '.github/workflows/account-skill-zips.yml'
 
 permissions:
@@ -55,91 +99,109 @@ jobs:
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
         with:
           python-version: '3.12'
+      - name: Read the published account audit's verdict
+        id: audit
+        # WHY THIS IMPORTS skills-evals' FUNCTION INSTEAD OF RE-DERIVING IT
+        # `freshness_verdict` is the ONE decision function over
+        # propagation/account/latest.json, and the tracking issue named in this
+        # file's header is opened, updated and closed by its result. A second
+        # implementation here would be free to disagree with it: this workflow
+        # would build ZIPs for a condition nobody filed, or stay silent while an
+        # issue sat open, and nothing would report the divergence. So the
+        # harness is cloned and its own function is called, with `max_age_days`
+        # read from ITS fixture rather than copied into a constant here.
+        #
+        # Two clones because they want different things - blobless for the code,
+        # single-branch for the published artifact - and both anonymous: the two
+        # repos are public, which is the same reason ci.yml's sibling clones
+        # need no token. Cloned to ../ so neither tree pollutes the workspace
+        # checkout that `--account-drift` scans.
+        #
+        # `set -uo pipefail` WITHOUT `-e`, deliberately. Every failure here is
+        # handled by name and becomes `status=unavailable`, which the summary
+        # renders as DEGRADED. A missing `eval-results` branch in particular is
+        # reported and never fatal - the same tolerance skills-evals' own
+        # propagation.yml applies in "Fetch the account audit's published
+        # result", and for the same reason: a hard failure would take out the
+        # one workflow that hands a phone the fix for the drift.
+        run: |
+          set -uo pipefail
+          if git clone --filter=blob:none --depth 1 --quiet \
+              https://github.com/Adam-S-Daniel/skills-evals.git ../skills-evals; then
+            echo "skills-evals harness checked out"
+          else
+            echo "::warning::could not clone the skills-evals harness"
+          fi
+          if git clone --depth 1 --single-branch --branch eval-results --quiet \
+              https://github.com/Adam-S-Daniel/skills-evals.git ../eval-results; then
+            echo "eval-results checked out"
+          else
+            echo "::warning::eval-results branch not present yet"
+            mkdir -p ../eval-results
+          fi
+          python3 -m pip install --quiet pyyaml==6.0.3 \
+            || echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"
+          verdict=$(python3 - <<'PY'
+          import json
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          sys.path.insert(0, "../skills-evals/harness")
+          import yaml
+          from propagation.account_store import freshness_verdict
+
+          fixture = yaml.safe_load(Path(
+              "../skills-evals/evals/propagation/fixture.yaml"
+          ).read_text(encoding="utf-8"))
+          latest = Path("../eval-results/propagation/account/latest.json")
+          try:
+              summary = json.loads(latest.read_text(encoding="utf-8"))
+          except (OSError, ValueError):
+              summary = None
+          ok, status, message = freshness_verdict(
+              summary,
+              now=datetime.now(timezone.utc),
+              max_age_days=int(fixture["account_audit_max_age_days"]),
+              bootstrapped=Path("../eval-results/propagation/.bootstrapped").exists(),
+          )
+          print(message, file=sys.stderr)
+          print(status)
+          PY
+          ) || verdict=""
+          # An empty capture is the ONLY way this can end without a verdict, and
+          # it must not read as one. `unavailable` is not a skills-evals status;
+          # the selection module treats it - and any string it does not
+          # recognise - as "the audit could not be used".
+          [ -n "$verdict" ] || verdict=unavailable
+          echo "published account audit reads: $verdict"
+          echo "status=$verdict" >> "$GITHUB_OUTPUT"
       - name: Decide which skills need a ZIP
         id: drift
         # SELECTION is read from the environment, never interpolated into the
         # run: body - an `${{ inputs.* }}` expansion is echoed into the log and
         # is attacker-controlled shell. See AGENTS.md, "Data exposure in CI".
+        # AUDIT_STATUS and EVENT_NAME come the same way for the same reason.
+        #
+        # The decision itself lives in scripts/account_zip_selection.py rather
+        # than in a heredoc here: it now takes the union of two sources, and a
+        # rule that spans two repos has to be exercisable against fixtures. See
+        # scripts/test_account_zip_selection.py.
         env:
           SELECTION: ${{ inputs.selection || 'stale' }}
+          AUDIT_STATUS: ${{ steps.audit.outputs.status }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           python3 plugins/adam-local/skills/sync-skills/sync_skills.py \
             --account-drift --repos "$GITHUB_WORKSPACE" > drift.json
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, os
-          rep = json.load(open("drift.json"))
-          sel = (os.environ.get("SELECTION") or "stale").strip()
-          rows = {r["name"]: r for r in rep["skills"]}
-          if sel == "all":
-              names = [r["name"] for r in rep["skills"]
-                       if r["status"] != "missing-from-registry"]
-              why = "every declared skill (`all` requested)"
-          elif sel in ("", "stale"):
-              names = rep["needs_upload"]
-              why = "changed since the account store was last recorded"
-          else:
-              asked = [n.strip() for n in sel.split(",") if n.strip()]
-              names = [n for n in asked if n in rows]
-              why = "named on the dispatch"
-              unknown = [n for n in asked if n not in rows]
-              if unknown:
-                  print(f"> Not declared in `account-skills.txt`, skipped: "
-                        f"{', '.join(unknown)}\n")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"names={json.dumps(names)}\n")
-              fh.write(f"count={len(names)}\n")
-          print("## Account skill ZIPs\n")
-          print(f"Recording last taken: **{rep['recorded_at'] or 'never'}**\n")
-          if not names:
-              print("Nothing to upload - every declared skill matches the "
-                    "recording.\n")
-          else:
-              print(f"{len(names)} skill(s) {why}:\n")
-              for n in names:
-                  st = rows[n]["status"]
-                  print(f"- **{n}** — `{st}`")
-              print("\n### From your phone\n")
-              print("1. Scroll to **Artifacts** at the bottom of this run page.")
-              print("2. Tap a skill's artifact — it downloads as `<name>.zip`.")
-              print("3. In Safari open claude.ai → Settings → Capabilities → "
-                    "upload that `.zip` as-is. No unzipping.")
-              print("4. It replaces the account copy of the same name.\n")
-              # Two ways to close the loop, PHONE FIRST - this summary is
-              # read on a phone, and the mirror route is the one a phone
-              # cannot take. Naming only the mirror told the reader to do the
-              # single thing their device cannot.
-              print("\n### Then close the loop, or these keep being offered\n")
-              # Workflow name kept contiguous on one line so a grep for it
-              # finds this pointer.
-              print("**From the phone** — dispatch **Record an account upload**"
-                    f" with the skill name and this run ID "
-                    f"(`{os.environ.get('GITHUB_RUN_ID', '')}`). It records "
-                    "the upload and pushes a branch for you to open as a PR. "
-                    "It writes `basis: asserted` — your word that the upload "
-                    "landed, which nothing can verify.\n")
-              print("**From a machine with the account mirror** — the stronger "
-                    "one, because it measures instead of asserting:\n")
-              print("```")
-              print("CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'")
-              print("python3 plugins/adam-local/skills/sync-skills/"
-                    "sync_skills.py --record-account-state")
-              print("```")
-              print("\nEither way, commit the result. An observation "
-                    "overwrites an assertion, never the reverse.\n")
-          # An `in-sync` that rests on --assert-uploaded was never checked
-          # against the account. Not offering it is right; saying nothing about
-          # it is what made a claim indistinguishable from a measurement.
-          if rep.get("in_sync_asserted"):
-              print(f"\n**Not offered, but never verified:** "
-                    f"{', '.join(rep['in_sync_asserted'])} — recorded by "
-                    f"`--assert-uploaded`, i.e. on the operator's word. Run "
-                    f"`--record-account-state` from a session with a mirror to "
-                    f"replace the claim with a measurement.\n")
-          if rep["missing_from_registry"]:
-              print(f"\n⚠️ Declared but absent from the registry: "
-                    f"{', '.join(rep['missing_from_registry'])}\n")
-          PY
+          python3 scripts/account_zip_selection.py \
+            --drift-report drift.json \
+            --selection "$SELECTION" \
+            --audit-latest ../eval-results/propagation/account/latest.json \
+            --audit-status "$AUDIT_STATUS" \
+            --event "$EVENT_NAME" \
+            --run-id "$GITHUB_RUN_ID"
 
   zip:
     needs: pick

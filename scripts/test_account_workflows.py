@@ -19,6 +19,9 @@ yaml = pytest.importorskip("yaml")
 WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 ZIPS = WORKFLOWS / "account-skill-zips.yml"
 RECORD = WORKFLOWS / "record-account-upload.yml"
+# The ZIP selection lives here rather than in a `run:` heredoc; see the note on
+# test_the_summary_offers_the_route_a_phone_can_take.
+SELECTION = Path(__file__).resolve().parent / "account_zip_selection.py"
 
 
 def load(path):
@@ -133,16 +136,123 @@ class TestAccountSkillZips:
         has ~/.claude/skills/synced" - correct, and useless to the reader
         standing there holding the artifact they just uploaded. Both routes are
         named now; this keeps the dispatchable one from being edited back out.
+
+        IT READS THE MODULE NOW, NOT THE `run:` BODY, and that is a deliberate
+        follow of the code rather than a weakening. The summary moved into
+        scripts/account_zip_selection.py when the selection grew a second
+        source, because a heredoc cannot be unit-tested. Asserting on the
+        workflow text alone would now pass on an empty module, so this asserts
+        on the module AND that the pick step still invokes it - the strings
+        have to sit on the path that actually renders. The rendering itself is
+        covered in scripts/test_account_zip_selection.py.
         """
         pick = next(
             s for s in load(ZIPS)["jobs"]["pick"]["steps"]
             if s.get("name") == "Decide which skills need a ZIP"
         )["run"]
-        assert "Record an account upload" in pick, "phone route not offered"
-        assert "--record-account-state" in pick, "mirror route not offered"
+        assert "scripts/account_zip_selection.py" in pick, (
+            "the pick step no longer calls the module this test reads"
+        )
+        text = SELECTION.read_text(encoding="utf-8")
+        assert "Record an account upload" in text, "phone route not offered"
+        assert "--record-account-state" in text, "mirror route not offered"
         # The run ID is filled in for the reader - having to go and find it is
         # the friction this whole path exists to remove.
-        assert "GITHUB_RUN_ID" in pick
+        assert "GITHUB_RUN_ID" in text
+
+    def test_it_runs_daily_on_one_offset_cron(self):
+        """The condition it reacts to can become true with NO commit here.
+
+        skills-evals' Tier-3 Routine publishes on its own schedule, so without
+        a cron this workflow could only ever learn about account drift by
+        accident, on the next unrelated push. Exactly one cron - a second entry
+        would double every day's runs for no new information - and a non-zero
+        minute, because GitHub queues the whole platform's cron on the hour and
+        delays it. Offset from ci.yml's `17 6 * * *` so the two do not contend.
+        """
+        triggers = load(ZIPS)["on"]
+        assert "schedule" in triggers, "no schedule trigger"
+        crons = [entry["cron"] for entry in triggers["schedule"]]
+        assert len(crons) == 1, crons
+        minute = crons[0].split()[0]
+        assert minute not in ("0", "00", "*"), crons[0]
+
+    def test_the_recording_that_decides_staleness_is_a_salient_path(self):
+        """The bug this locks out, found live.
+
+        `account-state.json` sits at the repo ROOT deliberately - a copy inside
+        a skill directory would be uploaded as part of that skill by
+        `zip_skill()` - so it matches neither `plugins/*/skills/**` nor the
+        workflow's own path. A merged `record-account-upload` PR, whose diff is
+        exactly and only that file, therefore did not re-run this workflow at
+        all, and the header comment claimed the filter covered "the recording
+        that decides staleness" while it did not.
+        """
+        paths = load(ZIPS)["on"]["push"]["paths"]
+        assert "account-state.json" in paths, paths
+        # The selection module decides what gets built; a change to it that
+        # nothing re-ran would be the same silent no-op one level up.
+        assert "scripts/account_zip_selection.py" in paths, paths
+
+    def test_the_verdict_is_imported_from_skills_evals_not_re_derived(self):
+        """One predicate, two repos, and only one implementation of it.
+
+        `freshness_verdict` is what opens, updates and closes the tracking
+        issue "Account skill store drifted from registry (automated Tier-3
+        audit)". A copy of that rule here would be free to disagree with the
+        issue - ZIPs for a condition nobody filed, or silence while an issue
+        sat open - and nothing would report the divergence. So the pick job
+        clones skills-evals and calls ITS function, with the age limit read
+        from ITS fixture rather than pasted into a constant.
+        """
+        audit = next(
+            s for s in load(ZIPS)["jobs"]["pick"]["steps"]
+            if s.get("id") == "audit"
+        )["run"]
+        assert "freshness_verdict" in audit, "the verdict is not imported"
+        assert "--branch eval-results" in audit, "the artifact branch is not read"
+        assert "Adam-S-Daniel/skills-evals" in audit
+        assert "account/latest.json" in audit
+        assert "fixture.yaml" in audit, "max_age_days was hard-coded"
+        # Re-deriving staleness would need a comparison against the age limit
+        # right here. Importing means this step does arithmetic on nothing.
+        assert "timedelta" not in audit
+
+    def test_the_cross_repo_condition_is_named_in_exactly_one_place(self):
+        """`reported-failure` is the string both repos key on.
+
+        It has to be written down on this side or the coupling is invisible to
+        a reader, and it has to be DECIDED in one place or the next edit
+        updates one copy of it. So: exactly one string literal, in the module,
+        as a named constant - and in the workflow the name may appear only in a
+        comment explaining the coupling, never in a line that acts on it.
+        """
+        module = SELECTION.read_text(encoding="utf-8")
+        assert "reported-failure" in module
+        assert module.count('"reported-failure"') == 1, (
+            "the predicate is written out more than once in the module"
+        )
+        for line in ZIPS.read_text(encoding="utf-8").splitlines():
+            if "reported-failure" in line:
+                assert line.strip().startswith("#"), (
+                    f"the workflow acts on the predicate itself: {line!r}"
+                )
+
+    def test_no_run_body_interpolates_a_workflow_expression(self):
+        """A `${{ }}` expansion inside `run:` is rendered into the command and
+        echoed to a PUBLIC log, and is attacker-controlled shell. Values reach
+        a script through `env:` only.
+
+        `github.server_url` / `github.repository` / `github.run_id` are the one
+        tolerated exception in these repos (ci.yml builds a run URL that way),
+        so they are allowed here rather than silently forcing a rewrite of a
+        file this change does not touch.
+        """
+        allowed = re.compile(
+            r"\$\{\{\s*github\.(server_url|repository|run_id)\s*\}\}")
+        for path in (ZIPS, RECORD):
+            for body in runs(load(path)):
+                assert "${{" not in allowed.sub("", body), path.name
 
     def test_the_zip_payload_is_built_by_the_real_uploader(self):
         """Re-walking the skill directory here would be a second
