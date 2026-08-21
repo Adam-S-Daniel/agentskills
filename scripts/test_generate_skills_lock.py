@@ -1998,6 +1998,210 @@ def test_repin_on_a_federated_lock_preserves_every_source_verbatim(federated, tm
     assert after["generated_from"] == advanced
 
 
+def _edit_source_skill(extra: Path, body: str) -> str:
+    """Change the federated source's SKILL content and commit; return its HEAD.
+
+    Content rather than `_move_head`'s unrelated file, because the digest is
+    the only thing in the lock that says which ref a source's skills were read
+    out of — an unrelated commit moves HEAD and leaves the digest identical, so
+    a test using it could not tell a re-digest at the new ref from the old
+    value copied forward.
+    """
+    _write(extra / "skills" / "deploy" / "SKILL.md", body)
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "edit deploy")
+    return _head(extra)
+
+
+def test_repin_holds_back_a_source_whose_checkout_was_not_named(federated, tmp_path):
+    """Opt-in per source, and keyed on the FLAG rather than on a checkout existing.
+
+    The sibling clone is at the default `../cms-platform` path and its HEAD has
+    moved, so an implementation that advanced whatever it could find a checkout
+    for would move this pin. That is the case a consumer holding one registry
+    back looks exactly like — the default path is a convention every machine
+    set up for the conformance census already satisfies — so nothing but an
+    explicit `--source-repo` may count as permission.
+    """
+    primary, _primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = json.loads(out.read_text(encoding="utf-8"))
+
+    _edit_source_skill(extra, "---\nname: deploy\n---\nunreviewed\n")
+    _move_head(primary)
+    proc = run_generator("--repo", str(primary), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["sources"] == before["sources"] != []
+    assert after["sources"][0]["ref"] == extra_sha
+    assert after["skills"]["cms-platform/deploy"] == before["skills"]["cms-platform/deploy"]
+
+
+def test_repin_advances_a_source_whose_checkout_was_named(federated, tmp_path):
+    """The asymmetry this closes: --repo advances the primary, --source-repo a source.
+
+    A federated lock inherits its whole `sources` array verbatim, `ref`
+    included, so before this there was no invocation that could advance a
+    secondary pin at all — `--source` REPLACES the array and is an argparse
+    error alongside --repin, which is the trap, not the route. Both consumer
+    site locks stayed frozen on one cms-platform commit and `--check` was green
+    the whole time, because a lock that never moves is perfectly faithful to
+    the ref it pins.
+
+    Only `ref` moves: registry, bundles and layout are the lock's identity, and
+    a re-pin that touched them would be the plain generate this flag exists not
+    to be.
+    """
+    primary, _primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = json.loads(out.read_text(encoding="utf-8"))
+
+    advanced = _edit_source_skill(extra, "---\nname: deploy\n---\ndeploy body, reviewed\n")
+    assert advanced != extra_sha
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--source-repo", f"cms-platform={extra}", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["sources"][0]["ref"] == advanced
+    for field in ("registry", "bundles", "layout"):
+        assert after["sources"][0][field] == before["sources"][0][field]
+    # The primary is untouched by the source's advance — it has its own half of
+    # this field, and nothing here moved its HEAD.
+    assert after["ref"] == before["ref"]
+
+
+def test_an_advanced_sources_digests_come_from_the_ref_that_was_written(federated, tmp_path):
+    """Never write a ref the digests were not taken from.
+
+    The whole lock is an attestation that the content at `ref` is the content
+    the hook will verify against. A re-pin that moved the ref while copying the
+    old digests forward would red every consumer's integrity check at session
+    start; one that re-digested without moving the ref would report success for
+    a no-op. Asserted against the source's working tree at the new commit,
+    which is what the operator reviewed.
+    """
+    primary, _primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    stale = json.loads(out.read_text(encoding="utf-8"))["skills"]["cms-platform/deploy"]
+
+    advanced = _edit_source_skill(extra, "---\nname: deploy\n---\ndeploy body, reviewed\n")
+    assert run_generator("--repo", str(primary), "--repin",
+                         "--source-repo", f"cms-platform={extra}",
+                         "-o", str(out)).returncode == 0
+
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert lock["sources"][0]["ref"] == advanced
+    assert lock["skills"]["cms-platform/deploy"] != stale
+    assert lock["skills"]["cms-platform/deploy"] == gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(
+        extra / "skills" / "deploy"
+    )
+
+
+def test_repin_advances_only_the_sources_that_were_named(tmp_path):
+    """Per source, not per run — one registry moves while the other is held back.
+
+    The two are deliberately identical in every way the code could key on
+    except the flag: both are federated, both sit at their default sibling
+    path, and both have moved. Only the `--source-repo` naming one of them
+    separates them.
+    """
+    primary = tmp_path / "registry"
+    primary_sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    named = tmp_path / "cms-platform"
+    named_sha = make_registry(named, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    held = tmp_path / "other-registry"
+    held_sha = make_registry(held, {"other/publish": SKILL_B}, layout="skills")
+    out = tmp_path / "skills.lock"
+
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={named.resolve().as_uri()}@{named_sha}:skills",
+        "--source", f"other={held.resolve().as_uri()}@{held_sha}:skills",
+        "-o", str(out)).returncode == 0
+
+    advanced = _move_head(named)
+    _move_head(held)
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--source-repo", f"cms-platform={named}", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    by_bundle = {source["bundles"][0]: source
+                 for source in json.loads(out.read_text(encoding="utf-8"))["sources"]}
+    assert by_bundle["cms-platform"]["ref"] == advanced != named_sha
+    assert by_bundle["other"]["ref"] == held_sha
+
+
+def test_source_is_still_an_argparse_error_now_that_source_repo_advances(federated, tmp_path):
+    """The route that advances a source must stay the one that cannot re-identify it.
+
+    Restated here, next to the capability, rather than left to the identity
+    parametrization alone: --source is what an operator reaches for when they
+    want a federated source to move, and it REPLACES the inherited array, so
+    naming one source drops every other registry at exit 0. --source-repo says
+    only where a clone is, which is why it is the flag allowed to mean 'advance
+    this one'.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    advanced = _edit_source_skill(extra, "---\nname: deploy\n---\nedited\n")
+    proc = run_generator(
+        "--repo", str(primary), "--repin",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{advanced}:skills",
+        "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert "--source" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_refuses_to_advance_a_source_from_a_clone_of_another_registry(tmp_path):
+    """The primary's registry/clone correlation, applied to the half that now moves.
+
+    Nothing ties the registry a source NAMES to the checkout --source-repo
+    POINTS AT — and --source-repo is precisely the flag for a machine whose
+    clones are not where the convention says, so pointing it at the wrong one
+    is a typo away. Advancing from that clone writes a sha the registry does
+    not contain: exit 0, --check green because it re-derives from the same
+    wrong clone, and the damage lands at somebody else's session start, where
+    the hook cannot fetch the sha and reports DEGRADED. The pin the source
+    already carries is the probe.
+    """
+    primary = tmp_path / "registry"
+    primary_sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    stranger = tmp_path / "stranger"
+    # DIFFERENT content, and that is load-bearing rather than incidental: a
+    # commit sha is a function of its tree and its author date, so a stranger
+    # built from the same skill in the same second is the same commit, the
+    # probe finds the pinned sha in it, and the test passes for the wrong
+    # reason on a fast machine and fails on a slow one.
+    make_registry(stranger, {"cms-platform/deploy": SKILL_A}, layout="skills")
+    out = tmp_path / "skills.lock"
+
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "-o", str(out)).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--source-repo", f"cms-platform={stranger}", "-o", str(out))
+    assert _rejected(proc), proc.stdout + proc.stderr
+    assert extra_sha in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
 def test_a_plain_generate_still_does_not_inherit_the_locks_sources(federated, tmp_path):
     """Asserted so nobody 'fixes' the trap by teaching generate to inherit.
 

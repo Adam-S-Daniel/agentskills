@@ -202,6 +202,25 @@ disk and report success for having done nothing. The new value is HEAD of the
 re-pin onto a reviewed commit, or back onto a known-good one after a bad bump,
 is a legitimate use — so "advance" describes the intent, not a check.
 
+A federated source has a `ref` of its own, and it moves under exactly the same
+rule, one flag over. `--repo` names the PRIMARY's checkout and `--repin`
+re-resolves the primary's `ref` from its HEAD; `--source-repo 'KEY=PATH'` names
+a SECONDARY's checkout, and `--repin` re-resolves THAT source's `ref` from its
+HEAD. Nothing else about the source moves — registry, bundles and layout are
+identity and stay inherited.
+
+It is opt-in per source, keyed on the operator having passed `--source-repo`
+for it, so a lock can hold one registry back while advancing another. It is
+NOT keyed on a checkout being present: `source_checkout` falls back to a
+default sibling path that a machine set up for the conformance census already
+has, which would make the advance accidental and would move a pin somebody is
+holding still on purpose. The asymmetry this closes was silent for as long as
+it existed — an inherited-verbatim `sources` array meant a secondary pin could
+not be advanced by this tool AT ALL, the lock stayed internally consistent so
+`--check` stayed green, and both consumer site locks sat frozen on one
+cms-platform commit, delivering a retired rule into every ephemeral session,
+until they were re-pinned by hand.
+
 The inheritance is what makes the ADR's named trap unrepresentable rather than
 merely avoidable. A plain generate deliberately does not inherit — a fresh lock
 means exactly what its flags say — so re-pinning a FEDERATED lock by rerunning
@@ -213,12 +232,14 @@ half simply stops being delivered.
 `--repin` cannot express that, and the word is literal: the flags that would
 override an inherited identity — `--registry`, `--bundles`, `--source` — are an
 argparse ERROR alongside it. Leaving them merely unnecessary was not enough.
-`--source` is the one way `--repin` offers to advance a federated source's own
-pin, so an operator whose cms-platform sibling had moved would reach for exactly
-`--repin --source '...'` — which took precedence over the inherited array and
-REPLACED it, dropping every other registry. The trap, through the flag written
-to close it. Changing a lock's identity and advancing its pin are two different
-decisions and are now two different commands.
+`--source` was once the only thing on the command line that looked like a way
+to advance a federated source's own pin, so an operator whose cms-platform
+sibling had moved would reach for exactly `--repin --source '...'` — which took
+precedence over the inherited array and REPLACED it, dropping every other
+registry. The trap, through the flag written to close it. Changing a lock's
+identity and advancing its pin are two different decisions and are two
+different commands; `--source-repo` is the one that advances, and it can say
+nothing about what the lock means.
 
 Inheritance also means the lock's fields are REQUIRED, not merely preferred.
 A plain generate falls back to `DEFAULT_REGISTRY` / `DEFAULT_BUNDLES` because
@@ -313,8 +334,10 @@ sibling `../<repo-name>` (the convention scripts/skills_registries.yml already
 uses), and is keyed by the source's registry, its comma-joined bundle list, or
 any one of its bundle names. `--check` / `--check-current` inherit `sources`
 from the lock the same way they inherit `registry` / `ref` / `bundles`;
-`--repin` inherits all of those EXCEPT `ref`, requires them to be present and
-well-formed rather than falling back to a default, and refuses the flags that
+`--repin` inherits all of those EXCEPT `ref` — the primary's, and the `ref` of
+each source whose checkout `--source-repo` names, those being the two halves of
+the same field — requires the inherited fields to be present and well-formed
+rather than falling back to a default, and refuses the flags that
 would override them. `--check-format` inherits nothing and reads `skills`,
 plus `ref` — only to name it in the remediation it prints, never to resolve
 it — so it is still the one mode that never asks a registry anything.
@@ -740,6 +763,23 @@ def parse_source_repo(spec: str) -> Tuple[str, str]:
     return key.strip(), path.strip()
 
 
+def source_override_key(source: dict, overrides: Dict[str, str]) -> Optional[str]:
+    """The `--source-repo` key the operator used to name THIS source, if any.
+
+    Split out of `source_checkout` because two callers now need to tell the two
+    cases apart rather than merely resolve a path. `--repin` advances a
+    federated source's pin only when the operator named that source's checkout
+    (see `_advance_source`), and "a checkout exists at the resolved path" is
+    not the same question: the fallback below is a DEFAULT sibling that may
+    perfectly well exist for a source the lock is deliberately holding back.
+    Membership here is an explicit act; the sibling path is a convention.
+    """
+    for key in (source["registry"], ",".join(source["bundles"]), *source["bundles"]):
+        if key in overrides:
+            return key
+    return None
+
+
 def source_checkout(primary_repo: Path, source: dict, overrides: Dict[str, str]) -> Path:
     """Where this source's git checkout lives on this machine.
 
@@ -749,9 +789,9 @@ def source_checkout(primary_repo: Path, source: dict, overrides: Dict[str, str])
     scripts/skills_registries.yml uses for the conformance census, so a machine
     set up for one is already set up for the other.
     """
-    for key in (source["registry"], ",".join(source["bundles"]), *source["bundles"]):
-        if key in overrides:
-            return Path(overrides[key]).expanduser()
+    key = source_override_key(source, overrides)
+    if key is not None:
+        return Path(overrides[key]).expanduser()
     name = source["registry"].rstrip("/").rsplit("/", 1)[-1]
     if name.endswith(".git"):
         name = name[: -len(".git")]
@@ -1284,6 +1324,67 @@ def _inherited_bundles(existing: dict, output: Path) -> List[str]:
     return list(bundles)
 
 
+def _advance_source(
+    repo: Path,
+    source: dict,
+    overrides: Dict[str, str],
+    output: Path,
+    where: str,
+) -> dict:
+    """A federated source's own `ref`, re-resolved when its checkout was named.
+
+    Closes an ASYMMETRY rather than adding a mode. `--repo` says where the
+    PRIMARY's clone is, and `--repin` re-resolves the primary's `ref` out of
+    that clone's HEAD; `--source-repo` says where a SECONDARY's clone is, and
+    until now nothing re-resolved anything out of it. A federated lock inherits
+    its whole `sources` array verbatim — `ref` included — so a secondary pin
+    could not be advanced by this tool at all. Both consumer site locks sat
+    frozen on one cms-platform commit until somebody edited them by hand, and
+    nothing said so: the lock stayed internally consistent, so `--check` was
+    green the entire time, while ephemeral sessions in both production sites
+    installed a skill arguing for a rule the fleet had already retired.
+
+    Opt-in PER SOURCE, keyed on the operator having passed `--source-repo` for
+    it. Deliberately not keyed on whether a checkout is present at the resolved
+    path: `source_checkout` falls back to a default sibling that a machine set
+    up for the conformance census already has, so existence would make this
+    accidental — and would start moving a pin that a consumer is holding back
+    on purpose, which is the one thing worse than not being able to move it.
+
+    Only `ref` moves. Registry, bundles and layout stay inherited, because
+    those are the lock's identity and changing them is the plain generate this
+    flag exists to not be. `"HEAD"` is substituted rather than resolved here so
+    that the value goes through `normalize_source` and then `plan_sources`
+    exactly as an inherited one does — same validation, same resolution, and
+    the digests are materialised from the ref that is written because they are
+    read off the same source dict.
+
+    The registry/clone correlation `--repin` already makes for the primary is
+    made here too, and for the same reason: nothing else ties the registry a
+    source NAMES to the checkout `--source-repo` POINTS AT, so advancing out of
+    the wrong clone writes a sha that registry does not contain — exit 0,
+    `--check` green because it re-derives from the same wrong clone, and the
+    damage lands at somebody else's session start, where the hook cannot fetch
+    that sha and reports DEGRADED. The pin the source already carries is the
+    probe. A missing checkout is left to `plan_sources`, which already reports
+    it and says which flag would fix it.
+    """
+    key = source_override_key(source, overrides)
+    if key is None:
+        return source
+    path = source_checkout(repo, source, overrides)
+    if path.is_dir() and _git(path, "cat-file", "-e", f"{source['ref']}^{{commit}}").returncode:
+        raise GeneratorError(
+            f"{path} does not contain {source['ref']}, the commit {output} pins for "
+            f"'{source['registry']}' — so the checkout named by --source-repo '{key}=...' "
+            "is not that registry, and advancing this source from it would write a commit "
+            "the registry does not have (the hook then cannot fetch it, and every consumer "
+            "session reports DEGRADED for that source's skills). Point --source-repo at a "
+            "clone of that registry, or fetch the pinned commit into this one."
+        )
+    return normalize_source({**source, "ref": "HEAD"}, where)
+
+
 def _source_spec(source: dict) -> str:
     """Render a source back as the `--source` flag that would recreate it.
 
@@ -1322,7 +1423,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "are read from git, never a working tree). KEY is that source's "
                              "registry, its comma-separated bundle list, or any one of its "
                              "bundle names. Default: the sibling ../<repo-name>, the same "
-                             "convention scripts/skills_registries.yml uses.")
+                             "convention scripts/skills_registries.yml uses. Under --repin "
+                             "it also OPTS THAT SOURCE IN to being advanced: its 'ref' is "
+                             "re-resolved to that checkout's HEAD, the way --repo's is for "
+                             "the primary. A source nobody names keeps the pin it has.")
     parser.add_argument("-o", "--output", metavar="PATH", default=None,
                         help=f"where to write the lock (default: {DEFAULT_LOCK})")
     parser.add_argument("--check", action="store_true",
@@ -1360,8 +1464,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--repin", action="store_true",
                         help="advance an EXISTING lock onto another commit, and write it. "
                              "The lock's own identity is inherited — registry, bundles and "
-                             "the whole 'sources' array — and only 'ref' is re-resolved, to "
-                             "HEAD of --repo or to --ref. That inheritance is the point: a "
+                             "the whole 'sources' array — and only 'ref' is re-resolved: the "
+                             "primary's to HEAD of --repo or to --ref, and a federated "
+                             "source's to HEAD of the checkout --source-repo names for it "
+                             "(a source nobody names keeps its pin, so one registry can be "
+                             "held back while another advances). That inheritance is the point: a "
                              "plain generate takes 'sources' from the command line alone, so "
                              "re-pinning a federated lock by rerunning it drops every "
                              "--source not repeated, writes a de-federated lock and exits "
@@ -1398,8 +1505,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # "inherits its identity" a property of the code rather than of the
     # docstring. --source-repo is deliberately NOT here: it says where a
     # source's checkout lives on this machine, which is not the lock's identity
-    # and is exactly what a federated re-pin needs on a machine whose siblings
-    # are not at the default path.
+    # — and is exactly what a federated re-pin needs, both to find a sibling
+    # that is not at the default path and, since it is the only thing that
+    # names one source rather than replacing them all, to say WHICH source's
+    # pin this run advances (see `_advance_source`).
     if args.repin:
         overriding = [
             flag for flag, value in (("--registry", args.registry),
@@ -1502,7 +1611,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # whole flag: advancing the pin is the operation, so inheriting it would
     # rewrite the lock to what it already said and report success for a no-op.
     # A verify mode inherits it for the opposite reason — see the docstring:
-    # --check asks whether the lock is faithful to the ref it PINS.
+    # --check asks whether the lock is faithful to the ref it PINS. This is the
+    # PRIMARY's half of that field; each named source's half is advanced below,
+    # out of the checkout --source-repo points at.
     ref = args.ref or (existing.get("ref") if verifying else None) or resolve_ref(repo, "HEAD")
     # Inherited by every mode that reads the lock at all, verify and re-pin
     # alike — the one field with a mode-dependent answer is `ref` above. A
@@ -1533,6 +1644,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         extras = []
     overrides = dict(parse_source_repo(spec) for spec in args.source_repo or [])
+    if args.repin:
+        # The secondary half of the one field a re-pin does not inherit. See
+        # `_advance_source`: `--repo` is the primary's checkout and its HEAD is
+        # what `ref` above advances to, so `--source-repo` is a secondary's
+        # checkout and its HEAD is what that source's `ref` advances to. A
+        # source nobody named keeps the pin it came with, which is what makes
+        # holding one back expressible.
+        extras = [
+            _advance_source(repo, source, overrides, output, f"sources[{index}]")
+            for index, source in enumerate(extras)
+        ]
 
     if verifying:
         # Seeded with --check-format's verdict, printed above: the exit code is
