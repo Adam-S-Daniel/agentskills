@@ -814,6 +814,8 @@ nothing else. So on that day the union and either source alone were the same
 list — which is agreement rather than redundancy, and the two can only be seen
 to agree because both are read.
 
+**Then, on the phone**, whichever source put the skill on the list:
+
 1. Open the run, scroll to **Artifacts**.
 2. Tap a skill's artifact — it downloads as `<name>.zip`.
 3. claude.ai → Settings → Capabilities → upload that file **as-is**.

@@ -103,9 +103,8 @@ runs at 06:23 — but GitHub queues cron across the whole platform and delays it
 by an amount nothing here controls (this fleet's own note on
 `scheduled-run-health.yml` records 4-5h measured on daily crons), so no
 schedule can be reliably "just after" a publish and aligning the two is not
-something this side can arrange. That is latency, not
-incorrectness, and the artifact's own `generated_at` is what makes a late read
-safe: `freshness_verdict` judges the age, so an early run sees a
+something this side can arrange. That is latency, not incorrectness, and the
+artifact's own `generated_at` is what makes a late read safe: `freshness_verdict` judges the age, so an early run sees a
 yesterday's-but-still-fresh result and says so, while a Routine that has stopped
 firing reads as `stale` — never as a pass. A design that trusted the clock
 instead would have to guess at exactly the moment it matters most.
@@ -141,10 +140,21 @@ half the evidence was never read.
 **The ZIP workflow now has a `schedule`, which brings it inside
 `scheduled-run-health.yml`'s watch.** That daily audit scans this repo's
 `event=schedule` runs for failure, startup failure and timeout, and lands
-findings on a single `ci`-labelled tracking issue. Positive: this workflow's
-scheduled failures can no longer be silent. Negative, and accepted: a flaky
-anonymous clone of a public repo can now open an issue here, and the noise
-lands on the same issue as everything else scheduled.
+findings on a single `ci`-labelled tracking issue. Positive: a scheduled run
+that fails here can no longer be silent, which for a workflow nobody watches is
+the difference between a broken offer list and a *reported* broken offer list.
+Negative, and accepted: those failures now land on the same shared issue as
+every other scheduled workflow, so the signal is one more comment on a thread
+rather than a dedicated alert.
+
+The gap that leaves is worth naming, because it is the one a reader will
+assume is covered. A failed clone of skills-evals does **not** fail this
+workflow — it degrades the verdict to `unavailable` and the run goes on
+building ZIPs from the local recording, deliberately, because a hard failure
+would take out the one workflow that hands a phone the fix. So the health audit
+never sees it. The DEGRADED line exists only in the run summary, and nothing
+notifies on a summary; a cross-repo half that quietly stopped being readable
+would be visible only to someone opening the run.
 
 **What this ADR does not close.** The drift issue's own lifecycle lives in the
 other repo and is not finished. As of 2026-08-21, skills-evals issue #48
@@ -185,8 +195,10 @@ what stops a results-branch publish feeding CI back into itself.
 **Re-deriving the freshness rule here.** Trivially easy — the artifact is JSON,
 and an age comparison is three lines. Rejected because a second implementation
 of a policy is free to drift from the first, and nothing would report the
-divergence. `freshness_verdict` is what opens, updates and (once #52 lands)
-closes the drift tracking issue; a local copy of the rule would let this
+divergence. `freshness_verdict` is the predicate the drift tracking issue is
+keyed to — the verdict skills-evals' own freshness gate acts on today, and the
+one that will open, edit and close issue #48 once #52 lands — so a local copy
+of the rule would let this
 workflow build ZIPs for a condition nobody filed, or sit silent while an issue
 stayed open, and the only symptom would be two repos quietly disagreeing about
 whether the account store is broken. Cloning a public repo to call one function
