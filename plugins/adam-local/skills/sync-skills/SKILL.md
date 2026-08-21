@@ -779,13 +779,24 @@ No unzipping: GitHub serves an artifact *as* a ZIP, and the artifact holds the
 skill's files at its root with `compression-level: 0`, which is the shape
 `zip_skill()` produces (`SKILL.md` at root, `ZIP_STORED`).
 
-**Then close the loop.** Re-record and commit, or the same skill is offered
-forever:
+**Then close the loop**, or the same skill is offered forever. Two routes,
+and the phone can only take the first:
 
-```bash
-CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'                     # refresh mirror
-python3 "$SKILL_DIR/sync_skills.py" --record-account-state   # re-record
-```
+- **Dispatch `Record an account upload`** with the skill name and the ZIP
+  run's ID. No mirror needed, so it works from the phone you just uploaded
+  from; it writes `basis: asserted` and pushes a branch for you to open as a
+  PR. Detail in "Closing the loop from the phone too" below.
+- **Re-record from a machine with the mirror.** Stronger, because it measures
+  the account instead of taking your word for it:
+
+  ```bash
+  CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'                     # refresh mirror
+  python3 "$SKILL_DIR/sync_skills.py" --record-account-state   # re-record
+  ```
+
+Either way, commit the result. An observation overwrites an assertion, never
+the reverse — so an asserted entry is a placeholder until you are next at a
+signed-in surface, not a substitute for one.
 
 ### What a verdict does and does not mean
 

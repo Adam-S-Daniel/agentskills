@@ -105,10 +105,28 @@ jobs:
               print("3. In Safari open claude.ai → Settings → Capabilities → "
                     "upload that `.zip` as-is. No unzipping.")
               print("4. It replaces the account copy of the same name.\n")
-              print("> After uploading, re-run `sync_skills.py "
-                    "--record-account-state` from a session that has "
-                    "`~/.claude/skills/synced` and commit the result — "
-                    "otherwise these keep being offered.\n")
+              # Two ways to close the loop, PHONE FIRST - this summary is
+              # read on a phone, and the mirror route is the one a phone
+              # cannot take. Naming only the mirror told the reader to do the
+              # single thing their device cannot.
+              print("\n### Then close the loop, or these keep being offered\n")
+              # Workflow name kept contiguous on one line so a grep for it
+              # finds this pointer.
+              print("**From the phone** — dispatch **Record an account upload**"
+                    f" with the skill name and this run ID "
+                    f"(`{os.environ.get('GITHUB_RUN_ID', '')}`). It records "
+                    "the upload and pushes a branch for you to open as a PR. "
+                    "It writes `basis: asserted` — your word that the upload "
+                    "landed, which nothing can verify.\n")
+              print("**From a machine with the account mirror** — the stronger "
+                    "one, because it measures instead of asserting:\n")
+              print("```")
+              print("CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'")
+              print("python3 plugins/adam-local/skills/sync-skills/"
+                    "sync_skills.py --record-account-state")
+              print("```")
+              print("\nEither way, commit the result. An observation "
+                    "overwrites an assertion, never the reverse.\n")
           # An `in-sync` that rests on --assert-uploaded was never checked
           # against the account. Not offering it is right; saying nothing about
           # it is what made a claim indistinguishable from a measurement.

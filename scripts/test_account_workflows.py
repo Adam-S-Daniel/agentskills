@@ -125,6 +125,25 @@ class TestAccountSkillZips:
             for job in wf["jobs"].values():
                 assert "concurrency" not in job, path.name
 
+    def test_the_summary_offers_the_route_a_phone_can_take(self):
+        """The summary is read ON a phone, so it must not name only the route
+        a phone cannot take.
+
+        It used to say just "re-run --record-account-state from a session that
+        has ~/.claude/skills/synced" - correct, and useless to the reader
+        standing there holding the artifact they just uploaded. Both routes are
+        named now; this keeps the dispatchable one from being edited back out.
+        """
+        pick = next(
+            s for s in load(ZIPS)["jobs"]["pick"]["steps"]
+            if s.get("name") == "Decide which skills need a ZIP"
+        )["run"]
+        assert "Record an account upload" in pick, "phone route not offered"
+        assert "--record-account-state" in pick, "mirror route not offered"
+        # The run ID is filled in for the reader - having to go and find it is
+        # the friction this whole path exists to remove.
+        assert "GITHUB_RUN_ID" in pick
+
     def test_the_zip_payload_is_built_by_the_real_uploader(self):
         """Re-walking the skill directory here would be a second
         implementation of `_include_in_zip`, free to drift from the one an
