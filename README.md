@@ -271,6 +271,15 @@ write is the delivery channel for ephemeral surfaces. What works where:
   so it's reserved for skills that should be live everywhere, not per-repo
   ones. The [`sync-skills`](plugins/adam-local/skills/sync-skills) skill (in
   the `adam-local` bundle) automates pushing this registry's skills there.
+  Nothing in CI can see that store, so what a runner compares against is
+  [`account-state.json`](account-state.json) — a digest per declared skill,
+  recorded from a session that *does* have the mirror
+  (`sync_skills.py --record-account-state`). The
+  [Account skill ZIPs](.github/workflows/account-skill-zips.yml) workflow reads
+  it and publishes one artifact per skill that has moved since, each downloading
+  as a `<name>.zip` that uploads to claude.ai as-is — the path for uploading
+  from a phone. A `stale` verdict is evidence an upload is needed, never proof
+  one happened; re-record after uploading. See `sync-skills` SKILL.md §9.
 - **Memory**: hosted sessions see a repo's git-tracked `.claude/memory/` (see the
   Memory section in [`STRATEGY.md`](STRATEGY.md) and the
   [portable-memory guide](https://github.com/Adam-S-Daniel/claude-memory-map/blob/main/docs/portable-memory.md);

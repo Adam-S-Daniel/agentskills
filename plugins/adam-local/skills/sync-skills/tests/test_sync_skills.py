@@ -3568,3 +3568,314 @@ class TestReportIssueDocsAreHonest:
                        "uncommitted declaration."):
             assert clause in text, f"{clause!r} not documented"
 
+
+
+# ---------------------------------------------------------------------------
+# Recorded account state (--record-account-state / --account-drift)
+# ---------------------------------------------------------------------------
+
+
+class TestAccountState:
+    """The CI-visible half of the account arm.
+
+    CI cannot read ~/.claude/skills/synced, so staleness on a runner is decided
+    against a committed recording. These pin the properties that make that
+    substitution honest rather than merely convenient.
+    """
+
+    @pytest.fixture()
+    def registry(self, tmp_path):
+        """A fake registry holding two declared skills."""
+        repo = tmp_path / "reg"
+        for name in ("alpha", "beta"):
+            p = repo / "plugins" / "bundle" / "skills" / name
+            p.mkdir(parents=True)
+            (p / "SKILL.md").write_text(f"---\nname: {name}\n---\nbody\n")
+        return repo
+
+    @pytest.fixture()
+    def mirror(self, tmp_path, monkeypatch):
+        """A fake account mirror; holds `alpha` only."""
+        acct = tmp_path / "account"
+        (acct / "alpha").mkdir(parents=True)
+        (acct / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\nbody\n")
+        (acct / "manifest.json").write_text(json.dumps({
+            "lastUpdated": 0,
+            "skills": [{"name": "alpha", "updatedAt": "2026-01-01T00:00:00Z"}],
+        }))
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", acct)
+        return acct
+
+    def test_digest_is_labelled_like_skills_lock(self):
+        d = sync_skills.payload_digest({"SKILL.md": b"x"})
+        assert d.startswith("sha256:")
+        assert len(d) == len("sha256:") + 64
+
+    def test_digest_ignores_line_endings(self):
+        """CRLF is an upload-batch artefact, not a content change."""
+        assert (sync_skills.payload_digest({"a": b"one\r\ntwo\r\n"})
+                == sync_skills.payload_digest({"a": b"one\ntwo\n"}))
+
+    def test_digest_separates_a_rename_from_a_content_change(self):
+        """The length delimiter earns its place here.
+
+        Without it, `{"ab": b"c"}` and `{"a": b"bc"}` concatenate identically
+        and a rename would be indistinguishable from an edit.
+        """
+        assert (sync_skills.payload_digest({"ab": b"c"})
+                != sync_skills.payload_digest({"a": b"bc"}))
+
+    def test_absent_from_the_mirror_is_recorded_as_null_not_omitted(self, mirror):
+        """"Observed absent" and "never looked at" must stay distinguishable."""
+        state = sync_skills.build_account_state(declared={"alpha", "beta"})
+        assert state["skills"]["alpha"]["digest"] is not None
+        assert state["skills"]["beta"]["digest"] is None
+        assert "beta" in state["skills"]
+
+    def test_drift_reports_each_status(self, registry, mirror):
+        state = sync_skills.build_account_state(declared={"alpha", "beta"})
+        rows = {r["name"]: r for r in sync_skills.account_drift(
+            [registry], declared={"alpha", "beta", "gamma"}, state=state)}
+        assert rows["alpha"]["status"] == "in-sync"
+        assert rows["beta"]["status"] == "never-uploaded"
+        assert rows["gamma"]["status"] == "missing-from-registry"
+
+        # Move the registry copy on: that, and only that, is `stale`.
+        (registry / "plugins" / "bundle" / "skills" / "alpha"
+         / "SKILL.md").write_text("---\nname: alpha\n---\nCHANGED\n")
+        rows = {r["name"]: r for r in sync_skills.account_drift(
+            [registry], declared={"alpha"}, state=state)}
+        assert rows["alpha"]["status"] == "stale"
+        assert rows["alpha"]["registry_digest"] != rows["alpha"]["recorded_digest"]
+
+    def test_an_unrecorded_skill_is_offered_not_assumed_clean(
+            self, registry, mirror):
+        rows = list(sync_skills.account_drift(
+            [registry], declared={"alpha"}, state={"skills": {}}))
+        assert rows[0]["status"] == "unrecorded"
+        assert "alpha" in sync_skills.account_drift_report(rows, None)["needs_upload"]
+
+    def test_no_recording_reads_as_unknown_never_as_in_sync(
+            self, registry, mirror, tmp_path):
+        """An absent record is the least informed state, not the healthiest."""
+        assert sync_skills.load_account_state(tmp_path / "nope.json") is None
+        (tmp_path / "junk.json").write_text("{not json")
+        assert sync_skills.load_account_state(tmp_path / "junk.json") is None
+        rows = sync_skills.account_drift([registry], declared={"alpha"}, state=None)
+        assert rows[0]["status"] == "unrecorded"
+
+    def test_the_recording_never_lives_inside_a_skill_it_records(self):
+        """Regression: recording inside sync-skills made it eternally stale.
+
+        `zip_skill()` uploads a skill's whole directory, so a recording kept in
+        this skill's own folder ships inside this skill - every
+        `--record-account-state` would change the skill it had just recorded,
+        so `sync-skills` could never once read as in-sync. Caught by simulating
+        the workflow, not by review.
+        """
+        skill_root = Path(sync_skills.__file__).resolve().parent
+        if not (skill_root.parents[3] / ".claude-plugin"
+                / "marketplace.json").is_file():
+            pytest.skip("not a registry checkout; ACCOUNT_STATE_FILE falls back")
+        assert skill_root not in sync_skills.ACCOUNT_STATE_FILE.parents
+        assert not any("account-state" in member
+                       for member in sync_skills.skill_payload(skill_root))
+
+
+# ---------------------------------------------------------------------------
+# --assert-uploaded: recording an upload nobody can verify
+# ---------------------------------------------------------------------------
+
+def _tree_with(tmp_path, name, body, sub="plugins/adam-local/skills"):
+    """A minimal repo holding one skill, in the plugin layout."""
+    d = tmp_path / sub / name
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n{body}\n", encoding="utf-8")
+    return tmp_path
+
+
+def _seed_state(path, entries, recorded_at="2026-01-01T00:00:00+00:00"):
+    path.write_text(
+        json.dumps({"recorded_at": recorded_at, "skills": entries}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestAssertUploaded:
+    @pytest.fixture(autouse=True)
+    def _declared(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "sync_skills.ACCOUNT_SKILLS_FILE",
+            write_declaration(tmp_path / "declared.txt", ["alpha"]),
+        )
+
+    def test_it_refuses_a_skill_the_declaration_does_not_carry(self, tmp_path):
+        """ADR 0002: a name not declared is not supposed to be on the account.
+
+        Asserting one would record an upload for a skill nothing sanctioned,
+        which is how the store accumulated the orphans PR #62 had to recover.
+        """
+        repo = _tree_with(tmp_path / "repo", "beta", "x")
+        state = _seed_state(tmp_path / "state.json", {})
+        with pytest.raises(ValueError, match="not declared"):
+            sync_skills.assert_uploaded("beta", [repo], state_path=state)
+
+    def test_it_refuses_when_there_is_no_recording_to_amend(self, tmp_path):
+        """An absent file is not an empty one to fill in.
+
+        Writing a fresh state here would leave every OTHER declared skill
+        silently unrecorded, which reads downstream as "nobody has looked" -
+        a much larger claim than the one being made.
+        """
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        with pytest.raises(ValueError, match="no recording"):
+            sync_skills.assert_uploaded(
+                "alpha", [repo], state_path=tmp_path / "absent.json"
+            )
+
+    def test_it_records_the_digest_basis_and_provenance(self, tmp_path):
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        state = _seed_state(tmp_path / "state.json", {"alpha": {"digest": "sha256:old"}})
+        changed, _ = sync_skills.assert_uploaded(
+            "alpha", [repo], ref="c0ffee", run_id="42", state_path=state,
+            now=datetime.datetime(2026, 3, 4, tzinfo=datetime.timezone.utc),
+        )
+        entry = json.loads(state.read_text())["skills"]["alpha"]
+        expected = sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(repo, "alpha"))
+        )
+        assert changed
+        assert entry["digest"] == expected
+        assert entry["basis"] == "asserted"
+        assert entry["asserted_from"] == {"ref": "c0ffee", "run_id": "42"}
+        assert entry["asserted_at"] == "2026-03-04T00:00:00+00:00"
+        # An assertion cannot know the account's own stamp, and keeping the
+        # previous one would attribute this content to the older upload.
+        assert entry["updatedAt"] is None
+
+    def test_it_digests_the_tree_it_was_given_not_the_current_one(self, tmp_path):
+        """The signature's whole reason for existing.
+
+        The artifact was built from one commit; the repo may have moved since.
+        Recording today's digest for yesterday's upload claims an upload that
+        never happened - and nothing downstream could ever detect it.
+        """
+        uploaded = _tree_with(tmp_path / "at-sha", "alpha", "AS UPLOADED")
+        current = _tree_with(tmp_path / "now", "alpha", "MOVED SINCE")
+        state = _seed_state(tmp_path / "state.json", {"alpha": {"digest": "sha256:old"}})
+        sync_skills.assert_uploaded("alpha", [uploaded], state_path=state)
+        recorded = json.loads(state.read_text())["skills"]["alpha"]["digest"]
+        assert recorded == sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(uploaded, "alpha"))
+        )
+        assert recorded != sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(current, "alpha"))
+        )
+
+    def test_recording_the_same_digest_twice_changes_nothing(self, tmp_path):
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        digest = sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(repo, "alpha"))
+        )
+        state = _seed_state(tmp_path / "state.json", {"alpha": {"digest": digest}})
+        before = state.read_text()
+        changed, message = sync_skills.assert_uploaded("alpha", [repo], state_path=state)
+        assert not changed
+        assert "nothing to change" in message
+        assert state.read_text() == before
+
+    def test_it_leaves_the_file_level_observation_stamp_alone(self, tmp_path):
+        """`recorded_at` means "when the STORE was last observed".
+
+        Asserting does not observe the store, so bumping it would make a stale
+        file read as freshly verified - inverting the one signal that tells a
+        reader how much the rest of the file is worth.
+        """
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        state = _seed_state(
+            tmp_path / "state.json",
+            {"alpha": {"digest": "sha256:old"}, "other": {"digest": "sha256:keep"}},
+            recorded_at="2026-01-01T00:00:00+00:00",
+        )
+        sync_skills.assert_uploaded("alpha", [repo], state_path=state)
+        after = json.loads(state.read_text())
+        assert after["recorded_at"] == "2026-01-01T00:00:00+00:00"
+        assert after["skills"]["other"] == {"digest": "sha256:keep"}
+
+    def test_an_observation_supersedes_an_assertion(self, tmp_path, monkeypatch):
+        """A full recording overwrites `asserted` with `observed`, never back.
+
+        The mirror is ground truth; the assertion was a stand-in for it.
+        """
+        mirror = tmp_path / "synced"
+        (mirror / "alpha").mkdir(parents=True)
+        (mirror / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\nx\n")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", mirror)
+        state = sync_skills.build_account_state(
+            declared={"alpha"},
+            now=datetime.datetime(2026, 5, 6, tzinfo=datetime.timezone.utc),
+        )
+        assert state["skills"]["alpha"]["basis"] == "observed"
+
+
+class TestBasisTravelsWithTheVerdict:
+    """#114 review: every consumer dropped `basis`, so an `in-sync` resting on
+    the operator's word was byte-identical to one measured against the mirror -
+    while SKILL.md called that distinction the point. A caveat that lives only
+    in a docstring is not a caveat.
+    """
+
+    def _setup(self, tmp_path, basis):
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        digest = sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(repo, "alpha"))
+        )
+        state = _seed_state(
+            tmp_path / "state.json", {"alpha": {"digest": digest, "basis": basis}}
+        )
+        return repo, state
+
+    @pytest.mark.parametrize("basis", ["asserted", "observed"])
+    def test_the_row_carries_the_basis(self, tmp_path, basis):
+        repo, state = self._setup(tmp_path, basis)
+        rows = sync_skills.account_drift(
+            [repo], declared={"alpha"},
+            state=json.loads(state.read_text()),
+        )
+        assert rows[0]["status"] == "in-sync"
+        assert rows[0]["recorded_basis"] == basis
+
+    def test_the_report_separates_asserted_in_sync_from_measured(self, tmp_path):
+        repo, state = self._setup(tmp_path, "asserted")
+        rows = sync_skills.account_drift(
+            [repo], declared={"alpha"}, state=json.loads(state.read_text())
+        )
+        report = sync_skills.account_drift_report(rows, json.loads(state.read_text()))
+        # Present in BOTH: a caller reading only `in_sync` still gets the safe
+        # reading, and one that cares whether anyone looked has somewhere to look.
+        assert report["in_sync"] == ["alpha"]
+        assert report["in_sync_asserted"] == ["alpha"]
+
+    def test_an_observed_in_sync_is_not_listed_as_asserted(self, tmp_path):
+        repo, state = self._setup(tmp_path, "observed")
+        rows = sync_skills.account_drift(
+            [repo], declared={"alpha"}, state=json.loads(state.read_text())
+        )
+        report = sync_skills.account_drift_report(rows, json.loads(state.read_text()))
+        assert report["in_sync"] == ["alpha"]
+        assert report["in_sync_asserted"] == []
+
+    def test_the_operator_facing_line_says_asserted(self, tmp_path):
+        """The surface a human actually reads, driven through the real CLI."""
+        repo, state = self._setup(tmp_path, "asserted")
+        declared = write_declaration(tmp_path / "declared.txt", ["alpha"])
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).parent.parent / "sync_skills.py"),
+             "--account-drift", "--repos", str(repo),
+             "--account-state", str(state), "--account-list", str(declared)],
+            capture_output=True, encoding="utf-8", errors="replace",
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "in-sync (asserted)" in proc.stderr, proc.stderr
+        assert json.loads(proc.stdout)["in_sync_asserted"] == ["alpha"]

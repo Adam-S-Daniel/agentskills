@@ -1,0 +1,202 @@
+# After uploading a skill ZIP to claude.ai from your phone, record it here so
+# `account-skill-zips` stops offering it. Dispatch-only: nothing about this can
+# be inferred from a push, because the event it records happens in a browser.
+#
+# IT STOPS AT A BRANCH, ON PURPOSE - DO NOT "FIX" IT TO OPEN THE PR
+# `pytest-windows` is a REQUIRED status check on main (repo-settings' fleet.yml
+# overrides agentskills to require it). GitHub does not trigger workflows for
+# events raised by GITHUB_TOKEN, so a PR this job opened would never run CI,
+# never publish that context, and could never merge - a dead PR that looks like
+# a working feature. Pushing the branch and letting a human open the PR keeps
+# the checks running under their identity. The summary links a prefilled
+# compare URL so that is one tap.
+#
+# WHAT IT WRITES IS A CLAIM, NOT A MEASUREMENT
+# No runner can see ~/.claude/skills/synced (ADR 0002), so this cannot verify
+# the upload landed. The entry is stamped `basis: asserted` with the ref and
+# run it came from, and `--record-account-state` overwrites it with `observed`
+# the next time someone runs that from a session with a mirror.
+name: Record an account upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      skill:
+        description: "Skill you just uploaded (must be declared in account-skills.txt)"
+        required: true
+      from_run:
+        description: "Run ID of the 'Account skill ZIPs' run whose artifact you uploaded"
+        required: true
+
+permissions:
+  contents: write   # push the recording branch (never main - it is protected)
+  actions: read     # resolve the artifact run
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          # The artifact's commit has to be reachable to digest the tree it was
+          # built from; a shallow clone usually cannot see it.
+          fetch-depth: 0
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: '3.12'
+
+      - name: Resolve the run that built the artifact
+        id: run
+        # Inputs are read from env, never interpolated into the script - a
+        # `${{ inputs.* }}` expansion is echoed into the log and is
+        # attacker-controlled shell. See AGENTS.md, "Data exposure in CI".
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SKILL: ${{ inputs.skill }}
+          FROM_RUN: ${{ inputs.from_run }}
+        run: |
+          set -euo pipefail
+          case "$FROM_RUN" in ''|*[!0-9]*)
+            echo "::error::from_run must be a numeric run ID, e.g. 32414713598"
+            exit 1 ;;
+          esac
+          # `skill` is validated for SHAPE here, before it reaches anything.
+          # The artifact-name check below looks like it validates and does not:
+          # `grep -F` treats a newline-separated pattern as ALTERNATIVES, so
+          # $'sync-skills\nfoo=bar' matches on its first line and passes. The
+          # tail then rides into `branch=` and thence into $GITHUB_ENV, where a
+          # newline injects an arbitrary environment variable into every later
+          # step. Only a repo-write holder can dispatch this, so it is not a
+          # privilege boundary - but a guard that reads as validation while
+          # letting a newline through is worse than no guard, and the fix is
+          # one line. Declared skill names are [a-z0-9._-] throughout.
+          # Same shape .claude/hooks/skills-bootstrap.sh validates a skill
+          # directory name with: a leading alphanumeric, then [A-Za-z0-9._-].
+          # The leading-char clause is not redundant - without it `-rf` passes,
+          # and a value that can lead with `-` is one argv position away from
+          # being read as an option.
+          case "$SKILL" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*)
+            echo "::error::skill must match [A-Za-z0-9][A-Za-z0-9._-]* - refusing before it reaches a branch name or GITHUB_ENV"
+            exit 1 ;;
+          esac
+          # `gh api --jq` prints the raw error body to STDOUT and exits 1 on an
+          # HTTP error - the filter never runs - so `x=$(...) || true` captures
+          # that garbage as if it were the answer. Discard it explicitly.
+          meta=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FROM_RUN" \
+                   --jq '[.head_sha, .path, .conclusion] | @tsv') || meta=""
+          if [ -z "$meta" ]; then
+            echo "::error::run $FROM_RUN is not readable in $GITHUB_REPOSITORY"
+            exit 1
+          fi
+          sha=$(printf '%s' "$meta" | cut -f1)
+          path=$(printf '%s' "$meta" | cut -f2)
+          if [ "$path" != ".github/workflows/account-skill-zips.yml" ]; then
+            echo "::error::run $FROM_RUN is '$path', not account-skill-zips.yml. Recording a digest from an unrelated commit is the mistake this check exists to stop."
+            exit 1
+          fi
+          names=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FROM_RUN/artifacts" \
+                    --jq '.artifacts[].name') || names=""
+          if ! printf '%s\n' "$names" | grep -qxF -- "$SKILL"; then
+            arts=$(printf '%s' "$names" | tr '\n' ' ')
+            echo "::error::run $FROM_RUN published no artifact named '$SKILL', so it is not the run that produced what you uploaded. Artifacts: $arts"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Artifact '$SKILL' was built from $sha"
+
+      - name: Record the upload against that tree
+        id: record
+        env:
+          SKILL: ${{ inputs.skill }}
+          FROM_RUN: ${{ inputs.from_run }}
+          SHA: ${{ steps.run.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Digest the tree the artifact was BUILT from, not today's main. If
+          # the skill has moved since, recording main's digest would claim an
+          # upload that never happened.
+          git fetch --no-tags -q origin "$SHA" || true
+          if ! git worktree add --detach -q "$RUNNER_TEMP/at-sha" "$SHA"; then
+            echo "::error::commit $SHA is unreachable, so the tree the artifact was built from cannot be digested. Its branch was probably deleted; rebuild the ZIP and upload that instead."
+            exit 1
+          fi
+          # The SCRIPT comes from this checkout (older commits have no
+          # --assert-uploaded) while --repos points at the artifact's tree, so
+          # the declaration is today's and the digest is the upload's.
+          python3 plugins/adam-local/skills/sync-skills/sync_skills.py \
+            --assert-uploaded "$SKILL" --repos "$RUNNER_TEMP/at-sha" \
+            --asserted-ref "$SHA" --asserted-run "$FROM_RUN"
+          if [ -z "$(git status --porcelain account-state.json)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push the recording branch
+        if: steps.record.outputs.changed == 'true'
+        env:
+          SKILL: ${{ inputs.skill }}
+          FROM_RUN: ${{ inputs.from_run }}
+          SHA: ${{ steps.run.outputs.sha }}
+        run: |
+          set -euo pipefail
+          branch="record-account-upload/$SKILL-$FROM_RUN"
+          # The bot's own noreply identity - no real address in commit metadata
+          # on a public repo. See AGENTS.md, "git history & metadata".
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b "$branch"
+          git add account-state.json
+          git commit -q -m "Record $SKILL as uploaded to the account store" \
+            -m "Asserted from run $FROM_RUN, which built the artifact from $SHA.
+
+          basis=asserted: no runner can read ~/.claude/skills/synced, so this
+          records that the upload was made, not that it landed whole. A later
+          --record-account-state from a session with a mirror replaces it with
+          an observation."
+          git push -q origin "HEAD:refs/heads/$branch"
+          echo "branch=$branch" >> "$GITHUB_ENV"
+
+      - name: Summarise
+        if: always()
+        env:
+          SKILL: ${{ inputs.skill }}
+          FROM_RUN: ${{ inputs.from_run }}
+          SHA: ${{ steps.run.outputs.sha }}
+          CHANGED: ${{ steps.record.outputs.changed }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Record an account upload"
+            echo
+            if [ "${CHANGED:-}" = "true" ]; then
+              enc_branch="${branch:-}"
+              echo "Recorded **$SKILL** as uploaded, from run \`$FROM_RUN\` (built at \`$SHA\`)."
+              echo
+              echo "### Open the PR (one tap)"
+              echo
+              echo "[Create the pull request](https://github.com/$GITHUB_REPOSITORY/compare/main...$enc_branch?expand=1&title=Record%20$SKILL%20as%20uploaded%20to%20the%20account%20store)"
+              echo
+              echo "> It stops at a branch deliberately. \`pytest-windows\` is required on"
+              echo "> main, and GitHub runs no checks on a PR opened by the Actions token,"
+              echo "> so a self-opened PR could never merge. Opening it yourself runs CI."
+              echo
+              # Did main move past what was uploaded? Then the recording is
+              # right and already behind - say so rather than let the next
+              # drift report look like a regression.
+              status=$(python3 plugins/adam-local/skills/sync-skills/sync_skills.py \
+                         --account-drift --repos "$GITHUB_WORKSPACE" 2>/dev/null \
+                       | python3 -c "import json,sys,os;print(next(r['status'] for r in json.load(sys.stdin)['skills'] if r['name']==os.environ['SKILL']))") || status=""
+              if [ "$status" = "stale" ]; then
+                echo "⚠️ **$SKILL has changed on main since that artifact was built.**"
+                echo "The recording is correct - it describes what you uploaded - but the"
+                echo "next drift report will offer this skill again, and it should:"
+                echo "the account is now behind main. Build a fresh ZIP and upload that too."
+              fi
+            elif [ "${CHANGED:-}" = "false" ]; then
+              echo "Nothing to change - **$SKILL** already records the digest of the tree"
+              echo "run \`$FROM_RUN\` built. No branch was pushed."
+            else
+              echo "Failed before recording anything. No branch was pushed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
