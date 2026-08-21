@@ -6,6 +6,7 @@ permissions a job holds, which triggers publish a context, what a `run:` block
 does). Same rule the fleet AGENTS.md states for workflow lints.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -148,14 +149,28 @@ class TestSkillInputIsValidatedBeforeUse:
         end = body.index("esac", start) + len("esac")
         return body[start:end]
 
-    def _run(self, snippet, value):
+    def _bash(self, script, value):
         bash = shutil.which("bash")
         if not bash:
             pytest.skip("bash not on PATH")
+        # Delivered through the ENVIRONMENT, which is how the workflow supplies
+        # it (`env: SKILL: ${{ inputs.skill }}`) - and the only way that
+        # survives Windows.
+        #
+        # This was argv, and pytest-windows caught it: Git Bash reconstructs
+        # its own argv from the Windows command line and truncates an argument
+        # at a newline, so the shell saw a bare `sync-skills`, the guard
+        # correctly admitted it, and the refusal test failed. Five of six evil
+        # inputs still refused, which is what made it look like a guard bug
+        # rather than a harness one. An environment block is NUL-delimited and
+        # carries a newline intact.
         return subprocess.run(
-            [bash, "-c", 'SKILL="$1"\n' + snippet, "_", value],
+            [bash, "-c", script], env={**os.environ, "SKILL": value},
             capture_output=True, text=True,
-        ).returncode
+        )
+
+    def _run(self, snippet, value):
+        return self._bash(snippet, value).returncode
 
     @pytest.mark.parametrize("name", [
         "sync-skills", "wj-next-break", "pdf-ocr-audit",
@@ -173,6 +188,14 @@ class TestSkillInputIsValidatedBeforeUse:
         ("", "empty"),
     ])
     def test_it_refuses_anything_that_is_not_a_bare_skill_name(self, evil, why):
+        # Delivery first: a refusal test passes vacuously if the harness never
+        # handed the shell the dangerous value. See _bash.
+        got = self._bash('printf %s "$SKILL" | wc -c', evil).stdout.strip()
+        assert int(got) == len(evil.encode()), (
+            f"harness mangled the input before the guard saw it: sent "
+            f"{len(evil.encode())} bytes, shell received {got}. The refusal "
+            f"below would have passed for the wrong reason."
+        )
         assert self._run(self._guard(), evil) != 0, why
 
     def test_the_grep_check_alone_would_have_let_the_newline_through(self):
