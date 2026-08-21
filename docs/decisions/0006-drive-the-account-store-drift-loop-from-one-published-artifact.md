@@ -156,18 +156,22 @@ never sees it. The DEGRADED line exists only in the run summary, and nothing
 notifies on a summary; a cross-repo half that quietly stopped being readable
 would be visible only to someone opening the run.
 
-**What this ADR does not close.** The drift issue's own lifecycle lives in the
-other repo and is not finished. As of 2026-08-21, skills-evals issue #48
-("Account skill store drifted from registry (automated Tier-3 audit)") is open
-and maintained **by hand** — `ROUTINE.md` step 5 asks the fired session to keep
-it in step and, per skills-evals#52, it never has — and the workflow that would
-close it on the first `pass`, `.github/workflows/account-store-drift.yml`, is
-open PR skills-evals#52, not merged. Verified through the GitHub API on
-2026-08-21: skills-evals' default branch (`9737f0e`) carries five workflows and
-that is not one of them. So "the loop closes itself" describes the agentskills
-half today; the skills-evals half arrives when #52 lands. Anything here that
-reads as though the close is already automatic is describing the intended end
-state, and this paragraph is the correction.
+**The other half, and what it means that it landed.** The drift issue's own
+lifecycle lives in the other repo. `ROUTINE.md` step 5 asked the fired session
+to keep one marker-tagged issue in step with the audit; nothing in CI did it,
+and the issue that exists was opened by hand. `.github/workflows/account-store-drift.yml`
+now owns it, reading this same artifact and calling this same
+`freshness_verdict` — `reported-failure` opens or edits it in place, `fresh`
+closes it, and the four liveness statuses deliberately do nothing because they
+report a transport fault the freshness gate already owns. It merged on
+2026-08-21 (skills-evals#52), so "the loop closes itself" is a description of
+both halves rather than of an intention.
+
+**What this ADR still does not close.** The repair itself is irreducibly human.
+`sync_skills.py` only PREPARES the payload; the upload is a POST from a
+signed-in browser tab, and there is no headless write path — so the loop is
+automatic at both ends and manual in the middle, by a constraint no decision
+here can remove.
 
 ## Alternatives considered
 
@@ -254,6 +258,8 @@ The decisions above are asserted rather than described:
   `evals/propagation/ROUTINE.md` (steps 4 and 5, the publish message, and the
   two blockers on a push listener), and `.github/workflows/propagation.yml`
   (the freshness gate reading the same artifact).
-- [skills-evals#48](https://github.com/Adam-S-Daniel/skills-evals/issues/48) —
-  the open drift tracking issue; [skills-evals#52](https://github.com/Adam-S-Daniel/skills-evals/pull/52)
-  — the unmerged lifecycle workflow.
+- [skills-evals#52](https://github.com/Adam-S-Daniel/skills-evals/pull/52) —
+  the lifecycle workflow that owns the drift tracking issue. The issue itself is
+  deliberately not named by number here: the reactor looks it up with
+  `--state open`, so each drift episode opens a fresh one and any number written
+  down goes stale at the second episode.
