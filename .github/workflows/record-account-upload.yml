@@ -193,6 +193,17 @@ jobs:
                 echo "next drift report will offer this skill again, and it should:"
                 echo "the account is now behind main. Build a fresh ZIP and upload that too."
               fi
+              echo
+              echo "### What happens after that"
+              echo
+              echo "Nothing further from you. Merging lands the recording; the account store"
+              echo "itself is re-measured by the next Tier-3 audit, which reads it from a"
+              echo "signed-in surface and republishes \`propagation/account/latest.json\` to"
+              echo "skills-evals' \`eval-results\` branch. The daily **Account skill ZIPs** run"
+              echo "reads that verdict, and a \`pass\` contributes no names and retires the"
+              echo "drift issue skills-evals#48 - so the loop closes itself. Closing that issue"
+              echo "automatically is skills-evals#52, open and unmerged as of 2026-08-21, so"
+              echo "until it lands that last step is done by hand."
             elif [ "${CHANGED:-}" = "false" ]; then
               echo "Nothing to change - **$SKILL** already records the digest of the tree"
               echo "run \`$FROM_RUN\` built. No branch was pushed."

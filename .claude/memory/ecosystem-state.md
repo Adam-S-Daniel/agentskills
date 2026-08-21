@@ -22,6 +22,14 @@
 - skills-evals harness is dual-layout (glob plugins/*/skills/<skill>) and
   fully hermetic (47 tests, verified under unshare -rn); real evals are the
   only network path.
+- **Account-store drift loop, skills-evals half is PENDING (2026-08-21):** the
+  agentskills side ships in #118 (daily read of
+  `eval-results:propagation/account/latest.json`, ADR 0006). The other half —
+  closing tracking issue skills-evals#48 on the first `pass` — is open PR
+  skills-evals#52 (`.github/workflows/account-store-drift.yml`), not on that
+  repo's default branch. Until it merges the issue is maintained by hand, and
+  the "loop closes itself" wording in ADR 0006 / the record-account-upload
+  summary carries an explicit as-of caveat that can be dropped once #52 lands.
 
 Cloud/ephemeral skill delivery has since moved past E1's NO-GO — see
 AGENTS.md's "Skills ecosystem" section for the current (E2-derived)
