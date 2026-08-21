@@ -4,8 +4,9 @@
 #
 # WHAT THIS CAN AND CANNOT KNOW
 # A runner has no ~/.claude/skills/synced, so it cannot ask the account store
-# anything (ADR 0002). It reads the COMMITTED recording,
-# plugins/adam-local/skills/sync-skills/account-state.json, written by
+# anything (ADR 0002). It reads the COMMITTED recording, `account-state.json`
+# at the REGISTRY ROOT beside skills.lock - never inside a skill directory,
+# because zip_skill() uploads a skill's whole folder - written by
 # `sync_skills.py --record-account-state` from a session that does have a
 # mirror. So "needs upload" means "the registry moved since someone last
 # looked at the account" - strong evidence, not proof. Re-record after
@@ -108,6 +109,15 @@ jobs:
                     "--record-account-state` from a session that has "
                     "`~/.claude/skills/synced` and commit the result — "
                     "otherwise these keep being offered.\n")
+          # An `in-sync` that rests on --assert-uploaded was never checked
+          # against the account. Not offering it is right; saying nothing about
+          # it is what made a claim indistinguishable from a measurement.
+          if rep.get("in_sync_asserted"):
+              print(f"\n**Not offered, but never verified:** "
+                    f"{', '.join(rep['in_sync_asserted'])} — recorded by "
+                    f"`--assert-uploaded`, i.e. on the operator's word. Run "
+                    f"`--record-account-state` from a session with a mirror to "
+                    f"replace the claim with a measurement.\n")
           if rep["missing_from_registry"]:
               print(f"\n⚠️ Declared but absent from the registry: "
                     f"{', '.join(rep['missing_from_registry'])}\n")

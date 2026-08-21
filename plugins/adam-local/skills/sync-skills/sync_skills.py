@@ -1382,6 +1382,13 @@ def account_drift(
             rec = (recorded[name] or {}).get("digest")
             row["recorded_digest"] = rec
             row["recorded_updatedAt"] = (recorded[name] or {}).get("updatedAt")
+            # WHAT the recording rests on travels with the verdict, always.
+            # An `in-sync` from `--assert-uploaded` is the operator's word;
+            # one from `--record-account-state` was measured against the
+            # account mirror. Dropping this here made the two byte-identical
+            # in every report while SKILL.md called the distinction the point
+            # - a caveat that lives only in a docstring is not a caveat.
+            row["recorded_basis"] = (recorded[name] or {}).get("basis")
             if rec is None:
                 row["status"] = "never-uploaded"
             elif rec == reg:
@@ -1401,6 +1408,13 @@ def account_drift_report(rows: List[Dict], state: Optional[Dict]) -> Dict:
         "recorded_at": (state or {}).get("recorded_at"),
         "needs_upload": [r["name"] for r in rows if r["status"] in NEEDS_UPLOAD],
         "in_sync": [r["name"] for r in rows if r["status"] == "in-sync"],
+        # A caller that only reads `in_sync` gets the safe reading; one that
+        # cares whether anybody actually looked reads this. Both are present
+        # so neither has to know to ask.
+        "in_sync_asserted": [
+            r["name"] for r in rows
+            if r["status"] == "in-sync" and r.get("recorded_basis") == "asserted"
+        ],
         "missing_from_registry": [
             r["name"] for r in rows if r["status"] == "missing-from-registry"
         ],
@@ -2634,7 +2648,12 @@ def main() -> None:
                 file=sys.stderr,
             )
         for row in rows:
-            print(f"{row['status']:22} {row['name']}", file=sys.stderr)
+            # The suffix is not decoration: `in-sync` alone is what made an
+            # unverified claim read exactly like a measurement.
+            label = row["status"]
+            if row.get("recorded_basis") == "asserted":
+                label += " (asserted)"
+            print(f"{label:22} {row['name']}", file=sys.stderr)
         return
 
     # Everything below builds an upload out of these working trees, so their

@@ -60,6 +60,25 @@ jobs:
             echo "::error::from_run must be a numeric run ID, e.g. 32414713598"
             exit 1 ;;
           esac
+          # `skill` is validated for SHAPE here, before it reaches anything.
+          # The artifact-name check below looks like it validates and does not:
+          # `grep -F` treats a newline-separated pattern as ALTERNATIVES, so
+          # $'sync-skills\nfoo=bar' matches on its first line and passes. The
+          # tail then rides into `branch=` and thence into $GITHUB_ENV, where a
+          # newline injects an arbitrary environment variable into every later
+          # step. Only a repo-write holder can dispatch this, so it is not a
+          # privilege boundary - but a guard that reads as validation while
+          # letting a newline through is worse than no guard, and the fix is
+          # one line. Declared skill names are [a-z0-9._-] throughout.
+          # Same shape .claude/hooks/skills-bootstrap.sh validates a skill
+          # directory name with: a leading alphanumeric, then [A-Za-z0-9._-].
+          # The leading-char clause is not redundant - without it `-rf` passes,
+          # and a value that can lead with `-` is one argv position away from
+          # being read as an option.
+          case "$SKILL" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*)
+            echo "::error::skill must match [A-Za-z0-9][A-Za-z0-9._-]* - refusing before it reaches a branch name or GITHUB_ENV"
+            exit 1 ;;
+          esac
           # `gh api --jq` prints the raw error body to STDOUT and exits 1 on an
           # HTTP error - the filter never runs - so `x=$(...) || true` captures
           # that garbage as if it were the answer. Discard it explicitly.
@@ -77,7 +96,7 @@ jobs:
           fi
           names=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FROM_RUN/artifacts" \
                     --jq '.artifacts[].name') || names=""
-          if ! printf '%s\n' "$names" | grep -qxF "$SKILL"; then
+          if ! printf '%s\n' "$names" | grep -qxF -- "$SKILL"; then
             arts=$(printf '%s' "$names" | tr '\n' ' ')
             echo "::error::run $FROM_RUN published no artifact named '$SKILL', so it is not the run that produced what you uploaded. Artifacts: $arts"
             exit 1

@@ -3817,3 +3817,65 @@ class TestAssertUploaded:
             now=datetime.datetime(2026, 5, 6, tzinfo=datetime.timezone.utc),
         )
         assert state["skills"]["alpha"]["basis"] == "observed"
+
+
+class TestBasisTravelsWithTheVerdict:
+    """#114 review: every consumer dropped `basis`, so an `in-sync` resting on
+    the operator's word was byte-identical to one measured against the mirror -
+    while SKILL.md called that distinction the point. A caveat that lives only
+    in a docstring is not a caveat.
+    """
+
+    def _setup(self, tmp_path, basis):
+        repo = _tree_with(tmp_path / "repo", "alpha", "x")
+        digest = sync_skills.payload_digest(
+            sync_skills.skill_payload(sync_skills._skill_dir(repo, "alpha"))
+        )
+        state = _seed_state(
+            tmp_path / "state.json", {"alpha": {"digest": digest, "basis": basis}}
+        )
+        return repo, state
+
+    @pytest.mark.parametrize("basis", ["asserted", "observed"])
+    def test_the_row_carries_the_basis(self, tmp_path, basis):
+        repo, state = self._setup(tmp_path, basis)
+        rows = sync_skills.account_drift(
+            [repo], declared={"alpha"},
+            state=json.loads(state.read_text()),
+        )
+        assert rows[0]["status"] == "in-sync"
+        assert rows[0]["recorded_basis"] == basis
+
+    def test_the_report_separates_asserted_in_sync_from_measured(self, tmp_path):
+        repo, state = self._setup(tmp_path, "asserted")
+        rows = sync_skills.account_drift(
+            [repo], declared={"alpha"}, state=json.loads(state.read_text())
+        )
+        report = sync_skills.account_drift_report(rows, json.loads(state.read_text()))
+        # Present in BOTH: a caller reading only `in_sync` still gets the safe
+        # reading, and one that cares whether anyone looked has somewhere to look.
+        assert report["in_sync"] == ["alpha"]
+        assert report["in_sync_asserted"] == ["alpha"]
+
+    def test_an_observed_in_sync_is_not_listed_as_asserted(self, tmp_path):
+        repo, state = self._setup(tmp_path, "observed")
+        rows = sync_skills.account_drift(
+            [repo], declared={"alpha"}, state=json.loads(state.read_text())
+        )
+        report = sync_skills.account_drift_report(rows, json.loads(state.read_text()))
+        assert report["in_sync"] == ["alpha"]
+        assert report["in_sync_asserted"] == []
+
+    def test_the_operator_facing_line_says_asserted(self, tmp_path):
+        """The surface a human actually reads, driven through the real CLI."""
+        repo, state = self._setup(tmp_path, "asserted")
+        declared = write_declaration(tmp_path / "declared.txt", ["alpha"])
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).parent.parent / "sync_skills.py"),
+             "--account-drift", "--repos", str(repo),
+             "--account-state", str(state), "--account-list", str(declared)],
+            capture_output=True, encoding="utf-8", errors="replace",
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "in-sync (asserted)" in proc.stderr, proc.stderr
+        assert json.loads(proc.stdout)["in_sync_asserted"] == ["alpha"]

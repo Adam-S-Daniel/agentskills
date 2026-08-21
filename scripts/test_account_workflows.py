@@ -7,6 +7,8 @@ does). Same rule the fleet AGENTS.md states for workflow lints.
 """
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -128,3 +130,71 @@ class TestAccountSkillZips:
         actual upload uses. The payload comes from `--prepare --zip-dir`.
         """
         assert any("--zip-dir" in body for body in runs(load(ZIPS)))
+
+
+class TestSkillInputIsValidatedBeforeUse:
+    """The shipped guard, executed - not string-matched.
+
+    A workflow lint that greps for the guard passes on a guard that does not
+    work. These run the exact `case` block out of the YAML.
+    """
+
+    def _guard(self):
+        body = next(
+            s["run"] for s in load(RECORD)["jobs"]["record"]["steps"]
+            if s.get("name") == "Resolve the run that built the artifact"
+        )
+        start = body.index('case "$SKILL"')
+        end = body.index("esac", start) + len("esac")
+        return body[start:end]
+
+    def _run(self, snippet, value):
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("bash not on PATH")
+        return subprocess.run(
+            [bash, "-c", 'SKILL="$1"\n' + snippet, "_", value],
+            capture_output=True, text=True,
+        ).returncode
+
+    @pytest.mark.parametrize("name", [
+        "sync-skills", "wj-next-break", "pdf-ocr-audit",
+        "sync-cc-settings-between-wsl-and-windows",
+    ])
+    def test_it_admits_every_real_declared_name(self, name):
+        assert self._run(self._guard(), name) == 0, name
+
+    @pytest.mark.parametrize("evil, why", [
+        ("sync-skills\nfoo=bar", "newline injects a line into $GITHUB_ENV"),
+        ("sync-skills bar", "space splits a branch name"),
+        ("../../etc/passwd", "traversal"),
+        ("sync-skills;id", "command separator"),
+        ("-rf", "leading dash reads as a grep/git option"),
+        ("", "empty"),
+    ])
+    def test_it_refuses_anything_that_is_not_a_bare_skill_name(self, evil, why):
+        assert self._run(self._guard(), evil) != 0, why
+
+    def test_the_grep_check_alone_would_have_let_the_newline_through(self):
+        """The negative control, and the reason the guard above exists.
+
+        `grep -F` treats a newline-separated pattern as ALTERNATIVES, so the
+        artifact-name check matches on the first line and passes the whole
+        value - including the tail that reaches $GITHUB_ENV. Without this
+        test, a later reader deletes the `case` guard as redundant with a
+        check that reads like validation and is not.
+        """
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("bash not on PATH")
+        script = (
+            'printf \'%s\\n\' "sync-skills" "other" '
+            '| grep -qxF -- "$1"'
+        )
+        assert subprocess.run(
+            [bash, "-c", script, "_", "sync-skills\nfoo=bar"],
+            capture_output=True,
+        ).returncode == 0, (
+            "grep -F unexpectedly rejected the multiline pattern; if this "
+            "starts failing the hazard is gone and this test can go with it"
+        )

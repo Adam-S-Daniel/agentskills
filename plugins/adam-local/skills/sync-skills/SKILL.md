@@ -832,3 +832,12 @@ unfinished: `pytest-windows` is a required check on `main`, GitHub raises no
 workflow events for anything `GITHUB_TOKEN` does, so a PR this workflow opened
 would never run CI and could never merge. You open it; the checks run under
 your identity.
+
+**Where the distinction shows up.** `basis` is not left in the file for a
+careful reader to find — every surface that reports a verdict carries it. The
+`--account-drift` row has `recorded_basis`, the JSON report lists
+`in_sync_asserted` alongside `in_sync` (both, so a caller reading only
+`in_sync` still gets the safe reading), the human line reads
+`in-sync (asserted)`, and the ZIP workflow's summary names any skill whose
+`in-sync` was never checked against the account. A caveat that lives only in a
+docstring is not a caveat.
