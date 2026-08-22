@@ -2506,6 +2506,29 @@ def test_the_foreign_note_does_not_claim_no_bundle_ever_delivered_it(
     assert "does not run the name-dir-mismatch check" in flat(out), out
 
 
+def test_a_recorded_name_disagreement_gets_no_foreign_note(tmp_path, capsys,
+                                                           ephemeral):
+    """A record ENTRY is the hook saying it installed exactly this directory.
+
+    The same contradiction `reported_foreign`'s other gates exist for, in the
+    state neither of them reaches: a skill the hook installed and the lock has
+    since dropped, whose frontmatter disagrees with its basename — which a
+    federated registry that does not run the name-dir-mismatch lint can ship.
+    The row reads `hook`, with the registry and bundle that delivered it, and
+    the note beside it said the install record does not name it.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    seeded_skill(store, "helper", "some-other-name")
+    write_record(store, "alpha", "helper")    # the hook installed BOTH
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    _, out = run(store, lock, capsys)
+    assert "helper                       hook" in out, out
+    assert "[foreign] helper" not in out, out
+
+
 def test_a_locked_name_disagreement_gets_no_foreign_note(tmp_path, capsys,
                                                          ephemeral):
     """One directory, two sentences that cannot both be true.
