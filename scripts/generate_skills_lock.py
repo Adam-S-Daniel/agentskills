@@ -1281,14 +1281,24 @@ def check_current(
     overrides: Optional[Dict[str, str]] = None,
     *,
     only: Optional[str] = None,
-) -> Tuple[Dict[str, str], List[str]]:
+) -> Tuple[Dict[str, str], List[Tuple[dict, List[str]]]]:
     """Compare the content at each source's pinned ref with its working tree.
 
-    Returns (working-tree skill map, human-readable differences). An empty
-    difference list means every pinned commit still describes its bundles as
-    they stand, i.e. the lock is current as well as faithful. Each difference
-    names the ref of the source it came from, so a multi-source failure says
-    which registry to re-pin.
+    Returns (working-tree skill map, [(source, its differences), ...]), with an
+    entry only for a source that actually drifted. An empty list means every
+    pinned commit still describes its bundles as they stand, i.e. the lock is
+    current as well as faithful.
+
+    GROUPED BY SOURCE, not one flat list: a caller is told which registry
+    drifted without reading a message. The differences themselves still name
+    the ref they came from, but that was the weak form of the guarantee — it
+    put the attribution in prose, where a reader had to notice that the sha in
+    a detail line was not the sha in the headline above it.
+
+    Each returned source carries an extra `is_primary` key alongside its
+    planned fields. It is set here rather than derived by the caller because
+    plan order is what decides it (the primary is the first source planned) and
+    a filtered list no longer carries that index.
 
     `only` narrows the question to ONE registry the lock plans rather than
     reinterpreting a combined answer. That distinction is the whole reason the
@@ -1307,8 +1317,8 @@ def check_current(
         # its whole tree — that a scoped question has no business doing.
         sources = sources[1:]
     working: Dict[str, str] = {}
-    differences: List[str] = []
-    for source in sources:
+    drifted: List[Tuple[dict, List[str]]] = []
+    for index, source in enumerate(sources):
         # Resolve first. `git archive` on a commit this clone does not have
         # reports a bare "not a valid object name", where resolve_ref names the
         # shallow clone that actually causes it — the exact failure a CI
@@ -1328,6 +1338,10 @@ def check_current(
                               skip=ignored_paths(source["path"]))
         working.update(here)
         at = source["ref"]
+        # These three strings are quoted verbatim into a PR body by
+        # _agent-guidance's bumper and asserted by several tests here. Grouping
+        # changed which LIST they land in; it must not change their bytes.
+        differences: List[str] = []
         for name in sorted(set(here) - set(pinned)):
             differences.append(f"added: '{name}' is in the working tree but not at {at}")
         for name in sorted(set(pinned) - set(here)):
@@ -1335,7 +1349,10 @@ def check_current(
         for name in sorted(set(pinned) & set(here)):
             if pinned[name] != here[name]:
                 differences.append(f"changed: '{name}' differs from its content at {at}")
-    return working, differences
+        if differences:
+            drifted.append(({**source, "is_primary": include_primary and index == 0},
+                            differences))
+    return working, drifted
 
 
 def serialize(document: dict) -> str:
@@ -1763,7 +1780,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # the ref this run actually looked at. Both calls answer off the same
             # inherited `extras`, and the helper is pure.
             selected, include_primary = _select_sources(registry, extras, args.only)
-            working, differences = check_current(
+            working, drifted = check_current(
                 repo, registry, ref, bundles, extras, overrides, only=args.only
             )
             # The ref of the FIRST source the run planned. Unscoped that is the
@@ -1772,24 +1789,60 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # branch, so there is no new way for this line to name a ref nobody
             # checked.
             scoped_ref = ref if include_primary else selected[0]["ref"]
-            if not differences:
+            if not drifted:
                 print(f"OK: the working tree still matches {scoped_ref} "
                       f"({len(working)} skills).")
             else:
-                print(f"FAILED: the bundle has moved on since {ref}, which {output} still "
-                      "pins — nothing added or changed since then reaches an ephemeral "
-                      "surface. Re-pin it (after committing the content) with:")
-                # --repin, not a bare re-run: this lock may federate, and a
-                # plain generate takes `sources` from the command line alone,
-                # so following that instruction literally would de-federate it
-                # at exit 0. The remediation line is the one place a reader is
-                # told which command to type, so it must name the safe one.
-                print("  python3 scripts/generate_skills_lock.py --repin")
-                print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
-                print("  before another commit touched a locked skill: the lock is still faithful")
-                print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
-                for line in differences:
-                    print(f"  - {line}")
+                # THE CROSS-REPO CONTRACT this loop must keep, as three facts a
+                # reader can check rather than a promise:
+                #
+                #   1. Every verdict line begins at column 0 with the literal
+                #      `FAILED:`. _agent-guidance's
+                #      scripts/bump-consumer-locks.sh branches on
+                #      `grep -q '^FAILED:'`, and anything else there is an
+                #      ERROR it refuses to act on.
+                #   2. The primary's block comes FIRST. That script slices
+                #      `sed -n '/^FAILED:/,$p' | head -20` into a PR body, and
+                #      the path substitution beside that slice names the
+                #      primary lock alone.
+                #   3. Every headline is IMMEDIATELY followed by its own
+                #      remediation line. That is what makes the 20-line cap
+                #      safe: a truncation can drop a whole trailing block, but
+                #      it can never separate a headline from the command that
+                #      fixes it.
+                #
+                # Plan order gives (2) for free — plan_sources puts the primary
+                # first — and `test_check_current_names_both_when_primary_and_source_both_drift`
+                # and `test_every_failed_line_is_followed_by_its_own_remediation_command`
+                # are what say so out loud.
+                for source, differences in drifted:
+                    if source["is_primary"]:
+                        print(f"FAILED: the bundle has moved on since {ref}, which {output} "
+                              "still pins — nothing added or changed since then reaches an "
+                              "ephemeral surface. Re-pin it (after committing the content) "
+                              "with:")
+                        # --repin, not a bare re-run: this lock may federate, and a
+                        # plain generate takes `sources` from the command line alone,
+                        # so following that instruction literally would de-federate it
+                        # at exit 0. The remediation line is the one place a reader is
+                        # told which command to type, so it must name the safe one.
+                        print("  python3 scripts/generate_skills_lock.py --repin")
+                        # PRIMARY-ONLY, deliberately. This note reasons about the
+                        # reader's own merge base, and is simply false about another
+                        # registry's drift.
+                        print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
+                        print("  before another commit touched a locked skill: the lock is still faithful")
+                        print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
+                    else:
+                        print(f"FAILED: {source['registry']}'s bundles have moved on since "
+                              f"{source['ref']}, which {output} still pins for it — nothing "
+                              "added or changed there reaches an ephemeral surface. Advance "
+                              "that source's pin (after committing the content in that "
+                              "registry) with:")
+                        print("  python3 scripts/generate_skills_lock.py --repin "
+                              f"--repin-source '{source['registry']}@'")
+                    for line in differences:
+                        print(f"  - {line}")
                 status = 1
         return status
 
