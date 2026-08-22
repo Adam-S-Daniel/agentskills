@@ -2065,19 +2065,57 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # measures the sliced output rather than the raw stream, so the
                 # absolute cannot be restated without a red test.
                 #
-                # What the cap DOES guarantee is the primary's own pair, and
-                # only because of (2): the primary's headline is line 1 of the
-                # slice and its remediation line 2. That is the block the
-                # bumper's path substitution names, and today's bumper slices
-                # only the primary-scoped, single-block run — so nothing is
-                # live. A scoped per-source slice would be a NEW consumer and
-                # would need its own guarantee; it does not inherit one here.
+                # Its replacement then asserted two more things nobody had
+                # checked — that the bumper slices "only the primary-scoped,
+                # single-block run", and that a scoped per-source slice "would
+                # be a NEW consumer" — and both were false when written. The
+                # four statements below are a dated reading of that script
+                # rather than a standing promise about it: measured in
+                # _agent-guidance's scripts/bump-consumer-locks.sh at 4c505e3,
+                # 2026-08-22. Re-read it before relying on the first one; the
+                # other three are about this file and are held by tests.
                 #
-                # Plan order gives (2) for free — plan_sources puts the primary
-                # first — and `test_check_current_names_both_when_primary_and_source_both_drift`,
-                # `test_every_failed_line_is_followed_by_its_own_remediation_command`
-                # and `test_the_bumper_cap_always_keeps_the_primary_headline_with_its_command`
-                # are what say so out loud.
+                #   * That script applies `sed -n '/^FAILED:/,$p' | head -20`
+                #     to THREE streams, two of them from this report. One is
+                #     `check_out`, a single UNSCOPED `--check-current`. The
+                #     other is `fed_check_out`, which it builds by
+                #     CONCATENATING one `--check-current --only <registry>`
+                #     block per drifted source — a multi-block scoped stream,
+                #     sliced today, under a heading that says as much ("each
+                #     block below was produced by `--check-current --only <that
+                #     registry>`").
+                #   * What no cap above two lines can split is the FIRST
+                #     block's headline from the command under it, when it has
+                #     one: headline on line 1 of the slice, command on line 2,
+                #     whichever block is first. In the unscoped
+                #     stream that is the primary's block whenever the primary
+                #     drifted, by (2) — plan_sources puts it first.
+                #   * A LATER block whose command is a separate line has no
+                #     such protection, in either stream, and both are
+                #     reachable. Unscoped: the primary's 5 fixed lines plus 14
+                #     differences puts the first federated headline on line 20
+                #     and its command on 21. Scoped and concatenated: a source
+                #     block is 2 fixed lines plus its differences, so 17
+                #     differences in the first source's block orphans the
+                #     SECOND source's headline the same way — and that stream
+                #     carries no primary block at all (`_select_sources`
+                #     returns include_primary False when `only` names a
+                #     source), so "the primary's pair survives" is not merely
+                #     unhelpful there, it is about a block that is not present.
+                #   * A block the refusal above left without a command cannot
+                #     be orphaned by any cap, because its answer is inside its
+                #     headline.
+                #
+                # Plan order gives (2) for free, and the tests that measure the
+                # SLICED output rather than the raw stream are what keep any of
+                # this from being restated on intuition:
+                # `test_the_bumper_cap_always_keeps_the_primary_headline_with_its_command`,
+                # `test_the_bumper_cap_can_cut_a_later_headline_from_its_command`
+                # and
+                # `test_the_bumper_cap_can_cut_a_scoped_headline_from_its_command`.
+                # `test_check_current_names_both_when_primary_and_source_both_drift`
+                # and `test_every_failed_line_is_followed_by_its_own_remediation_command`
+                # hold (2) and (3).
                 # Whether the primary's own block is about to tell the reader
                 # to advance it decides whether the federated blocks below hold
                 # its pin. See the --ref anchor there.

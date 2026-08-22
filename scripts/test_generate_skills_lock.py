@@ -940,6 +940,63 @@ def test_the_bumper_cap_can_cut_a_later_headline_from_its_command(
     assert first_cut.strip().startswith("python3 scripts/generate_skills_lock.py --repin")
 
 
+# A SCOPED source block is 2 fixed lines (headline + remediation) + one line
+# per difference, with no note lines and no primary block above it — so the
+# count that orphans the NEXT block's headline differs from the unscoped one.
+# Named for the same reason: if a block's fixed size changes, this goes red
+# beside its unscoped sibling and the report loop's arithmetic is re-derived.
+_SCOPED_DIFFERENCES_THAT_FILL_THE_CAP = _BUMPER_CAP - 2 - 1
+
+
+def test_the_bumper_cap_can_cut_a_scoped_headline_from_its_command(
+        federated_two, tmp_path):
+    """The bumper's OTHER slice, which the fix for the first one denied existed.
+
+    _agent-guidance's bump-consumer-locks.sh caps two streams from this report,
+    not one. Besides the unscoped `check_out` it builds `fed_check_out` by
+    CONCATENATING one `--check-current --only <registry>` block per drifted
+    source and slices that with the same `head -20`. This reproduces that
+    concatenation rather than describing it.
+
+    Two things the unscoped tests cannot show: the stream carries no primary
+    block at all, so "the primary's pair survives any cap" is about a block
+    that is not there; and a source block's smaller fixed size means a
+    different number of differences orphans the next headline.
+
+    Pinned as a measurement. Making a later block's pair unsplittable is a fine
+    thing to do — it is what the ambiguous-source headline already does — but
+    it cannot be ASSERTED while this test still passes.
+    """
+    primary, _primary_sha, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    for index in range(_SCOPED_DIFFERENCES_THAT_FILL_THE_CAP):
+        _write(extra / "skills" / f"added{index:02d}" / "SKILL.md",
+               f"---\nname: added{index:02d}\n---\nbody\n")
+    _write(other / "skills" / "publish" / "SKILL.md", "---\nname: publish\n---\nedited\n")
+
+    blocks = []
+    for source in json.loads(out.read_text(encoding="utf-8"))["sources"]:
+        scoped = run_generator("--repo", str(primary), "--check-current",
+                               "--only", source["registry"], "-o", str(out))
+        assert scoped.returncode == 1, scoped.stdout + scoped.stderr
+        blocks.append(scoped.stdout.rstrip("\n"))
+    stream = "\n".join(blocks) + "\n"
+
+    lines = stream.splitlines()
+    sliced = _bumper_slice(stream)
+    assert len(sliced) == _BUMPER_CAP, stream
+    assert sliced[-1].startswith(
+        f"FAILED: {other.resolve().as_uri()}'s bundles have moved"), stream
+    first_cut = lines[lines.index(sliced[-1]) + 1]
+    assert first_cut.strip().startswith(
+        "python3 scripts/generate_skills_lock.py --repin"), stream
+    # No primary block anywhere in it: a scoped run selects the named source
+    # alone, so the one pair the cap cannot split here belongs to a source.
+    assert "FAILED: the bundle has moved on since" not in stream, stream
+
+
 def test_check_current_verdict_still_starts_with_FAILED_at_column_zero(
         federated, tmp_path):
     """The contract's first fact, asserted for a federated block too.
