@@ -117,9 +117,25 @@ jobs:
         # need no token. Cloned to ../ so neither tree pollutes the workspace
         # checkout that `--account-drift` scans.
         #
-        # `set -uo pipefail` WITHOUT `-e`, deliberately. Every failure here is
-        # handled by name and becomes `status=unavailable`, which the summary
-        # renders as DEGRADED. A missing `eval-results` branch in particular is
+        # THIS STEP RUNS UNDER `bash -e`, AND EVERY FAILURE IN IT IS EXPLICITLY
+        # GUARDED. Both facts are load-bearing, and the first one is not a
+        # choice made here: no `shell:` and no `defaults:` are declared
+        # anywhere in this file, so GitHub runs each `run:` body as
+        # `/usr/bin/bash -e {0}`. The `set -uo pipefail` below adds nounset and
+        # pipefail to that; it cannot take errexit away, because `set -o` only
+        # ENABLES options. This comment previously claimed the step ran without
+        # `-e` "deliberately", which was false at runtime and is the more
+        # dangerous direction to be wrong in: an editor who believes an
+        # unguarded command fails soft here writes one, and it aborts the step
+        # instead.
+        #
+        # What makes the tolerance real is the SHAPE of every failable command,
+        # not the absence of a flag. Both clones sit in `if` conditions, and
+        # the pyyaml install, the heredoc capture and the drift-constant read
+        # sit in `||` lists - all constructs errexit is defined not to act on,
+        # so each failure is caught by name and becomes `status=unavailable`,
+        # which the summary renders as DEGRADED. Keep new commands in one of
+        # those shapes. A missing `eval-results` branch in particular is
         # reported and never fatal - the same tolerance skills-evals' own
         # propagation.yml applies in "Fetch the account audit's published
         # result", and for the same reason: a hard failure would take out the

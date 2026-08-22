@@ -408,8 +408,17 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # `python3 scripts/account_zip_selection.py`; both resolve against
         # $GITHUB_WORKSPACE. Inheriting pytest's cwd instead would make the
         # quiet arm depend on where the suite happened to be started from.
+        #
+        # `-e`, BECAUSE THAT IS THE SHELL THE STEP ACTUALLY GETS. The workflow
+        # declares no `shell:` and no `defaults:`, so GitHub runs every `run:`
+        # body as `/usr/bin/bash -e {0}`, and the step's own `set -uo pipefail`
+        # cannot take that back - `set -o` only ENABLES options. Spawning this
+        # tail without `-e` made the harness differ from production in exactly
+        # the flag that decides whether an unguarded failure aborts the step,
+        # so a command that fails soft here would abort there and this suite
+        # would report the opposite of what the runner does.
         proc = subprocess.run(
-            [bash, "-c", "set -uo pipefail\nverdict=$1\n" + self._tail(),
+            [bash, "-e", "-c", "set -uo pipefail\nverdict=$1\n" + self._tail(),
              "_", verdict],
             capture_output=True, text=True, env=env, cwd=str(REPO),
         )
