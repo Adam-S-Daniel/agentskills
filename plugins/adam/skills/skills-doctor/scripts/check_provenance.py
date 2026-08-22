@@ -1113,7 +1113,7 @@ def _why_not_foreign(origin: Origin) -> str:
             f"untested.")
 
 
-def foreign_notes(origins: Dict[str, Origin],
+def foreign_notes(skills_dir: Path, origins: Dict[str, Origin],
                   account: Set[str] = frozenset()) -> List[Finding]:
     """One note per directory no name-keyed channel here could have produced.
 
@@ -1130,19 +1130,51 @@ def foreign_notes(origins: Dict[str, Origin],
     name-keyed channels this rules out, and it is the one that can name the
     BASENAME while having nothing to do with the directory. Saying "no
     name-keyed channel names it" while the same report shows `synced/<name>`
-    is a claim a reader can falsify in one `ls`, so the clause is measured.
+    is a claim a reader can falsify in one `ls`.
+
+    `skills_dir` is passed for the rest of that clause. Knowing the basename is
+    taken says nothing about WHAT is under it, and the first version of this
+    text asserted three things about the account copy's frontmatter — that it is
+    "a skill of its own", that "this one declares something else", and that "no
+    re-upload could reconcile them" — off the directory's existence alone. All
+    three are false for a byte-identical twin, and one `cat` shows it. So the
+    frontmatter is read, and the sentence says which of the three states was
+    found.
     """
     notes: List[Finding] = []
     for name, origin in sorted(origins.items()):
         if origin.kind != FOREIGN:
             continue
         if name in account:
-            collision = (f"The account store does hold a {ACCOUNT_DIR}/{name}/, "
-                         f"which is a skill of its own under that basename and "
-                         f"not a second copy of this directory — this one "
-                         f"declares something else. So the two are not compared "
-                         f"as one skill's two deliveries, and no re-upload could "
-                         f"reconcile them.")
+            theirs = declared_name(skills_dir / ACCOUNT_DIR / name)
+            if theirs == origin.declared:
+                collision = (
+                    f"The account store does hold a {ACCOUNT_DIR}/{name}/, and "
+                    f"its SKILL.md declares `name: {theirs}` too — the same "
+                    f"disagreement, so the two may well be one skill delivered "
+                    f"twice under a basename neither of them claims. They are "
+                    f"still not diffed against each other here: the shadow "
+                    f"comparison is declared over the origins a channel here "
+                    f"accounts for, and this directory is not one of them.")
+            elif theirs == name:
+                collision = (
+                    f"The account store does hold a {ACCOUNT_DIR}/{name}/, and "
+                    f"its SKILL.md declares `name: {name}` — the basename. So "
+                    f"it is a skill of its own under that name and not another "
+                    f"copy of this directory, which declares something else.")
+            elif theirs is not None:
+                collision = (
+                    f"The account store does hold a {ACCOUNT_DIR}/{name}/, and "
+                    f"its SKILL.md declares `name: {theirs}` — a third name, "
+                    f"neither this directory's basename nor what this one "
+                    f"declares. Two things colliding on one basename, then, "
+                    f"rather than one skill's two deliveries.")
+            else:
+                collision = (
+                    f"The account store does hold a {ACCOUNT_DIR}/{name}/, and "
+                    f"this script cannot read a `name:` out of its SKILL.md — "
+                    f"so whether it is another copy of THIS directory is not "
+                    f"established either way.")
         else:
             collision = "Nor does the account manifest."
         notes.append(_observed(
@@ -2143,7 +2175,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         + [finding for result in results for finding in result.findings])
     notes = dedupe(hook_noted
                    + shadow_noted
-                   + foreign_notes(origins, account)
+                   + foreign_notes(skills_dir, origins, account)
                    + [note for result in results for note in result.notes])
 
     stamped: List[Tuple[str, float]] = []

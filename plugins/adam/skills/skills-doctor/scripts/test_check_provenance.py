@@ -2617,6 +2617,68 @@ def test_a_foreign_directory_the_account_store_also_names_is_not_a_shadow(
     assert "Nor does the account manifest" not in flat(out), out
 
 
+def _account_skill(store: Path, name: str, text: str) -> Path:
+    """An account-store directory whose SKILL.md is written verbatim.
+
+    `account_copy` always declares the basename, which is exactly the one case
+    the collision clause used to assume and the reason it went three rounds
+    unmeasured.
+    """
+    skill = store / prov.ACCOUNT_DIR / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(text, encoding="utf-8")
+    return skill
+
+
+@pytest.mark.parametrize("account_text,present,absent", [
+    # The byte-identical twin: the same disagreement on both sides. The old
+    # clause said "this one declares something else" and "no re-upload could
+    # reconcile them" here, and one `cat` falsifies both.
+    ("---\nname: startup-hook-skill\n---\nbody\n",
+     "declares `name: startup-hook-skill` too",
+     "a skill of its own under that name"),
+    # A genuinely different skill that happens to own the basename.
+    ("---\nname: session-start-hook\n---\nbody\n",
+     "a skill of its own under that name",
+     "declares `name: startup-hook-skill` too"),
+    # A third name: not this basename, not this directory's declaration.
+    ("---\nname: something-third\n---\nbody\n",
+     "declares `name: something-third` — a third name",
+     "a skill of its own under that name"),
+    # Nothing readable. `declared_name` is conservative by design, and the
+    # clause has to be conservative with it rather than filling the gap in.
+    ("no frontmatter at all\n",
+     "cannot read a `name:` out of its SKILL.md",
+     "and its SKILL.md declares"),
+], ids=["identical-twin", "owns-the-basename", "a-third-name", "unreadable"])
+def test_the_account_collision_clause_reads_the_account_copys_frontmatter(
+        tmp_path, capsys, ephemeral, account_text, present, absent):
+    """What is under the basename, not just that the basename is taken.
+
+    The clause asserted three things about the account copy — that it is a skill
+    of its own, that this directory "declares something else", and that no
+    re-upload could reconcile the pair — from `name in account` alone, while its
+    own docstring said the clause was measured. All three are wrong for a
+    byte-identical twin, which the first case here is.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    seeded_skill(store, "session-start-hook", "startup-hook-skill")
+    _account_skill(store, "session-start-hook", account_text)
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "[foreign] session-start-hook" in out, out
+    assert present in flat(out), out
+    assert absent not in flat(out), out
+    # Retired in every branch: it was never measured, and it is false wherever
+    # the two copies really are one skill's two deliveries.
+    assert "no re-upload could reconcile them" not in flat(out), out
+
+
 def test_a_kind_no_observation_registers_cannot_reach_a_reader():
     """The table is enforced, not decorative.
 
