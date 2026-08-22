@@ -3295,30 +3295,6 @@ def test_check_current_prints_no_repin_command_the_flag_would_refuse(tmp_path):
     assert "restate the whole array with a plain generate" in proc.stdout
 
 
-def test_the_report_and_the_refusal_give_the_same_reason(tmp_path):
-    """One sentence, one source of it — `repin_source_blocker`.
-
-    Two copies of "why this flag cannot be used here" is how a report and a
-    flag come to disagree, and this pair disagreeing is not cosmetic: the
-    report is where a reader learns the repair, and the flag is what accepts
-    it. Compared as strings rather than by re-describing both.
-    """
-    primary, extra, uri, out = _lock_federating_one_registry_twice(tmp_path)
-    before = out.read_text(encoding="utf-8")
-    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
-
-    report = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
-    assert report.returncode == 1, report.stdout + report.stderr
-    assert "would refuse one: " in report.stdout, report.stdout
-    reason = report.stdout.split("would refuse one: ", 1)[1].splitlines()[0]
-
-    refusal = run_generator("--repo", str(primary), "--repin",
-                            "--repin-source", f"{uri}@", "-o", str(out))
-    assert refusal.returncode == 1, refusal.stdout + refusal.stderr
-    assert reason and reason in refusal.stderr, (reason, refusal.stderr)
-    assert out.read_text(encoding="utf-8") == before
-
-
 def test_repin_source_refuses_a_checkout_that_is_not_the_source_it_names(
         federated, tmp_path):
     """The identity probe the primary's --repin has, applied per source.
@@ -3416,6 +3392,254 @@ def test_repin_refuses_a_primary_pinned_at_a_branch(registry, tmp_path):
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "not a commit sha" in proc.stderr, proc.stderr
     assert out.read_text(encoding="utf-8") == before
+
+
+# --------------------------------------------------------------------------
+# one predicate per refusal, read by the report AND by the flag
+#
+# The defect class these hold shut: a condition that makes a command refuse is
+# checked on the APPLY path but not on the REPORT path (or the other way
+# round), so --check-current recommends a command the same generator then
+# rejects at exit 1 — leaving a drifted lock with no route the tool accepts.
+# Three rounds of fixing one instance at a time re-opened it three times, so
+# what is measured here is the property over every lock shape rather than over
+# the shape whose report happened to be read.
+# --------------------------------------------------------------------------
+
+def _primary_drifted(primary: Path) -> str:
+    """Commit a real content change in the primary bundle. Returns its new sha."""
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "the primary really moved")
+    return _head(primary)
+
+
+def _drifted_plain(tmp_path):
+    """An ordinary lock whose primary bundle gained a commit."""
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", sha, "--bundles", "adam", "-o", str(out)).returncode == 0
+    _primary_drifted(primary)
+    return primary, out, []
+
+
+def _drifted_source_only(tmp_path):
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "-o", str(out)).returncode == 0
+    _source_drifted(extra)
+    return primary, out, []
+
+
+def _drifted_source_only_scoped(tmp_path):
+    """The same drift, asked the way the fleet bumper asks about one source."""
+    primary, out, _ = _drifted_source_only(tmp_path)
+    extra = tmp_path / "cms-platform"
+    return primary, out, ["--only", extra.resolve().as_uri()]
+
+
+def _drifted_primary_and_source(tmp_path):
+    primary, out, _ = _drifted_source_only(tmp_path)
+    _primary_drifted(primary)
+    return primary, out, []
+
+
+def _branch_primary_drifted(tmp_path):
+    """`--ref main` is a supported invocation and writes the branch verbatim.
+
+    The drift is left UNCOMMITTED on purpose: a branch pin resolves to the tip,
+    so committing would move the pin along with the content and leave nothing
+    to report.
+    """
+    primary = tmp_path / "registry"
+    make_registry(primary, {"adam/alpha": SKILL_A})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", "main", "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["ref"] == "main"
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    return primary, out, []
+
+
+def _branch_primary_with_a_drifted_source(tmp_path):
+    """Only the SOURCE drifted — but the line that repairs it is a --repin."""
+    primary = tmp_path / "registry"
+    extra = tmp_path / "cms-platform"
+    make_registry(primary, {"adam/alpha": SKILL_A})
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", "main", "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "-o", str(out)).returncode == 0
+    _source_drifted(extra)
+    return primary, out, []
+
+
+def _one_registry_as_both_halves(tmp_path):
+    """A lock naming one registry as its primary AND as a federated source.
+
+    Representable and `--check`-green — plan_sources' uniqueness check is keyed
+    on bundle — and `_select_sources` refuses to SCOPE to such a registry, so
+    the unscoped run is the only one that reports this drift at all.
+    """
+    primary = tmp_path / "registry"
+    make_registry(primary, {"adam/alpha": SKILL_A})
+    _write(primary / "other" / "publish" / "SKILL.md", SKILL_C["SKILL.md"])
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "a second bundle in the same repo")
+    sha = _head(primary)
+    uri = primary.resolve().as_uri()
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", uri, "--ref", sha, "--bundles", "adam",
+        "--source", f"other={uri}@{sha}:{{bundle}}", "-o", str(out)).returncode == 0
+    _write(primary / "other" / "publish" / "SKILL.md", "---\nname: gamma\n---\nedited\n")
+    return primary, out, []
+
+
+def _registry_federated_twice(tmp_path):
+    primary, extra, _uri, out = _lock_federating_one_registry_twice(tmp_path)
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+    return primary, out, []
+
+
+def _source_hand_pinned_at_a_branch(tmp_path):
+    primary, out, _ = _drifted_source_only(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["sources"][0]["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    # Uncommitted, for the same reason `_branch_primary_drifted` is: a branch
+    # pin follows its tip, so a committed change would not be a drift.
+    _write(tmp_path / "cms-platform" / "skills" / "deploy" / "SKILL.md",
+           "---\nname: deploy\n---\nedited again\n")
+    return primary, out, []
+
+
+# (builder, id, does --check-current have a command it can honestly print?)
+_DRIFT_SHAPES = [
+    (_drifted_plain, "the primary moved", True),
+    (_drifted_source_only, "a source moved", True),
+    (_drifted_source_only_scoped, "a source moved, asked with --only", True),
+    (_drifted_primary_and_source, "both moved", True),
+    (_branch_primary_drifted, "the primary is pinned at a branch", False),
+    (_branch_primary_with_a_drifted_source,
+     "a source moved under a branch-pinned primary", False),
+    (_one_registry_as_both_halves,
+     "one registry is both the primary and a source", False),
+    (_registry_federated_twice, "one registry is federated twice", False),
+    (_source_hand_pinned_at_a_branch, "a source is pinned at a branch", False),
+]
+_EVERY_SHAPE = [pytest.param(build, printable, id=name)
+                for build, name, printable in _DRIFT_SHAPES]
+_BLOCKED_SHAPES = [pytest.param(build, id=name)
+                   for build, name, printable in _DRIFT_SHAPES if not printable]
+
+
+def _printed_commands(stdout: str) -> list:
+    return [line.strip() for line in stdout.splitlines()
+            if line.strip().startswith("python3 ")]
+
+
+@pytest.mark.parametrize("build, printable", _EVERY_SHAPE)
+def test_every_command_check_current_prints_is_one_the_generator_accepts(
+        build, printable, tmp_path):
+    """The whole class as one property: print it only if you would run it.
+
+    Every command this report prints is a `--repin` — the federated
+    `--repin --ref <r> --repin-source '<reg>@'` included — so ANY refusal on
+    the re-pin path can reject any printed line, whichever block printed it.
+    Rather than re-listing which refusals apply to which block (three rounds of
+    doing that left three shapes uncovered), this runs whatever was printed,
+    exactly as printed, and requires exit 0.
+
+    The blocked shapes carry the other half: they must print no command at all
+    and say why in the headline, where no truncation can separate the reason
+    from the block it belongs to.
+    """
+    primary, out, extra_args = build(tmp_path)
+    verdict = run_generator("--repo", str(primary), "--check-current",
+                            *extra_args, "-o", str(out))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    commands = _printed_commands(verdict.stdout)
+
+    if not printable:
+        assert not commands, verdict.stdout
+        for line in verdict.stdout.splitlines():
+            if line.startswith("FAILED:"):
+                assert "would refuse one: " in line, line
+        return
+
+    assert commands, verdict.stdout
+    for command in commands:
+        # shlex, so what runs is the string a reader would paste. --repo/-o
+        # only say where this fixture lives.
+        applied = run_generator(*shlex.split(command)[2:],
+                                "--repo", str(primary), "-o", str(out))
+        assert applied.returncode == 0, (command, applied.stdout + applied.stderr)
+
+
+def _blocked_headlines(stdout: str) -> list:
+    """(registry or None for the primary block, the reason given) per block."""
+    blocks = []
+    for line in stdout.splitlines():
+        if not line.startswith("FAILED:") or "would refuse one: " not in line:
+            continue
+        reason = line.split("would refuse one: ", 1)[1]
+        if line.startswith("FAILED: the bundle has moved on"):
+            blocks.append((None, reason))
+        else:
+            blocks.append((line[len("FAILED: "):].split("'s bundles have moved")[0],
+                           reason))
+    return blocks
+
+
+@pytest.mark.parametrize("build", _BLOCKED_SHAPES)
+def test_the_report_and_the_refusal_give_the_same_reason(build, tmp_path):
+    """One sentence, one source of it — the `*_blocker` predicates.
+
+    Two copies of "why a re-pin cannot be used here" is how a report and a flag
+    come to disagree, and this pair disagreeing is not cosmetic: the report is
+    where a reader learns the repair and the flag is what accepts it. So the
+    command each blocked block DECLINED to print is rebuilt in the shape that
+    block prints (bare `--repin` for the primary, `--repin --repin-source
+    '<registry>@'` for a source), run, and required to fail with the very
+    sentence the reader was given.
+
+    Compared as strings rather than by re-describing both, and over every shape
+    the report refuses rather than the one the predicate was born for.
+    """
+    primary, out, extra_args = build(tmp_path)
+    before = out.read_text(encoding="utf-8")
+
+    report = run_generator("--repo", str(primary), "--check-current",
+                           *extra_args, "-o", str(out))
+    assert report.returncode == 1, report.stdout + report.stderr
+    blocks = _blocked_headlines(report.stdout)
+    assert blocks, report.stdout
+
+    for registry, reason in blocks:
+        # The `--ref` anchor the printable form carries is left off: it names
+        # which primary pin to hold, and every refusal here is decided before
+        # any pin is written.
+        spec = [] if registry is None else ["--repin-source", f"{registry}@"]
+        refusal = run_generator("--repo", str(primary), "--repin", *spec, "-o", str(out))
+        assert refusal.returncode == 1, (registry, refusal.stdout + refusal.stderr)
+        assert reason in refusal.stderr, (reason, refusal.stderr)
+        assert out.read_text(encoding="utf-8") == before, "a refused re-pin still wrote"
 
 
 def test_a_source_ref_is_resolved_before_it_is_written_and_a_primarys_is_not(
