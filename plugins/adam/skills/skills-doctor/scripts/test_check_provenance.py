@@ -3744,9 +3744,9 @@ def hook_may_replace(dest: Path, name: str, locked: str,
 def _may_replace_state(tmp_path, which: str):
     """One store in which the hook's answer about `alpha` is worth measuring.
 
-    Returns (store, lock, locked digest, recorded rows) — the three inputs
-    `may_replace` reads besides the bytes on disk, so a caller can put the same
-    store to the hook and to the doctor and compare their answers.
+    Returns (store, lock, locked digest, recorded rows): everything
+    `may_replace` reads besides the bytes on disk, plus the lock file to run the
+    doctor against — so a caller can put one store to both and compare answers.
 
     The lock and the record are written BEFORE the directory is disturbed, so
     both carry the digest of the copy the hook installed, which is what a real
@@ -3989,7 +3989,7 @@ def test_a_refusal_on_a_durable_surface_says_the_run_does_not_happen(
     after that installs the locked copy. On a durable machine the hook prints
     `skills: skipped` and returns before it reads the lock, so there is no
     verdict, no shadowed list and no install — and the report printed all of it
-    two blocks under its own `SURFACE  durable` line.
+    under its own `SURFACE  durable` line.
     """
     store, lock, _locked, _recorded = _may_replace_state(tmp_path, which)
     code, out = run(store, lock, capsys,
@@ -4425,9 +4425,10 @@ MATRIX = {
     (_F, True, False, 'shadow', 'divergent'): (set(), {'foreign'}, 0),
 
     # Nothing attributes these to the hook, so whether the hook refuses them
-    # turns entirely on the lock's digest — which is why five of these eight
-    # are now a NOTE. Round 4's table read `hand-placed-over-locked` at exit 1
-    # in all eight, over five stores the hook overwrites without complaint.
+    # turns entirely on the lock's digest, and most of this block is a NOTE.
+    # Round 4's table had no `digest-moved-on` column and read
+    # `hand-placed-over-locked` at exit 1 in every cell it did have — five of
+    # which are stores the hook overwrites without complaint.
     (_U, True, True, 'foreign', 'declares-another-name'):
         (set(), {'bytes-are-the-locked-ones'}, 0),
     (_U, True, True, 'integrity', 'edited'):
