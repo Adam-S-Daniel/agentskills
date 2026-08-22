@@ -315,6 +315,14 @@ jobs:
           # is normalised rather than condemned: `$( )` already discards a
           # TRAILING blank line, and treating a LEADING one as fatal while its
           # mirror image is invisible would be the inconsistent rule.
+          #
+          # THE ORDER IS EXECUTED, NOT ARGUED. This paragraph used to be the
+          # only thing holding it: moving the line above the two trims left
+          # every test in this repo green while `\nfresh` began degrading to
+          # `unavailable` with an annotation blaming a cross-repo import.
+          # test_a_capture_padded_with_a_newline_is_trimmed_not_condemned runs
+          # the step for seven paddings and reds on all seven if the two are
+          # swapped.
           [ "$verdict" = "${verdict%%[$'\n']*}" ] || verdict=""
           # An empty capture is the ONLY way this can end without a verdict, and
           # it must not read as one. `unavailable` is not a skills-evals status;
