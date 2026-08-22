@@ -3739,6 +3739,64 @@ _INVOCATION_TOKENS = ("python", ".py")
 _FLAG_TOKEN = re.compile(r"(?:^|\s)(--?[a-z][a-z0-9-]*)")
 
 
+# The callables a printed expression may reach, beyond this module's own
+# functions. Every one is here because its RESULT SHAPE is closed against this
+# script's own name — they count, order, re-type, or hand back a piece of a
+# value that has already been placed; none of them can conjure a new string.
+# A name that is not here is a RED, never a pass, so widening this is a
+# deliberate act with a reason attached rather than a silent gap.
+_SAFE_CALLS = frozenset({
+    "len", "type", "sorted", "any", "all", "enumerate",   # count / order / re-type
+    "dict", "set", "list", "str", "int",                  # re-type
+    "Path",                                               # a path out of its arguments
+})
+# Methods, judged the same way: each returns a piece of, or a re-shaping of,
+# its receiver. `read_text` and `loads` bring in the LOCK's own bytes, which is
+# the data every verdict reports on — data a lock happens to carry is not this
+# file writing itself a command.
+_SAFE_METHODS = frozenset({
+    "join", "fromkeys", "get", "items", "values", "keys",
+    "strip", "splitlines", "read_text", "loads",
+})
+# Every way to reach a module-level name without writing it down. Banned
+# outright in a report path, because the names themselves are banned and a
+# lookup by string would be the way around that.
+_DYNAMIC_LOOKUPS = frozenset({
+    "globals", "locals", "vars", "getattr", "eval", "exec", "compile",
+    "__import__",
+})
+# The two attribute names that spell the running script, in ANY spelling of
+# the object they hang off — `sys.argv`, `os.sys.argv`, a rebound alias.
+_INVOCATION_ATTRS = frozenset({"argv", "executable"})
+
+# What a placed expression turned out to be.
+_BLANK = "whitespace"          # a literal with nothing but spaces in it
+_TEXT = "text"                 # prose, or data read off the lock
+_CARRIER = "a reason"          # `remediation`'s refusal sentence
+_COMMAND = "the command"       # `remediation`'s line — printed verbatim or not at all
+
+
+class _Unplaceable(AssertionError):
+    """An expression the analysis has no rule for. Always a failure."""
+
+
+def _spells_the_invocation(value) -> bool:
+    """Does this module-level VALUE hold the script's name, at any depth?
+
+    Strings and plain containers of strings only. A module object's `repr`
+    carries its own `.py` file path, so scanning those would ban `json` and
+    tell nobody anything.
+    """
+    if isinstance(value, str):
+        return any(token in value for token in _INVOCATION_TOKENS)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_spells_the_invocation(item) for item in value)
+    if isinstance(value, dict):
+        return any(_spells_the_invocation(item)
+                   for pair in value.items() for item in pair)
+    return False
+
+
 def _module_command_names() -> set:
     """Module-level names whose value spells a way to invoke this script.
 
@@ -3746,32 +3804,16 @@ def _module_command_names() -> set:
     any other name — a rename, a second one added beside it — is covered the
     moment it exists rather than when someone remembers to widen a list.
     `__file__` lands in this set for free, which is right: it is the other
-    module-level route to the script's own name.
+    module-level route to the script's own name. Containers count too: a dict
+    or tuple of command strings is the same name-holding constant with one
+    more subscript in front of it.
     """
-    banned = set()
-    for name in dir(gsl):
-        value = getattr(gsl, name)
-        if isinstance(value, str) and any(token in value
-                                          for token in _INVOCATION_TOKENS):
-            banned.add(name)
+    banned = {name for name in dir(gsl)
+              if _spells_the_invocation(getattr(gsl, name))}
     assert "_SCRIPT" in banned, (
         "the module no longer has a name holding the script's invocation — this "
         "check has nothing to key on and must be rewritten, not deleted")
     return banned
-
-
-def _outside_remediation(node):
-    """Walk `node`, pruning any subtree that is a `remediation(...)` call.
-
-    What that call is GIVEN is not what gets printed, so its own arguments —
-    the kind literal, the keywords — must not be read as printed text.
-    """
-    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id == "remediation"):
-        return
-    yield node
-    for child in ast.iter_child_nodes(node):
-        yield from _outside_remediation(child)
 
 
 def _print_calls(function: ast.FunctionDef) -> list:
@@ -3780,35 +3822,304 @@ def _print_calls(function: ast.FunctionDef) -> list:
             and node.func.id == "print"]
 
 
-def _printed_literals(function: ast.FunctionDef) -> list:
-    """Every string literal that can reach stdout from this function.
+def _docstring_constants(function: ast.FunctionDef) -> set:
+    """Every bare string STATEMENT under `function` — docstrings and comments-as-prose.
 
-    Literals inside a `print(...)` argument, plus literals assigned to any
-    local name such an argument reads — the one level of indirection the
-    report paths actually use (`headline`, `refused`, `invite`). Stated as the
-    limit it is: a literal reaching print through two hops is not seen here,
-    and the name ban above is what keeps such a hop from carrying an
-    invocation. Scoping to what is PRINTED is what lets `main` keep argparse
-    help that names every flag this script has.
+    They cannot reach `print`, so the reasoning in them stays exempt from the
+    literal rules and can go on quoting the commands it is about.
     """
-    printed_names = set()
-    literals = []
-    for call in _print_calls(function):
-        for arg in call.args:
-            for node in _outside_remediation(arg):
-                if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    literals.append(node)
-                elif isinstance(node, ast.Name):
-                    printed_names.add(node.id)
+    found = set()
     for node in ast.walk(function):
-        if not (isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name) and target.id in printed_names
-                for target in node.targets)):
-            continue
-        for child in _outside_remediation(node.value):
-            if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                literals.append(child)
-    return literals
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for statement in block:
+                if (isinstance(statement, ast.Expr)
+                        and isinstance(statement.value, ast.Constant)
+                        and isinstance(statement.value.value, str)):
+                    found.add(id(statement.value))
+    return found
+
+
+def _names_the_invocation(function: ast.FunctionDef, banned: set):
+    """Why this function can name the script itself — or None. No calls followed."""
+    exempt = _docstring_constants(function)
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and node.id in banned:
+            return f"names {node.id!r}"
+        if isinstance(node, ast.Attribute) and node.attr in _INVOCATION_ATTRS:
+            return f"reads .{node.attr}"
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _DYNAMIC_LOOKUPS):
+            return f"calls {node.func.id}(), which reaches any module-level name"
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in exempt
+                and any(token in node.value for token in _INVOCATION_TOKENS)):
+            return f"has a literal spelling it: {node.value.strip()[:40]!r}"
+    return None
+
+
+def _invocation_capable(functions: dict, banned: set) -> dict:
+    """Every module function that can produce this script's own invocation.
+
+    Transitive over calls, so a helper that names `_SCRIPT` taints everything
+    that calls it. DERIVED, which is the point: round 5's escape was a
+    module-level `_repin_line` builder, and no list anyone writes down
+    contains a function that does not exist yet.
+
+    A COMMAND SKELETON with no script name in it — two flags in a literal — is
+    deliberately NOT capability. It is only dangerous joined to the
+    invocation, and every route to the invocation is closed separately; making
+    it capability here marks every refusal message in the file (they are prose
+    about flags) and buys nothing.
+    """
+    capable = {}
+    for name, function in functions.items():
+        why = _names_the_invocation(function, banned)
+        if why:
+            capable[name] = why
+    widened = True
+    while widened:
+        widened = False
+        for name, function in functions.items():
+            if name in capable:
+                continue
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id in capable and node.func.id != name):
+                    capable[name] = (f"calls {node.func.id}(), which "
+                                     f"{capable[node.func.id]}")
+                    widened = True
+                    break
+    return capable
+
+
+class _Placer:
+    """Places every expression that can reach a `print` in one report path.
+
+    A whitelist BY CONSTRUCTION: `place` handles a fixed set of node shapes and
+    raises `_Unplaceable` on everything else, naming the expression. There is
+    no fall-through that means "probably fine" — an expression the analysis
+    cannot account for is a red, which is what makes the set closed rather
+    than merely long.
+    """
+
+    def __init__(self, function: ast.FunctionDef, name: str,
+                 functions: dict, banned: set, capable: dict):
+        self.function = function
+        self.name = name
+        self.functions = functions
+        self.banned = banned
+        self.capable = capable
+
+    # -- the walk -----------------------------------------------------------
+
+    def reject(self, node, why):
+        raise _Unplaceable(
+            f"{self.name}, line {getattr(node, 'lineno', '?')}: "
+            f"{ast.unparse(node)[:140]!r} — {why}")
+
+    def combine(self, kinds, node):
+        """One expression built from several placed parts."""
+        if _COMMAND in kinds:
+            for kind in kinds:
+                if kind not in (_COMMAND, _BLANK):
+                    self.reject(node, (
+                        f"{kind} printed alongside the command `remediation` "
+                        "decided. The answer goes out verbatim; a verdict that "
+                        "can add to it has taken the decision back"))
+            return _COMMAND
+        if _CARRIER in kinds:
+            return _CARRIER
+        return _BLANK if kinds and set(kinds) == {_BLANK} else _TEXT
+
+    def place(self, node, seen=()):
+        if isinstance(node, ast.Constant):
+            return self.place_constant(node)
+        if isinstance(node, ast.JoinedStr):
+            return self.combine([self.place(v, seen) for v in node.values], node)
+        if isinstance(node, ast.FormattedValue):
+            if node.format_spec is not None:
+                self.place(node.format_spec, seen)
+            return self.place(node.value, seen)
+        if isinstance(node, ast.BinOp):
+            if not isinstance(node.op, (ast.Add, ast.Sub)):
+                self.reject(node, f"{type(node.op).__name__} on a printed value")
+            return self.combine([self.place(node.left, seen),
+                                 self.place(node.right, seen)], node)
+        if isinstance(node, ast.BoolOp):
+            return self.combine([self.place(v, seen) for v in node.values], node)
+        if isinstance(node, ast.IfExp):
+            return self.combine([self.place(node.body, seen),
+                                 self.place(node.orelse, seen)], node)
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return self.combine([self.place(e, seen) for e in node.elts], node)
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if key is not None:
+                    self.place(key, seen)
+                self.place(value, seen)
+            return _TEXT
+        if isinstance(node, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
+            for generator in node.generators:
+                self.place(generator.iter, seen)
+            return self.combine([self.place(node.elt, seen)], node)
+        if isinstance(node, ast.Starred):
+            return self.place(node.value, seen)
+        if isinstance(node, ast.Subscript):
+            self.place(node.value, seen)
+            if isinstance(node.slice, ast.Slice):
+                for part in (node.slice.lower, node.slice.upper, node.slice.step):
+                    if part is not None:
+                        self.place(part, seen)
+            else:
+                self.place(node.slice, seen)
+            return _TEXT
+        if isinstance(node, ast.Attribute):
+            return self.place_attribute(node, seen)
+        if isinstance(node, ast.Call):
+            return self.place_call(node, seen)
+        if isinstance(node, ast.Name):
+            return self.place_name(node, seen)
+        self.reject(node, f"a printed {type(node).__name__} the analysis has no rule for")
+
+    # -- the leaves ---------------------------------------------------------
+
+    def place_constant(self, node):
+        if not isinstance(node.value, str):
+            return _TEXT
+        for token in _INVOCATION_TOKENS:
+            if token in node.value:
+                self.reject(node, (
+                    f"{token!r} in a string this function prints — the verdict is "
+                    "spelling out something to run. Ask `remediation`, so the line "
+                    "meets the same refusals every other verdict's does"))
+        flags = _FLAG_TOKEN.findall(node.value)
+        if len(flags) >= 2:
+            self.reject(node, (
+                f"{flags} in one printed string is a command skeleton, not prose "
+                "about a flag. Ask `remediation` for the whole line"))
+        return _BLANK if not node.value.strip() else _TEXT
+
+    def place_attribute(self, node, seen):
+        if node.attr in _INVOCATION_ATTRS:
+            self.reject(node, f"sys.{node.attr} is another way to spell the invocation")
+        if node.attr in ("command", "reason"):
+            if self.place(node.value, seen) == _CARRIER:
+                return _COMMAND if node.attr == "command" else _CARRIER
+            self.reject(node, f".{node.attr} on something that is not `remediation`'s answer")
+        if node.attr == "__name__":
+            self.place(node.value, seen)
+            return _TEXT
+        if self.is_parsed_args(node.value):
+            # argparse fills a namespace with the options this parser DECLARES,
+            # and `argv[0]` is not one of them — so this is caller input, the
+            # same kind of value as the lock's own fields, and not a route to
+            # the script's name.
+            return _TEXT
+        self.reject(node, "an attribute the analysis has no rule for")
+
+    def is_parsed_args(self, node):
+        if not isinstance(node, ast.Name):
+            return False
+        bound, is_parameter = self.bindings(node.id)
+        return bool(bound) and not is_parameter and all(
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "parse_args" for value, _ in bound)
+
+    def place_call(self, node, seen):
+        for argument in node.args:
+            self.place(argument, seen)
+        for keyword in node.keywords:
+            self.place(keyword.value, seen)
+        function = node.func
+        if isinstance(function, ast.Attribute):
+            if function.attr not in _SAFE_METHODS:
+                self.reject(node, f".{function.attr}() is not in the closed set of "
+                                  "methods a verdict may print")
+            self.place(function.value, seen)
+            return _TEXT
+        if not isinstance(function, ast.Name):
+            self.reject(node, "a call on something that is not a plain name")
+        if function.id == "remediation":
+            return _CARRIER
+        if function.id in self.functions:
+            if function.id in self.capable:
+                self.reject(node, (
+                    f"{function.id}() can spell this script's invocation — it "
+                    f"{self.capable[function.id]}. Ask `remediation` for the line"))
+            return _TEXT
+        if function.id in _SAFE_CALLS:
+            return _TEXT
+        self.reject(node, f"{function.id}() is not in the closed set of callables "
+                          "a verdict may print")
+
+    def place_name(self, node, seen):
+        name = node.id
+        if name in self.banned:
+            self.reject(node, (
+                f"{name!r} holds this script's own invocation. A verdict that can "
+                "name the script can build its own remediation beside "
+                "`remediation`; ask that function for the line instead"))
+        if name in seen:                       # a name defined in terms of itself
+            return _TEXT
+        bound, is_parameter = self.bindings(name)
+        if bound:
+            return self.combine(
+                [self.place(value, seen + (name,)) if how == "direct"
+                 else self.element_kind(value, seen + (name,))
+                 for value, how in bound], node)
+        if is_parameter:
+            # Supplied by `main`, which is itself scanned — and no name in any
+            # report path may hold the invocation, so nothing a report path
+            # could hand another one carries it.
+            return _TEXT
+        if hasattr(gsl, name):
+            return _TEXT
+        if name in _SAFE_CALLS:
+            return _TEXT
+        self.reject(node, f"{name!r} is not a name the analysis can place")
+
+    def element_kind(self, iterable, seen):
+        """A loop variable: placed through what it iterates over."""
+        kind = self.place(iterable, seen)
+        return _TEXT if kind is _BLANK else kind
+
+    def bindings(self, name):
+        """Every expression `name` can be bound to in this function, and how."""
+        arguments = self.function.args
+        parameters = [a.arg for a in (list(arguments.posonlyargs) + list(arguments.args)
+                                      + list(arguments.kwonlyargs))]
+        for extra in (arguments.vararg, arguments.kwarg):
+            if extra is not None:
+                parameters.append(extra.arg)
+        found = []
+        for node in ast.walk(self.function):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    found += [(node.value, "direct")] * _binds(target, name)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                if node.value is not None:
+                    found += [(node.value, "direct")] * _binds(node.target, name)
+            elif isinstance(node, ast.NamedExpr):
+                found += [(node.value, "direct")] * _binds(node.target, name)
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                found += [(node.iter, "element")] * _binds(node.target, name)
+            elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                found += [(node.context_expr, "direct")] * _binds(node.optional_vars, name)
+        return found, name in parameters
+
+
+def _binds(target, name: str) -> int:
+    """How many times this assignment target binds `name`."""
+    if isinstance(target, ast.Name):
+        return 1 if target.id == name else 0
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return sum(_binds(element, name) for element in target.elts)
+    if isinstance(target, ast.Starred):
+        return _binds(target.value, name)
+    return 0
 
 
 def test_no_report_path_writes_a_command_of_its_own():
@@ -3818,74 +4129,76 @@ def test_no_report_path_writes_a_command_of_its_own():
     its own line beside it — that is exactly how four verdicts came to consult
     four different subsets of the refusals.
 
-    This was a blacklist of four substrings, and a blacklist of four cannot be
-    total. MEASURED: patching `report_drift` to print
-    `f"  {_SCRIPT} --repin --ref {ref} --repin-source " + chr(39) + ...`
-    — a complete, runnable remediation built beside the choke point — left it
-    green, because `_SCRIPT` is an `ast.Name` and the remaining literals match
-    none of the four needles. So it is stated the other way round: a report
-    path may reach the invocation by NO route, and what it prints beside
-    `remediation`'s answer must be prose.
+    THIS HAS BEEN WRITTEN TWICE THE WRONG WAY ROUND, and both times the shape
+    of the mistake was the same: a list of the ways someone had thought of.
+    First a blacklist of four substrings — patching `report_drift` to print
+    `f"  {_SCRIPT} --repin --ref {ref} --repin-source " + chr(39) + ...` left
+    it green. Then a ban-list of routes, whose docstring claimed "a report path
+    may reach the invocation by NO route" while four measured constructions
+    walked through it: a module-level FUNCTION that builds the line (a function
+    is not a `str`, so the name derivation skipped it), one local assignment
+    stripping the `.command` attribute off the print argument, `os.sys.argv[0]`
+    (the attribute ban required the base to be the NAME `sys`), and
+    `globals()["_SCRIPT"]` with the flags split across two literals.
 
-      1. It may not reference a module-level name holding the invocation.
-         `_module_command_names` derives that set from the module itself, so a
-         renamed or duplicated `_SCRIPT` — and `__file__` — are in it without
-         being listed. `sys.argv` / `sys.executable` are the attribute-shaped
-         route and are banned by name.
-      2. No literal that can reach `print` may contain an invocation token, or
-         two flag tokens (a command skeleton waiting for one). Prose about a
-         single flag stays legal, which is what the verdicts actually write.
-      3. Whatever `remediation` answered is printed VERBATIM: a `print` that
-         reaches `.command` may carry nothing but whitespace beside it, so a
-         verdict cannot append a flag to a line the choke point decided.
+    So it is a whitelist BY CONSTRUCTION, and the totality is the mechanism
+    rather than a claim about it: every expression that can reach a `print`
+    must be PLACED in a closed set of shapes, and an expression `_Placer` has
+    no rule for raises `_Unplaceable` naming it. There is no branch that means
+    "nothing matched, so probably fine" — that branch is what a ban-list is.
 
-    Docstrings are exempt from (2) by construction — they cannot reach
-    `print` — so the reasoning stays next to the code it is about.
+    What a placed expression may be:
+
+      1. A LITERAL with no invocation token in it and no second flag token — a
+         command skeleton waiting for a name is not prose about a flag.
+         Docstrings are exempt by construction: they cannot reach `print`, so
+         the reasoning stays next to the code it is about.
+      2. A NAME the analysis can account for: a local, placed through every
+         expression it is bound to (assignments, loop and comprehension
+         targets, `with`, walrus); a parameter; or a module-level name that is
+         not one of `_module_command_names`. That derivation now reads
+         CONTAINERS too — a tuple or dict of command strings is the same
+         constant with a subscript in front of it.
+      3. A CALL, but only to `remediation`, to a module function that cannot
+         name this script (derived transitively — this is what a module-level
+         line builder trips), or to one of `_SAFE_CALLS` / `_SAFE_METHODS`,
+         each of which is there because its result shape is closed against
+         this script's name.
+      4. AN F-STRING, concatenation, conditional, comprehension or container
+         built out of (1)-(3).
+
+    And what `remediation` answered goes out VERBATIM: a `.command` may be
+    printed beside nothing but whitespace, wherever it is reached from —
+    through a local, through an f-string, through a chain of both — because
+    the placement carries that fact with it rather than looking for an
+    `ast.Attribute` in the print argument.
+
+    `sys.argv` / `sys.executable` are rejected on the ATTRIBUTE NAME alone, in
+    any spelling of the object they hang off, and every dynamic lookup
+    (`globals`, `getattr`, `eval`, ...) is outside the closed call set, so
+    neither `os.sys.argv[0]` nor `globals()["_SCRIPT"]` has anywhere to land.
     """
     functions = _module_functions()
-    banned_names = _module_command_names()
+    banned = _module_command_names()
+    capable = _invocation_capable(functions, banned)
+    assert "remediation" in capable, (
+        "`remediation` no longer names this script, so the one function allowed "
+        "to build a command is not the one building it. Find out what does.")
+
     for name in _report_paths(functions):
         function = functions[name]
-
-        for node in ast.walk(function):
-            if isinstance(node, ast.Name):
-                assert node.id not in banned_names, (
-                    f"{name}, line {node.lineno}: references {node.id!r}, which holds "
-                    "this script's own invocation. A verdict that can name the script "
-                    "can build its own remediation beside `remediation`; ask that "
-                    "function for the line instead.")
-            if isinstance(node, ast.Attribute) and node.attr in {"argv", "executable"}:
-                assert not (isinstance(node.value, ast.Name)
-                            and node.value.id == "sys"), (
-                    f"{name}, line {node.lineno}: sys.{node.attr} is another way to "
-                    "spell the invocation. Ask `remediation` for the command.")
-
-        for node in _printed_literals(function):
-            for token in _INVOCATION_TOKENS:
-                assert token not in node.value, (
-                    f"{name}, line {node.lineno}: {token!r} in a string this function "
-                    "prints — the verdict is spelling out something to run. Ask "
-                    "`remediation`, so the line meets the same refusals every other "
-                    "verdict's does.")
-            flags = _FLAG_TOKEN.findall(node.value)
-            assert len(flags) < 2, (
-                f"{name}, line {node.lineno}: {flags} in one printed string is a "
-                "command skeleton, not prose about a flag. Ask `remediation` for the "
-                "whole line.")
-
+        placer = _Placer(function, name, functions, banned, capable)
         for call in _print_calls(function):
-            for arg in call.args:
-                nodes = list(_outside_remediation(arg))
-                if not any(isinstance(node, ast.Attribute) and node.attr == "command"
-                           for node in nodes):
+            # ONE line per call, so the arguments are combined rather than
+            # placed apart: `print(answer.command, "--repin-source", spec)`
+            # writes the same line as concatenating them, and a check that
+            # looked at each argument alone would see three innocent values.
+            kinds = [placer.place(argument) for argument in call.args]
+            for keyword in call.keywords:
+                if keyword.arg in ("sep", "end", "file", "flush"):
                     continue
-                beside = [node.value for node in nodes
-                          if isinstance(node, ast.Constant)
-                          and isinstance(node.value, str) and node.value.strip()]
-                assert not beside, (
-                    f"{name}, line {call.lineno}: {beside} printed alongside the "
-                    "command `remediation` decided. The answer goes out verbatim; a "
-                    "verdict that can add to it has taken the decision back.")
+                kinds.append(placer.place(keyword.value))
+            placer.combine(kinds, call)
 
 
 def _drifted_plain(tmp_path):
