@@ -2307,3 +2307,213 @@ def test_two_locks_disagreeing_about_one_skill_stay_two_findings(tmp_path,
     assert len(merged) == 2, merged
     assert merged[0].lock == "one.lock, three.lock", merged[0]
     assert merged[1].lock == "two.lock", merged[1]
+
+
+# ---------------------------------------------------------------------------
+# a directory no name-keyed channel here produced (#123)
+# ---------------------------------------------------------------------------
+
+def seeded_skill(store: Path, directory: str, declared: str) -> Path:
+    """A directory whose SKILL.md declares a name that is not its basename.
+
+    The exact shape measured in two independent hosted cloud sessions: a lone
+    SKILL.md, no payload directories, and a frontmatter `name:` belonging to
+    something else. Built from bytes rather than copied from the real
+    `~/.claude/skills`, which would make the suite report on whichever surface
+    it happens to run on.
+    """
+    skill = store / directory
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {declared}\ndescription: seeded by the harness\n---\nbody\n",
+        encoding="utf-8")
+    return skill
+
+
+def test_a_seeded_directory_is_a_note_and_does_not_hold_the_exit_code_at_one(
+        tmp_path, capsys, ephemeral):
+    """#123's whole point: exit 1 must not be the resting state of a healthy session.
+
+    The reported session is reproduced exactly — one hook-installed locked
+    skill, plus `session-start-hook/` which the harness placed and whose
+    frontmatter says `startup-hook-skill`. Before this, that second directory
+    was an `untracked` FINDING and the session exited 1 with nothing wrong with
+    it, on a surface where that is the permanent resting state.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    seeded_skill(store, "session-start-hook", "startup-hook-skill")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "FINDINGS (0)" in out, out
+    assert "[untracked] session-start-hook" not in out, out
+    assert "[foreign] session-start-hook" in out, out
+    # The note has to SAY the thing, not merely exist: the measurement that
+    # carried the reclassification is the declared name.
+    assert "startup-hook-skill" in flat(out), out
+
+
+def test_the_seeded_row_is_counted_so_the_headline_still_adds_up(
+        tmp_path, capsys, ephemeral):
+    """"2 on disk, 1 hook-installed, 0 unattributed" loses a directory silently.
+
+    Same arithmetic defect `_tally` already exists to prevent one column over.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    seeded_skill(store, "session-start-hook", "startup-hook-skill")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    _, out = run(store, lock, capsys)
+    verdict = out.splitlines()[0]
+    assert "2 on disk" in verdict, verdict
+    assert "1 hook-installed" in verdict, verdict
+    assert "0 unattributed" in verdict, verdict
+    assert "1 foreign" in verdict, verdict
+    assert "session-start-hook           foreign" in out, out
+
+
+def test_a_name_disagreement_the_lock_declares_is_still_a_finding(
+        tmp_path, capsys, ephemeral):
+    """The lock naming it outranks the label, because the hook is about to act.
+
+    A locked directory is replaced at the next session start whatever its
+    frontmatter says, and that consequence is the user's to know about. If the
+    recogniser could suppress this, one mis-typed `name:` would silence the
+    warning that local work is about to be overwritten.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    seeded_skill(store, "alpha", "something-else")
+    write_record(store)                       # a run that recorded no install
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[hand-placed-over-locked] alpha" in out, out
+    assert "alpha                        unattributed" in out, out
+
+
+def test_an_ordinary_untracked_directory_is_still_a_finding(
+        tmp_path, capsys, ephemeral):
+    """The negative control: the recogniser must not blanket-mute `untracked`.
+
+    A directory whose SKILL.md agrees with its own basename is exactly the case
+    the finding was written for, and it has to survive a change whose whole
+    purpose is to stop that finding firing on something else.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "mine")                 # name == basename
+    write_record(store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[untracked] mine" in out, out
+    assert "[foreign] mine" not in out, out
+
+
+def test_the_untracked_finding_names_the_surface_as_a_fourth_cause(
+        tmp_path, capsys, ephemeral):
+    """#123 option 4, which the issue asks for regardless of the rest.
+
+    "Three ways to land here" sent the reader hunting for a decision they never
+    made, because none of the three was "something other than you put it there".
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "mine")
+    write_record(store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    _, out = run(store, lock, capsys)
+    flattened = flat(out)
+    assert "Four ways to land here" in flattened, out
+    assert "Three ways to land here" not in flattened, out
+    assert "the SURFACE seeded it" in flattened, out
+
+
+@pytest.mark.parametrize("frontmatter", [
+    "",                                        # no frontmatter at all
+    "---\ndescription: no name here\n---\n",   # frontmatter, no name
+    "---\nname: alpha\n---\n",                 # name agrees with the basename
+    "---\nname: |\n  alpha\n---\n",            # a block scalar it cannot read
+    "---\nname: other # why\n---\n",           # a possible trailing comment
+    "---\nname:\n---\n",                       # an empty value
+    "---\nfields:\n  name: other\n---\n",      # nested, not the skill's own name
+])
+def test_every_shape_it_cannot_read_confidently_leaves_the_finding_alone(
+        tmp_path, capsys, ephemeral, frontmatter):
+    """None must mean "not measured", and not measured must change nothing.
+
+    Downgrading a real finding to a note is the expensive direction: the reader
+    never sees it again. So every ambiguous shape has to fall back to the
+    behaviour this change did not touch.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    (store / "alpha").mkdir()
+    (store / "alpha" / "SKILL.md").write_text(frontmatter + "body\n",
+                                              encoding="utf-8")
+    write_record(store)
+    lock = write_lock(tmp_path / "skills.lock", store)
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[untracked] alpha" in out, out
+    assert "[foreign] alpha" not in out, out
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("name: startup-hook-skill", "startup-hook-skill"),
+    ('name: "startup-hook-skill"', "startup-hook-skill"),
+    ("name: 'startup-hook-skill'", "startup-hook-skill"),
+    ("name:\tstartup-hook-skill", "startup-hook-skill"),
+])
+def test_the_plain_scalar_shapes_it_does_read(tmp_path, line, expected):
+    """Quoting is a YAML detail, not a different name."""
+    skill = tmp_path / "session-start-hook"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(f"---\n{line}\n---\nbody\n", encoding="utf-8")
+    assert prov.declared_name(skill) == expected
+
+
+def test_a_directory_with_no_skill_md_declares_nothing(tmp_path):
+    """No SKILL.md is not a disagreement — it is the absence of a reading."""
+    skill = tmp_path / "empty"
+    skill.mkdir()
+    assert prov.declared_name(skill) is None
+
+
+def test_no_registry_skill_could_be_read_as_foreign():
+    """The recogniser's premise, asserted against the registry rather than claimed.
+
+    `foreign` means "no name-keyed channel here produced this", and that only
+    holds while no skill this registry ships has a frontmatter `name:` differing
+    from its directory basename. `scripts/check_skills.py` refuses one (kind
+    `name-dir-mismatch`, unwaived, run on every CI push) — but that lint could be
+    waived or dropped without anything here noticing, and the day it is, this
+    tool starts labelling a real bundle skill as foreign and withholding a real
+    finding about it. So the premise is measured here, on the checkout, and goes
+    red at the moment it stops being true.
+    """
+    root = _walk_up("scripts/check_skills.py")
+    skills = sorted((root / "plugins").glob("*/skills/*/SKILL.md"))
+    assert skills, "no skills found — this test would pass by measuring nothing"
+    mismatched = {
+        path.parent.name: prov.declared_name(path.parent)
+        for path in skills
+        if prov.declared_name(path.parent) not in (None, path.parent.name)}
+    assert not mismatched, (
+        f"these registry skills would be reported as `foreign` by "
+        f"check_provenance.py, which would withhold real findings about them: "
+        f"{mismatched}")

@@ -65,7 +65,26 @@ PRESENT, ABSENT, UNREADABLE = "present", "absent", "unreadable"
 REJECTED = "rejected"
 
 UNCHANGED, EDITED, UNMEASURABLE = "unchanged", "edited", "unmeasurable"
-HOOK, UNATTRIBUTED, UNKNOWN = "hook", "unattributed", "unknown"
+# FOREIGN is the fourth origin, and it is named for what was MEASURED rather
+# than for who is suspected. The measurement is that the directory's SKILL.md
+# declares a `name:` other than the directory's own basename, and every channel
+# modelled here keys on that basename: the lock installs to its key's last
+# segment, the record names directories, the account manifest names directories.
+# `scripts/check_skills.py` refuses a skill in that state outright — kind
+# `name-dir-mismatch`, run on every CI push, unwaived — so no skill this
+# registry ships can be one. That premise is asserted against the checkout by
+# `test_no_registry_skill_could_be_read_as_foreign` rather than left as a claim
+# here, so it goes red the day the lint is waived or dropped.
+#
+# So FOREIGN establishes "no name-keyed channel here produced this" and stops
+# there. It deliberately does NOT say `seeded`, which the issue proposing this
+# reached for (#123 option 1): that word names an agent — the hosted harness —
+# and nothing readable from this process can show the harness rather than a
+# hand copy with a typo. The same issue rejects an mtime/mode recogniser for
+# exactly that over-claim, and picking its conclusion while keeping its word
+# would smuggle the over-claim back in through the column heading.
+HOOK, UNATTRIBUTED, UNKNOWN, FOREIGN = ("hook", "unattributed", "unknown",
+                                        "foreign")
 
 # Which kind of machine this is, which is what decides whether an empty personal
 # store is the correct state or a delivery failure. EPHEMERAL and DURABLE are the
@@ -625,6 +644,99 @@ def skill_names(directory: Path) -> Set[str]:
     return {child.name for child in children if (child / "SKILL.md").is_file()}
 
 
+def declared_name(skill_dir: Path) -> Optional[str]:
+    """The `name:` this directory's SKILL.md frontmatter declares, or None.
+
+    A deliberately small reader rather than a YAML parse: this file ships into a
+    `~/.claude/skills` where nothing is installed but the standard library, the
+    same constraint that forces `digest_skill_dir` to be a hand copy.
+
+    Conservative in ONE direction, on purpose. Every shape it cannot read with
+    confidence — no SKILL.md, no frontmatter, a block scalar, an anchor, a flow
+    collection, anything that might carry a trailing comment — returns None, and
+    None leaves the caller reporting exactly what it would have reported without
+    this function. The expensive mistake here is the other direction: a
+    misparsed value that differs from the basename downgrades a real `untracked`
+    FINDING into a note, which is the one outcome a reader cannot recover from
+    by reading more carefully.
+
+    `re.match` anchors at column 0, which is load-bearing rather than incidental:
+    an indented `name:` is a key nested under something else, and reading it as
+    the skill's own name is how a `field_types: {name: string}` block would be
+    mistaken for the declaration.
+    """
+    try:
+        text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return None                      # frontmatter closed, no name in it
+        match = re.match(r"name:[ \t]*(.*)$", line)
+        if match is None:
+            continue
+        raw = match.group(1).strip()
+        # "#" anywhere is enough to stop: ` # comment` is a comment YAML strips
+        # and `a#b` is not, and telling those apart is a parse this does not do.
+        if not raw or raw[0] in "|>&*!{[#" or "#" in raw:
+            return None
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+            raw = raw[1:-1].strip()
+        return raw or None
+    return None
+
+
+def foreign_names(skills_dir: Path, names: List[str]) -> Dict[str, str]:
+    """{directory: the OTHER name its SKILL.md declares}, for each disagreement.
+
+    Computed once over the whole store rather than per lock, for the reason
+    `store_findings` gives: it is a property of the directory, not of any
+    expectation, so raising it per lock would report one fact N times in a
+    multi-repo session.
+    """
+    found: Dict[str, str] = {}
+    for name in names:
+        declared = declared_name(skills_dir / name)
+        if declared is not None and declared != name:
+            found[name] = declared
+    return found
+
+
+def foreign_notes(foreign: Dict[str, str]) -> List[Finding]:
+    """One note per directory no name-keyed channel here could have produced.
+
+    A NOTE and not a finding, for the reason `record_findings` gives about an
+    absent record: this is the correct resting state of a whole class of
+    sessions, and a doctor that calls the correct state a defect trains its
+    reader to skip the findings section. Measured on two independent hosted
+    cloud sessions (#123): the surface seeds `~/.claude/skills/
+    session-start-hook/` before the bootstrap hook runs at all, so leaving it as
+    an `untracked` FINDING makes exit 1 the permanent resting state of every
+    healthy session on that surface — an exit code that can never be green is
+    one that has stopped carrying information.
+    """
+    return [Finding(
+        "foreign", name,
+        f"its SKILL.md declares `name: {declared}`, which is not this "
+        f"directory's basename. Every channel this script models keys on the "
+        f"basename — the lock installs to its key's last segment, the install "
+        f"record names directories, the account manifest names directories — "
+        f"and the registry's own CI refuses a skill whose frontmatter name "
+        f"disagrees with its directory (scripts/check_skills.py, kind "
+        f"name-dir-mismatch). So no bundle here delivered it, and it is "
+        f"reported as a state rather than as something to fix: on a hosted "
+        f"surface the harness seeds directories under this HOME before the "
+        f"bootstrap hook runs, and none of those is a decision anyone here "
+        f"made. What this does NOT establish is WHO placed it — only that no "
+        f"name-keyed channel here did. It is still always-on context, and the "
+        f"hook will never remove it, because the hook removes only what its "
+        f"record proves it installed.")
+        for name, declared in sorted(foreign.items())]
+
+
 def newest_mtime(directory: Path) -> Optional[float]:
     """When this directory was last written, for the fallback only.
 
@@ -663,6 +775,7 @@ def cluster(stamped: List[Tuple[str, float]]) -> List[List[Tuple[str, float]]]:
 def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
              account: Set[str] = frozenset(), repo_owned: Set[str] = frozenset(),
              store_state: str = PRESENT, surface: str = DURABLE,
+             foreign: Dict[str, str] = None,
              ) -> Tuple[List[Row], List[Finding], List[Finding]]:
     """One row per directory on disk, plus the findings and notes they imply.
 
@@ -688,18 +801,34 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
     are here only so that "not in the personal store" does not get reported as
     "not delivered": both of those channels satisfy a locked name without the
     hook installing anything.
+
+    `foreign` is `foreign_names`' reading, passed in rather than measured here
+    because the note it carries is store-wide (see `foreign_notes`). It changes
+    the origin COLUMN only where the name is not in this lock: a lock that names
+    the directory is about to have the hook overwrite it, and that consequence
+    is real whatever the frontmatter says, so `hand-placed-over-locked` keeps
+    priority over the label.
     """
     rows: List[Row] = []
     findings: List[Finding] = []
     notes: List[Finding] = []
     attributable = record.state == PRESENT
     expected = lock.state == PRESENT
+    foreign = {} if foreign is None else foreign
 
     for name in names:
         entry = record.entries.get(name) if attributable else None
         in_lock = name in lock.names
 
         if entry is None:
+            if name in foreign and not in_lock:
+                # The `untracked` finding this replaces is withheld rather than
+                # softened, and that is the whole change: the finding asks the
+                # reader to account for a directory, and there is no account to
+                # give for one the surface placed. `foreign_notes` says so once,
+                # store-wide.
+                rows.append(Row(name, FOREIGN, None, None, None, in_lock))
+                continue
             origin = UNATTRIBUTED if attributable else UNKNOWN
             rows.append(Row(name, origin, None, None, None, in_lock))
             if not expected:
@@ -715,10 +844,17 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "left alone indefinitely. Where a session has several locks "
                     "this is one lock's reading, not a verdict about the name: "
                     "another lock may name it, and would report it separately. "
-                    "Three ways to land here: it is yours (right), you expected "
-                    "the bundle to own it (a delivery gap), or the hook "
+                    "Four ways to land here: it is yours (right), you expected "
+                    "the bundle to own it (a delivery gap), the hook "
                     "installed it and then rewrote the record after failing to "
-                    "read one, which forgets what came before."))
+                    "read one, which forgets what came before, or the SURFACE "
+                    "seeded it — a hosted harness places skill directories "
+                    "under this HOME before the bootstrap hook runs, and one of "
+                    "those is nobody's decision to review. A seeded directory "
+                    "is recognised and reported as a `foreign` NOTE instead "
+                    "when its SKILL.md declares a name other than its own "
+                    "basename; this one does not, so that evidence is absent "
+                    "here rather than the cause being ruled out."))
             elif origin == UNATTRIBUTED:
                 findings.append(Finding(
                     "hand-placed-over-locked", name,
@@ -738,7 +874,10 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "not named by the lock, and there is no readable record to "
                     "say whether the hook installed it. Nothing will remove it "
                     "either way: the hook only removes what it can prove it put "
-                    "there."))
+                    "there. The four causes the attributable case lists apply "
+                    "here too, the surface having seeded it among them — and "
+                    "with no record, even 'the hook installed it' cannot be "
+                    "ruled out."))
             continue
 
         measured = digest_skill_dir(skills_dir / name)
@@ -1024,6 +1163,7 @@ def render(record: Record, record_path: Path, skills_dir: Path,
     rows = results[0].rows if results else []
     hook_rows = [row for row in rows if row.origin == HOOK]
     unattributed = [row for row in rows if row.origin == UNATTRIBUTED]
+    foreign_rows = [row for row in rows if row.origin == FOREIGN]
     declared: Set[str] = set()
     for result in results:
         declared |= result.lock.names
@@ -1033,7 +1173,7 @@ def render(record: Record, record_path: Path, skills_dir: Path,
     missing = declared - {row.name for row in rows}
     out = [
         f"provenance: {len(rows)} on disk, "
-        f"{_tally(record.state, len(rows), len(hook_rows), len(unattributed))}, "
+        f"{_tally(record.state, len(rows), len(hook_rows), len(unattributed), len(foreign_rows))}, "
         f"{len(missing)} not in the store — record {record.state} — "
         f"surface {surface[0]} — "
         f"{len(findings)} finding{'' if len(findings) == 1 else 's'}",
@@ -1286,16 +1426,27 @@ def _para(text: str, indent: str = "  ") -> List[str]:
                          break_on_hyphens=False).splitlines()
 
 
-def _tally(state: str, total: int, hook: int, unattributed: int) -> str:
+def _tally(state: str, total: int, hook: int, unattributed: int,
+           foreign: int = 0) -> str:
     """The attribution counts, or the one honest count when there are none.
 
     Without a readable record nothing is attributable, and printing
     "0 hook-installed, 0 unattributed" beside "3 on disk" reads as a
     contradiction — or worse, as "the store is empty".
+
+    `foreign` is subtracted from the unattributable count rather than added
+    beside it, and is counted in BOTH branches. Those rows are not
+    unattributable: the disagreement between a directory's frontmatter name and
+    its own basename is a measurement the record plays no part in, so it is
+    readable on a machine with no record at all. Leaving them inside the other
+    count would print a headline whose parts do not sum to "N on disk" — the
+    same arithmetic that makes "0 hook-installed" beside "3 on disk" unreadable,
+    which is the defect this function exists for.
     """
+    tail = f", {foreign} foreign" if foreign else ""
     if state != PRESENT:
-        return f"{total} unattributable (no readable record)"
-    return f"{hook} hook-installed, {unattributed} unattributed"
+        return f"{total - foreign} unattributable (no readable record){tail}"
+    return f"{hook} hook-installed, {unattributed} unattributed{tail}"
 
 
 def _stamp(when: float) -> str:
@@ -1331,6 +1482,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     store_state, names = scan(skills_dir)
     account = skill_names(skills_dir / ACCOUNT_DIR)
     repo_owned = skill_names(project_dir / ".claude" / "skills")
+    foreign = foreign_names(skills_dir, names)
 
     # One store, judged once per declared expectation. See `LockResult`: the
     # locks are deliberately not merged first.
@@ -1339,7 +1491,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         lock = read_lock(lock_path)
         rows, findings, notes = classify(
             skills_dir, names, record, lock, account=account,
-            repo_owned=repo_owned, store_state=store_state, surface=surface[0])
+            repo_owned=repo_owned, store_state=store_state, surface=surface[0],
+            foreign=foreign)
         tagged = [finding._replace(lock=str(lock_path))
                   for finding in lock_findings(lock, lock_path) + findings]
         results.append(LockResult(
@@ -1356,6 +1509,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         + record_findings(record, record_path)
         + [finding for result in results for finding in result.findings])
     notes = dedupe(hook_noted
+                   + foreign_notes(foreign)
                    + [note for result in results for note in result.notes])
 
     stamped: List[Tuple[str, float]] = []
