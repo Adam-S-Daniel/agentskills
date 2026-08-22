@@ -1368,13 +1368,19 @@ def check_current(
     overrides: Optional[Dict[str, str]] = None,
     *,
     only: Optional[str] = None,
-) -> Tuple[Dict[str, str], List[Tuple[dict, List[str]]]]:
+) -> Tuple[Dict[str, str], List[Tuple[dict, List[str]]], List[dict]]:
     """Compare the content at each source's pinned ref with its working tree.
 
-    Returns (working-tree skill map, [(source, its differences), ...]), with an
-    entry only for a source that actually drifted. An empty list means every
-    pinned commit still describes its bundles as they stand, i.e. the lock is
-    current as well as faithful.
+    Returns (working-tree skill map, [(source, its differences), ...], the
+    sources actually read), with a differences entry only for a source that
+    actually drifted. An empty list means every pinned commit still describes
+    its bundles as they stand, i.e. the lock is current as well as faithful.
+
+    The third element is the PLANNED sources — every ref resolved, the primary
+    already dropped when the question was scoped away from it. It is returned
+    rather than re-derived by the caller because it is the only record of what
+    this run looked at: a scoped OK line naming a ref off the raw lock can name
+    a branch name nobody resolved, or one entry of two the scope matched.
 
     GROUPED BY SOURCE, not one flat list: a caller is told which registry
     drifted without reading a message. The differences themselves still name
@@ -1439,7 +1445,7 @@ def check_current(
         if differences:
             drifted.append(({**source, "is_primary": include_primary and index == 0},
                             differences))
-    return working, drifted
+    return working, drifted, sources
 
 
 def serialize(document: dict) -> str:
@@ -1878,16 +1884,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # Asked here as well as inside check_current so the OK line can name
             # the ref this run actually looked at. Both calls answer off the same
             # inherited `extras`, and the helper is pure.
-            selected, include_primary = _select_sources(registry, extras, args.only)
-            working, drifted = check_current(
+            _selected, include_primary = _select_sources(registry, extras, args.only)
+            working, drifted, read = check_current(
                 repo, registry, ref, bundles, extras, overrides, only=args.only
             )
-            # The ref of the FIRST source the run planned. Unscoped that is the
-            # primary, so these bytes are what they always were; scoped to a
-            # source it is the only ref the run read. One rule rather than a
-            # branch, so there is no new way for this line to name a ref nobody
-            # checked.
-            scoped_ref = ref if include_primary else selected[0]["ref"]
+            # What the run READ, off the planned sources rather than off the
+            # lock as found. Unscoped this is the primary's ref, so these bytes
+            # are what they always were.
+            #
+            # Scoped, it is every ref the scope matched, RESOLVED. Both halves
+            # of that matter and both were wrong: `validate_ref` accepts a
+            # branch name in a source's ref, and everything that reads a source
+            # resolves it first — so the raw string named a ref no part of the
+            # run had looked at, and named the same source differently from the
+            # way the FAILED headline names it. And `_select_sources` returns
+            # every entry matching the registry, so a lock federating one
+            # registry twice is scoped to two pins; naming the first and
+            # calling it "the" ref is a one-of-two the reader cannot detect.
+            scoped_ref = ref if include_primary else ", ".join(
+                dict.fromkeys(source["ref"] for source in read))
             if not drifted:
                 print(f"OK: the working tree still matches {scoped_ref} "
                       f"({len(working)} skills).")
