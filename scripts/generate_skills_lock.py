@@ -793,6 +793,43 @@ def parse_repin_source(spec: str) -> Tuple[str, str]:
     return registry, (validate_ref(ref, f"--repin-source {spec!r}") if ref else "")
 
 
+def restated_sources(extras: Sequence[dict], unproven: str = "") -> str:
+    """The `--source` flags a plain generate needs to leave this lock federated.
+
+    Appended to every refusal that sends a reader to a plain generate, because
+    a plain generate takes `sources` from the COMMAND LINE ALONE: the inherited
+    array is replaced by whatever --source flags the command carries, so advice
+    that names one source, or none, silently drops the rest at exit 0 — and
+    --check is green afterwards for having done so.
+
+    Not a hypothetical. Measured on this branch before this clause existed, by
+    following each refusal's own words literally: a two-source lock refused on
+    the source side, repaired with the single `--source` the message named,
+    came back with ONE source at exit 0; a federated lock refused on the
+    primary side, repaired with the "(--registry / --ref / --bundles)" the
+    message named, came back with no `sources` key at all. The file already
+    knew — report_drift's primary remediation is a `--repin` for exactly this
+    reason, and the dup-registry refusal says "the whole array" — but each new
+    refusal had to remember, and the third one did not.
+
+    `unproven` names a registry whose recorded ref is the thing being refused;
+    it is rendered `<sha>` rather than echoed back, since echoing it would
+    advise restating the pin as the string that is not a pin.
+    """
+    if not extras:
+        return ""
+    flags = " ".join(
+        "--source '{}'".format(_source_spec(
+            {**source, "ref": "<sha>"} if source["registry"] == unproven else source))
+        for source in extras
+    )
+    return (
+        " Note that a plain generate takes `sources` from the command line alone, so it "
+        "must carry a --source for every source the lock is to keep, or the ones it "
+        f"omits are dropped at exit 0 — this lock's are: {flags}"
+    )
+
+
 def repin_source_blocker(
     extras: Sequence[dict], registry: str, primary_registry: str
 ) -> Optional[str]:
@@ -834,7 +871,7 @@ def repin_source_blocker(
                 "the primary's name outright, so under one name there is no spec that "
                 "reaches the federated entry alone. Give the two halves two names — the "
                 "federated entry is the one to re-point, since the primary's pin is what "
-                "--ref (or a bare --repin) advances."
+                "--ref (or a bare --repin) advances." + restated_sources(extras)
             )
         return (
             "that is this lock's PRIMARY registry, not a federated source; the primary's "
@@ -846,7 +883,8 @@ def repin_source_blocker(
         ) or "none"
         return (
             f"that is not a source this lock federates ({federated}); ADDING a source "
-            "changes what the lock means and is a plain generate, not a re-pin"
+            "changes what the lock means and is a plain generate, not a re-pin."
+            + restated_sources(extras)
         )
     if len(matched) > 1:
         # A registry the lock federates TWICE is representable and --check
@@ -872,7 +910,7 @@ def repin_source_blocker(
             "Bundles are the lock's identity and are not expressible on this flag, so it "
             "will not pick one for you: give that registry a single 'sources' entry, or "
             "restate the whole array with a plain generate, which is where identity is "
-            "decided."
+            "decided." + restated_sources(extras)
         )
     # A source pinned at something that is not a commit cannot be re-pinned
     # from an unproven clone, because the pin is the whole proof. `validate_ref`
@@ -898,8 +936,8 @@ def repin_source_blocker(
             "checkout this would re-pin from is that registry at all. A branch name "
             "resolves in any clone, so re-pinning against one would write whatever some "
             "unverified directory is sitting on. Restate that source at the commit it is "
-            "actually on with a plain generate (--source "
-            f"'{','.join(matched[0]['bundles'])}={registry}@<sha>:<layout>'), then advance it."
+            "actually on with a plain generate, then advance it."
+            + restated_sources(extras, unproven=registry)
         )
     return None
 
@@ -933,7 +971,8 @@ def repin_primary_blocker(
             "--repin reads is that registry. A branch name resolves in any clone, so "
             "re-pinning against one would write whatever that directory is sitting "
             "on. Restate the pin at the commit it is actually on with a plain "
-            "generate (--registry / --ref / --bundles), then advance it."
+            "generate (--registry / --ref <sha> / --bundles), then advance it."
+            + restated_sources(extras)
         )
     return None
 

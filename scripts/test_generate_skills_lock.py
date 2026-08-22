@@ -3635,8 +3635,32 @@ def _registry_federated_twice(tmp_path):
     return primary, out, []
 
 
+def _two_sources(tmp_path):
+    """A primary and TWO federated sources — so a dropped one is visible.
+
+    Distinct bundle names and distinct skill basenames throughout: a shared
+    bundle is a hard error in plan_sources and a shared basename one in
+    `_reject_basename_collisions`, either of which would fail the run before it
+    could show anything about remediation.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    other = tmp_path / "other-platform"
+    other_sha = make_registry(other, {"other/publish": SKILL_C}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--source", f"other={other.resolve().as_uri()}@{other_sha}:skills",
+        "-o", str(out)).returncode == 0
+    return primary, out
+
+
 def _source_hand_pinned_at_a_branch(tmp_path):
-    primary, out, _ = _drifted_source_only(tmp_path)
+    primary, out = _two_sources(tmp_path)
     document = json.loads(out.read_text(encoding="utf-8"))
     document["sources"][0]["ref"] = "main"
     out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
@@ -3708,6 +3732,109 @@ def test_every_command_check_current_prints_is_one_the_generator_accepts(
         applied = run_generator(*shlex.split(command)[2:],
                                 "--repo", str(primary), "-o", str(out))
         assert applied.returncode == 0, (command, applied.stdout + applied.stderr)
+
+
+_SOURCE_FLAG_RE = re.compile(r"--source '([^']+)'")
+_COMMIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def _restated_registries(text: str) -> list:
+    """The registries a refusal's own `--source` flags would restate."""
+    return [spec.split("=", 1)[1].rpartition("@")[0]
+            for spec in _SOURCE_FLAG_RE.findall(text)]
+
+
+@pytest.mark.parametrize("build", _BLOCKED_SHAPES)
+def test_no_refusal_sends_a_reader_to_a_plain_generate_that_drops_sources(
+        build, tmp_path):
+    """Advice whose literal execution loses data is worse than no advice.
+
+    A plain generate takes `sources` from the COMMAND LINE ALONE, so "repair
+    the lock with a plain generate" is an instruction to de-federate it unless
+    every source is restated in the same command. Measured before this clause
+    existed, by following each refusal's own words: the source-side refusal
+    named one `--source` and a two-source lock came back with one source at
+    exit 0; the primary-side refusal named "(--registry / --ref / --bundles)"
+    and a federated lock came back with no `sources` key at all. Both exit 0,
+    both green under `--check` afterwards.
+
+    So: every refusal that mentions a plain generate must name a --source for
+    every source the lock federates, and the set is compared rather than the
+    prose.
+    """
+    primary, out, extra_args = build(tmp_path)
+    federated = [source["registry"]
+                 for source in json.loads(out.read_text(encoding="utf-8")).get("sources", [])]
+    report = run_generator("--repo", str(primary), "--check-current",
+                           *extra_args, "-o", str(out))
+    assert report.returncode == 1, report.stdout + report.stderr
+    reasons = [line.split("would refuse one: ", 1)[1]
+               for line in report.stdout.splitlines() if "would refuse one: " in line]
+    assert reasons, report.stdout
+    for reason in reasons:
+        if "plain generate" not in reason:
+            continue
+        assert _restated_registries(reason) == federated, reason
+
+
+def _follow_the_plain_generate(reason: str, primary: Path, out: Path,
+                               placeholder: str = "") -> subprocess.CompletedProcess:
+    """Run the plain generate a refusal describes, taking its --source flags verbatim.
+
+    `--registry / --ref / --bundles` come off the lock because the message
+    names them as flags rather than as values; the `--source` list is the part
+    the message spells out in full, and is the part that decides whether the
+    lock stays federated. A `<sha>` placeholder stands for the one commit only
+    the reader knows — the pin the refusal declined to trust — so the caller
+    supplies it.
+    """
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    flags = []
+    for spec in _SOURCE_FLAG_RE.findall(reason):
+        flags += ["--source", spec.replace("<sha>", placeholder)]
+    return run_generator(
+        "--repo", str(primary), "--registry", lock["registry"],
+        "--ref", _head(primary), "--bundles", ",".join(lock["bundles"]),
+        *flags, "-o", str(out))
+
+
+def test_following_the_primary_refusal_literally_keeps_the_lock_federated(tmp_path):
+    """The primary-side half of the clause above, executed rather than asserted."""
+    primary, out, _ = _branch_primary_with_a_drifted_source(tmp_path)
+    before = [source["registry"]
+              for source in json.loads(out.read_text(encoding="utf-8"))["sources"]]
+
+    refusal = run_generator("--repo", str(primary), "--repin", "-o", str(out))
+    assert refusal.returncode == 1, refusal.stdout + refusal.stderr
+
+    applied = _follow_the_plain_generate(refusal.stderr, primary, out)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert [source["registry"] for source in after.get("sources", [])] == before
+    assert _COMMIT_SHA.fullmatch(after["ref"]), after["ref"]
+
+
+def test_following_the_source_refusal_literally_keeps_the_other_source(tmp_path):
+    """And the source-side half, on a lock with a second source to lose."""
+    primary, out, _ = _source_hand_pinned_at_a_branch(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    before = [source["registry"] for source in document["sources"]]
+    assert len(before) == 2
+    blocked = document["sources"][0]["registry"]
+
+    refusal = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{blocked}@", "-o", str(out))
+    assert refusal.returncode == 1, refusal.stdout + refusal.stderr
+
+    # The commit the refusal would not guess: the one the branch-pinned source
+    # is really sitting on, which only the reader can supply.
+    applied = _follow_the_plain_generate(
+        refusal.stderr, primary, out, _head(tmp_path / "cms-platform"))
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert [source["registry"] for source in after.get("sources", [])] == before
+    for source in after["sources"]:
+        assert _COMMIT_SHA.fullmatch(source["ref"]), source
 
 
 def _blocked_headlines(stdout: str) -> list:
