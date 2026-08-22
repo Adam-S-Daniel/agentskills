@@ -7942,17 +7942,37 @@ def _report_invocations(primary: Path, out: Path) -> list:
     asked over the whole document says so.
     """
     document = json.loads(out.read_text(encoding="utf-8"))
-    common = ["--repo", str(primary),
-              *_source_repo_flags(primary, document), "-o", str(out)]
-    calls = [("--check", ["--check", *common]),
-             ("--check-current", ["--check-current", *common])]
+    # TWO FORMS, because a cell asked in a form its caller cannot produce
+    # measures nothing about that caller. `addressed` is what a caller holding
+    # the clones passes; `unaddressed` is what a caller that has none does —
+    # and that is not an exotic case, it is the fleet bumper's own pre-clone
+    # `--check-format` (measured in _agent-guidance's
+    # scripts/bump-consumer-locks.sh at 4c505e3: `python3 "$GENERATOR"
+    # --check-format -o "$lock_file"`, no --repo and no --source-repo) and any
+    # `--only` scope that reads no source. Asking `--check-format` with the
+    # post-clone flags attached is what hid a whole column of unrunnable
+    # commands for a round: the flag was never asked the way it is called.
+    unaddressed = ["--repo", str(primary), "-o", str(out)]
+    addressed = ["--repo", str(primary),
+                 *_source_repo_flags(primary, document), "-o", str(out)]
+    calls = [("--check", ["--check", *addressed]),
+             ("--check-current", ["--check-current", *addressed])]
     sources = document.get("sources")
     registries = [document.get("registry")] + (
         [source.get("registry") for source in sources]
         if isinstance(sources, list) else [])
     for name in dict.fromkeys(r for r in registries if isinstance(r, str) and r):
         calls.append((f"--check-current --only {name}",
-                      ["--check-current", "--only", name, *common]))
+                      ["--check-current", "--only", name, *addressed]))
+        # The same scope with nothing handed to it. A scope that needs a
+        # source checkout stops at "no checkout at ..." and the cell asserts
+        # nothing, which is correct — the caller cannot ask that question
+        # unaddressed either. A scope that needs none ANSWERS, and its line
+        # still rebuilds the whole document: that is the cell where the round
+        # that derived addressing found `--only <the primary registry>`
+        # printing a `--repin` nobody could run.
+        calls.append((f"--check-current --only {name} (unaddressed)",
+                      ["--check-current", "--only", name, *unaddressed]))
         # The PRODUCT of `--only` and `--ref`, which main allows together (its
         # only guards are that `--only` needs `--check-current` and excludes
         # `--check` / `--check-format`). Emitting each alone left their
@@ -7962,7 +7982,7 @@ def _report_invocations(primary: Path, out: Path) -> list:
         # content this run never looked at.
         calls.append((f"--check-current --only {name} --ref HEAD",
                       ["--check-current", "--only", name,
-                       "--ref", _head(primary), *common]))
+                       "--ref", _head(primary), *addressed]))
     # `--check-current --ref <somewhere else>` asks the same verdict about a
     # DIFFERENT primary commit, and the line it prints anchors to that commit
     # rather than to the lock's own pin — so whether the primary can move under
@@ -7970,29 +7990,45 @@ def _report_invocations(primary: Path, out: Path) -> list:
     # that is where the report and the shrink guard would otherwise part
     # company, and no other cell reaches it.
     calls.append(("--check-current --ref HEAD",
-                  ["--check-current", "--ref", _head(primary), *common]))
-    calls.append(("--check-format", ["--check-format", *common]))
+                  ["--check-current", "--ref", _head(primary), *addressed]))
+    # BOTH forms of the one flag whose documented caller passes nothing: the
+    # unaddressed one because that is how it is really called, the addressed
+    # one because a reader at a terminal may hold the clones and the two must
+    # both answer.
+    calls.append(("--check-format", ["--check-format", *unaddressed]))
+    calls.append(("--check-format (addressed)", ["--check-format", *addressed]))
     return calls
 
 
 def _assert_matrix_cell(label: str, proc, out: Path, reasons: dict) -> set:
     """The whole property, on one (report path, lock) cell. Returns what it saw.
 
-    Either a block prints a command that RUNS and costs the lock nothing, or it
+    Either a block prints a line that RUNS and costs the lock nothing, or it
     prints none and carries its reason inside its own headline, where the fleet
     bumper's 20-line slice cannot separate the two.
+
+    A TEMPLATE is a line too, and it is held to the same standard rather than
+    excused from it: its `<...>` are filled in from where this fixture's clones
+    really are and the result is RUN. A marker that let a line stop being
+    runnable would be the defect it was introduced to close, wearing an
+    apology — so nothing here is string-matched, everything printed is
+    executed.
     """
     lines = proc.stdout.splitlines()
     for index, line in enumerate(lines):
         if not line.startswith("FAILED:"):
             continue
-        following = lines[index + 1:index + 2]
-        printed = bool(following) and following[0].strip().startswith("python3 ")
-        assert printed or "would refuse one: " in line, (label, line)
+        following = (lines[index + 1:index + 2] or [""])[0].strip()
+        answered = (following.startswith("python3 ")
+                    or following.startswith(gsl.TEMPLATE_MARK))
+        assert answered or "would refuse one: " in line, (label, line)
 
     flagged = _fields_the_verdict_flagged(proc.stdout)
+    document = json.loads(out.read_text(encoding="utf-8"))
     before = _matrix_lock_identity(out, flagged)
-    for command in _printed_commands(proc.stdout):
+    for command in (_printed_commands(proc.stdout)
+                    + [_completed(template, document)
+                       for template in _printed_templates(proc.stdout)]):
         applied = _run_printed(command)
         assert applied.returncode == 0, (label, command,
                                          applied.stdout + applied.stderr)
