@@ -47,9 +47,27 @@ ACCOUNT_DIR = "synced"
 
 # The one difference the two delivery channels are known to have that is not a
 # difference in content: account-store copies are CRLF, the registry is LF. Only
-# `digest_skill_dir_normalised` folds them, and only to compare two copies of one
+# `digest_shared_payload` folds them, and only to compare two copies of one
 # skill with each other.
 CRLF, LF = b"\r\n", b"\n"
+
+# What the uploader drops on the way into the account store, mirrored from
+# `_SKIP_DIRS`, `_SKIP_DIR_PREFIXES` and `_SKIP_EXTS` in sync-skills'
+# `sync_skills.py`. The account copy of a skill is not the directory the registry
+# holds: it is the ZIP `zip_skill` built out of it, and these never went in. A
+# comparison that digests the personal directory whole therefore reads an
+# ordinary build artefact as a second, divergent set of instructions — which is
+# the ONE thing this reporting must not do, because the shadow it describes is
+# the resting state of every cloud session here.
+#
+# A hand copy for `digest_skill_dir`'s reason: this file ships into a
+# `~/.claude/skills` that holds no sync-skills to import from.
+# `test_the_upload_filter_matches_the_uploaders` binds each set below to the
+# uploader's own, so the copy cannot drift silently.
+UPLOAD_SKIP_DIRS = frozenset({"__pycache__", ".pytest_cache", ".git", ".venv",
+                              "node_modules"})
+UPLOAD_SKIP_DIR_PREFIXES = ("pytest-cache-files-",)
+UPLOAD_SKIP_EXTS = frozenset({".pyc", ".pyo", ".b64"})
 
 # The hook's charsets, applied to the same fields on the way out of the same file.
 # An entry failing any of them is one the hook SKIPS, so it is invisible to the
@@ -253,52 +271,92 @@ def digest_skill_dir(path: Path) -> Optional[str]:
     return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
 
-def digest_skill_dir_normalised(path: Path) -> Optional[str]:
-    """`digest_skill_dir` over bytes whose CRLF line endings are folded to LF.
+def uploaded_files(root: Path) -> Optional[List[Tuple[str, Path]]]:
+    """(relpath, path) for every file the ACCOUNT channel would have carried.
 
-    For COMPARING two copies of one skill with each other, and for nothing else.
-    Never for judging a copy against a RECORDED digest: the record and the lock
-    both carry the exact-bytes digest, so normalising before comparing to one of
-    those would report edited bytes as unchanged — precisely the lie `_cause`
-    exists to avoid telling.
+    The uploader's own selection rule, applied to a directory here so that a
+    personal copy and an account copy can be compared over the same set of
+    files. Sorted by relpath, so a caller can fold it straight into a manifest.
 
-    It is needed because the two delivery channels disagree about line endings
-    and, so far, about nothing else. Account-store copies are CRLF where the
-    registry is LF, which this skill's own account-drift procedure already works
-    around by piping both sides through `tr -d '\\r'` before diffing. Comparing
-    the exact digests instead marks every account copy as differing from every
-    personal one — a signal that fires on all of them and therefore says nothing
-    about any of them.
-
-    A deliberate near-copy of `digest_skill_dir` rather than a flag on it. That
-    function is one of three hand-written copies of the generator's algorithm,
-    held to it by `test_the_digest_matches_the_generators`, and a parameter that
-    can change what it hashes is a way for the copy to drift while the binding
-    still passes. The duplication is the cheaper risk.
-
-    Byte-level substitution, applied to every file including binary ones. That
-    is safe HERE because the answer is only ever used as "do these two
-    directories match", never as an identity for anything: a normalisation that
-    collided for two different payloads would have to collide across both
-    copies, and the exact digests are compared first anyway.
+    Returns None when the directory cannot be walked, which is `digest_skill_dir`'s
+    contract and for its reason: "not measured" is a different answer from "no
+    files".
     """
-    root = Path(path)
     try:
         if not root.is_dir():
             return None
-        entries = []
+        found: List[Tuple[str, Path]] = []
         for candidate in root.rglob("*"):
             if not candidate.is_file():
+                continue  # directories carry no bytes; broken symlinks carry none
+            relpath = candidate.relative_to(root)
+            parts = relpath.parts
+            if any(part in UPLOAD_SKIP_DIRS for part in parts):
                 continue
-            entries.append((candidate.relative_to(root).as_posix(), candidate))
+            if any(part.startswith(prefix)
+                   for part in parts for prefix in UPLOAD_SKIP_DIR_PREFIXES):
+                continue
+            if candidate.suffix in UPLOAD_SKIP_EXTS:
+                continue
+            found.append((relpath.as_posix(), candidate))
+        found.sort(key=lambda entry: entry[0])
+    except OSError:
+        return None
+    return found
+
+
+def digest_shared_payload(path: Path, fold: bool = False) -> Optional[str]:
+    """`digest_skill_dir`'s manifest shape over the files BOTH channels carry.
+
+    For COMPARING two copies of one skill with each other, and for nothing else.
+    Never for judging a copy against a RECORDED digest: the record and the lock
+    both carry `digest_skill_dir`'s answer over the whole directory, so using
+    this against one of those would report edited bytes as unchanged — precisely
+    the lie `_cause` exists to avoid telling.
+
+    Two things separate it from `digest_skill_dir`, and both exist because the
+    account copy is not a directory anyone copied — it is the ZIP `zip_skill`
+    uploaded:
+
+    * It digests only `uploaded_files`. A `__pycache__` beside a skill's scripts
+      is in the personal copy and was never in the account one, and calling that
+      a divergence reddens a session where nothing is wrong.
+    * `fold=True` folds CRLF to LF, because the two channels disagree about line
+      endings and, so far, about nothing else that survives the filter above.
+      Account-store copies are CRLF where the registry is LF, which this skill's
+      own account-drift procedure already works around by piping both sides
+      through `tr -d '\r'` before diffing. Comparing exact bytes alone marks
+      every account copy as differing from every personal one — a signal that
+      fires on all of them and therefore says nothing about any of them.
+
+    The `fold` flag is safe here in a way it would not be on `digest_skill_dir`.
+    That one is held to the generator's algorithm by
+    `test_the_digest_matches_the_generators`, and a parameter that changes what
+    it hashes is a way for the copy to drift while the binding still passes. This
+    function is bound to nothing outside this file; its answer is only ever used
+    as "do these two directories match", never as an identity for anything.
+
+    Byte-level substitution, applied to every file including binary ones. Safe
+    for the same reason: a normalisation that collided for two payloads would
+    have to collide across both copies, and the unfolded digests are compared
+    first anyway.
+    """
+    entries = uploaded_files(Path(path))
+    if entries is None:
+        return None
+    try:
         manifest = "".join(
             f"{relpath}\0"
-            f"{hashlib.sha256(file_path.read_bytes().replace(CRLF, LF)).hexdigest()}\n"
-            for relpath, file_path in sorted(entries, key=lambda entry: entry[0])
+            f"{hashlib.sha256(_folded(file_path.read_bytes(), fold)).hexdigest()}\n"
+            for relpath, file_path in entries
         )
     except OSError:
         return None
     return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+
+
+def _folded(data: bytes, fold: bool) -> bytes:
+    return data.replace(CRLF, LF) if fold else data
 
 
 def remote_url(registry: object) -> Optional[str]:
@@ -1167,8 +1225,8 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
                   "of a session where both copies coexist, and CI never stands "
                   "on the surface where they do.")
 
-        exact_mine = digest_skill_dir(mine)
-        exact_theirs = digest_skill_dir(theirs)
+        exact_mine = digest_shared_payload(mine)
+        exact_theirs = digest_shared_payload(theirs)
         if exact_mine is None or exact_theirs is None:
             unread = " and ".join(
                 str(path) for path, value in ((mine, exact_mine), (theirs, exact_theirs))
@@ -1183,8 +1241,8 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
         if exact_mine == exact_theirs:
             sameness = "The two copies are byte-identical"
         else:
-            norm_mine = digest_skill_dir_normalised(mine)
-            norm_theirs = digest_skill_dir_normalised(theirs)
+            norm_mine = digest_shared_payload(mine, fold=True)
+            norm_theirs = digest_shared_payload(theirs, fold=True)
             if norm_mine is None or norm_theirs is None:
                 notes.append(Finding(
                     "shadowed-by-the-account-store", name,
