@@ -399,8 +399,15 @@ figure. No remediation is performed — recommend, do not do.
   still digest to what was recorded — and REFUSES everything else. A refusal
   copies nothing and removes nothing: the skill is dropped from that run, the
   bytes stay, and the name is listed after `DEGRADED … shadowed`. So the risk
-  an `edited-and-locked`, `artefacts-and-locked` or `hand-placed-over-locked`
-  finding describes is a skill that stops being delivered, never local work
-  about to be overwritten — and a build artefact left by running a skill's own
-  suite in place stalls that skill's updates until it is deleted, which is why
-  it is a finding rather than a note.
+  an `edited-and-locked`, `artefacts-and-locked`, `hand-placed-over-locked` or
+  `unattributable-over-locked` finding describes is a skill that stops being
+  delivered, never local work about to be overwritten — and a build artefact
+  left by running a skill's own suite in place stalls that skill's updates
+  until it is deleted, which is why it is a finding rather than a note.
+- **The middle clause is why some of those are only a note.** "What is there
+  already digests to the digest the lock names" asks nothing about who put the
+  directory there, so a hand-placed copy of exactly the bytes the bundle ships
+  is overwritten like any other and delivery is unaffected. The doctor measures
+  that clause and reports `bytes-are-the-locked-ones` instead of a refusal —
+  the state is not a defect, it is a state that becomes one the next time the
+  lock's digest for that name moves.
