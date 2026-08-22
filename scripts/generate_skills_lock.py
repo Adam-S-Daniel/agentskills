@@ -348,7 +348,8 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Collection, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (Collection, Dict, Iterable, List, Mapping, Optional, Sequence,
+                    Tuple)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY = "Adam-S-Daniel/agentskills"
@@ -961,6 +962,87 @@ def repin_source_blocker(
             + restated_sources(extras, unproven=(registry,))
         )
     return None
+
+
+def _per_bundle(skills: Mapping[str, str]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for key in skills:
+        bundle = key.split("/", 1)[0]
+        counts[bundle] = counts.get(bundle, 0) + 1
+    return counts
+
+
+def repin_shrink_blocker(
+    before: Mapping[str, str],
+    after: Mapping[str, str],
+    bundles: Collection[str] = (),
+) -> Optional[str]:
+    """Why a re-pin must not be written — a bundle that lost every skill it had.
+
+    The condition `_agent-guidance`'s bump-consumer-locks.sh has refused to
+    PROPOSE since ADR 0009 (`skills_shrink_reason`): a bundle DIRECTORY stopped
+    existing at the commit this would pin — a rename, a deleted plugin, a
+    layout change — which is a registry-side decision and not a lock chore.
+
+    Stated per BUNDLE and never as "the whole lock is empty", although the
+    bumper says both: an emptied lock is every bundle at once and needs no
+    second sentence, and a second sentence is one the two callers can pick
+    differently. They did, while it existed — a `--only` run narrowed to one
+    bundle said "declares no skills at all" where the whole-document refusal
+    said "bundle(s) cms-platform", so the report handed the reader a sentence
+    the flag never says.
+
+    The fleet bumper refusing it was never cover for this repo: measured on
+    this branch before this guard, a plain `--repin` whose registry had emptied
+    a bundle wrote the smaller lock and exited 0, identically with and without
+    `--repin-source`. Anyone re-pinning by hand, and every consumer whose
+    re-pin is not the bumper's, got the silent version.
+
+    `bundles` narrows both sides to the bundles a caller actually re-derived,
+    which is what lets the read-only report ask this question about a SCOPED
+    run: `--check-current --only <source>` reads that source alone, and the
+    command it prints holds every other pin with `--ref`, so that source's
+    bundles are the only ones whose content can move.
+    """
+    if bundles:
+        keep = set(bundles)
+        before = {key: value for key, value in before.items()
+                  if key.split("/", 1)[0] in keep}
+        after = {key: value for key, value in after.items()
+                 if key.split("/", 1)[0] in keep}
+    if not before:
+        return None
+    counts = _per_bundle(after)
+    gone = sorted(bundle for bundle, count in _per_bundle(before).items()
+                  if count and not counts.get(bundle))
+    if not gone:
+        return None
+    return (
+        f"the re-pin would leave bundle(s) {', '.join(gone)} with no skills at all"
+        " — a bundle directory stopped existing at the commit this would pin: a "
+        "rename, a deleted plugin, a layout change. A skill that leaves the lock stops "
+        "being installed in every ephemeral session that reads it, so this is a "
+        "registry-side decision rather than a lock chore. Fix it where it broke, or "
+        "decide deliberately that the lock should stop declaring that bundle. "
+        "(_agent-guidance's bump-consumer-locks.sh refuses to PROPOSE such a re-pin for "
+        "the same reason; this refuses to write one.)"
+    )
+
+
+def _repin_shrink_guard(existing: dict, document: dict, output: Path) -> None:
+    """Refuse to WRITE a re-pin that empties a bundle.
+
+    Asked after build_lock rather than from a blocker the earlier guards read,
+    because the answer is not in the lock: it is in the content at the commit
+    the re-pin would write, which is exactly what build_lock has just gone and
+    read. `report_drift` asks the same predicate off `--check-current`'s own
+    reading of that content.
+    """
+    skills = existing.get("skills")
+    blocker = repin_shrink_blocker(
+        skills if isinstance(skills, dict) else {}, document.get("skills") or {})
+    if blocker:
+        raise GeneratorError(f"{output}: {blocker}")
 
 
 def repin_unproven_sources_blocker(extras: Sequence[dict], output: Path) -> Optional[str]:
@@ -1864,6 +1946,8 @@ def report_drift(
     existing: dict,
     extras: Sequence[dict],
     registry: str,
+    working: Mapping[str, str],
+    read: Sequence[dict],
 ) -> None:
     """Print one FAILED block per drifted source, with its repair or its reason.
 
@@ -1971,13 +2055,28 @@ def report_drift(
     # the primary side printing a command the generator refuses.
     blocked = (repin_primary_blocker(existing, extras, registry, output)
                or repin_unproven_sources_blocker(extras, output))
+    # Asked off what THIS run read, and scoped to the bundles it read: a
+    # `--only` run reads one source and the command it prints holds every other
+    # pin with --ref, so those are the only bundles whose content can move.
+    # `existing["skills"]` may be any JSON — a lock the hook would reject reaches
+    # here on the way to being told so.
+    declared = existing.get("skills")
+    shrink = repin_shrink_blocker(
+        declared if isinstance(declared, dict) else {},
+        working,
+        {bundle for source in read for bundle in source["bundles"]},
+    )
     for source, differences in drifted:
         if source["is_primary"]:
-            if blocked:
+            # `or shrink` last, matching the order the apply path meets them:
+            # `_repin_primary_guard` runs before build_lock, `_repin_shrink_guard`
+            # after it, so a lock tripping both is refused with the first.
+            blocked_here = blocked or shrink
+            if blocked_here:
                 print(f"FAILED: the bundle has moved on since {ref}, which {output} "
                       "still pins — nothing added or changed since then reaches an "
                       "ephemeral surface. No re-pin command is printed for it "
-                      f"because this generator would refuse one: {blocked}")
+                      f"because this generator would refuse one: {blocked_here}")
                 for line in differences:
                     print(f"  - {line}")
                 continue
@@ -2012,8 +2111,8 @@ def report_drift(
             # command this block would print is a --repin, so it meets those
             # refusals first, and a report that named a later reason would be
             # handing the reader a sentence the flag never says.
-            blocker = blocked or repin_source_blocker(
-                extras, source["registry"], registry)
+            blocker = (blocked or repin_source_blocker(
+                extras, source["registry"], registry) or shrink)
             if blocker:
                 # "the commit its pin resolves to", not "which the lock still
                 # pins": `source` here is PLANNED, so its ref is resolved, and
@@ -2405,11 +2504,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       f"({len(working)} skills).")
             else:
                 report_drift(drifted, ref=ref, output=output, existing=existing,
-                             extras=extras, registry=registry)
+                             extras=extras, registry=registry, working=working,
+                             read=read)
                 status = 1
         return status
 
     document = build_lock(repo, registry, ref, bundles, extras, overrides)
+    if args.repin:
+        _repin_shrink_guard(existing, document, output)
     try:
         # newline="": the lock is a COMMITTED artifact whose bytes are compared
         # (test_this_repos_committed_lock_regenerates_byte_identically, and
