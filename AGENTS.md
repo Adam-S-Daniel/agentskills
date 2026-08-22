@@ -425,6 +425,21 @@ ref for review, not the setting, to catch.
   back. A subagent that cannot run it reports BLOCKED; a count that disagrees
   with the spec's stated expectation is a stop-and-report condition, never a
   rounding difference.
+- **Prove the verifier can fail before you trust it.** A command exiting 0 is
+  evidence only if a broken tree makes it exit non-zero; otherwise it is a green
+  light wired to nothing. The trap with teeth: `python3 path/to/test_foo.py` on a
+  pytest module with no `if __name__ == "__main__"` block imports the file,
+  defines the test functions, and exits 0 having run **zero** assertions. It
+  looks exactly like a pass. (Real incident, 2026-08-22: appending
+  `def test_x(): assert False` to a 53-test file left `python3
+  scripts/test_account_zip_selection.py` at exit 0, while `python3 -m pytest` on
+  that same file returned exit 1 and "1 failed, 53 passed". Two delegation briefs
+  had been citing the hollow command as the gate.) This is the `${PIPESTATUS[0]}`
+  lesson above in a second costume — an exit code that belongs to something other
+  than the thing you meant to measure. Name the RUNNER in the spec
+  (`python3 -m pytest <paths> -q`), never the file, and require the test COUNT
+  back beside the exit code: a count is the cheapest proof that anything ran at
+  all.
 - Don't assume the subagent sees this file: general-purpose and custom
   subagents receive the full memory hierarchy (imports included), but
   Explore/Plan-type agents and SDK harnesses with `settingSources: []` skip
