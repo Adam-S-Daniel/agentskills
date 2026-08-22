@@ -4009,7 +4009,7 @@ def test_the_matrix_is_complete():
     # and could only ever produce one of its two kinds.
     assert set(OBSERVATION_VARIANTS) == set(prov.OBSERVATION_ORIGINS)
     assert all(variants for variants in OBSERVATION_VARIANTS.values())
-    # The three numbers the section comment quotes, so that changing the shape
+    # The numbers the section comment quotes, so that changing the shape
     # of the table and leaving the prose behind is a failure rather than a
     # stale sentence nobody re-derives.
     assert (len(REACHABLE), len(OBSERVATIONS)) == (7, 7)
