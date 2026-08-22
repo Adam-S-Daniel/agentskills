@@ -482,9 +482,24 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         """
         log, out = self._run(tmp_path, verdict)
         assert log.count("::warning::") == 1, why
-        assert verdict in log, (
+        # ON THE ANNOTATION LINE, because "somewhere in stdout" is a guarantee
+        # this step gives for free. This read `verdict in log`, and the step
+        # echoes `published account audit reads: $verdict` a few lines above
+        # the `case` on EVERY run - so the assertion was true before the `*)`
+        # arm ran and stayed true however that arm was worded. Measured:
+        # rewriting the annotation to say "a status that is not one this repo
+        # knows", naming nothing, left this file at 39 passed while the
+        # assertion whose sole job is to require the name said nothing.
+        #
+        # Which status it was is the actionable half. An Actions annotation
+        # reading "skills-evals' verdict vocabulary has moved" and not saying
+        # to WHAT sends the reader to diff two repos; naming the word turns it
+        # into one edit to account_zip_selection.py.
+        annotation = next(l for l in log.splitlines() if "::warning::" in l)
+        assert verdict in annotation, (
             "the annotation does not name the status it could not use, so the "
-            "run page says a vocabulary moved without saying to what"
+            f"run page says a vocabulary moved without saying to what: "
+            f"{annotation}"
         )
         # Unchanged on the way out, as with every other verdict: the selection
         # module is what decides an unknown string means "unusable", and it
