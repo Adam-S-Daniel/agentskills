@@ -680,10 +680,10 @@ def _model_mask_then_strip(body):
 # blanks every line from there to the end of the step. That is not a false
 # red; it is a silent green, because every rule downstream iterates commands
 # and a blanked line produces none. `if grep -q fresh <<<yes; then` above the
-# `case` was enough to hide a bare `mkdir` from the guard below with the whole
-# file still at 289 passed. So the `<<` may not touch a third `<` on either
-# side, and test_a_here_string_does_not_blank_the_rest_of_the_step runs that
-# exact shape.
+# `case` was enough to hide a bare `mkdir` from the guard below without reding
+# anything. So the `<<` may not touch a third `<` on either side, and
+# test_a_here_string_does_not_blank_the_rest_of_the_step runs that exact
+# shape.
 _HEREDOC_OPENER = re.compile(
     r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
@@ -1179,9 +1179,9 @@ _ARMS_OK = [
     ("catch-all-with-a-leading-empty-string", _arm('  *)', '  ""*)')),
     ("catch-all-with-a-trailing-empty-string", _arm('  *)', "  *'')")),
     # THE THREE WRAPPED SHAPES, AND WHAT EACH IS WORTH. This comment claimed
-    # each was here for a model the others do not catch; its own table said
-    # otherwise three lines further down, and the table was right. Only ONE of
-    # the three reaches a second model. For model discrimination the other two
+    # each was here for a model the others do not catch; the table it carried
+    # said otherwise, and the table was right. Only ONE of the three reaches
+    # a second model. For model discrimination the other two
     # are near-duplicates of the first, and saying so is the point - a reason
     # that is not true is what makes a set look deletable to the next person
     # tidying it.
@@ -1510,8 +1510,7 @@ class TestWhereAHashOpensAComment:
                 f"`_PAREN_SHAPES` says {shape} is run by `{fixture}`, and no "
                 f"script above is called that. A `)` shape this file models "
                 f"with no script is one decided by argument - which is how "
-                f"the class docstring came to name six shapes and execute "
-                f"four."
+                f"the class docstring came to name shapes that nothing ran."
             )
             assert table[fixture] == ends_a_word, (
                 f"`_PAREN_SHAPES` and `{fixture}` disagree about whether {shape} "
@@ -2020,8 +2019,8 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         own clothes. `_strip_heredocs` read `<<<yes` as a heredoc opening on
         `yes`, found no line equal to `yes`, and blanked everything after it;
         the step's `case`, its `$GITHUB_OUTPUT` write and a bare `mkdir`
-        spliced beside them all vanished from `_classified()` and the file
-        stayed at 289 passed.
+        spliced beside them all vanished from `_classified()`, and nothing in
+        this file went red.
 
         `test_the_classifier_reads_every_line_of_the_step` cannot catch that
         and never could: its check is `not line.strip() or number in covered`
@@ -2094,7 +2093,7 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
 
     def test_the_echo_carve_out_admits_only_a_simple_echo(
             self, monkeypatch, tmp_path):
-        """The two shapes `command.startswith("echo")` let through.
+        """The shapes `command.startswith("echo")` let through.
 
         A carve-out too broad certifies the shipped file while holding
         nothing, which the list above says in its own first sentence. A
