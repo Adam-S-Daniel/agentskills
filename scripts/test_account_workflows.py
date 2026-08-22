@@ -60,6 +60,37 @@ def code(body):
     )
 
 
+def require_bash():
+    """bash, or a hard FAILURE - deliberately not a skip.
+
+    Everything in this file that proves a shell guard actually guards runs the
+    real block in a real bash. A `pytest.skip` when bash is missing turns that
+    into 22 skipped tests and an exit code of 0, and CI reads the exit code:
+    the load-bearing half of this suite would go untested while the job stayed
+    green. Measured before this became a failure - stubbing `shutil.which` to
+    hide bash gave "17 passed, 22 skipped" and EXIT=0.
+
+    That is the same silent-green shape these tests exist to close, and this
+    repo has already paid for it once: ci.yml's `fetch-depth: 0` carries a
+    comment about the dogfood test skipping rather than failing, and the fix
+    there was to remove the condition that triggered the skip rather than to
+    tolerate it.
+
+    Both CI jobs have bash - ubuntu natively, and pytest-windows runs under
+    `defaults: {run: {shell: bash}}`, which is Git Bash. A machine without it
+    cannot verify this repo, and should say so out loud.
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.fail(
+            "bash is not on PATH, so every executed-guard test in this file "
+            "would be skipped and the suite would still exit 0. Install bash "
+            "(Git Bash on Windows) and re-run; do not turn this back into a "
+            "skip."
+        )
+    return bash
+
+
 def load(path):
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     # PyYAML resolves a bare `on:` key to the boolean True (YAML 1.1).
@@ -417,9 +448,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         return body[body.index(marker) + len(marker):]
 
     def _run(self, tmp_path, verdict):
-        bash = shutil.which("bash")
-        if not bash:
-            pytest.skip("bash not on PATH")
+        bash = require_bash()
         out = tmp_path / "gh_output"
         # Forward slashes: Git Bash reads the backslashes of a Windows path as
         # escapes inside the step's own `>> "$GITHUB_OUTPUT"` redirect, and
@@ -726,9 +755,7 @@ class TestSkillInputIsValidatedBeforeUse:
         return body[start:end]
 
     def _bash(self, script, value):
-        bash = shutil.which("bash")
-        if not bash:
-            pytest.skip("bash not on PATH")
+        bash = require_bash()
         # Delivered through the ENVIRONMENT, which is how the workflow supplies
         # it (`env: SKILL: ${{ inputs.skill }}`) - and the only way that
         # survives Windows.
@@ -783,9 +810,7 @@ class TestSkillInputIsValidatedBeforeUse:
         test, a later reader deletes the `case` guard as redundant with a
         check that reads like validation and is not.
         """
-        bash = shutil.which("bash")
-        if not bash:
-            pytest.skip("bash not on PATH")
+        bash = require_bash()
         script = (
             'printf \'%s\\n\' "sync-skills" "other" '
             '| grep -qxF -- "$1"'
