@@ -201,10 +201,49 @@ jobs:
           # The healthy answers stay quiet on purpose - `fresh`, the drift
           # verdict this workflow exists to react to, and `not-yet-bootstrapped`
           # (nothing has been published yet, which is a state and not a fault).
-          # A warning on every run is a warning nobody reads.
+          # A warning on every run is a warning nobody reads. `unavailable` is
+          # quiet HERE for a different reason: it is set in exactly one place,
+          # the `if [ -z "$verdict" ]` branch a few lines up, which annotates it
+          # as it sets it. Catching it below as well would put two annotations
+          # on one fault, and a reader who learns the annotations are duplicated
+          # stops counting them.
+          #
+          # AND THE CATCH-ALL, WHICH IS WHY THE HEALTHY ANSWERS ARE ENUMERATED
+          # RATHER THAN LEFT TO FALL THROUGH. Without a `*)` arm a status this
+          # repo has never heard of matched nothing, said nothing, and was
+          # normalised to `unavailable` inside account_zip_selection.py - so the
+          # audit contributed no names, the Degraded notice went only to the
+          # step summary, and the run ended green with zero annotations while
+          # the whole cross-repo half of the evidence went unused. That is this
+          # file header's "we could not ask" read as "we asked and it passed",
+          # arriving through the one door the empty-capture guard above cannot
+          # cover: `$verdict` is not empty, it is just a word from a vocabulary
+          # that moved. A skills-evals rename of the drift status is exactly
+          # that shape, and nothing else here would report it - both clones are
+          # green, the import is green, and scheduled-run-health.yml only scans
+          # for FAILED runs.
+          #
+          # WHY THE DRIFT VERDICT IS READ FROM THE MODULE INSTEAD OF SPELLED IN
+          # THE ARM. It is the predicate both repos key on, and this repo writes
+          # it down exactly once - `AUDIT_DRIFT_STATUS` in
+          # scripts/account_zip_selection.py - precisely so a rename cannot
+          # update one copy and leave a second one behind; a non-comment line
+          # here naming it fails scripts/test_account_workflows.py. So the quiet
+          # arm imports it, which is also the more honest arrangement: the two
+          # lists cannot disagree, because there is only one list. If that read
+          # fails, `drift` is empty, the drift verdict falls to `*)` and warns
+          # about a status that is in fact recognised - wrong, but loud, and it
+          # cannot happen quietly: reading it fails only when the module cannot
+          # be imported, and the very next step runs that same module under
+          # `set -euo pipefail`, which reds the job.
+          drift=$(PYTHONPATH=scripts python3 -c 'from account_zip_selection import AUDIT_DRIFT_STATUS as s; print(s)') || drift=""
           case "$verdict" in
             stale|missing|unreadable)
               echo "::warning::the published account audit reads '$verdict' - the Tier-3 Routine has not published a usable result recently, so this run leaned on the local recording. Check that Routine and the eval-results branch of Adam-S-Daniel/skills-evals." ;;
+            fresh|not-yet-bootstrapped|unavailable|"$drift")
+              : ;;
+            *)
+              echo "::warning::the published account audit reads '$verdict', which is not a status this repo knows - skills-evals' verdict vocabulary has moved under it. The audit contributed no skill names, so this run fell back to the local recording alone. Teach scripts/account_zip_selection.py the new name, and this step with it." ;;
           esac
           echo "status=$verdict" >> "$GITHUB_OUTPUT"
       - name: Decide which skills need a ZIP

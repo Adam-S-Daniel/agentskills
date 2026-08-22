@@ -10,18 +10,27 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 yaml = pytest.importorskip("yaml")
 
-WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+REPO = Path(__file__).resolve().parent.parent
+WORKFLOWS = REPO / ".github" / "workflows"
 ZIPS = WORKFLOWS / "account-skill-zips.yml"
 RECORD = WORKFLOWS / "record-account-upload.yml"
 # The ZIP selection lives here rather than in a `run:` heredoc; see the note on
 # test_the_summary_offers_the_route_a_phone_can_take.
 SELECTION = Path(__file__).resolve().parent / "account_zip_selection.py"
+
+sys.path.insert(0, str(SELECTION.parent))
+
+# Imported rather than restated: the status vocabulary is the thing under test
+# in test_the_case_block_names_every_status_the_module_knows, and a copy of it
+# here would be a third place for a rename to miss.
+import account_zip_selection as sel  # noqa: E402
 
 
 # The prose a `run:` block actually emits, with its comments dropped: the
@@ -392,10 +401,17 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         env = {**os.environ, "GITHUB_OUTPUT": str(out).replace("\\", "/")}
         # The verdict arrives as an ARGUMENT rather than baked into the script,
         # so the empty case is delivered as an actual empty string.
+        #
+        # cwd IS THE REPO ROOT BECAUSE THAT IS WHERE THE RUNNER STANDS. The
+        # tail reads the drift predicate out of scripts/account_zip_selection.py
+        # with a relative PYTHONPATH, exactly as the next step in that job runs
+        # `python3 scripts/account_zip_selection.py`; both resolve against
+        # $GITHUB_WORKSPACE. Inheriting pytest's cwd instead would make the
+        # quiet arm depend on where the suite happened to be started from.
         proc = subprocess.run(
             [bash, "-c", "set -uo pipefail\nverdict=$1\n" + self._tail(),
              "_", verdict],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True, env=env, cwd=str(REPO),
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout, out.read_text(encoding="utf-8")
@@ -411,12 +427,68 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
     def test_a_verdict_the_run_could_not_use_raises_an_annotation(
             self, tmp_path, verdict, recorded, why):
         log, out = self._run(tmp_path, verdict)
-        assert "::warning::" in log, why
+        # EXACTLY one, not at least one. Each of these is a single fault, and
+        # an arm that annotated a fault a previous arm had already reported
+        # would teach a reader that the annotations are duplicated - after
+        # which they stop counting them, which is how the silent one below
+        # goes unnoticed. `unavailable` is the case that makes this concrete:
+        # it is set by the empty-capture branch, which warns as it sets it.
+        assert log.count("::warning::") == 1, why
         # The verdict still reaches the selection module unchanged - the
         # annotation is additional, not a substitute.
         assert f"status={recorded}" in out
 
-    @pytest.mark.parametrize("verdict", ["fresh", "not-yet-bootstrapped"])
+    @pytest.mark.parametrize("verdict, why", [
+        ("account-drifted", "the shape a rename of the drift status takes"),
+        ("throttled", "a verdict skills-evals could add tomorrow"),
+    ])
+    def test_a_status_this_repo_has_never_heard_of_raises_an_annotation(
+            self, tmp_path, verdict, why):
+        """THE SILENT-GREEN HOLE, and the one fault that annotated nowhere.
+
+        A non-empty verdict this repo has no name for passes the
+        `if [ -z "$verdict" ]` guard untouched, matched no arm of the `case`,
+        and was then normalised to `unavailable` inside
+        account_zip_selection.py - so the audit contributed no skill names, the
+        Degraded notice reached the STEP SUMMARY alone, and the run finished
+        green with zero annotations while the entire cross-repo half of the
+        evidence went unused. Both clones succeeded; the import succeeded; only
+        the vocabulary had moved.
+
+        WHAT THIS TEST CANNOT COVER, STATED SO IT IS NOT READ AS MORE. It
+        cannot catch the rename itself. skills-evals is not a dependency of
+        this repo, CI here has no network, and nothing local can observe that
+        `reported-failure` became something else - which is exactly why the
+        `*)` arm exists at RUNTIME: the annotation is the mechanism for the
+        cross-repo case, and this test only proves the annotation fires.
+        """
+        log, out = self._run(tmp_path, verdict)
+        assert log.count("::warning::") == 1, why
+        assert verdict in log, (
+            "the annotation does not name the status it could not use, so the "
+            "run page says a vocabulary moved without saying to what"
+        )
+        # Unchanged on the way out, as with every other verdict: the selection
+        # module is what decides an unknown string means "unusable", and it
+        # cannot do that on a string this step rewrote.
+        assert f"status={verdict}" in out
+
+    @pytest.mark.parametrize("verdict", [
+        "fresh", "not-yet-bootstrapped",
+        # The drift verdict - the condition this whole workflow exists to react
+        # to - reaches the case like any other and MUST stay quiet. It is also
+        # the one status this file cannot spell (the module owns it, see
+        # test_the_cross_repo_condition_is_named_in_exactly_one_place), so the
+        # quiet arm matches it through a variable the step reads back out of
+        # the module. That indirection is what this parameter exercises: it
+        # goes red if the read breaks and the happy path starts warning.
+        sel.AUDIT_DRIFT_STATUS,
+        # Delivered directly rather than through the empty capture that
+        # normally produces it, which is the point: the branch that sets it
+        # already annotated, so a second annotation here would be one fault
+        # reported twice.
+        sel.UNAVAILABLE,
+    ])
     def test_a_healthy_verdict_stays_quiet(self, tmp_path, verdict):
         """The negative control. A warning on every run is a warning nobody
         reads, so an annotation here would cost the ones above their meaning -
@@ -425,6 +497,76 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         log, out = self._run(tmp_path, verdict)
         assert "::warning::" not in log, verdict
         assert f"status={verdict}" in out
+
+    def _case_statuses(self):
+        """The arm patterns of the audit step's `case`, split from the parsed
+        YAML rather than scanned out of the file.
+
+        Returns (literal statuses, variable patterns). A pattern list is the
+        whole line up to its `)`; the arm bodies end in `;;` and are skipped.
+        """
+        body = next(
+            s["run"] for s in load(ZIPS)["jobs"]["pick"]["steps"]
+            if s.get("id") == "audit"
+        )
+        start = body.index('case "$verdict" in')
+        block = body[start:body.index("esac", start)]
+        literals, variables = set(), set()
+        for line in block.splitlines()[1:]:
+            line = line.strip()
+            if line.startswith("#") or not line.endswith(")"):
+                continue
+            for token in line[:-1].split("|"):
+                token = token.strip()
+                (variables if "$" in token else literals).add(token)
+        return literals, variables
+
+    def test_the_case_block_names_every_status_the_module_knows(self):
+        """The two vocabularies inside THIS repo cannot drift apart silently.
+
+        The `case` decides which verdicts are worth an annotation;
+        account_zip_selection.py decides which ones mean anything at all. They
+        are separate files in separate languages, and a status added to one is
+        invisible to the other - a new skills-evals verdict taught to the
+        module alone would land in the `*)` arm and be reported as unrecognised
+        when it is not, and one taught to the workflow alone would be quiet
+        here and normalised to `unavailable` one step later.
+
+        The drift predicate is the deliberate hole in the enumeration: this
+        workflow may not spell it (see
+        test_the_cross_repo_condition_is_named_in_exactly_one_place), so the
+        quiet arm matches it through a variable the step reads back out of the
+        module's own constant. Asserted as a variable rather than trusted:
+        `"$drift"` matching nothing at all would be indistinguishable from a
+        working arm on every verdict except that one.
+
+        This is a same-repo agreement and nothing more. A rename INSIDE
+        skills-evals moves a string no test here can see - agentskills' CI has
+        no network and does not depend on that repo - which is why the runtime
+        `*)` annotation, not this test, is what covers that case.
+        """
+        literals, variables = self._case_statuses()
+        assert "*" in literals, (
+            "no catch-all arm: a status this repo has never heard of matches "
+            "nothing, says nothing, and the run goes green having used the "
+            "local recording alone"
+        )
+        literals.discard("*")
+        assert literals | {sel.AUDIT_DRIFT_STATUS} == (
+            sel.KNOWN_STATUSES | {sel.UNAVAILABLE}), (
+            "the `case` and account_zip_selection.py disagree about which "
+            "statuses exist; every one the module knows needs an arm, or it "
+            "is annotated as unrecognised when it is not"
+        )
+        assert variables == {'"$drift"'}
+        body = next(
+            s["run"] for s in load(ZIPS)["jobs"]["pick"]["steps"]
+            if s.get("id") == "audit"
+        )
+        assert "drift=$(" in body and "AUDIT_DRIFT_STATUS" in body, (
+            "the quiet arm's variable is no longer read from the module's "
+            "constant, so it can hold anything - including nothing"
+        )
 
     def test_the_verdict_still_reaches_the_step_output(self, tmp_path):
         """Whatever else the step says, `status=` is the only thing the next
