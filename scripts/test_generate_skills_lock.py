@@ -3737,8 +3737,21 @@ _DRIFT_SHAPES = [
      "a source bundle lost every skill, asked with --only", False),
     (_emptied_primary_bundle, "the primary bundle lost every skill", False),
 ]
-_EVERY_SHAPE = [pytest.param(build, printable, id=name)
-                for build, name, printable in _DRIFT_SHAPES]
+# Shapes where --check-current must print no command, but where the command it
+# declined to print would have failed for a DIFFERENT reason than the one the
+# report gives — so they belong in the "print it only if you would run it" half
+# and not in the "same sentence" half. There is one, and its two reasons are
+# both correct: the report says a bundle emptied (read off the working tree),
+# while the flag never gets that far, because build_lock materialises the empty
+# commit first and `git archive` of a tree with no entries is unreadable.
+_ALSO_UNPRINTABLE = [
+    (lambda tmp_path: _emptied_source_tree(tmp_path)[:2] + ([],),
+     "a source tree was emptied outright"),
+]
+_EVERY_SHAPE = ([pytest.param(build, printable, id=name)
+                 for build, name, printable in _DRIFT_SHAPES]
+                + [pytest.param(build, False, id=name)
+                   for build, name in _ALSO_UNPRINTABLE])
 _BLOCKED_SHAPES = [pytest.param(build, id=name)
                    for build, name, printable in _DRIFT_SHAPES if not printable]
 
@@ -3937,6 +3950,60 @@ def test_the_report_and_the_refusal_give_the_same_reason(build, tmp_path):
         assert refusal.returncode == 1, (registry, refusal.stdout + refusal.stderr)
         assert reason in refusal.stderr, (reason, refusal.stderr)
         assert out.read_text(encoding="utf-8") == before, "a refused re-pin still wrote"
+
+
+def _emptied_source_tree(tmp_path):
+    """A source registry with NOTHING at its new commit, not even a README."""
+    primary, out = _two_sources(tmp_path)
+    extra = tmp_path / "cms-platform"
+    shutil.rmtree(extra / "skills")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "everything is gone")
+    return primary, out, extra
+
+
+@pytest.mark.parametrize("repin", [
+    pytest.param(True, id="--repin --repin-source"),
+    pytest.param(False, id="a plain generate pinning that commit"),
+])
+def test_an_empty_tree_at_a_pinned_ref_is_an_error_not_a_traceback(repin, tmp_path):
+    """agentskills #125: the one unusable input that escaped as a stack trace.
+
+    `git archive` of a commit whose tree has no entries does NOT emit nothing:
+    it writes its `pax_global_header` plus the usual padding — measured, 10240
+    bytes beginning `pax_global_header\0` — and python's tarfile refuses that
+    stream, because a pax global header must be followed by a member header
+    (`ReadError('end of file header')`). That escaped `materialize` as a
+    traceback naming internal line numbers.
+
+    Every other unusable input in this module is a GeneratorError, and the
+    shape matters beyond tidiness: _agent-guidance's bumper classifies this
+    tool's runs by `^FAILED:` at column 0 plus the exit code, and a traceback
+    is neither of those.
+
+    Both routes that READ the empty commit are covered, and `--check-current`
+    is not one of them: it materialises the ref the lock still PINS, which has
+    content, and reads the working tree with `collect_skills` rather than
+    through git. What it does instead is refuse to print a command, because a
+    bundle with no skills left is `repin_shrink_blocker`'s answer —
+    `_emptied_source_tree` is one of the blocked shapes above.
+    """
+    primary, out, extra = _emptied_source_tree(tmp_path)
+    uri = extra.resolve().as_uri()
+    if repin:
+        flags = ["--repin", "--repin-source", f"{uri}@"]
+    else:
+        lock = json.loads(out.read_text(encoding="utf-8"))
+        flags = ["--registry", lock["registry"], "--ref", lock["ref"],
+                 "--bundles", ",".join(lock["bundles"]),
+                 "--source", f"cms-platform={uri}@{_head(extra)}:skills"]
+
+    proc = run_generator("--repo", str(primary), *flags, "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "tarfile" not in proc.stderr, proc.stderr
+    assert proc.stderr.startswith("ERROR: "), proc.stderr
+    assert "has no files in it at all" in proc.stderr, proc.stderr
 
 
 @pytest.mark.parametrize("build, emptied, federated", [
