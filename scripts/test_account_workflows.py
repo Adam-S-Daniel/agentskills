@@ -43,6 +43,23 @@ def echoed(body):
     return " ".join(m.group(1) for m in ECHOED.finditer(body))
 
 
+def code(body):
+    """A `run:` block with its comment lines dropped.
+
+    The counterpart to `echoed()` and there for the same reason. The audit
+    step's comments quote its own shell at length - the paragraph above the
+    quiet arm names `AUDIT_DRIFT_STATUS` in prose - so `"AUDIT_DRIFT_STATUS" in
+    body` was true whether or not any COMMAND read it. Measured: replacing the
+    read with a workflow-local `python3 -c 'print("reported" + "-failure")'`
+    left the full verifier at 945 passed, with the predicate both repos key on
+    now written a second time inside the workflow, which is the one thing the
+    design forbids.
+    """
+    return "\n".join(
+        line for line in body.splitlines() if not line.strip().startswith("#")
+    )
+
+
 def load(path):
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     # PyYAML resolves a bare `on:` key to the boolean True (YAML 1.1).
@@ -637,7 +654,12 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "is annotated as unrecognised when it is not"
         )
         assert variables == {'"$drift"'}
-        assert "drift=$(" in body and "AUDIT_DRIFT_STATUS" in body, (
+        # `code(body)`, never `body`: see that helper. The claim here is about
+        # what the step RUNS, and this file's own docstring says asserting on
+        # the raw body "would let a claim that only survives in a comment count
+        # as if it reached the reader".
+        step = code(body)
+        assert "drift=$(" in step and "AUDIT_DRIFT_STATUS" in step, (
             "the quiet arm's variable is no longer read from the module's "
             "constant, so it can hold anything - including nothing"
         )
