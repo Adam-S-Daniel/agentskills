@@ -1135,6 +1135,62 @@ def build_lock(
     return {key: document[key] for key in FIELD_ORDER if key in document}
 
 
+def _select_sources(
+    registry: str,
+    extras: Sequence[dict],
+    only: Optional[str],
+) -> Tuple[List[dict], bool]:
+    """Narrow --check-current to ONE registry, before anything is located.
+
+    Filtering `extras` up front rather than filtering plan_sources' output
+    keeps an UNRELATED source's missing sibling checkout from deciding this
+    source's answer: plan_sources raises on the first `no checkout at ...` it
+    meets, so a lock federating two registries could not be asked about one of
+    them on a machine that has only that one cloned.
+
+    Returns (extras subset, include_primary).
+
+    What a scoped run stops asserting is everything it did not select.
+    plan_sources' bundle-uniqueness check still runs, but over the SELECTED set
+    alone, so a conflict between two un-selected sources goes unreported on
+    that run. That is correct for a scoped question and wrong to lean on: a
+    scoped run is a gate input, never the place a lock's whole-document
+    validity is established. `--check` and the bootstrap hook are that place.
+
+    The comparison is against the lock's own registry STRINGS, which are what
+    identify a source here. A lock recording OWNER/REPO does not match an
+    https:// URL naming the same repository, so the refusal below lists every
+    registry the lock plans rather than saying only "unknown" — the mismatch
+    has to be diagnosable from the one line the caller sees.
+    """
+    if only is None:
+        return list(extras), True
+    only = validate_registry(only, "--only")
+    matched = [source for source in extras if source["registry"] == only]
+    if only == registry:
+        if matched:
+            # Representable, and nothing else refuses it: plan_sources rejects a
+            # BUNDLE claimed twice, and says nothing about one registry standing
+            # as both the primary and a source with different bundles and a
+            # different layout. Scoping to it has two answers, so it gets none.
+            raise GeneratorError(
+                f"--only {only}: this lock names it as BOTH its primary registry and a "
+                "federated source, and those two carry different bundles and different "
+                "layouts — so scoping to it has two different answers. Fix the lock, or "
+                "ask about the whole document with an unscoped --check-current."
+            )
+        return [], True
+    if not matched:
+        planned = ", ".join(
+            dict.fromkeys([registry] + [source["registry"] for source in extras])
+        )
+        raise GeneratorError(
+            f"--only {only}: not a registry this lock plans. It plans {planned} — "
+            "name one of those exactly as the lock spells it."
+        )
+    return matched, False
+
+
 def check_current(
     repo: Path,
     registry: str,
@@ -1142,6 +1198,8 @@ def check_current(
     bundles: Sequence[str],
     extras: Sequence[dict] = (),
     overrides: Optional[Dict[str, str]] = None,
+    *,
+    only: Optional[str] = None,
 ) -> Tuple[Dict[str, str], List[str]]:
     """Compare the content at each source's pinned ref with its working tree.
 
@@ -1150,8 +1208,23 @@ def check_current(
     they stand, i.e. the lock is current as well as faithful. Each difference
     names the ref of the source it came from, so a multi-source failure says
     which registry to re-pin.
+
+    `only` narrows the question to ONE registry the lock plans rather than
+    reinterpreting a combined answer. That distinction is the whole reason the
+    parameter exists: a caller asking "has the federated half moved" off a
+    full-lock verdict reads a primary-only drift as federated drift, because
+    one drifted source and one drifted primary produce the same single verdict.
+    Asking a different question cannot drift with the wording of an answer.
     """
-    sources = plan_sources(repo, registry, ref, bundles, extras, overrides or {})
+    selected, include_primary = _select_sources(registry, extras, only)
+    sources = plan_sources(repo, registry, ref, bundles, selected, overrides or {})
+    if not include_primary:
+        # Dropped AFTER planning, not before it: plan_sources is what validates
+        # the primary's registry and ref and what refuses a bundle claimed
+        # twice, and a scoped run should still refuse a lock that cannot be
+        # planned at all. It is the READING of the primary — a `git archive` of
+        # its whole tree — that a scoped question has no business doing.
+        sources = sources[1:]
     working: Dict[str, str] = {}
     differences: List[str] = []
     for source in sources:
@@ -1341,6 +1414,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "working tree is read verbatim, so an untracked skill directory "
                              "counts; what git ignores is excluded, so a local __pycache__ "
                              "does not.")
+    parser.add_argument("--only", metavar="REGISTRY", default=None,
+                        help="scope --check-current to ONE registry this lock plans — the "
+                             "primary, or one federated source — so a caller learns WHICH "
+                             "half has moved from the exit code of the question it asked, "
+                             "rather than from the wording of a combined answer. Name the "
+                             "registry exactly as the lock spells it. A scoped run asserts "
+                             "nothing about the sources it did not select, so it is a gate "
+                             "input and not a substitute for --check.")
     parser.add_argument("--check-format", action="store_true",
                         help="verify every STORED digest in the lock is "
                              f"'{LOCK_DIGEST_PREFIX}<64 lowercase hex>', and exit 1 if not, "
@@ -1415,6 +1496,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "means as separate commands: a plain generate is where identity is "
                 "decided."
             )
+
+    if args.only and not args.check_current:
+        parser.error("--only scopes --check-current; pass it alongside that flag.")
+    if args.only and (args.check or args.check_format):
+        parser.error(
+            "--only scopes --check-current alone. --check compares the WHOLE "
+            "document and --check-format reads the file alone, so neither can be "
+            "narrowed to one registry — and a run whose exit code is the worst of "
+            "three verdicts, only one of them scoped, answers no question anyone "
+            "asked.")
 
     if args.digest is not None:
         print(digest_skill_dir(Path(args.digest)))
@@ -1561,11 +1652,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     print(f"  - {line}")
                 status = 1
         if args.check_current:
+            # Asked here as well as inside check_current so the OK line can name
+            # the ref this run actually looked at. Both calls answer off the same
+            # inherited `extras`, and the helper is pure.
+            selected, include_primary = _select_sources(registry, extras, args.only)
             working, differences = check_current(
-                repo, registry, ref, bundles, extras, overrides
+                repo, registry, ref, bundles, extras, overrides, only=args.only
             )
+            # The ref of the FIRST source the run planned. Unscoped that is the
+            # primary, so these bytes are what they always were; scoped to a
+            # source it is the only ref the run read. One rule rather than a
+            # branch, so there is no new way for this line to name a ref nobody
+            # checked.
+            scoped_ref = ref if include_primary else selected[0]["ref"]
             if not differences:
-                print(f"OK: the working tree still matches {ref} ({len(working)} skills).")
+                print(f"OK: the working tree still matches {scoped_ref} "
+                      f"({len(working)} skills).")
             else:
                 print(f"FAILED: the bundle has moved on since {ref}, which {output} still "
                       "pins — nothing added or changed since then reaches an ephemeral "

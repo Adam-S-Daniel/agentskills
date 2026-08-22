@@ -128,6 +128,7 @@ def _registry_shipping_the_generator(root: Path, skills: dict,
 
 SKILL_A = {"SKILL.md": "---\nname: alpha\n---\nalpha body\n", "notes.md": "a\n"}
 SKILL_B = {"SKILL.md": "---\nname: beta\n---\nbeta body\n"}
+SKILL_C = {"SKILL.md": "---\nname: gamma\n---\ngamma body\n"}
 # A skill directory built to make two independently written digest
 # implementations disagree if they differ at all: a nested directory, an EMPTY
 # file, CRLF line endings, a non-ASCII filename, and a file with no trailing
@@ -416,6 +417,44 @@ def federated(tmp_path):
     return primary, primary_sha, extra, extra_sha
 
 
+@pytest.fixture
+def federated_two(tmp_path):
+    """A primary registry plus TWO sibling registries.
+
+    One source cannot tell "advanced the source I named" from "advanced every
+    source", and it cannot tell "scoped the question" from "asked it and got
+    lucky". Both properties need a source that is deliberately left alone.
+
+    The three BUNDLE names and the three skill BASENAMES are all distinct, and
+    that is load-bearing rather than tidy: a shared bundle is a hard error in
+    `plan_sources` and a shared basename is a hard error in
+    `_reject_basename_collisions`, so either collision would fail the run
+    before it could demonstrate anything about scoping or about merging.
+
+    Both siblings are named so the default `../<repo-name>` checkout lookup
+    finds them, the same way the single-source `federated` fixture is.
+    """
+    primary = tmp_path / "registry"
+    primary_sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    other = tmp_path / "other-platform"
+    other_sha = make_registry(other, {"other/publish": SKILL_C}, layout="skills")
+    return primary, primary_sha, extra, extra_sha, other, other_sha
+
+
+def _federated_two_lock(out: Path, federated_two,
+                        *extra_args: str) -> subprocess.CompletedProcess:
+    primary, primary_sha, extra, extra_sha, other, other_sha = federated_two
+    return run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--source", f"other={other.resolve().as_uri()}@{other_sha}:skills",
+        "-o", str(out), *extra_args,
+    )
+
+
 def _federated_lock(out: Path, federated, *extra_args: str) -> subprocess.CompletedProcess:
     primary, primary_sha, extra, extra_sha = federated
     return run_generator(
@@ -637,6 +676,173 @@ def test_check_current_ignores_a_build_artefact_in_a_federated_source(federated,
 
     proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# --------------------------------------------------------------------------
+# --check-current --only: drift attribution by QUESTION, not by answer
+#
+# A caller that wants to know whether the FEDERATED half of a lock has moved
+# cannot read that off a full-lock verdict: one combined `FAILED:` is printed
+# whether the primary drifted, a source drifted, or both. Measured before this
+# flag existed, on a lock with two sources both sitting exactly at their pins
+# and only the primary edited: exit 1, one `FAILED:` line, zero federated
+# differences. A gate keyed on that verdict advances every federated pin on
+# every ordinary night. `--only` makes the scope a property of the question.
+# --------------------------------------------------------------------------
+
+def test_check_current_only_scopes_the_question_to_one_federated_source(
+        federated_two, tmp_path):
+    """The regression this flag exists for: a PRIMARY-only drift is not federated drift.
+
+    Unscoped this lock is red, and it is red for a reason that has nothing to
+    do with either source. Asked about a source specifically, each one answers
+    green, because each one really is sitting at its pin.
+    """
+    primary, _, _extra, _extra_sha, _other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+    sources = json.loads(out.read_text(encoding="utf-8"))["sources"]
+
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nalpha body, edited\n")
+
+    combined = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert combined.returncode == 1, combined.stdout + combined.stderr
+
+    for source in sources:
+        scoped = run_generator("--repo", str(primary), "--check-current",
+                               "--only", source["registry"], "-o", str(out))
+        assert scoped.returncode == 0, (source["registry"], scoped.stdout, scoped.stderr)
+        assert "FAILED:" not in scoped.stdout
+
+
+def test_check_current_only_on_the_primary_ignores_a_drifted_source(
+        federated_two, tmp_path):
+    """The mirror. Scoped to the primary, another registry's drift is not this
+    question's answer."""
+    primary, _, extra, _extra_sha, _other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    combined = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert combined.returncode == 1, combined.stdout + combined.stderr
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", primary.resolve().as_uri(), "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+
+
+def test_check_current_only_refuses_a_registry_the_lock_does_not_plan(
+        federated, tmp_path):
+    """And names what it DOES plan: the lock's own strings are the key, so an
+    OWNER/REPO lock does not match an https:// URL for the same repository, and
+    a caller has to be able to see that from the one line it gets."""
+    primary, _, extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    proc = run_generator("--repo", str(primary), "--check-current",
+                         "--only", "owner/nowhere", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "FAILED:" not in proc.stdout    # not drift — the question could not be asked
+    assert "ERROR:" in proc.stderr
+    assert primary.resolve().as_uri() in proc.stderr
+    assert extra.resolve().as_uri() in proc.stderr
+
+
+def test_check_current_only_refuses_a_registry_that_is_both_primary_and_source(
+        tmp_path):
+    """Nothing else refuses this shape: plan_sources rejects a BUNDLE claimed
+    twice and says nothing about one registry standing as both halves."""
+    primary = tmp_path / "registry"
+    primary_sha = make_registry(primary, {"adam/alpha": SKILL_A, "extras/beta": SKILL_B})
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"extras={primary.resolve().as_uri()}@{primary_sha}",
+        "--source-repo", f"extras={primary}", "-o", str(out)).returncode == 0
+
+    proc = run_generator("--repo", str(primary), "--check-current",
+                         "--only", primary.resolve().as_uri(),
+                         "--source-repo", f"extras={primary}", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "FAILED:" not in proc.stdout
+    assert "BOTH" in proc.stderr
+
+
+def test_check_current_only_without_check_current_is_an_argparse_error(
+        federated, tmp_path):
+    primary, _, _extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), "--only", primary.resolve().as_uri(),
+                         "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert "--only" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_check_current_only_alongside_check_or_check_format_is_an_argparse_error(
+        federated, tmp_path):
+    """`status` is already the worst verdict across the verify flags, so a run
+    with one of them scoped and the others not has an exit code that answers no
+    question anybody asked."""
+    primary, _, _extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    for other_flag in ("--check", "--check-format"):
+        proc = run_generator("--repo", str(primary), "--check-current", other_flag,
+                             "--only", primary.resolve().as_uri(), "-o", str(out))
+        assert proc.returncode == 2, (other_flag, proc.stdout, proc.stderr)
+        assert "usage:" in proc.stderr
+        assert "--only" in proc.stderr
+
+
+def test_check_current_only_does_not_need_an_unrelated_sources_checkout(
+        federated_two, tmp_path):
+    """This is what pins filtering BEFORE plan_sources rather than after it.
+
+    plan_sources raises on the first `no checkout at ...` it meets, so a filter
+    applied to its output would let one absent sibling clone decide a question
+    asked about a different registry entirely.
+    """
+    primary, _, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    shutil.move(str(other), str(tmp_path / "moved-away"))
+
+    combined = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert combined.returncode != 0
+    assert "no checkout at" in combined.stderr
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", extra.resolve().as_uri(), "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+
+
+def test_check_current_only_ok_line_names_the_scoped_sources_ref(
+        federated, tmp_path):
+    """The OK line names the ref this run actually read, not the primary's."""
+    primary, primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", extra.resolve().as_uri(), "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+    assert scoped.stdout == f"OK: the working tree still matches {extra_sha} (1 skills).\n"
+
+    unscoped = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert unscoped.returncode == 0, unscoped.stdout + unscoped.stderr
+    assert unscoped.stdout == f"OK: the working tree still matches {primary_sha} (2 skills).\n"
 
 
 # --------------------------------------------------------------------------
