@@ -153,13 +153,24 @@ jobs:
         # list now, and scripts/test_account_workflows.py executes that case
         # rather than reading this paragraph.
         #
-        # ONE COMMAND IS DELIBERATELY LEFT UNGUARDED: the final `status=` write
-        # to $GITHUB_OUTPUT. There is no degraded path to take when the runner
-        # cannot write its own output file - the next step would read an absent
-        # status and normalise it to `unavailable`, which is this file header's
-        # "we could not ask" read as "we asked and it passed" one more time.
-        # Aborting is the honest answer there, and it is the reason the
-        # headline above says "reaches for skills-evals" rather than "every".
+        # ONE COMMAND THAT CAN PLAUSIBLY FAIL IS DELIBERATELY LEFT UNGUARDED:
+        # the final `status=` write to $GITHUB_OUTPUT. There is no degraded
+        # path to take when the runner cannot write its own output file - the
+        # next step would read an absent status and normalise it to
+        # `unavailable`, which is this file header's "we could not ask" read as
+        # "we asked and it passed" one more time. Aborting is the honest answer
+        # there, and it is the reason the headline above says "reaches for
+        # skills-evals" rather than "every".
+        #
+        # THE QUALIFIER IS LOAD-BEARING, because an unqualified count here
+        # would be false and this paragraph's own argument is that a wrong
+        # tolerance comment is worse than none. Twelve other `echo` commands
+        # sit equally bare - the two clone-success lines, every `::warning::`,
+        # and the `published account audit reads:` line - each of them in an
+        # `if` or `case` BODY, which errexit does act on. They are left that
+        # way because an `echo` to a runner's stdout essentially never fails;
+        # the one that also REDIRECTS is the one named above, and redirection
+        # is what makes it failable.
         run: |
           set -uo pipefail
           # ONE ANNOTATION PER DISTINCT FAULT. Not "one annotation per run":
@@ -248,9 +259,12 @@ jobs:
           # the selection module treats it - and any string it does not
           # recognise - as "the audit could not be used".
           #
-          # IT ALSO RAISES AN ANNOTATION - BUT ONLY IF NOTHING ELSE HAS -
-          # BECAUSE THIS IS THE ONE PATH THAT FAILS OPEN. Every other failure
-          # in this step warns already, and this was the one that did not,
+          # IT ALSO RAISES AN ANNOTATION, BECAUSE THIS IS ONE OF THE THREE
+          # PATHS THAT FAILED OPEN - not the only one. The other two are the
+          # `*)` arm and the `not-yet-bootstrapped` arm below, each of which
+          # had to grow its own annotation for the same reason. Every failure
+          # in this step that WARNED warned already, and this was the one that
+          # did not,
           # which is backwards: it is the path that fires when the cross-repo
           # IMPORT breaks and everything else went right. skills-evals moves
           # `account_store.py`, renames `freshness_verdict`, or renames the
@@ -360,7 +374,7 @@ jobs:
               echo "::warning::the published account audit reads '$verdict' - the Tier-3 Routine has not published a usable result recently, so this run leaned on the local recording. Check that Routine and the eval-results branch of Adam-S-Daniel/skills-evals." ;;
             not-yet-bootstrapped)
               # THE FOURTH MEMBER OF THE FAULT FAMILY THE COMMENT ABOVE
-              # ENUMERATES, and the only one that raises nothing. If
+              # ENUMERATES, and the one that used to raise nothing. If
               # skills-evals moves the published ARTIFACT PATH rather than a
               # module, a function or a fixture key, both clones still succeed
               # and the import still succeeds - the heredoc simply finds no

@@ -547,7 +547,14 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
 
     THE FAILURE THIS LOCKS OUT IS A GREEN RUN THAT ASKED NOTHING. Every other
     failure in that step (both clones, the pyyaml install) raises a
-    `::warning::`; TWO paths failed OPEN, and each has its own test below.
+    `::warning::`; THREE paths failed OPEN, and each has its own test below.
+
+    THREE, not two - the count is maintained here because a reader auditing
+    whether every failed-open path has a test counts what this sentence says,
+    finds that many enumerated, and stops. It said TWO after a third had been
+    added with its own test, which is how the third one - the gated one, and
+    the one whose premise most needed a second look - would have escaped it.
+    An unmaintained label does not stay silent; it starts lying.
 
     The first is the empty-capture fallback, taken when the cross-repo IMPORT
     breaks: skills-evals moves `account_store.py`, renames
@@ -564,6 +571,15 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
     skills-evals RENAME of the drift status is exactly that shape - the whole
     cross-repo half of the evidence goes unused and the run page shows no sign
     of it.
+
+    The third is quieter again, because the verdict is one this repo HAS a
+    name for: `not-yet-bootstrapped`, which is what `freshness_verdict`
+    answers when skills-evals moves the published ARTIFACT PATH rather than a
+    module, a function or a fixture key. Both clones succeed and the import
+    succeeds, so neither guard above can see it, and the `case` sent it to the
+    quiet arm. It is the one of the three whose annotation is CONDITIONAL -
+    quiet is the right answer before anything has ever been published - so it
+    carries two tests, one for each side of that gate.
 
     The liveness verdicts are here for the same reason one level out: `stale`,
     `missing` and `unreadable` all mean the Tier-3 Routine stopped publishing a
@@ -665,8 +681,12 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
     # network here would clone Adam-S-Daniel/skills-evals on every run of the
     # suite - non-deterministic by AGENTS.md's rule, and slow.
     #
-    # The `git` double answers on the DESTINATION argument, which is the only
-    # thing the step varies between its two clones, and it creates the tree on
+    # The `git` double answers on the DESTINATION argument - the last word of
+    # either command line, and the one part of it that says WHICH clone is
+    # being asked for. The flags differ between the two as well
+    # (`--filter=blob:none` against `--single-branch --branch eval-results`),
+    # which is exactly why the double does not key on them: they are the half
+    # most likely to be edited. It creates the tree on
     # success so the step sees the same directory layout it would get from a
     # real clone with a moved payload. It never fabricates the skills-evals
     # harness itself: what is under test here is the step's REACTION to a
