@@ -117,8 +117,9 @@ jobs:
         # need no token. Cloned to ../ so neither tree pollutes the workspace
         # checkout that `--account-drift` scans.
         #
-        # THIS STEP RUNS UNDER `bash -e`, AND EVERY FAILURE IN IT IS EXPLICITLY
-        # GUARDED. Both facts are load-bearing, and the first one is not a
+        # THIS STEP RUNS UNDER `bash -e`, AND EVERY FAILURE THAT REACHES FOR
+        # skills-evals IS EXPLICITLY GUARDED. Both facts are load-bearing, and
+        # the first one is not a
         # choice made here: no `shell:` and no `defaults:` are declared
         # anywhere in this file, so GitHub runs each `run:` body as
         # `/usr/bin/bash -e {0}`. The `set -uo pipefail` below adds nounset and
@@ -131,15 +132,34 @@ jobs:
         #
         # What makes the tolerance real is the SHAPE of every failable command,
         # not the absence of a flag. Both clones sit in `if` conditions, and
-        # the pyyaml install, the heredoc capture and the drift-constant read
-        # sit in `||` lists - all constructs errexit is defined not to act on,
-        # so each failure is caught by name and becomes `status=unavailable`,
-        # which the summary renders as DEGRADED. Keep new commands in one of
-        # those shapes. A missing `eval-results` branch in particular is
-        # reported and never fatal - the same tolerance skills-evals' own
-        # propagation.yml applies in "Fetch the account audit's published
-        # result", and for the same reason: a hard failure would take out the
-        # one workflow that hands a phone the fix for the drift.
+        # the pyyaml install, the placeholder `mkdir`, the heredoc capture and
+        # the drift-constant read sit in `||` lists - all constructs errexit is
+        # defined not to act on, so each failure is caught by name and becomes
+        # `status=unavailable`, which the summary renders as DEGRADED. Keep new
+        # commands in one of those shapes. A missing `eval-results` branch in
+        # particular is reported and never fatal - the same tolerance
+        # skills-evals' own propagation.yml applies in "Fetch the account
+        # audit's published result", and for the same reason: a hard failure
+        # would take out the one workflow that hands a phone the fix for the
+        # drift.
+        #
+        # THAT `mkdir` USED TO BE THE COUNTEREXAMPLE, and it sat in the one
+        # branch the sentence above promises is never fatal. `mkdir -p
+        # ../eval-results` fails when the path already exists as a FILE or the
+        # parent is not writable, and unguarded that killed the step under
+        # errexit before any verdict handling ran - so the missing-branch path
+        # aborted the job instead of degrading, which is the exact failure the
+        # comment was telling an editor could not happen here. It is a `||`
+        # list now, and scripts/test_account_workflows.py executes that case
+        # rather than reading this paragraph.
+        #
+        # ONE COMMAND IS DELIBERATELY LEFT UNGUARDED: the final `status=` write
+        # to $GITHUB_OUTPUT. There is no degraded path to take when the runner
+        # cannot write its own output file - the next step would read an absent
+        # status and normalise it to `unavailable`, which is this file header's
+        # "we could not ask" read as "we asked and it passed" one more time.
+        # Aborting is the honest answer there, and it is the reason the
+        # headline above says "reaches for skills-evals" rather than "every".
         run: |
           set -uo pipefail
           if git clone --filter=blob:none --depth 1 --quiet \
@@ -153,7 +173,8 @@ jobs:
             echo "eval-results checked out"
           else
             echo "::warning::eval-results branch not present yet"
-            mkdir -p ../eval-results
+            mkdir -p ../eval-results \
+              || echo "no placeholder for the missing eval-results clone either; the verdict below reports it"
           fi
           python3 -m pip install --quiet pyyaml==6.0.3 \
             || echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"

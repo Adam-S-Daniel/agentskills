@@ -480,6 +480,110 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         assert proc.returncode == 0, proc.stderr
         return proc.stdout, out.read_text(encoding="utf-8")
 
+    # `git` and `python3 -m pip` as SHELL FUNCTIONS, prepended to the step
+    # body, so that `_run_step` below can execute the head of the step without
+    # a network and without a PATH stub.
+    #
+    # Functions rather than executables on PATH because a function is the one
+    # form that behaves identically on both CI jobs: no shebang, no execute
+    # bit, no Windows path translation, and bash resolves a function ahead of
+    # PATH so the real `git` cannot win by accident. A test that reached the
+    # network here would clone Adam-S-Daniel/skills-evals on every run of the
+    # suite - non-deterministic by AGENTS.md's rule, and slow.
+    #
+    # The `git` double answers on the DESTINATION argument, which is the only
+    # thing the step varies between its two clones, and it creates the tree on
+    # success so the step sees the same directory layout it would get from a
+    # real clone with a moved payload. It never fabricates the skills-evals
+    # harness itself: what is under test here is the step's REACTION to a
+    # clone, not skills-evals' own code, and a fake `freshness_verdict` would
+    # be exactly the second implementation this workflow exists to avoid.
+    #
+    # The `python3` double intercepts `-m pip` alone and hands everything else
+    # to the real interpreter, so the heredoc and the drift read are genuine.
+    # `${1-}` / `${2-}`, not `$1` / `$2`: the step calls `python3 -` with a
+    # single argument and the body runs under `set -u`.
+    STUBS = """
+    git() {
+      dest=""
+      for arg in "$@"; do dest="$arg"; done
+      case "$dest" in
+        *skills-evals) if [ "$FAIL_HARNESS" = yes ]; then return 128; fi ;;
+        *eval-results) if [ "$FAIL_RESULTS" = yes ]; then return 128; fi ;;
+      esac
+      mkdir -p "$dest"
+    }
+    python3() {
+      if [ "${1-}" = -m ] && [ "${2-}" = pip ]; then return 0; fi
+      command python3 "$@"
+    }
+    """
+
+    def _run_step(self, tmp_path, *, unreachable=(), placeholder_blocked=False):
+        """The WHOLE audit step - clones, install, heredoc and tail - executed.
+
+        `_tail()` starts at the heredoc's `) || verdict=""`, so everything
+        above that point is run by nothing else in this suite. That head is
+        where the step's most likely fault lives: skills-evals unreachable, on
+        a GitHub outage, a rate limit, or the repo renamed or made private. It
+        needs no cross-repo rename to happen, and how many annotations it
+        produces cannot be seen from the tail.
+
+        The sandbox is `tmp_path/workspace`, so the step's `../` clones land in
+        `tmp_path` rather than beside the real checkout, and it carries a copy
+        of account_zip_selection.py at the path the drift read expects.
+        """
+        bash = require_bash()
+        workspace = tmp_path / "workspace"
+        (workspace / "scripts").mkdir(parents=True)
+        shutil.copy(SELECTION, workspace / "scripts" / SELECTION.name)
+        if placeholder_blocked:
+            # `mkdir -p` refuses a path that already exists and is not a
+            # directory, on every platform and without needing a permission
+            # the test would have to be root to arrange.
+            (tmp_path / "eval-results").write_text("a file\n", encoding="utf-8")
+        out = tmp_path / "gh_output"
+        env = {
+            **os.environ,
+            "GITHUB_OUTPUT": str(out).replace("\\", "/"),
+            "FAIL_HARNESS": "yes" if "harness" in unreachable else "no",
+            "FAIL_RESULTS": "yes" if "results" in unreachable else "no",
+        }
+        proc = subprocess.run(
+            [bash, "-e", "-c", self.STUBS + self._body()],
+            capture_output=True, text=True, env=env, cwd=str(workspace),
+        )
+        assert proc.returncode == 0, (
+            "the audit step ABORTED. Under the runner's `bash -e` an unguarded "
+            f"failure ends the step before it reports anything:\n{proc.stderr}"
+        )
+        assert "checked out" in proc.stdout or "::warning::" in proc.stdout, (
+            "the step produced neither a clone nor a warning, so the doubles "
+            f"above did not stand in for the real ones:\n{proc.stdout}"
+        )
+        return proc.stdout, out.read_text(encoding="utf-8")
+
+    def test_a_placeholder_it_cannot_create_does_not_abort_the_step(
+            self, tmp_path):
+        """The missing-eval-results branch is the one the step's own comment
+        promises is "reported and never fatal", and it held the one unguarded
+        command in the step.
+
+        `mkdir -p ../eval-results` fails when that path exists as a file or its
+        parent is not writable. Under `bash -e` that ended the step on the spot
+        - before the empty-capture guard, before the `case`, before the
+        `status=` write - so the branch documented as never fatal was the one
+        that killed the job, and the workflow reported nothing at all rather
+        than reporting DEGRADED.
+        """
+        log, out = self._run_step(
+            tmp_path, unreachable=("results",), placeholder_blocked=True)
+        assert "status=unavailable" in out, (
+            "the step never reached its output write, so the next step reads "
+            "no status at all"
+        )
+        assert "eval-results branch not present yet" in log
+
     @pytest.mark.parametrize("verdict, recorded, why", [
         ("", "unavailable",
          "the heredoc raised - a broken cross-repo import looks exactly like "
