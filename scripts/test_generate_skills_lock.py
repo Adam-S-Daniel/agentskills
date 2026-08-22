@@ -1987,6 +1987,35 @@ def test_check_format_suggests_a_repin_pinned_to_the_locks_own_ref(registry, tmp
     assert drifted["skills"] != before
 
 
+def test_the_cross_repo_anchor_comment_names_its_counterpart_block(tmp_path):
+    """A cross-repo contract that names only a FILE degrades into a search.
+
+    This one is two halves that must move together: the `--ref` this report
+    prints, and `repin_ref_args=(--ref "$old_ref")` on the fleet bumper's
+    format branch. Nothing compares the two copies automatically, so the only
+    thing holding them together is each side naming the other precisely enough
+    to be found. The bumper's half names this docstring and quotes the
+    paragraph it expects to find; this half named the script and stopped there,
+    which is how the bumper ended up still asking for an edit that had already
+    been made, with nothing over here pointing at the request.
+    """
+    def unwrapped(text: str) -> str:
+        # Comment prose wraps, so a quoted phrase is split across lines. Compare
+        # against the unwrapped text rather than letting a line break decide
+        # whether a pointer counts as present.
+        return " ".join(line.strip().lstrip("#").strip() for line in text.splitlines())
+
+    source = GENERATOR.read_text(encoding="utf-8")
+    block = unwrapped(source[source.index("THE COUNTERPART BLOCK"):][:1400])
+    assert "scripts/bump-consumer-locks.sh" in block
+    assert "A SIBLING SITE MOVES WITH THIS" in block
+    assert "One consequence to expect rather than re-discover" in block
+    # The paragraph the bumper still expects to find here is genuinely gone —
+    # its only occurrence is the quotation above, which is what makes that
+    # block stale rather than merely duplicated.
+    assert unwrapped(source).count("One consequence to expect rather than re-discover") == 1
+
+
 def test_check_format_will_not_echo_a_hand_edited_ref_into_the_command(registry,
                                                                       tmp_path):
     """That line is copy-pasteable, and the fleet bumper slices it into a PR body.

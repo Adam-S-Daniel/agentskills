@@ -1258,10 +1258,19 @@ def report_digest_format(document: dict, output: Path) -> int:
     # shape repair holds the pin whether a human at a terminal or the nightly
     # performs it. That is what makes quoting this report verbatim into a PR
     # body honest — the command a reviewer reads there is the command that
-    # produced the diff beneath it. Checkable from the other side, in
-    # scripts/bump-consumer-locks.sh; nothing compares the two copies
-    # automatically, so a change to either half still has to be carried across
-    # by hand, exactly like the prefix split above.
+    # produced the diff beneath it.
+    #
+    # THE COUNTERPART BLOCK, named so neither half is a pointer to nowhere:
+    # _agent-guidance's scripts/bump-consumer-locks.sh, under the comment
+    # beginning "A SIBLING SITE MOVES WITH THIS". It asks a future reader to
+    # rewrite a paragraph in THIS docstring that began "One consequence to
+    # expect rather than re-discover" — the paragraph these lines replaced, so
+    # that request is already discharged and the block over there is stale.
+    # Removing it is the remaining half of this edit and can only be made in
+    # that repo. Nothing compares the two copies automatically, so a change to
+    # either half still has to be carried across by hand, exactly like the
+    # prefix split above; naming the block is what keeps "by hand" from meaning
+    # "by search".
     suggested_ref = _suggested_repin_ref(document)
     print(f"  python3 scripts/generate_skills_lock.py --repin "
           f"--ref {suggested_ref or '<the commit this lock pins>'} "
