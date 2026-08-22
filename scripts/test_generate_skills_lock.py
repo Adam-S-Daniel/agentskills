@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Collection, Optional, Tuple
 
 import pytest
 
@@ -2152,11 +2152,14 @@ def test_check_format_will_not_echo_a_hand_edited_ref_into_the_command(registry,
 # the total count moved. A module-level assert is a collection ERROR instead,
 # the same self-proving discipline `_unlabel` uses on the fixture it edits.
 # "-o" is the case a charset guard alone lets through: it is legal in
-# `_REF_RE`, so before the dash check it was echoed straight into the command
-# as `--ref -o --repo ...`, where the ref stops being a value and becomes an
-# OPTION. That fails loudly (argparse exit 2) rather than silently, but a
-# remediation line that cannot run is still a remediation line that does not
-# do what the sentence above it promises.
+# `_REF_RE`, so while `_suggested_repin_ref` was the guard it was echoed
+# straight into the command as `--ref -o --repo ...`, where the ref stops being
+# a value and becomes an OPTION. `_REF_RE` is not the guard any more —
+# `repin_primary_blocker` is, through `remediation`, and it refuses anything
+# that is not a 40-hex sha — so the shell hazard is closed by the same rule
+# that closes the "printed a command --repin would refuse" one, rather than by
+# a second charset check beside it. The list stays because it is the set of
+# `ref` values a merge or a hand edit really leaves behind.
 _UNUSABLE_REFS = [None, 7, "", "  ", "a" * 40 + " --repo /elsewhere", "-o"]
 assert len(_UNUSABLE_REFS) == 6
 
@@ -3921,8 +3924,8 @@ def _a_bundle_claimed_twice_asked_with_only(tmp_path):
     scoped run plans the primary plus ONE source and meets no conflict — it can
     only learn of this from a predicate asked over the whole lock. Measured
     before `repin_plan_blocker`: this printed
-    `--repin --ref <sha> --repin-source '<third>@'`, and running that line
-    exited 1 with "bundle 'cms-platform' is claimed by both ...".
+    `--repin --ref <sha> --repin-source '<third>@'`, and running that line at
+    that lock exited 1 with "bundle 'cms-platform' is claimed by both ...".
 
     The bumper's live path, not a curiosity: _agent-guidance builds its
     federated report by concatenating one `--check-current --only <registry>`
@@ -3982,6 +3985,28 @@ def _a_skills_key_for_a_bundle_the_lock_does_not_declare(tmp_path):
     return primary, out, extra_args
 
 
+def _primary_bundle_gone_at_head_with_a_drifted_source(tmp_path):
+    """The one shape where `--check-current --ref <elsewhere>` is not the lock's pin.
+
+    The primary deleted its bundle's last skill in a commit AFTER the one the
+    lock pins, and a federated source drifted. Asked with `--ref <that later
+    commit>` the primary does not drift — the working tree agrees with it — so
+    only the source block is printed, and the line it prints anchors the
+    primary at a commit where the bundle is GONE. Whether the primary can move
+    under that line is therefore a comparison against the lock's own ref, not
+    "did the primary block drift"; asked the second way the report prints a
+    command the shrink guard then refuses.
+    """
+    primary, out = _two_sources(tmp_path)
+    shutil.rmtree(primary / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha")
+    _write(primary / "README.md", "still a repository\n")
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "the primary bundle is gone")
+    _write(tmp_path / "cms-platform" / "skills" / "deploy" / "SKILL.md",
+           "---\nname: deploy\n---\nedited\n")
+    return primary, out, []
+
+
 def _hand_broken_lock(field, value=None):
     """A really-drifted lock with one field --repin cannot inherit.
 
@@ -4036,6 +4061,8 @@ _DRIFT_SHAPES = [
     (_hand_broken_lock("bundles"), "the lock lost its 'bundles'", False),
     (_hand_broken_lock("sources", {}), "the lock's 'sources' is an object", False),
     (_emptied_primary_bundle, "the primary bundle lost every skill", False),
+    (_primary_bundle_gone_at_head_with_a_drifted_source,
+     "the primary bundle is gone at HEAD and a source drifted", False),
     (_a_bundle_claimed_twice_asked_with_only,
      "two sources claim one bundle, asked with --only about a third", False),
     (_more_sources_than_the_cap_asked_with_only,
@@ -7275,3 +7302,341 @@ def test_another_repos_lock_does_not_reap_this_ones_skills(tmp_path):
         "alpha": one.resolve().as_uri(),
         "beta": two.resolve().as_uri(),
     }
+
+# --------------------------------------------------------------------------
+# the matrix: every report path against every refusal
+# --------------------------------------------------------------------------
+
+def _derived_reasons() -> dict:
+    """{reason id -> its longest string literal}, read off the module's AST.
+
+    DERIVED, never hand-listed, so a refusal added to a predicate cannot skip
+    the matrix below: it appears here the moment it is written, and the
+    coverage assertion goes red until a fixture reaches it. Every
+    lock-decidable refusal already has to live in a `*_blocker` — that is
+    `test_every_refusal_a_repin_can_give_is_one_both_paths_read` — so
+    enumerating those predicates' non-None returns enumerates the reasons.
+
+    The longest literal is the fingerprint because a reason is an f-string: the
+    interpolated halves differ per lock, the literal spans do not.
+    """
+    tree = ast.parse(GENERATOR.read_text(encoding="utf-8"))
+    reasons = {}
+    for function in tree.body:
+        if not (isinstance(function, ast.FunctionDef)
+                and function.name.endswith("_blocker")):
+            continue
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            if isinstance(node.value, ast.Constant) and node.value.value is None:
+                continue
+            literals = [child.value for child in ast.walk(node.value)
+                        if isinstance(child, ast.Constant)
+                        and isinstance(child.value, str)]
+            assert literals, f"{function.name}:{node.lineno} returns no literal text"
+            reasons[f"{function.name}:{node.lineno}"] = max(literals, key=len)
+    return reasons
+
+
+# The one reason no caller can reach, because an earlier blocker always answers
+# first. Kept as a predicate's contract rather than deleted — see
+# repin_source_blocker's own note about being total — and PROVEN subsumed by
+# test_the_subsumed_reason_really_is_answered_by_an_earlier_blocker rather than
+# waived, so this cannot become the drawer a new reason is swept into. Keyed by
+# a fragment of the reason, because line numbers move and this must not.
+_SUBSUMED_REASON = "proves the checkout this would re-pin from is that registry at all"
+_SUBSUMES_IT = "repin_unproven_sources_blocker"
+
+
+def _reason_ids(text: str, reasons: dict) -> set:
+    return {name for name, literal in reasons.items() if literal in text}
+
+
+def _subsumed_ids(reasons: dict) -> set:
+    return {name for name, literal in reasons.items() if _SUBSUMED_REASON in literal}
+
+
+_IDENTITY_FIELDS = ("registry", "bundles", "sources")
+
+
+def _matrix_lock_identity(out: Path, ignoring: Collection = ()) -> dict:
+    """What no remediation may change: who this lock is and what it declares.
+
+    Refs are left out deliberately — advancing one is what a re-pin is FOR.
+    Everything else is identity: the registry it describes, the bundles it
+    installs, and the federated array with each entry's bundles and layout. All
+    three, not `registry` alone: a check watching one field goes green against
+    a line that restates that one and loses the rest, which is most of the way
+    to the defect it exists to catch.
+
+    `ignoring` names the fields the verdict ITSELF said were wrong. `--check`
+    on a lock that lost `bundles` reports exactly that and its repair restores
+    the field, so holding the missing value would be requiring the repair not
+    to repair. A field the verdict did not name has no such licence — and in
+    the defect this test was written for, `--check` flagged a missing SKILL and
+    its line silently took `registry` and `bundles` with it.
+    """
+    document = json.loads(out.read_text(encoding="utf-8"))
+    identity = {
+        "registry": document.get("registry"),
+        "bundles": document.get("bundles"),
+        "sources": [(source.get("registry"), source.get("bundles"),
+                     source.get("layout"))
+                    for source in document.get("sources", [])],
+    }
+    return {key: value for key, value in identity.items() if key not in ignoring}
+
+
+def _fields_the_verdict_flagged(stdout: str) -> set:
+    """Which identity fields a `--check` verdict named in its difference lines."""
+    return {field for field in _IDENTITY_FIELDS
+            if any(line.strip().startswith(f"- {field}: ")
+                   for line in stdout.splitlines())}
+
+
+def _bare_digest_copy(out: Path, name: str = "bare.lock") -> Path:
+    """The same lock with its digests unlabelled — --check-format's failing input.
+
+    Without it that flag is OK on every fixture here, since the generator wrote
+    those digests, and its column of the matrix would assert nothing at all.
+    That column is not optional: --check-format is the fleet bumper's WRITE
+    trigger, and it is the path that sat outside this property longest.
+    """
+    copy = out.parent / name
+    document = json.loads(out.read_text(encoding="utf-8"))
+    skills = document.get("skills")
+    if isinstance(skills, dict):
+        document["skills"] = {
+            key: (value.split(":", 1)[1]
+                  if isinstance(value, str) and ":" in value else value)
+            for key, value in skills.items()}
+    copy.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return copy
+
+
+def _report_invocations(primary: Path, out: Path) -> list:
+    """Every way this file reports on one lock: (label, argv).
+
+    All four verdicts, and `--check-current` once per registry the lock names.
+    Scoped and unscoped are different questions asked of different `extras`,
+    and the scoped one is what three rounds of this defect class escaped
+    through — `_select_sources` narrows the array before anything downstream
+    sees it, so a whole-document refusal is invisible there unless a predicate
+    asked over the whole document says so.
+    """
+    document = json.loads(out.read_text(encoding="utf-8"))
+    common = ["--repo", str(primary), "-o", str(out)]
+    calls = [("--check", ["--check", *common]),
+             ("--check-current", ["--check-current", *common])]
+    sources = document.get("sources")
+    registries = [document.get("registry")] + (
+        [source.get("registry") for source in sources]
+        if isinstance(sources, list) else [])
+    for name in dict.fromkeys(r for r in registries if isinstance(r, str) and r):
+        calls.append((f"--check-current --only {name}",
+                      ["--check-current", "--only", name, *common]))
+    # `--check-current --ref <somewhere else>` asks the same verdict about a
+    # DIFFERENT primary commit, and the line it prints anchors to that commit
+    # rather than to the lock's own pin — so whether the primary can move under
+    # it is a comparison, not "did the primary block drift". Included because
+    # that is where the report and the shrink guard would otherwise part
+    # company, and no other cell reaches it.
+    calls.append(("--check-current --ref HEAD",
+                  ["--check-current", "--ref", _head(primary), *common]))
+    calls.append(("--check-format", ["--check-format", *common]))
+    return calls
+
+
+def _assert_matrix_cell(label: str, proc, out: Path, reasons: dict) -> set:
+    """The whole property, on one (report path, lock) cell. Returns what it saw.
+
+    Either a block prints a command that RUNS and costs the lock nothing, or it
+    prints none and carries its reason inside its own headline, where the fleet
+    bumper's 20-line slice cannot separate the two.
+    """
+    lines = proc.stdout.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("FAILED:"):
+            continue
+        following = lines[index + 1:index + 2]
+        printed = bool(following) and following[0].strip().startswith("python3 ")
+        assert printed or "would refuse one: " in line, (label, line)
+
+    flagged = _fields_the_verdict_flagged(proc.stdout)
+    before = _matrix_lock_identity(out, flagged)
+    for command in _printed_commands(proc.stdout):
+        applied = _run_printed(command)
+        assert applied.returncode == 0, (label, command,
+                                         applied.stdout + applied.stderr)
+        assert _matrix_lock_identity(out, flagged) == before, (label, command)
+    return _reason_ids(proc.stdout + proc.stderr, reasons)
+
+
+_MATRIX_SHAPES = [(build, name) for build, name, _ in _DRIFT_SHAPES] + [
+    (_hand_broken_lock("ref"), "the lock lost its 'ref'"),
+    (_hand_broken_lock("bundles", ["adam", "not a bundle name!"]),
+     "a 'bundles' entry is not a plausible name"),
+]
+# Stated, because an empty or shortened list is the edit that turns the whole
+# matrix green against a generator it no longer exercises.
+assert len(_MATRIX_SHAPES) == 21
+
+
+@pytest.mark.parametrize("build, shape", [pytest.param(build, name, id=name)
+                                          for build, name in _MATRIX_SHAPES])
+def test_every_report_path_against_every_refusal(build, shape, tmp_path):
+    """The matrix. Every verdict this file prints x every lock shape.
+
+    Four rounds closed this class one pair at a time — a verdict and a refusal
+    that disagreed — and each round re-opened it where the pair had not been
+    enumerated: a whole-document refusal invisible to a SCOPED
+    `--check-current`; two callers asking the shrink predicate different
+    questions; a `--check` line that re-pointed the lock at DEFAULT_REGISTRY;
+    a `--check-format` line nobody re-read when the refusal set grew.
+
+    Pairs are what kept failing, so this asserts the PRODUCT. `remediation` is
+    what makes the product finite — one function decides both halves for every
+    verdict — and this is what proves that function total:
+
+      * every printed command is RUN, exactly as printed, and must exit 0 and
+        leave `registry`, `bundles` and the `sources` array's identity where
+        they were. Running it is the point: three rounds of reasoning that a
+        command *would* work is what this replaces.
+      * every FAILED block that prints no command must carry its reason inside
+        the headline.
+      * the reasons are DERIVED from the module's AST, and
+        `test_the_matrix_covers_every_refusal_the_code_can_give` requires each
+        one to be produced by some fixture here — so a reason cannot be added
+        to a predicate without a lock shape that reaches it.
+
+    Each cell gets its own copy of the lock, because running a remediation
+    writes one; a cell that inherited the previous cell's repaired lock would
+    be measuring a document no verdict had complained about.
+    """
+    primary, out, _scoped = build(tmp_path)
+    reasons = _derived_reasons()
+    seen = set()
+    for index, (label, argv) in enumerate(_report_invocations(primary, out)):
+        cell = tmp_path / f"cell{index}.lock"
+        shutil.copyfile(_bare_digest_copy(out, f"bare{index}.lock")
+                        if label == "--check-format" else out, cell)
+        proc = run_generator(*[str(cell) if arg == str(out) else arg for arg in argv])
+        seen |= _assert_matrix_cell(label, proc, cell, reasons)
+    assert seen <= set(reasons)
+    (tmp_path.parent / f"observed-{abs(hash(shape))}.json").write_text(
+        json.dumps(sorted(seen)), encoding="utf-8")
+
+
+def _observe_every_reason(tmp_path_factory, reasons: dict) -> set:
+    """Run every matrix shape past the two verdicts that can quote any reason.
+
+    The unscoped `--check-current` reaches every refusal a report gives (a
+    whole-document one arrives on stderr when plan_sources cannot even plan the
+    lock), and `--check-format` reaches the ones only a lock-shape defect
+    produces. That is the whole reason set minus the two `repin_source_blocker`
+    sentences about a spec the CALLER typed, which no report ever asks for and
+    which `_sweep_the_apply_path` supplies.
+
+    Self-contained rather than reading what the parametrized matrix observed:
+    a coverage assertion that depends on other tests having run first is green
+    whenever they are deselected, which is the shape of a gate wired to
+    nothing.
+    """
+    observed = set()
+    for build, name in _MATRIX_SHAPES:
+        tmp_path = tmp_path_factory.mktemp("cover")
+        primary, out, _scoped = build(tmp_path)
+        observed |= _reason_ids(
+            _joined(run_generator("--repo", str(primary), "--check-current",
+                                  "-o", str(out))), reasons)
+        bare = _bare_digest_copy(out)
+        observed |= _reason_ids(
+            _joined(run_generator("--repo", str(primary), "--check-format",
+                                  "-o", str(bare))), reasons)
+    return observed
+
+
+def _joined(proc) -> str:
+    return proc.stdout + proc.stderr
+
+
+def _sweep_the_apply_path(tmp_path, reasons: dict) -> set:
+    """The two `repin_source_blocker` reasons no report can ask for.
+
+    Both are about a spec the caller typed — the primary's own name, and a
+    registry the lock does not federate — and `report_drift` only ever asks
+    about a source it has just planned, so neither can reach a verdict. They
+    are still refusals this generator gives, so the coverage assertion has to
+    see them, and the flag itself is the only caller that produces them.
+    """
+    primary, out = _two_sources(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    observed = set()
+    for spec in (f"{document['registry']}@", "no-such/registry@"):
+        refusal = run_generator("--repo", str(primary), "--repin",
+                                "--repin-source", spec, "-o", str(out))
+        assert refusal.returncode == 1, (spec, refusal.stdout + refusal.stderr)
+        observed |= _reason_ids(refusal.stderr, reasons)
+    return observed
+
+
+def test_the_matrix_covers_every_refusal_the_code_can_give(tmp_path, tmp_path_factory):
+    """Nothing in `_derived_reasons` may go unproduced.
+
+    This is what makes the matrix total rather than a long list of cases: the
+    reasons come from the AST, so adding one to a predicate turns this red
+    until a `_MATRIX_SHAPES` fixture reaches it. The only exemption is a reason
+    an earlier blocker always answers first, and it is not a waiver — the
+    subsumption is measured in the next test, on the very lock that would trip
+    it.
+
+    Fingerprints are required to be distinct AND non-nesting first: two reasons
+    sharing one, or one containing another, would let a fixture that reaches
+    neither report both as covered.
+    """
+    reasons = _derived_reasons()
+    assert len(reasons) >= 15, reasons
+    for name, literal in reasons.items():
+        others = [other for key, other in reasons.items() if key != name]
+        assert not any(literal in other for other in others), (
+            f"{name}'s fingerprint is a substring of another reason's — the "
+            "coverage assertion below cannot tell the two apart")
+
+    observed = (_observe_every_reason(tmp_path_factory, reasons)
+                | _sweep_the_apply_path(tmp_path, reasons))
+    missing = set(reasons) - observed - _subsumed_ids(reasons)
+    assert not missing, (
+        f"no fixture in _MATRIX_SHAPES produces {sorted(missing)}. Add one — or, if "
+        "an earlier blocker always answers first, name it in _SUBSUMED_REASON and "
+        "prove that in test_the_subsumed_reason_really_is_answered_by_an_earlier_blocker.")
+
+
+def test_the_subsumed_reason_really_is_answered_by_an_earlier_blocker(tmp_path):
+    """The exemption above, re-measured rather than inherited.
+
+    A branch-pinned SOURCE trips two predicates: `repin_source_blocker` names
+    it per-registry, and `repin_unproven_sources_blocker` refuses the whole
+    invocation. The second is composed first on both paths, so the first's
+    sentence reaches nobody. If that order ever changes this goes red and the
+    reason has to rejoin the matrix — which is the difference between an
+    exemption and a hole.
+    """
+    primary, out, _ = _source_hand_pinned_at_a_branch(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    extras = [gsl.normalize_source(raw, f"sources[{index}]")
+              for index, raw in enumerate(document["sources"])]
+    blocked = extras[0]["registry"]
+    reasons = _derived_reasons()
+
+    on_its_own = gsl.repin_source_blocker(extras, blocked, document["registry"])
+    assert on_its_own, "the subsumed reason no longer fires on its own input"
+    assert _reason_ids(on_its_own, reasons) == _subsumed_ids(reasons), on_its_own
+
+    answer = gsl.remediation("source", existing=document, output=out, repo=primary,
+                             registry=document["registry"], extras=extras,
+                             ref=document["ref"], source_registry=blocked)
+    assert answer.command is None
+    covering = _reason_ids(answer.reason, reasons)
+    assert covering and all(name.startswith(_SUBSUMES_IT + ":") for name in covering), \
+        answer.reason

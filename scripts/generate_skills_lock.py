@@ -1013,12 +1013,13 @@ def repin_plan_blocker(
     condition, and reports a whole-document defect as repairable.
 
     Measured on this branch before this predicate, on a three-source lock whose
-    second source was hand-edited to claim the first's bundle:
-    `--check-current` unscoped exited 1 with no command, while
-    `--check-current --only <the third source>` printed
-    `--repin --ref <sha> --repin-source '<third>@'` — which exited 1 with
-    "bundle 'cms-platform' is claimed by both ...". The nine-source lock did
-    the same with the cap.
+    second source was hand-edited to claim the first's bundle: `--check-current`
+    unscoped exited 1 with no command, while `--check-current --only <the third
+    source>` printed `--repin --ref <sha> --repin-source '<third>@'`, and
+    running that line at that lock exited 1 with "bundle 'cms-platform' is
+    claimed by both ...". A nine-source lock did the same with the cap. (At that
+    line, addressed at that lock: the printed command carried no `--repo` or
+    `-o` either, which is the same class and is `_addressing`'s half of it.)
 
     Asked over the WHOLE document — the primary's bundles plus every entry in
     `sources` — because that is the document any `--repin` rebuilds, whatever
@@ -1744,9 +1745,12 @@ def report_digest_format(document: dict, output: Path, repo: Path) -> int:
         # string the fleet bumper branches on — but this lock has some OTHER
         # defect that makes the re-pin above impossible, and printing the line
         # anyway sends the bumper to a nightly exit 1 with no automated exit.
-        # Measured before this: a lock whose `bundles` had been lost, and one
-        # with a source pinned at a branch, each printed a --repin that the same
-        # generator refused.
+        # Measured before this, with the line's `<a clone ...>` / `<this lock>`
+        # placeholders filled in as it instructs: a lock pinned at a branch, one
+        # with a SOURCE pinned at a branch, and one whose `bundles` had been
+        # lost each printed a --repin that this same generator then refused at
+        # exit 1. (A lock whose bundle had merely emptied was fine at exit 0 —
+        # this line holds the pin, so no content moves and nothing can shrink.)
         print(f"FAILED: {headline}. No re-pin command is printed for it because "
               f"this generator would refuse one: {answer.reason}")
     else:
@@ -2099,9 +2103,10 @@ def _addressing(output: Path, repo: Path) -> str:
 
     Omitted when they are the defaults this script would pick anyway, so this
     repo's own remediation lines stay the short ones people already know. A
-    CONSUMER lock is the case that needs them: `--check -o <their lock>` that
-    printed a command without `-o` was telling the reader to regenerate a
-    DIFFERENT file.
+    CONSUMER lock is the case that needs them: without `-o` the printed command
+    resolves its output to DEFAULT_LOCK (see `main`), which is not the lock the
+    verdict was about — so following it either fails or rewrites this repo's own
+    lock instead of theirs.
     """
     flags = ""
     if repo.resolve() != REPO_ROOT:
@@ -2159,10 +2164,14 @@ def remediation(
     (`test_no_report_path_writes_a_command_of_its_own` reads the AST for it).
     Every apply-path guard reads the same `*_blocker` predicates this composes
     (`test_every_refusal_a_repin_can_give_is_one_both_paths_read`). And
-    `test_every_report_path_against_every_refusal` runs the whole matrix: each
-    path against each derived reason, requiring either no command with the
-    reason in the headline, or a command that RUNS at exit 0 and comes back
-    with `registry`, `bundles` and `sources` intact.
+    `test_every_report_path_against_every_refusal` runs the whole matrix — every
+    report path against every lock shape a refusal answers — requiring of each
+    cell either no command with the reason inside the headline, or a command
+    that RUNS at exit 0 and leaves `registry`, `bundles` and the `sources`
+    array's identity as it found them (bar a field the verdict itself named as
+    wrong). Its companion enumerates the reasons off this module's AST and
+    requires every one to be produced, so a refusal cannot be added to a
+    predicate without a lock shape that reaches it.
 
     The two things a command must therefore be, which no single call site kept:
 
@@ -2245,7 +2254,17 @@ def remediation(
     # through to resolve_ref(repo, "HEAD") and advances the PRIMARY pin too.
     # Dropped when the primary drifted as well, because its own block is then
     # telling the reader to advance it and one bare --repin does both.
-    primary_moves = kind == "primary" or primary_drifted
+    #
+    # Whether the PIN then moves is a second question, and the one
+    # `_movable_bundles` needs: an anchored line moves it only if the ref it
+    # anchors to is not the one the lock already carries. Spelled as a
+    # comparison rather than as `not primary_drifted`, so it stays the same
+    # question the apply path asks (`args.ref != existing["ref"]`) even for a
+    # `--check-current --ref <some other commit>`, where the two would
+    # otherwise part company and the report would recommend a line the guard
+    # refuses.
+    primary_moves = (kind == "primary" or primary_drifted
+                     or ref != existing.get("ref"))
     if kind == "primary":
         command = f"{_SCRIPT} --repin{addressing}"
     else:
