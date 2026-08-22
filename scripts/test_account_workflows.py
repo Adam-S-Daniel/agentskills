@@ -577,6 +577,53 @@ def _case_block(text, mask, opener_re, what):
 _GLOB_META = "*?["
 
 
+def _pattern_payload(token):
+    """(the literal TEXT of one `case` pattern, whether it holds a bare `*`).
+
+    A `*` outside quotes is the wildcard; every other character, and every
+    character inside quotes, is text the subject has to match. So a token
+    whose text is empty and which holds a bare `*` matches EVERY string, and a
+    token whose text is empty without one matches only the empty string.
+    Neither is a status name, and `_unquote` cannot tell either of them from
+    one: it only strips a symmetric pair of quotes around a whole token, so
+    `""*`, `*''` and the `''` in `''|*` all come back looking like literals
+    the module has never heard of, and the caller reds with the cross-repo
+    drift accusation about a `case` that is behaving perfectly.
+
+    QUOTING AN EMPTY STRING TAKES NOTHING AWAY, which is what separates these
+    from `"*"`. Quoting the STAR takes the glob away and leaves a match on a
+    literal asterisk - a dead catch-all, and the silent-green hole `_ARMS_RED`
+    holds in both quotings. `"*"` has text `*`, so it is not a catch-all here
+    either; the text being EMPTY is the whole test.
+
+    A backslash escapes the next character into the text, so `\\*` is a match
+    on a literal asterisk rather than a catch-all. An unbalanced quote returns
+    no text at all and the caller falls back to comparing the token as
+    written: guessing at half a pattern is how a scanner starts accepting
+    shapes bash does not.
+    """
+    text, star, i, n = [], False, 0, len(token)
+    while i < n:
+        ch = token[i]
+        if ch == "\\":
+            text.append(token[i + 1:i + 2])
+            i += 2
+            continue
+        if ch in "'\"":
+            close = token.find(ch, i + 1)
+            if close == -1:
+                return None, False
+            text.append(token[i + 1:close])
+            i = close + 1
+            continue
+        if ch == "*":
+            star = True
+        else:
+            text.append(ch)
+        i += 1
+    return "".join(text), star
+
+
 def _unquote(token):
     """One `case` pattern with a symmetric pair of surrounding quotes removed -
     but only where the quotes are invisible to bash.
@@ -839,6 +886,16 @@ _ARMS_OK = [
      _arm('  not-yet-bootstrapped)', '\n\n  not-yet-bootstrapped)')),
     ("no-terminator-on-the-last-arm",
      _arm(_CATCHALL + '\nesac', _CATCHALL[:-3].rstrip() + '\nesac')),
+    # THE CATCH-ALL IN SPELLINGS `_unquote` CANNOT REACH. Quoting an EMPTY
+    # string takes nothing away, so each of these matches what `*)` matches;
+    # quoting the STAR does take the glob away, which is why both quotings of
+    # that sit in `_ARMS_RED` instead. That the three below really are
+    # catch-alls is executed rather than argued:
+    # test_a_reformat_leaves_the_step_answering_as_it_did runs each against
+    # the control for every verdict, in a real bash.
+    ("catch-all-with-an-empty-alternative", _arm('  *)', "  ''|*)")),
+    ("catch-all-with-a-leading-empty-string", _arm('  *)', '  ""*)')),
+    ("catch-all-with-a-trailing-empty-string", _arm('  *)', "  *'')")),
     # THE THREE WRAPPED SHAPES DISCRIMINATE THE THREE QUOTE MODELS `_shell_scan`
     # rejects, and each is here for a model the others do not catch. They wrap
     # the FIRST arm rather than the catch-all deliberately: a terminator lost
@@ -2027,6 +2084,20 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
                 # about the quiet arm that points nowhere near the cause.
                 if "$" in token:
                     variables.add(token)
+                    continue
+                # EVERY SPELLING OF THE CATCH-ALL COUNTS AS ONE, and a
+                # pattern that matches only the empty string counts as
+                # nothing - see `_pattern_payload`. Reading `''|*)` as a
+                # literal named "" was a red on a block that matches exactly
+                # what `*)` matches, and the message it reds with sends the
+                # reader to diff this workflow against another repo.
+                # `payload`, not `text`: `text` is the whole masked body
+                # this loop is slicing arms out of.
+                payload, star = _pattern_payload(token)
+                if payload == "" and star:
+                    literals.add("*")
+                elif payload == "":
+                    continue
                 else:
                     literals.add(_unquote(token))
         return body, literals, variables
