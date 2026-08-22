@@ -1659,6 +1659,75 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"it is spelled a second time inside the workflow: {read[0]}"
         )
 
+    # SPELLED-OUT AND DIGIT COUNTS ALIKE, because the one that came back was
+    # spelled out ("Twelve other `echo` commands").
+    _COUNT_WORD = (r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|"
+                   r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+                   r"seventeen|eighteen|nineteen|twenty)")
+
+    def test_no_comment_in_this_step_counts_its_own_echoes(self):
+        """#120, guarded rather than described.
+
+        The defect this workflow was fixed for was a comment saying how many
+        `echo` commands the step had. It was accurate when it was written and
+        nothing asserted it, so it read as checked and would have gone stale
+        on the next edit - and an accurate unasserted count is the dangerous
+        kind, because nobody has a reason to look at it.
+
+        The paragraph that used to carry it now argues for a SHAPE instead.
+        This is what stops the count coming back the next time someone wants
+        the paragraph to sound more precise: a number qualifying `echo` in
+        this file has to be asserted somewhere, and there is nowhere here for
+        it to be asserted from.
+        """
+        text = ZIPS.read_text(encoding="utf-8")
+        hits = re.findall(
+            rf"(?i)\b{self._COUNT_WORD}\b[^.\n]{{0,40}}`?echo`?s?\b", text)
+        assert not hits, (
+            f"a count of this step's `echo` commands came back into a "
+            f"comment: {hits}. Nothing in this repo can assert it, so it "
+            f"reads as checked and goes stale on the next edit - see #120."
+        )
+
+    def test_the_output_write_is_left_unguarded_on_purpose(self):
+        """The one command the tolerance comment exempts, held to the exemption.
+
+        That comment names `echo "status=$verdict" >> "$GITHUB_OUTPUT"` as
+        deliberately unguarded: there is no degraded path when the runner
+        cannot write its own output file, because the next step would read an
+        absent status and normalise it to `unavailable` - "we could not ask"
+        reported as "we asked and it passed". Aborting is the honest answer.
+
+        It also closes with a rule about what belongs in an `if` or a `||`,
+        and an editor reading that rule alone would wrap this line and undo
+        the decision. So the decision is asserted here rather than argued
+        there: adding `|| true`, or moving the write into an `if` condition,
+        reds this test with the reason.
+        """
+        step = code(_audit_body())
+        writes = [l.strip() for l in step.splitlines()
+                  if "$GITHUB_OUTPUT" in l]
+        assert len(writes) == 1, (
+            f"expected exactly one $GITHUB_OUTPUT write in the audit step, "
+            f"found {len(writes)}: {writes}"
+        )
+        write = writes[0]
+        assert write.startswith("echo "), (
+            f"the audit step's output write is no longer a bare `echo`, so "
+            f"this test no longer knows whether it is guarded: {write!r}"
+        )
+        # THE PROPERTY, NOT THE TEXT. Matching the line byte for byte would
+        # red on a requoting bash cannot see, which is the false red the rest
+        # of this file exists to remove. What must not appear is a GUARD.
+        assert not re.search(r"\|\||&&", write), (
+            f"the `status=` write acquired a guard: {write!r}. There is no "
+            f"degraded path when the runner cannot write its own output file "
+            f"- the next step would read an absent status as `unavailable`, "
+            f"which is 'we could not ask' reported as 'we asked and it "
+            f"passed'. Aborting is the intended answer; see the tolerance "
+            f"comment above the step."
+        )
+
     def _bash_n(self, tmp_path, body, name):
         """The fixture is REAL BASH, asserted before anything is read off it.
 
