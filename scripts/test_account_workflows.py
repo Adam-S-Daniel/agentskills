@@ -477,22 +477,30 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         )
         return body[body.index(marker) + len(marker):]
 
-    def _run(self, tmp_path, verdict, *, annotated="no", results_ok="yes"):
+    def _run(self, tmp_path, verdict, *, harness_ok="yes", results_ok="yes",
+             pip_ok="yes"):
         bash = require_bash()
-        # `annotated` is the step head's own flag, delivered here because the
-        # tail reads it: the empty-capture guard annotates only when no earlier
-        # guard did. "no" is the healthy head - both clones and the install
-        # green - which is the state every verdict-driven test below assumes.
+        # THE THREE FLAGS THE STEP HEAD SETS AND THE TAIL READS, delivered
+        # here by their real names. "yes" on all three is the healthy head -
+        # both clones and the install green - which is the state every
+        # verdict-driven test below assumes.
         #
-        # Hardcoding the NAME is safe in the direction that matters. Rename the
+        # They are the state of each PATH, not a tally of annotations already
+        # raised, and that is the whole point: the empty-capture guard has to
+        # know WHICH earlier thing failed, because a clone failure explains an
+        # empty capture and a pip failure does not. A single `annotated` flag
+        # stood here once and could not tell them apart, so a transient pip
+        # hiccup silenced the cross-repo import annotation.
+        #
+        # Hardcoding the NAMES is safe in the direction that matters. Rename a
         # flag in the workflow and the tail dereferences an unset variable
         # under `set -u`, which exits non-zero and reds the assertion below
         # with the shell's own message. It cannot quietly test a stale shape.
-        assert annotated in ("yes", "no"), annotated
-        # `results_ok` is the other flag the head sets and the tail reads: it
-        # is what tells `not-yet-bootstrapped` apart from a branch that is not
-        # published yet. "yes" - the clone worked - is the healthy head.
+        assert harness_ok in ("yes", "no"), harness_ok
+        # `results_ok` is also what tells `not-yet-bootstrapped` apart from a
+        # branch that is not published yet.
         assert results_ok in ("yes", "no"), results_ok
+        assert pip_ok in ("yes", "no"), pip_ok
         out = tmp_path / "gh_output"
         # Forward slashes: Git Bash reads the backslashes of a Windows path as
         # escapes inside the step's own `>> "$GITHUB_OUTPUT"` redirect, and
@@ -520,8 +528,9 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # path - there is no `-c` placeholder $0 to absorb an argument.
         script = _script(
             tmp_path,
-            f"set -uo pipefail\nannotated={annotated}\n"
-            f"results_ok={results_ok}\nverdict=$1\n" + self._tail(),
+            f"set -uo pipefail\nharness_ok={harness_ok}\n"
+            f"results_ok={results_ok}\npip_ok={pip_ok}\nverdict=$1\n"
+            + self._tail(),
             name="tail.sh",
         )
         proc = subprocess.run(
@@ -554,6 +563,13 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
     # to the real interpreter, so the heredoc and the drift read are genuine.
     # `${1-}` / `${2-}`, not `$1` / `$2`: the step calls `python3 -` with a
     # single argument and the body runs under `set -u`.
+    #
+    # `$FAIL_PIP` is the install's exit status rather than a yes/no, so the
+    # double reproduces the real failure shape - a non-zero `python3 -m pip`
+    # that the step catches in a `||` list - instead of a stub that merely
+    # reports one. It is what crosses a pip failure with every clone state
+    # below; that combination was executed by no test, which is how a pip
+    # hiccup silently deleted the import annotation.
     STUBS = """
     git() {
       dest=""
@@ -565,12 +581,13 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
       mkdir -p "$dest"
     }
     python3() {
-      if [ "${1-}" = -m ] && [ "${2-}" = pip ]; then return 0; fi
+      if [ "${1-}" = -m ] && [ "${2-}" = pip ]; then return "$FAIL_PIP"; fi
       command python3 "$@"
     }
     """
 
-    def _run_step(self, tmp_path, *, unreachable=(), placeholder_blocked=False):
+    def _run_step(self, tmp_path, *, unreachable=(), placeholder_blocked=False,
+                  pip_broken=False):
         """The WHOLE audit step - clones, install, heredoc and tail - executed.
 
         `_tail()` starts at the heredoc's `) || verdict=""`, so everything
@@ -599,6 +616,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "GITHUB_OUTPUT": str(out).replace("\\", "/"),
             "FAIL_HARNESS": "yes" if "harness" in unreachable else "no",
             "FAIL_RESULTS": "yes" if "results" in unreachable else "no",
+            "FAIL_PIP": "1" if pip_broken else "0",
         }
         script = _script(tmp_path, self.STUBS + self._body())
         proc = subprocess.run(
@@ -643,6 +661,11 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         and the count matters for the same reason the class docstring gives:
         a reader who learns the annotations are duplicated stops counting them,
         and the silent one goes unnoticed.
+
+        ONE fault is what these rows arrange - the pyyaml install is green in
+        every one of them. The rule is one annotation per DISTINCT fault, not
+        one per run, and the sibling test below crosses each of these rows
+        with a pip failure to hold the other half of it.
         """
         log, out = self._run_step(tmp_path, unreachable=unreachable)
         annotations = [line for line in log.splitlines() if "::warning::" in line]
@@ -659,20 +682,109 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # The verdict still reaches the next step, whichever fault it was.
         assert "status=unavailable" in out
 
+    @pytest.mark.parametrize("unreachable, names, why", [
+        (("harness", "results"), "could not reach Adam-S-Daniel/skills-evals",
+         "the unreachable repository and the failed install are two faults"),
+        (("harness",), "could not clone the skills-evals harness",
+         "the harness clone and the failed install are two faults"),
+        (("results",), "eval-results branch not present yet",
+         "the missing branch and the failed install are two faults"),
+        ((), "the import inside this step",
+         "THE REGRESSION THIS ROW EXISTS FOR: both clones green, pip down, "
+         "and the cross-repo import broken - the import must still be named"),
+    ])
+    def test_a_pip_failure_is_a_second_fault_and_deletes_no_annotation(
+            self, tmp_path, unreachable, names, why):
+        """The rows above, crossed with a failing `python3 -m pip`.
+
+        THE RULE IS ONE ANNOTATION PER DISTINCT FAULT, NOT ONE PER RUN, and
+        this cross is where the difference bites. A tally of "has anything
+        annotated yet" made the pyyaml guard suppress the empty-capture guard,
+        so a run where skills-evals had renamed `account_store.py` AND pip
+        hiccupped carried exactly one annotation - naming pip. The pip line
+        hedges its own relevance ("unless it is already present"), so the
+        reader was sent after a transient hiccup while the durable cross-repo
+        rename this whole step exists to surface was annotated nowhere.
+
+        The last row is that scenario. It is the one combination the
+        one-fault test above cannot reach: it parametrizes clone states only,
+        and pip was green in all four, so nothing executed this at all.
+
+        A clone failure is genuinely different and stays consolidated - the
+        heredoc reads out of the tree that did not land, so an empty capture
+        there is that fault's consequence. Those rows therefore still hold at
+        two annotations, not three: the clone fault, and the install.
+        """
+        log, _ = self._run_step(
+            tmp_path, unreachable=unreachable, pip_broken=True)
+        annotations = [l for l in log.splitlines() if "::warning::" in l]
+        assert len(annotations) == 2, (
+            f"{why}, so the run page must carry both:\n{log}"
+        )
+        install = [l for l in annotations if "pyyaml install failed" in l]
+        assert len(install) == 1, f"the failed install went unreported:\n{log}"
+        other = [l for l in annotations if l not in install]
+        assert names in other[0], (
+            f"the second annotation does not name the other fault ({names}); "
+            f"a pip failure must not stand in for it:\n{other[0]}"
+        )
+        if not unreachable:
+            # The text has to stop claiming what is no longer true. Saying the
+            # install succeeded, on the run where it did not, is the same
+            # wrong-label failure one level down.
+            assert "the pyyaml install succeeded" not in other[0], (
+                "the import annotation asserts the pyyaml install succeeded "
+                f"on a run where it failed: {other[0]}"
+            )
+
     def test_an_empty_verdict_does_not_re_annotate_a_reported_fault(
             self, tmp_path):
         """The tail half of the same invariant.
 
         `unavailable` set by the empty-capture guard is not a fault of its own
-        when a guard above already annotated one - it is that fault's
-        consequence. The log still records it; the Actions list does not get a
-        second entry for it.
+        when a CLONE failed above - the heredoc reads out of both trees, so a
+        tree that is not on disk is why the capture came back empty. The log
+        still records it; the Actions list does not get a second entry for it.
+
+        Driven by the flag the head actually sets, not by a synthetic
+        "something annotated" bit: which earlier path failed is the whole
+        distinction the guard makes, and the sibling test below covers the
+        earlier path that does NOT explain an empty capture.
         """
-        log, out = self._run(tmp_path, "", annotated="yes")
+        log, out = self._run(tmp_path, "", harness_ok="no")
         assert "::warning::" not in log, log
         assert "no verdict" in log, (
             "the empty capture went unrecorded entirely; quiet on the "
             "annotations list is not quiet in the log"
+        )
+        assert out.strip() == "status=unavailable"
+
+    def test_an_empty_verdict_after_a_failed_install_still_annotates(
+            self, tmp_path):
+        """The tail half of the pip cross, at the guard itself.
+
+        The step head decides WHETHER to warn from three flags; this drives
+        the tail directly with the one state that used to be silent. Reverting
+        the guard to a single "has anything annotated" tally reds here and in
+        the parametrized head test above, from opposite directions.
+
+        The text is asserted as well as the count, because the annotation has
+        to stay TRUE: on this run the install did not succeed, and a line
+        saying it did would be the wrong label the guard exists to avoid.
+        """
+        log, out = self._run(tmp_path, "", pip_ok="no")
+        assert log.count("::warning::") == 1, (
+            "an empty capture after a failed pyyaml install raises no "
+            f"annotation, so a cross-repo rename would reach nobody:\n{log}"
+        )
+        annotation = next(l for l in log.splitlines() if "::warning::" in l)
+        assert "the import inside this step" in annotation, (
+            "the annotation does not send the reader at the import, which is "
+            f"what an empty capture with both clones green means: {annotation}"
+        )
+        assert "the pyyaml install succeeded" not in annotation, (
+            "the annotation claims the pyyaml install succeeded on a run "
+            f"where it failed: {annotation}"
         )
         assert out.strip() == "status=unavailable"
 

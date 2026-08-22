@@ -162,10 +162,16 @@ jobs:
         # headline above says "reaches for skills-evals" rather than "every".
         run: |
           set -uo pipefail
-          # ONE FAULT, ONE ANNOTATION, which is why the clones record their
-          # outcome in flags instead of annotating where they fail. Both pull
-          # from the SAME repository, so the failure that takes one out - an
-          # outage, a rate limit, the repo renamed or made private - almost
+          # ONE ANNOTATION PER DISTINCT FAULT. Not "one annotation per run":
+          # that is the weaker rule this block was briefly written to, and it
+          # is the rule that deleted the only annotation worth having (see the
+          # empty-capture guard below). Two different things going wrong earn
+          # two lines. One thing going wrong, reported twice, earns one.
+          #
+          # THE TWO CLONES ARE THE SAME-FAULT CASE, which is why they record
+          # their outcome in flags instead of annotating where they fail. Both
+          # pull from the SAME repository, so the failure that takes one out -
+          # an outage, a rate limit, the repo renamed or made private - almost
           # always takes out the other, and warning in each `else` reported
           # that single fault twice. A third annotation followed from the
           # empty-capture guard below, and it told the reader the clones had
@@ -191,22 +197,24 @@ jobs:
             mkdir -p ../eval-results \
               || echo "no placeholder for the missing eval-results clone either; the annotation below covers it"
           fi
-          # `annotated` is the whole mechanism: every guard that raises an
-          # annotation sets it, and the empty-capture branch below annotates
-          # only when nothing else has. Keep that true of any guard added here.
-          annotated=no
+          # THE FLAGS THE EMPTY-CAPTURE GUARD BELOW READS ARE THE STATE OF
+          # EACH PATH, NOT A COUNT OF ANNOTATIONS RAISED SO FAR. A single
+          # `annotated` tally was the shape that broke: it cannot say WHICH
+          # fault it is remembering, so every guard downstream had to treat
+          # them all as equally explanatory, and the least explanatory one -
+          # pip - silenced the most actionable one. Keep any new guard the
+          # same way: record what happened, and let the reader of the flag
+          # decide whether it explains what came next.
           if [ "$harness_ok" = no ] && [ "$results_ok" = no ]; then
-            annotated=yes
             echo "::warning::could not reach Adam-S-Daniel/skills-evals at all - neither the harness clone nor the eval-results branch came down. A GitHub outage, a rate limit, or the repo renamed or made private. The published audit could not be read, so this run used the local recording alone."
           elif [ "$harness_ok" = no ]; then
-            annotated=yes
             echo "::warning::could not clone the skills-evals harness, so the published audit could not be read and this run used the local recording alone."
           elif [ "$results_ok" = no ]; then
-            annotated=yes
             echo "::warning::eval-results branch not present yet, so there is no published audit to read and this run used the local recording alone."
           fi
+          pip_ok=yes
           python3 -m pip install --quiet pyyaml==6.0.3 \
-            || { annotated=yes; echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"; }
+            || { pip_ok=no; echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"; }
           verdict=$(python3 - <<'PY'
           import json
           import sys
@@ -253,19 +261,40 @@ jobs:
           # never read. Nothing else reports it either: scheduled-run-health.yml
           # scans for FAILED runs, and this one did not fail.
           #
-          # The `$annotated` test is what keeps that annotation TRUE. Its text
-          # tells the reader the clones and the install were fine and the
-          # import was not, which is only worth saying when it happens to be
-          # so; on a run where a clone failed, the same words send them to diff
-          # two repos over a fault already named above. An empty capture with a
-          # prior annotation is that annotation's consequence, not a new fault,
-          # and it says so in the log without adding a second one.
+          # WHICH EARLIER FAULT CAN EXPLAIN AN EMPTY CAPTURE, AND WHICH
+          # CANNOT. This is the distinction the guard has to make, and getting
+          # it wrong in the generous direction cost the run page the one
+          # annotation it most needed.
+          #
+          # A FAILED CLONE EXPLAINS IT. The heredoc reads out of both trees, so
+          # a clone that did not land leaves it reading a path that is not on
+          # disk - for the harness clone that IS why the import raised. An
+          # empty capture there is the annotated fault's consequence rather
+          # than a second fault, and repeating it would also force the text
+          # below to claim the clones were fine when they were not, sending
+          # the reader to diff two repos over something already named above.
+          # So that case goes to the log and not to the annotations list.
+          #
+          # A FAILED PIP INSTALL DOES NOT EXPLAIN IT, and treating it as
+          # though it did is the regression this branch shipped and then had
+          # to take back. `pyyaml` is very often already on the runner, which
+          # is exactly why its own annotation hedges ("unless it is already
+          # present") - so the install failing says almost nothing about why
+          # the capture came back empty. Suppressing on the strength of it
+          # meant a transient hiccup DELETED the cross-repo import annotation,
+          # the single fault this whole cross-repo half exists to surface, and
+          # the reader was left pointed at the hiccup. A wrong label is worse
+          # than no label, because it is read and believed. Two faults, two
+          # lines - and the text simply stops asserting that the install
+          # succeeded, because that is the part that would be false.
           if [ -z "$verdict" ]; then
             verdict=unavailable
-            if [ "$annotated" = no ]; then
-              echo "::warning::could not compute the published account audit verdict - both clones and the pyyaml install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
+            if [ "$harness_ok" = no ] || [ "$results_ok" = no ]; then
+              echo "no verdict, which follows from the clone failure annotated above; this run used the local recording alone"
+            elif [ "$pip_ok" = no ]; then
+              echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the pyyaml install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
             else
-              echo "no verdict, which follows from the fault annotated above; this run used the local recording alone"
+              echo "::warning::could not compute the published account audit verdict - both clones and the pyyaml install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
             fi
           fi
           echo "published account audit reads: $verdict"
@@ -280,12 +309,14 @@ jobs:
           # verdict this workflow exists to react to. A warning on every run is
           # a warning nobody reads. `unavailable` is
           # quiet HERE for a different reason: it is set in exactly one place,
-          # the `if [ -z "$verdict" ]` branch a few lines up, and by the time
-          # that branch returns the fault behind it carries exactly one
-          # annotation - either the one it raised itself, or the earlier one
-          # whose existence stopped it. Catching it below as well would make
-          # that two, and a reader who learns the annotations are duplicated
-          # stops counting them.
+          # the `if [ -z "$verdict" ]` branch a few lines up, and that branch
+          # has already reported the fault behind it - either by annotating it
+          # itself, or by naming the clone failure that explains it. Catching
+          # it below as well would report the SAME fault a second time, which
+          # is the duplication the rule at the top of this step forbids; a
+          # reader who learns the annotations are duplicated stops counting
+          # them. That is a different thing from the two-line case above,
+          # where a pip failure and an import failure are two faults.
           #
           # AND THE CATCH-ALL, WHICH IS WHY THE HEALTHY ANSWERS ARE ENUMERATED
           # RATHER THAN LEFT TO FALL THROUGH. Without a `*)` arm a status this
