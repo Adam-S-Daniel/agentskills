@@ -779,6 +779,55 @@ def parse_repin_source(spec: str) -> Tuple[str, str]:
     return registry, (validate_ref(ref, f"--repin-source {spec!r}") if ref else "")
 
 
+def repin_source_blocker(extras: Sequence[dict], registry: str) -> Optional[str]:
+    """Why `--repin-source <registry>@` cannot advance that source — or None.
+
+    ONE predicate, read by the flag that REFUSES it (`_apply_repin_sources`)
+    and by the report that RECOMMENDS it (`check_current`'s federated
+    remediation). Those two answering separately is how a tool comes to print a
+    command it then rejects at exit 1: --check-current reported the drift and
+    named the repair, and the repair was refused, leaving a drifted lock with
+    no route the tool itself would accept. The whole sentence is returned
+    rather than re-worded at each site, so the refusal and the report cannot
+    come to say different things —
+    `test_the_report_and_the_refusal_give_the_same_reason` compares the two
+    strings.
+
+    None for a registry this lock does not federate at all: refusing THAT is
+    `_apply_repin_sources`' own "ADDING a source" case, which is about a spec
+    naming something absent rather than about an existing pin, and
+    check_current only ever asks about a source it has just read.
+    """
+    matched = [source for source in extras if source["registry"] == registry]
+    if len(matched) > 1:
+        # A registry the lock federates TWICE is representable and --check
+        # green: plan_sources' uniqueness check is keyed on BUNDLE, so two
+        # entries may share a registry while carrying different bundles, their
+        # own layout and independent pins. Merging by registry key would then
+        # advance BOTH from one spec — moving a pin nobody named, with its
+        # digests rewritten to content nobody reviewed, at exit 0. This flag
+        # cannot say which one is meant: bundles are the lock's identity and
+        # are deliberately not expressible here.
+        #
+        # So it refuses, which is the answer _select_sources already gives to
+        # the analogous ambiguity on the read-only path — "scoping to it has
+        # two answers, so it gets none". Refusing in one place and guessing in
+        # the other, in the direction that moves MORE pins, is the asymmetry
+        # worth not having.
+        claimed = "; ".join(
+            ", ".join(source["bundles"]) or "no bundles" for source in matched
+        )
+        return (
+            f"this lock federates that registry twice, under [{claimed}], each with its "
+            "own pin — so one spec names two sources and advancing 'it' has two answers. "
+            "Bundles are the lock's identity and are not expressible on this flag, so it "
+            "will not pick one for you: give that registry a single 'sources' entry, or "
+            "restate the whole array with a plain generate, which is where identity is "
+            "decided."
+        )
+    return None
+
+
 def _apply_repin_sources(
     extras: Sequence[dict],
     specs: Sequence[str],
@@ -836,32 +885,13 @@ def _apply_repin_sources(
                 f"({', '.join(sorted(known)) or 'none'}); ADDING a source changes what the "
                 "lock means and is a plain generate, not a re-pin"
             )
-        # A registry the lock federates TWICE is representable and --check
-        # green: plan_sources' uniqueness check is keyed on BUNDLE, so two
-        # entries may share a registry while carrying different bundles, a
-        # different layout and independent pins. Merging by registry key would
-        # then advance BOTH from one spec — moving a pin nobody named, with its
-        # digests rewritten to content nobody reviewed, at exit 0. This flag
-        # cannot say which one is meant: bundles are the lock's identity and
-        # are deliberately not expressible here.
-        #
-        # So it refuses, which is the answer _select_sources already gives to
-        # the analogous ambiguity on the read-only path — "scoping to it has
-        # two answers, so it gets none". Refusing in one place and guessing in
-        # the other, in the direction that moves MORE pins, is the asymmetry
-        # worth not having.
-        if len(known[reg]) > 1:
-            claimed = "; ".join(
-                ", ".join(source["bundles"]) or "no bundles" for source in known[reg]
-            )
-            raise GeneratorError(
-                f"--repin-source {reg}: this lock federates that registry twice, under "
-                f"[{claimed}], each with its own pin — so one spec names two sources and "
-                "advancing 'it' has two answers. Bundles are the lock's identity and are "
-                "not expressible on this flag, so it will not pick one for you: give that "
-                "registry a single 'sources' entry, or restate the whole array with a "
-                "plain generate, which is where identity is decided."
-            )
+        # Read, never re-derived: `repin_source_blocker` is what
+        # --check-current consults before it recommends this flag, and a second
+        # copy of the condition here is how the two drift into recommending and
+        # refusing the same command.
+        blocker = repin_source_blocker(extras, reg)
+        if blocker:
+            raise GeneratorError(f"--repin-source {reg}: {blocker}")
     merged: List[dict] = []
     for source in extras:
         ref = wanted.get(source["registry"])
@@ -1940,9 +1970,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 #      `sed -n '/^FAILED:/,$p' | head -20` into a PR body, and
                 #      the path substitution beside that slice names the
                 #      primary lock alone.
-                #   3. Every headline is IMMEDIATELY followed by its own
-                #      remediation line — in the UNTRUNCATED stream. That is
-                #      the property this loop holds and all it holds.
+                #   3. A block's repair belongs to that block — in the
+                #      UNTRUNCATED stream. Either the line IMMEDIATELY under
+                #      its headline is the command that fixes it, or there is
+                #      no command to print and the headline says so itself
+                #      (see repin_source_blocker). Never a command under one
+                #      headline that repairs a different block. That is the
+                #      property this loop holds and all it holds.
                 #
                 # (3) was first written here claiming it made the 20-line cap
                 # SAFE — "a truncation can drop a whole trailing block, but it
@@ -1994,6 +2028,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         print("  before another commit touched a locked skill: the lock is still faithful")
                         print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
                     else:
+                        # ASKED BEFORE THE COMMAND IS PRINTED, not after it is
+                        # rejected. --repin-source refuses some shapes outright
+                        # (see repin_source_blocker), and a report that prints
+                        # the command anyway sends its reader — or the fleet
+                        # bumper, which builds the same flag from its own list
+                        # — to an exit 1 with nothing else offered. The reason
+                        # the flag would give is the reason printed here,
+                        # verbatim and in the headline itself, so the block
+                        # carries its own answer instead of a command that has
+                        # none.
+                        blocker = repin_source_blocker(extras, source["registry"])
+                        if blocker:
+                            print(f"FAILED: {source['registry']}'s bundles have moved on "
+                                  f"since {source['ref']}, which {output} still pins for it "
+                                  "— nothing added or changed there reaches an ephemeral "
+                                  "surface. No --repin-source command is printed for it "
+                                  f"because this generator would refuse one: {blocker}")
+                            for line in differences:
+                                print(f"  - {line}")
+                            continue
                         print(f"FAILED: {source['registry']}'s bundles have moved on since "
                               f"{source['ref']}, which {output} still pins for it — nothing "
                               "added or changed there reaches an ephemeral surface. Advance "

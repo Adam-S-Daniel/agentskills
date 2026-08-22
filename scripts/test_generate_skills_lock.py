@@ -3211,6 +3211,57 @@ def test_repin_source_refuses_a_registry_the_lock_federates_twice(tmp_path):
     assert out.read_text(encoding="utf-8") == before
 
 
+def test_check_current_prints_no_repin_command_the_flag_would_refuse(tmp_path):
+    """A drift report must not name a repair the same program rejects.
+
+    The federated remediation printed `--repin-source '<registry>@'` for every
+    drifted source without asking whether that spec is one this generator
+    accepts. On a lock federating one registry twice it is not — the refusal
+    above rejects it — so the printed line came back at exit 1 and the reader
+    was left with a drifted lock and no route the tool itself would take. The
+    fleet bumper reaches the same wall from the other side: it builds
+    `--repin-source "$reg@"` from its own per-registry drift list.
+
+    So the block says what is wrong instead of what to type, and says it in the
+    headline, where no truncation can separate the two.
+    """
+    primary, extra, uri, out = _lock_federating_one_registry_twice(tmp_path)
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert proc.stdout.startswith(f"FAILED: {uri}'s bundles have moved on since ")
+    assert not [line for line in proc.stdout.splitlines()
+                if line.strip().startswith("python3 ")], proc.stdout
+    # The two escapes the refusal names are the two the reader is given.
+    assert "give that registry a single 'sources' entry" in proc.stdout
+    assert "restate the whole array with a plain generate" in proc.stdout
+
+
+def test_the_report_and_the_refusal_give_the_same_reason(tmp_path):
+    """One sentence, one source of it — `repin_source_blocker`.
+
+    Two copies of "why this flag cannot be used here" is how a report and a
+    flag come to disagree, and this pair disagreeing is not cosmetic: the
+    report is where a reader learns the repair, and the flag is what accepts
+    it. Compared as strings rather than by re-describing both.
+    """
+    primary, extra, uri, out = _lock_federating_one_registry_twice(tmp_path)
+    before = out.read_text(encoding="utf-8")
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    report = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert report.returncode == 1, report.stdout + report.stderr
+    assert "would refuse one: " in report.stdout, report.stdout
+    reason = report.stdout.split("would refuse one: ", 1)[1].splitlines()[0]
+
+    refusal = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{uri}@", "-o", str(out))
+    assert refusal.returncode == 1, refusal.stdout + refusal.stderr
+    assert reason and reason in refusal.stderr, (reason, refusal.stderr)
+    assert out.read_text(encoding="utf-8") == before
+
+
 def test_repin_source_refuses_a_checkout_that_is_not_the_source_it_names(
         federated, tmp_path):
     """The identity probe the primary's --repin has, applied per source.
