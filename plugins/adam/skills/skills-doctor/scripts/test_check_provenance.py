@@ -21,6 +21,8 @@ only because this repo happens not to have one.
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -3506,6 +3508,189 @@ def test_the_shared_payload_digest_is_none_for_a_path_that_is_not_a_directory(
     plain.write_text("x", encoding="utf-8")
     assert prov.digest_shared_payload(plain) is None
     assert prov.digest_shared_payload(plain, fold=True) is None
+
+
+# ---------------------------------------------------------------------------
+# the binding to the hook's own refusal rule
+#
+# Every finding that says what happens NEXT is a claim about
+# `.claude/hooks/skills-bootstrap.sh`, and for three rounds those claims were
+# written by reading this file's earlier prose rather than that script. All of
+# them said the directory is replaced or removed at the next session start,
+# which is the one thing `may_replace` is written never to do.
+#
+# So the rule is not restated here, it is EXECUTED: `hook_may_replace` extracts
+# `may_replace` and `digest_dir` from the hook and runs them, in bash, against
+# a real directory. A change on either side breaks this — the hook starting to
+# overwrite an edited directory, or a finding going back to promising it.
+# ---------------------------------------------------------------------------
+
+HOOK_RELPATH = ".claude/hooks/skills-bootstrap.sh"
+
+
+def _hook_path() -> Path:
+    """The registry's bootstrap hook, with `_walk_up`'s fail/skip policy.
+
+    Not `_walk_up` itself: that inserts the located file's directory on
+    `sys.path`, which is right for the two python modules it finds and wrong
+    for a directory of shell scripts.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / HOOK_RELPATH).is_file():
+            return parent / HOOK_RELPATH
+    if "plugins" in here.parts:
+        pytest.fail(f"inside a registry checkout but {HOOK_RELPATH} did not "
+                    f"resolve — the refusal binding would have skipped silently")
+    pytest.skip("not running inside the registry checkout")
+
+
+def _bash_function(source: str, name: str) -> str:
+    """The text of one top-level shell function, brace to brace at column 0.
+
+    Fails rather than returning nothing when the function is gone: a renamed or
+    restructured `may_replace` must break this binding loudly, since the whole
+    point of it is that the hook cannot change under these claims unnoticed.
+    """
+    opener = f"{name} () {{\n"
+    start = source.find(opener)
+    assert start != -1, f"{name} is no longer a top-level function in the hook"
+    end = source.find("\n}\n", start)
+    assert end != -1, f"{name}'s closing brace is not at column 0"
+    return source[start:end + 3]
+
+
+def hook_may_replace(dest: Path, name: str, locked: str,
+                     recorded: Tuple[Tuple[str, str], ...] = ()) -> bool:
+    """True iff the HOOK would overwrite `dest/name`, by running its own code.
+
+    `locked` is the digest the lock names for the skill and `recorded` is the
+    (name, digest) list the hook reads out of the install record — the two
+    inputs `may_replace` takes besides the bytes on disk.
+    """
+    bash = shutil.which("bash")
+    if bash is None:                     # pragma: no cover - platform guard
+        pytest.skip("no bash on this machine")
+    source = _hook_path().read_text(encoding="utf-8")
+    driver = dest.parent / "may_replace_driver.sh"
+    driver.write_text(
+        "LOG=/dev/null\n"
+        'DEST="$1"; shift\n'
+        'subject="$1"; shift\n'
+        'want="$1"; shift\n'
+        "REC_NAME=(); REC_DIGEST=()\n"
+        'while [ "$#" -gt 0 ]; do REC_NAME+=("$1"); REC_DIGEST+=("$2"); shift 2; done\n'
+        + _bash_function(source, "digest_dir")
+        + _bash_function(source, "may_replace")
+        + 'if may_replace "$subject" "$want"; then echo REPLACE; else echo REFUSE; fi\n',
+        encoding="utf-8")
+    flat_record = [field for row in recorded for field in row]
+    done = subprocess.run(
+        [bash, str(driver), str(dest), name, locked, *flat_record],
+        capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    answer = done.stdout.strip()
+    assert answer in ("REPLACE", "REFUSE"), done.stdout
+    return answer == "REPLACE"
+
+
+def _refusal_state(tmp_path, which: str):
+    """One store in which the hook's answer about `alpha` is worth measuring.
+
+    Returns (store, lock, locked digest, recorded rows). The lock and the record
+    are written BEFORE the directory is disturbed, so both carry the digest of
+    the copy the hook installed — which is what a real second run compares
+    against.
+    """
+    store = tmp_path / which / "skills"
+    store.mkdir(parents=True)
+    make_skill(store, "alpha")
+    pristine = prov.digest_skill_dir(store / "alpha")
+    lock = write_lock(tmp_path / which / "skills.lock", store, "alpha")
+
+    if which == "hand-placed":
+        # A record that names no install: nothing attributes this directory.
+        write_record(store)
+        (store / "alpha" / "SKILL.md").write_text(
+            "---\nname: alpha\n---\nmy own copy\n", encoding="utf-8")
+        return store, lock, pristine, ()
+
+    write_record(store, "alpha")
+    if which == "edited":
+        (store / "alpha" / "SKILL.md").write_text(
+            "---\nname: alpha\n---\nMY LOCAL EDIT\n", encoding="utf-8")
+    elif which == "artefacts":
+        _artefacts(store / "alpha")
+    elif which != "identical":
+        raise AssertionError(which)
+    return store, lock, pristine, (("alpha", pristine),)
+
+
+REFUSAL_STATES = {
+    # state -> the finding kind the doctor raises about it
+    "edited": "edited-and-locked",
+    "artefacts": "artefacts-and-locked",
+    "hand-placed": "hand-placed-over-locked",
+}
+
+
+@pytest.mark.parametrize("which", sorted(REFUSAL_STATES))
+def test_the_refusal_claim_is_the_hooks_own_may_replace(tmp_path, capsys,
+                                                        ephemeral, which):
+    """The hook refuses, and the finding about it says so — both measured.
+
+    Two halves that have to agree. The hook's half runs `may_replace` itself, so
+    "refuses" is not this file's reading of the hook. The doctor's half is the
+    rendered report, so it is what a reader is actually shown.
+    """
+    store, lock, pristine, recorded = _refusal_state(tmp_path, which)
+
+    assert not hook_may_replace(store, "alpha", pristine, recorded), (
+        f"the hook now OVERWRITES the {which} state; every finding below "
+        f"describes a refusal and none of them is true any more")
+
+    code, out = run(store, lock, capsys, project_dir=tmp_path / which / "project")
+    assert code == 1, out
+    assert f"[{REFUSAL_STATES[which]}] alpha" in out, out
+    assert flat(prov.HOOK_REFUSAL) in flat(out), out
+
+
+def test_the_hook_does_overwrite_the_bytes_it_already_ships(tmp_path):
+    """The negative control the parametrised test needs to mean anything.
+
+    A `may_replace` that had been extracted wrongly — an empty body, a syntax
+    error swallowed, the wrong function — would refuse everything and make every
+    assertion above pass while measuring nothing. This is the same inputs and
+    the answer REPLACE, which only the real second clause produces: the bytes on
+    disk already digest to the digest the lock names.
+    """
+    store, lock, pristine, recorded = _refusal_state(tmp_path, "identical")
+    assert hook_may_replace(store, "alpha", pristine, recorded)
+    # And with no record at all, still REPLACE: content-identical outranks
+    # provenance, which is the exception `hand-placed-over-locked` states.
+    assert hook_may_replace(store, "alpha", pristine, ())
+    # A directory that is not there is the third true case.
+    assert hook_may_replace(store, "not-installed", pristine, ())
+
+
+def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory(
+        tmp_path, capsys, ephemeral):
+    """The claim, banned by its words, across every state that raises it.
+
+    The parametrised binding proves the true sentence is present. This proves
+    the false one is absent — they are different failures, and the round that
+    introduced the false green passed a test very like the first half.
+    """
+    banned = ("survive the next session start",
+              "replaced at the next session start",
+              "removes it outright",
+              "is lost without a prompt")
+    for which in sorted(REFUSAL_STATES):
+        store, lock, _pristine, _recorded = _refusal_state(tmp_path, which)
+        _code, out = run(store, lock, capsys,
+                         project_dir=tmp_path / which / "project")
+        for phrase in banned:
+            assert phrase not in flat(out), (which, phrase, out)
 
 
 # ---------------------------------------------------------------------------
