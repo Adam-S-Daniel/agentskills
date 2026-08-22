@@ -389,19 +389,37 @@ _REF_RE = re.compile(r"[A-Za-z0-9._/+:@-]+")
 _URL_RE = re.compile(r"(?:https|file)://[A-Za-z0-9._~:/?#@%!$&()*+,;=\[\]-]+")
 _CONTROL_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 # A ref that IDENTIFIES a commit, as against `_REF_RE`, which only says a ref
-# is safe to hand to git and the hook. The distinction is load-bearing on the
-# --repin path alone: both identity probes there prove "this checkout is the
-# registry the lock names" by asking git whether the checkout contains the
-# commit the lock already pins, and that proves nothing at all for a ref that
-# is not a commit — `main^{commit}` resolves in ANY clone with a main branch.
+# is safe to hand to git and the hook. What it decides: whether a --repin may
+# treat the lock's own pin as proof that the clone in front of it is the
+# registry the lock names. That probe asks git whether the checkout contains
+# the pinned commit, and proves nothing for a ref that is not one —
+# `main^{commit}` resolves in ANY clone with a main branch.
+#
+# It decides that on TWO paths, not one. `--repin` refuses (the blockers), and
+# `--check-current` reads the same blockers to decide whether it may print a
+# re-pin command at all — so flipping this regex changes what a read-only mode
+# prints. The earlier note here said "load-bearing on the --repin path alone",
+# which was already false when it was written: the commit that wired
+# check_current to `repin_source_blocker` is the parent of the one that added
+# this comment. That both ends read the same predicates is held by
+# `test_every_refusal_a_repin_can_give_is_one_both_paths_read`.
+#
 # The two sides differ in how a non-sha pin GETS there, measured rather than
 # assumed: a source's ref is resolved before it is written (`--source
 # 'b=reg@main:skills'` lands in the lock as a 40-hex sha), so a branch name
 # there is hand-written. The PRIMARY's is not — `--ref main` is written
 # verbatim, `"ref": "main"`, at exit 0 — so that half is reachable without
-# editing a lock at all. Either way what is on disk is not a pin, and --repin
-# is the one mode that treats it as one.
-_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+# editing a lock at all.
+#
+# Case-insensitive, though this generator writes only lowercase: git resolves
+# an UPPERCASE 40-hex sha (`git cat-file -e <UPPER>^{commit}` exits 0,
+# measured), so refusing one with "which is not a commit sha" hands the reader
+# a sentence they can check and find false — and then sends them to a repair.
+# Accepting it also normalises the lock, because the re-pin writes
+# `resolve_ref`'s lowercase output back. Which matters beyond tidiness: the
+# hook's `fetch_source` branches on `^[0-9a-f]{40}$` and would try to clone
+# `--branch <UPPER>`, so an uppercase pin is a lock the hook cannot fetch.
+_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 # Shared with the hook the same way, and by the same test: the number is stated
 # once per file, byte-identically, and drift between the two is an alarm rather
 # than a discovery. The hook's reason for the cap is that each source is fetched
@@ -1997,9 +2015,15 @@ def report_drift(
             blocker = blocked or repin_source_blocker(
                 extras, source["registry"], registry)
             if blocker:
+                # "the commit its pin resolves to", not "which the lock still
+                # pins": `source` here is PLANNED, so its ref is resolved, and
+                # the reason below may be about a lock that records a branch
+                # name. Naming the resolved sha as what the lock pins and then
+                # quoting the recorded ref one clause later asserted two
+                # different pins in one sentence.
                 print(f"FAILED: {source['registry']}'s bundles have moved on "
-                      f"since {source['ref']}, which {output} still pins for it "
-                      "— nothing added or changed there reaches an ephemeral "
+                      f"since {source['ref']}, the commit {output}'s pin for it "
+                      "resolves to — nothing added or changed there reaches an ephemeral "
                       "surface. No --repin-source command is printed for it "
                       f"because this generator would refuse one: {blocker}")
                 for line in differences:
