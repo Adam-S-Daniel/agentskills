@@ -48,11 +48,78 @@ def echoed(body):
 # bash - verified, `case x in x) : ;;# note` runs the arm and prints nothing -
 # and it was not one to either scanner here, which is the same false red these
 # scanners exist to remove. `;`, `&`, `|` and `(` are in; `<` and `>` are not,
-# because `echo hi >#x` is a syntax error either way and `bash -n` catches it;
-# `)` is not, because a `)` is only a metacharacter SOMETIMES - `x=$(date)#y`
-# is one word and prints `...#y`, so counting it would invent a comment where
-# bash sees data, which is the direction that loses text.
+# because `echo hi >#x` is a syntax error either way and `bash -n` catches it.
+#
+# `)` IS NOT IN THIS SET BECAUSE IT DOES NOT ALWAYS DELIMIT, and unlike the
+# characters above it cannot be decided from the character alone. It gets
+# `_WordParens` below, which decides each `)` from the scan's own state.
 _COMMENT_OPENS_AFTER = " \t\n;&|("
+
+
+class _WordParens:
+    """Which `)` end a WORD and which end a COMMAND, tracked as a scan walks.
+
+    A `#` opens a comment only where a word begins, so whether the `)` before
+    it delimits is what decides whether the rest of the line is code or prose
+    - and `)` does both jobs in bash. As an OPERATOR - a `case` pattern
+    terminator, a subshell or group close, an arithmetic `))`, a function
+    definition's parameter list - it ends a word, and the `#` after it opens a
+    comment. As the close of a COMMAND SUBSTITUTION `$( )`, or of a process
+    substitution `<( )` / `>( )`, it sits inside a word, so the `#` after it is
+    ordinary text and the line goes on being code.
+
+    BOTH DIRECTIONS COST SOMETHING AND THEY ARE NOT THE SAME COST. Treating
+    every `)` as an operator invents a comment where bash sees data, which
+    deletes code from the scan. Treating none of them as one is the false red
+    this scanner was fixed for and then only half fixed: the audit step's
+    `case` is built out of pattern-terminating `)`, so a `)#` there reads as
+    an arm whose pattern the scanner cannot find, or as a block with no
+    catch-all, on shell that runs exactly as it always did.
+
+    Neither direction is asserted in this comment. Every shape named above is
+    executed in a real bash by
+    test_bash_opens_a_comment_only_after_a_paren_that_ends_a_word, and the
+    test beside it requires this class to have reached the same answer.
+
+    The stack holds one flag per open paren - True when that paren opened a
+    word - so `$((1+2))#y`, whose inner `(` is a group and whose outer one is
+    a substitution, comes out as a word. A `)` with an EMPTY stack is an
+    operator, which is the `case` pattern terminator: its `(` is optional and
+    the shipped step omits it.
+    """
+
+    __slots__ = ("_stack", "_last_close_in_word")
+
+    def __init__(self):
+        self._stack = []
+        self._last_close_in_word = False
+
+    def saw(self, s, i, in_a_word):
+        """Feed the character at `s[i]`.
+
+        `in_a_word` when the character is quoted or backslash-escaped, and so
+        is data rather than punctuation.
+        """
+        ch = s[i]
+        if ch == "(":
+            if not in_a_word:
+                self._stack.append(i > 0 and s[i - 1] in "$<>")
+        elif ch == ")":
+            if in_a_word:
+                self._last_close_in_word = True
+            elif self._stack:
+                self._last_close_in_word = self._stack.pop()
+            else:
+                self._last_close_in_word = False
+
+    def opens_comment(self, s, i):
+        """Would a `#` at `s[i]` begin a word, and so open a comment?"""
+        if i == 0:
+            return True
+        prev = s[i - 1]
+        if prev == ")":
+            return not self._last_close_in_word
+        return prev in _COMMENT_OPENS_AFTER
 
 
 def _uncomment(line):
@@ -60,10 +127,10 @@ def _uncomment(line):
 
     Quote-aware, because the alternative is a lint that mangles the step's own
     `::warning::` text. Bash starts a comment at a `#` that begins a WORD -
-    see `_COMMENT_OPENS_AFTER` for where a word begins - and only when it is
-    not quoted, so `${v#x}`, `$#` and `a#b` are untouched, and a `#` inside
-    `'...'` or `"..."` is data. A backslash escapes the next character
-    everywhere except inside single quotes.
+    see `_COMMENT_OPENS_AFTER` and `_WordParens` for where a word begins - and
+    only when it is not quoted, so `${v#x}`, `$#` and `a#b` are untouched, and
+    a `#` inside `'...'` or `"..."` is data. A backslash escapes the next
+    character everywhere except inside single quotes.
 
     WHAT IT DELIBERATELY DOES NOT MODEL, stated so nobody reads more into it:
     quoting is tracked per LINE, and a heredoc body is read as shell rather
@@ -75,19 +142,25 @@ def _uncomment(line):
     claim, and that is the point of the helper.
     """
     quote = None
+    parens = _WordParens()
     i = 0
     while i < len(line):
         ch = line[i]
         if ch == "\\" and quote != "'":
+            if i + 1 < len(line):
+                parens.saw(line, i + 1, True)
             i += 2
             continue
         if quote:
+            parens.saw(line, i, True)
             if ch == quote:
                 quote = None
         elif ch in "'\"":
             quote = ch
-        elif ch == "#" and (i == 0 or line[i - 1] in _COMMENT_OPENS_AFTER):
+        elif ch == "#" and parens.opens_comment(line, i):
             return line[:i].rstrip()
+        else:
+            parens.saw(line, i, False)
         i += 1
     return line
 
@@ -203,12 +276,15 @@ def _shell_scan(body):
     index found in either indexes all three - which is what lets `_tail` and
     `_guard` go on returning slices of the raw body.
 
-    COMMENTS OPEN WHERE BASH OPENS THEM, which is `_COMMENT_OPENS_AFTER` and
-    not merely after whitespace. `: ;;# note` is a comment; reading it as code
-    made the `;;` inside the prose end an arm and the next arm start
-    mid-sentence, so the block reded with "an arm has no pattern this test can
-    read" over a missing space. Three `_ARMS_OK` shapes and three decoys in
-    test_the_tail_slice_is_not_relocated_by_a_comment hold it.
+    COMMENTS OPEN WHERE BASH OPENS THEM, which is `_COMMENT_OPENS_AFTER` plus
+    the stateful `)` rule in `_WordParens`, and not merely after whitespace.
+    `: ;;# note` is a comment; reading it as code made the `;;` inside the
+    prose end an arm and the next arm start mid-sentence, so the block reded
+    with "an arm has no pattern this test can read" over a missing space.
+    `_ARMS_OK` shapes and the decoys in
+    test_the_tail_slice_is_not_relocated_by_a_comment hold it, and
+    test_this_files_scanners_agree_with_bash_about_where_a_comment_opens
+    holds the opener rule itself against a real bash.
 
     ONE WALK, ONE QUOTE MODEL, and that is the point rather than an
     efficiency. `_uncomment` tracks quotes per LINE; anything that tracks them
@@ -280,6 +356,7 @@ def _shell_scan(body):
     text = list(body)
     mask = list(body)
     quote = None
+    parens = _WordParens()
     i, n = 0, len(body)
     while i < n:
         ch = body[i]
@@ -287,11 +364,13 @@ def _shell_scan(body):
             mask[i] = " "
             if i + 1 < n and body[i + 1] != "\n":
                 mask[i + 1] = " "
+                parens.saw(body, i + 1, True)
             i += 2
             continue
         if quote:
             if ch != "\n":
                 mask[i] = " "
+            parens.saw(body, i, True)
             if ch == quote:
                 quote = None
             i += 1
@@ -301,7 +380,7 @@ def _shell_scan(body):
             quote = ch
             i += 1
             continue
-        if ch == "#" and (i == 0 or body[i - 1] in _COMMENT_OPENS_AFTER):
+        if ch == "#" and parens.opens_comment(body, i):
             j = body.find("\n", i)
             j = n if j == -1 else j
             for k in range(i, j):
@@ -309,6 +388,7 @@ def _shell_scan(body):
                 mask[k] = " "
             i = j
             continue
+        parens.saw(body, i, False)
         i += 1
     return "".join(text), "".join(mask)
 
@@ -319,14 +399,17 @@ def _shell_scan(body):
 # about. So they live here and a test runs them.
 #
 # Each is the smallest faithful version of the idea rather than a straw man:
-# same signature, same return contract, same comment-opening rule, differing
-# only in where quote state is tracked.
+# same signature, same return contract, same comment-opening rule - every
+# scanner in this file asks `_WordParens` and `_COMMENT_OPENS_AFTER` the same
+# question - differing only in where quote state is tracked. A model that also
+# differed in where a comment opens would be discriminated by the wrong half.
 
 
 def _model_per_line_quotes(body):
     """Quote state RESET at every newline. Wrong because a `::warning::` may be
     wrapped over two lines: the closing quote then masks the `;;` after it."""
     text, mask = list(body), list(body)
+    parens = _WordParens()
     quote, i, n = None, 0, len(body)
     while i < n:
         ch = body[i]
@@ -338,10 +421,12 @@ def _model_per_line_quotes(body):
             mask[i] = " "
             if i + 1 < n and body[i + 1] != "\n":
                 mask[i + 1] = " "
+                parens.saw(body, i + 1, True)
             i += 2
             continue
         if quote:
             mask[i] = " "
+            parens.saw(body, i, True)
             if ch == quote:
                 quote = None
             i += 1
@@ -351,13 +436,14 @@ def _model_per_line_quotes(body):
             quote = ch
             i += 1
             continue
-        if ch == "#" and (i == 0 or body[i - 1] in _COMMENT_OPENS_AFTER):
+        if ch == "#" and parens.opens_comment(body, i):
             j = body.find("\n", i)
             j = n if j == -1 else j
             for k in range(i, j):
                 text[k] = mask[k] = " "
             i = j
             continue
+        parens.saw(body, i, False)
         i += 1
     return "".join(text), "".join(mask)
 
@@ -421,14 +507,17 @@ def _model_mask_then_strip(body):
             continue
         i += 1
     text, i = list(body), 0
+    parens = _WordParens()
+    masked = "".join(mask)
     while i < n:
-        if mask[i] == "#" and (i == 0 or body[i - 1] in _COMMENT_OPENS_AFTER):
+        if mask[i] == "#" and parens.opens_comment(masked, i):
             j = body.find("\n", i)
             j = n if j == -1 else j
             for k in range(i, j):
                 text[k] = mask[k] = " "
             i = j
             continue
+        parens.saw(masked, i, False)
         i += 1
     return "".join(text), "".join(mask)
 
@@ -685,6 +774,21 @@ _ARMS_OK = [
      _arm('    : ;;', '    : ;# the esac below is unaffected\n    ;;')),
     ("comment-opening-straight-after-an-open-paren",
      _arm('    : ;;', '    (# a subshell whose esac and ;; are prose\n    :)\n    ;;')),
+    # THE `)` SHAPES, in both directions. A `)` that terminates a `case`
+    # pattern or closes a subshell ends a word, so the `#` after it is prose;
+    # a `)` that closes `$( )` is inside a word, so the `#` after it is text
+    # and the `;;` beyond it is still an arm terminator. Reading that last
+    # kind as a comment loses the `;;` and merges the quiet arm into the
+    # catch-all, which is why it sits here rather than in `_ARMS_RED`.
+    # `_WordParens` is what tells them apart, and
+    # TestWhereAHashOpensAComment runs each shape in a real bash.
+    ("comment-opening-straight-after-a-case-pattern-paren",
+     _arm(_QUIET, _QUIET + '# quiet on purpose; the ;; and esac here are prose')),
+    ("comment-opening-straight-after-a-subshell-close",
+     _arm('    : ;;',
+          '    (:)# a subshell whose esac and ;; are prose\n    ;;')),
+    ("hash-after-a-command-substitution-close-is-not-a-comment",
+     _arm('    : ;;', '    : $(echo quiet)#not-a-comment ;;')),
     ("command-substitution-in-an-arm-body",
      _arm('    : ;;',
           '    echo "seen at $(date -u +%Y 2>/dev/null || echo ?)" ;;')),
@@ -835,6 +939,141 @@ class TestTheCommentStripperTheseAssertionsRestOn:
     def test_it_drops_a_whole_line_comment_as_it_always_did(self):
         body = "  # a whole line of prose\nreal_command\n"
         assert code(body).strip() == "real_command"
+
+
+# WHERE A `#` OPENS A COMMENT, AS BASH ANSWERS IT RATHER THAN AS THIS FILE
+# REMEMBERS IT. Each entry is a whole script, valid on its own, written so the
+# answer shows up in stdout: `echo LOUD` is reachable only through text a
+# comment would have swallowed, and DONE prints either way. The third field is
+# what bash does, and the tests below check that against a real bash before
+# holding this file's scanners to it.
+_COMMENT_OPENER_SCRIPTS = [
+    ("at-the-very-first-character", "#; echo LOUD\necho DONE\n", True),
+    ("after-a-newline", ":\n#; echo LOUD\necho DONE\n", True),
+    ("after-a-space", ": #; echo LOUD\necho DONE\n", True),
+    ("after-a-tab", ":\t#; echo LOUD\necho DONE\n", True),
+    ("after-a-semicolon", ": ;#; echo LOUD\necho DONE\n", True),
+    ("after-an-ampersand", ": &#; echo LOUD\nwait\necho DONE\n", True),
+    ("after-a-pipe", "true |#; echo LOUD\ncat /dev/null\necho DONE\n", True),
+    ("after-an-open-paren", "(#; echo LOUD\n:)\necho DONE\n", True),
+    # THE `)` SHAPES, and they are why this table is executed rather than
+    # argued. The ones that END A COMMAND open a comment; the ones that close a
+    # SUBSTITUTION are inside a word and do not. Reasoning from either group
+    # alone gives the wrong rule for the other, which is how `)` ended up
+    # excluded from `_COMMENT_OPENS_AFTER` on the strength of a `$( )` example.
+    ("after-a-case-pattern-paren",
+     "case x in\n  x)#; echo LOUD\n    echo DONE ;;\nesac\n", True),
+    ("after-a-subshell-close", "(:)#; echo LOUD\necho DONE\n", True),
+    ("after-an-arithmetic-command-close",
+     "(( 1 ))#; echo LOUD\necho DONE\n", True),
+    ("after-a-command-substitution-close",
+     "x=$(echo hi)#; echo LOUD\necho DONE\n", False),
+    ("after-an-arithmetic-expansion-close",
+     "x=$((1+2))#; echo LOUD\necho DONE\n", False),
+    ("after-a-subshell-nested-in-a-substitution",
+     "x=$( (echo hi) )#; echo LOUD\necho DONE\n", False),
+    ("after-a-process-substitution-close",
+     ": <(echo ps)#; echo LOUD\necho DONE\n", False),
+]
+
+
+class TestWhereAHashOpensAComment:
+    """The opener rule itself, run against bash instead of remembered.
+
+    `_COMMENT_OPENS_AFTER` and `_WordParens` are a model of one bash rule, and
+    a model that lives only in the comment above it is the shape #120 is
+    about. This one has already been wrong in the safe-looking direction more
+    than once: `;`, `&`, `|` and `(` were missing outright, and then `)` was
+    left out of the fix on the strength of a `$( )` example that says nothing
+    about a `case` pattern. Each time the cost was a red on shell that runs
+    exactly as it always did, with a message accusing another repo of a
+    rename.
+
+    So bash answers first, in a subprocess, and the scanners are held to that
+    answer rather than to a paragraph.
+    """
+
+    @pytest.mark.parametrize(
+        "name, script, opens", _COMMENT_OPENER_SCRIPTS,
+        ids=[n for n, _, _ in _COMMENT_OPENER_SCRIPTS])
+    def test_bash_opens_a_comment_only_after_a_paren_that_ends_a_word(
+            self, tmp_path, name, script, opens):
+        """What bash does with each script, observed on the machine running
+        this - so the table cannot go on claiming a rule bash has stopped
+        following, and cannot be corrected to match a scanner bug."""
+        bash = require_bash()
+        path = _script(tmp_path, script, name="opener.sh")
+        syntax = subprocess.run([bash, "-n", path], capture_output=True,
+                                text=True)
+        assert syntax.returncode == 0, (
+            f"the `{name}` script is not valid bash, so what bash prints for "
+            f"it is about the script and not about the comment rule:"
+            f"\n{syntax.stderr}"
+        )
+        proc = subprocess.run([bash, path], capture_output=True, text=True)
+        assert "DONE" in proc.stdout, (
+            f"the `{name}` script did not reach its end, so its stdout is not "
+            f"evidence about the `#`:\n{proc.stdout}\n{proc.stderr}"
+        )
+        assert ("LOUD" not in proc.stdout) == opens, (
+            f"bash disagrees with this table about `{name}`: the table says "
+            f"the `#` {'opens' if opens else 'does not open'} a comment there, "
+            f"and bash printed {proc.stdout!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "name, script, opens", _COMMENT_OPENER_SCRIPTS,
+        ids=[n for n, _, _ in _COMMENT_OPENER_SCRIPTS])
+    def test_this_files_scanners_agree_with_bash_about_where_a_comment_opens(
+            self, name, script, opens):
+        """`_shell_scan` AND `_uncomment`, against the same table.
+
+        Both, because `code()` reads one and every `case` assertion reads the
+        other: a rule that drifted between them would leave one helper reading
+        prose as code while the other read code as prose, and the two failures
+        look nothing alike.
+        """
+        text, mask = _shell_scan(script)
+        assert len(text) == len(script) and len(mask) == len(script), (
+            "`_shell_scan` must return strings the same length as its input; "
+            "every index the callers hand around depends on it"
+        )
+        assert ("LOUD" not in text) == opens, (
+            f"`_shell_scan` read `{name}` the other way from bash: with a "
+            f"comment {'opening' if opens else 'not opening'} there, LOUD "
+            f"should be {'blanked' if opens else 'kept'} and it is not"
+        )
+        line = next(l for l in script.splitlines() if "LOUD" in l)
+        assert ("LOUD" not in _uncomment(line)) == opens, (
+            f"`_uncomment` read `{name}` the other way from bash, so `code()` "
+            f"and the `case` scanners no longer agree about this shape"
+        )
+
+    def test_every_opener_this_file_models_is_executed_by_the_table(self):
+        """The coverage claim, asserted instead of stated.
+
+        An opener modelled with no script here is one decided by argument,
+        which is how `)` came to be half-right for a whole round.
+        """
+        covered = {script[script.index("#") - 1]
+                   for _, script, _ in _COMMENT_OPENER_SCRIPTS
+                   if script.index("#") > 0}
+        missing = sorted(set(_COMMENT_OPENS_AFTER) - covered)
+        assert not missing, (
+            f"`_COMMENT_OPENS_AFTER` names these openers and no script above "
+            f"runs one: {missing!r}"
+        )
+        assert any(s.startswith("#") for _, s, _ in _COMMENT_OPENER_SCRIPTS), (
+            "`_WordParens.opens_comment` answers True at index 0 without "
+            "consulting any character, and nothing above exercises it"
+        )
+        answers = {opens for _, script, opens in _COMMENT_OPENER_SCRIPTS
+                   if script[script.index("#") - 1:script.index("#")] == ")"}
+        assert answers == {True, False}, (
+            "the `)` rule is stateful, so a table that runs only one of its "
+            "two answers holds half of it - which is the half this file "
+            "shipped before #120's second review"
+        )
 
 
 class TestRecordAccountUpload:
@@ -2158,12 +2397,17 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         self.test_the_case_block_names_every_status_the_module_knows()
 
     # THE DECOY IN EVERY SHAPE A COMMENT CAN OPEN IN. The own-line form is the
-    # one a text search and a code search already agree is a comment; the three
-    # after it open the comment straight after a metacharacter, which is where
-    # both scanners in this file used to disagree with bash and hand `_tail`
-    # a slice that starts mid-sentence.
-    @pytest.mark.parametrize("decoy_prefix", ["", ": ;", "true &", "("],
-                             ids=["own-line", "after-;", "after-&", "after-("])
+    # one a text search and a code search already agree is a comment; the rest
+    # open the comment straight after a metacharacter, which is where both
+    # scanners in this file used to disagree with bash and hand `_tail` a slice
+    # that starts mid-sentence. `(:)` is the `)` shape, and it is here because
+    # excluding `)` outright left this decoy live through a round that reported
+    # the boundary rule closed. Which openers exist at all is asserted next to
+    # them, in TestWhereAHashOpensAComment.
+    @pytest.mark.parametrize(
+        "decoy_prefix", ["", ": ;", "true &", "true |", "(", "(:)"],
+        ids=["own-line", "after-;", "after-&", "after-|", "after-(",
+             "after-)"])
     def test_the_tail_slice_is_not_relocated_by_a_comment(
             self, monkeypatch, decoy_prefix):
         """`_tail()` is the slice EVERY verdict test in this class executes.
