@@ -2508,6 +2508,57 @@ def test_the_foreign_note_does_not_claim_no_bundle_ever_delivered_it(
     assert "does not run the name-dir-mismatch check" in flat(out), out
 
 
+def test_a_name_the_record_names_in_a_skipped_entry_is_not_foreign(
+        tmp_path, capsys, ephemeral):
+    """The record file is what a reader opens, not `Record.entries`.
+
+    An entry the hook's shape check rejects is dropped from `entries` and stays
+    in the file. Gating only on `entries` therefore printed "the install record
+    does not name it" about a directory the record names in plain JSON — beside
+    a `record-entries-skipped` FINDING in the same report, pointing at the very
+    file that contradicts it.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    seeded_skill(store, "helper", "some-other-name")
+    (store / prov.RECORD_NAME).write_text(json.dumps({"version": 1, "installed": [
+        {"name": "alpha", "registry": REGISTRY_URL, "bundle": "adam",
+         "digest": prov.digest_skill_dir(store / "alpha")},
+        {"name": "helper", "registry": REGISTRY_URL, "bundle": "adam",
+         "digest": "not-a-digest"},
+    ]}, indent=2) + "\n", encoding="utf-8")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    record = prov.read_record(store / prov.RECORD_NAME)
+    assert record.skipped == 1 and record.skipped_names == {"helper"}, record
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[record-entries-skipped]" in out, out
+    assert "[foreign] helper" not in out, out
+    assert "[untracked] helper" in out, out
+    assert "helper                       unattributed" in out, out
+
+
+def test_an_unnamed_skipped_entry_contributes_no_name(tmp_path):
+    """The negative control: `skipped_names` is names, not a rejection count.
+
+    An entry with no usable `name` is still skipped and still counted, and it
+    must not put anything into the set — a set that filled up with placeholder
+    entries would disqualify the foreign label for directories nothing names.
+    """
+    path = tmp_path / prov.RECORD_NAME
+    path.write_text(json.dumps({"version": 1, "installed": [
+        {"registry": REGISTRY_URL, "bundle": "adam", "digest": "f" * 64},
+        {"name": 7, "registry": REGISTRY_URL, "bundle": "adam", "digest": "f" * 64},
+        "not-a-dict",
+    ]}) + "\n", encoding="utf-8")
+    record = prov.read_record(path)
+    assert record.skipped == 3, record
+    assert record.skipped_names == set(), record
+
+
 def test_a_foreign_directory_the_account_store_also_names_is_not_a_shadow(
         tmp_path, capsys, ephemeral):
     """A basename collision is not one skill arriving twice.
