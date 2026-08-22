@@ -1327,15 +1327,25 @@ def _select_sources(
     matched = [source for source in extras if source["registry"] == only]
     if only == registry:
         if matched:
-            # Representable, and nothing else refuses it: plan_sources rejects a
-            # BUNDLE claimed twice, and says nothing about one registry standing
-            # as both the primary and a source with different bundles and a
-            # different layout. Scoping to it has two answers, so it gets none.
+            # Representable, and nothing else refuses it: plan_sources rejects
+            # a BUNDLE claimed twice, and says nothing about one registry
+            # standing as both the primary and a source. Scoping to it selects
+            # two entries, so it has two answers and gets none.
+            #
+            # The refusal says only what is forced. The bundle lists differ —
+            # plan_sources' uniqueness check is what guarantees that, and it is
+            # the sole difference guaranteed. Layout and ref are per-entry
+            # fields that MAY differ and here often do not: a source omitting
+            # `layout` inherits DEFAULT_LAYOUT, which is the primary's own, so
+            # the earlier wording ("those two carry different bundles and
+            # different layouts") told a reader something false about the lock
+            # in front of them and then instructed them to fix it.
             raise GeneratorError(
                 f"--only {only}: this lock names it as BOTH its primary registry and a "
-                "federated source, and those two carry different bundles and different "
-                "layouts — so scoping to it has two different answers. Fix the lock, or "
-                "ask about the whole document with an unscoped --check-current."
+                "federated source. That is two entries with two bundle lists, each with "
+                "its own layout and ref, so scoping to that one name asks about two "
+                "things and has two answers. Fix the lock, or ask about the whole "
+                "document with an unscoped --check-current."
             )
         return [], True
     if not matched:
