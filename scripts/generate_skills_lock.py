@@ -1324,11 +1324,21 @@ def _apply_repin_sources(
     ref downstream — so such a source was re-resolved, and could advance,
     under any --repin at all, this flag or a bare one. `--repin` now refuses
     that lock outright (`repin_unproven_sources_blocker`), which closes the gap
-    rather than narrowing this promise around it. For a ref that is already a
-    40-hex sha, which is all this generator writes and now all a --repin will
-    read, by-reference and byte-identical are the same thing.
+    rather than narrowing this promise around it.
     `test_an_unnamed_source_pinned_at_a_branch_refuses_the_whole_repin` is the
     measurement.
+
+    "By reference" is therefore not quite "byte-identical", and the remaining
+    gap is deliberate. `_COMMIT_SHA_RE` is case-insensitive, so an UPPERCASE
+    40-hex sha is a pin a --repin accepts — and plan_sources re-resolves every
+    inherited source ref downstream, writing `resolve_ref`'s lowercase back.
+    `test_an_unnamed_source_with_an_uppercase_pin_comes_back_lowercase` is the
+    measurement, and it asserts the lowercasing rather than describing it. That
+    normalisation is wanted rather than tolerated — see the note above
+    `_COMMIT_SHA_RE`: the bootstrap hook's `fetch_source` branches on
+    `^[0-9a-f]{40}$`, so an uppercase pin is a lock the hook cannot fetch. The
+    promise this function keeps is that it moves no pin the caller did not
+    name; the bytes downstream may still be canonicalised.
 
     ADDING a source is refused rather than allowed as a convenience — it
     changes what the lock means, which is a plain generate's decision — and so

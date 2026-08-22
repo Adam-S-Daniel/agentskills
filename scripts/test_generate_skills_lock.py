@@ -3212,6 +3212,36 @@ def test_an_unnamed_source_pinned_at_a_branch_refuses_the_whole_repin(
         assert impostor_sha not in out.read_text(encoding="utf-8")
 
 
+def test_an_unnamed_source_with_an_uppercase_pin_comes_back_lowercase(tmp_path):
+    """The one way `--repin-source` does NOT return an unnamed source verbatim.
+
+    `_apply_repin_sources` promises to move no pin the caller did not name, and
+    its docstring used to add that for a 40-hex sha "by-reference and
+    byte-identical are the same thing". 23caaf3 made that false one commit
+    later by widening `_COMMIT_SHA_RE` to accept an uppercase sha: such a pin
+    is now READ, and plan_sources re-resolves every inherited source ref, so
+    `resolve_ref`'s lowercase is what reaches disk.
+
+    Wanted, not tolerated — the hook's `fetch_source` branches on
+    `^[0-9a-f]{40}$`, so an uppercase pin is a lock it cannot fetch — which is
+    why this is a test of the normalisation rather than a fix to the code. It
+    exists so the docstring's remaining claim is one a reader can check.
+    """
+    primary, out = _two_sources(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    named, unnamed = document["sources"][0], document["sources"][1]
+    unnamed["ref"] = unnamed["ref"].upper()
+    assert unnamed["ref"] != unnamed["ref"].lower()
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    applied = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{named['registry']}@", "-o", str(out))
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = {source["registry"]: source["ref"]
+             for source in json.loads(out.read_text(encoding="utf-8"))["sources"]}
+    assert after[unnamed["registry"]] == unnamed["ref"].lower()
+
+
 def test_repin_source_refuses_a_registry_the_lock_does_not_federate(
         federated, tmp_path):
     """ADDING a source changes what the lock means; that is a plain generate."""
