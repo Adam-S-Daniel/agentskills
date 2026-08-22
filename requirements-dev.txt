@@ -1,0 +1,51 @@
+# The Python packages this repo needs to check and test itself.
+#
+# This file is the ONLY place a version of any of them is written down. Before
+# it existed the same pins were restated in five `pip install` lines across
+# .github/workflows/ — four in ci.yml, one in account-skill-zips.yml — and the
+# five installed different subsets of the same four packages, so nothing
+# outside a workflow could install what CI installs and no two of them had to
+# agree. scripts/test_workflow_dependency_pins.py now asserts that every
+# `pip install` in every workflow installs THIS FILE and names no package of
+# its own, which is what keeps the "only place" claim true.
+#
+# EVERY JOB INSTALLS THE WHOLE SET, including the two that use a subset of it
+# (ci.yml's `consistency` needs no markdown-it-py, `skills-conformance` no
+# jsonschema, and neither runs pytest). That is deliberate: a per-job subset
+# has to be maintained by hand against what each script happens to import, and
+# a test could only check it against a hand-written map of job -> packages —
+# the same restated list this file replaces. Uniform installs need no such map,
+# so the invariant above holds with no per-job knowledge at all. The four are
+# pure-Python wheels, so the extra install is cheap next to the checkouts and
+# clones these jobs already do.
+#
+# Not governed by this file: the workflow template a skill SHIPS as an asset
+# (plugins/adam/.../assets/workflows/repo-settings-fanout.yml) runs in other
+# people's repos, so its own `pip install` is theirs to pin, not ours.
+#
+# Pins are exact and each release has cleared this repo's 7-day dependency
+# cooling-off (AGENTS.md, "Dependency updates"). Changing a version here is a
+# separate change from moving one, and needs its own cooling-off check.
+
+# generate_readme_table.py parses SKILL.md frontmatter with it; check_skills.py
+# reads scripts/skills_registries.yml and scripts/skills_waivers.yml with it;
+# the workflow tests parse .github/workflows/*.yml with it rather than grepping.
+pyyaml==6.0.3
+
+# check_skills.py parses SKILL.md bodies with a real CommonMark parser rather
+# than a regex.
+markdown-it-py==4.2.0
+
+# check_agent_plugins.py validates the root plugin.json manifests against the
+# vendored Agent Plugins 1.0.0 schema with a real JSON Schema implementation.
+jsonschema==4.26.0
+
+# The runner for every suite in the repo. AGENTS.md is emphatic that
+# `python3 scripts/test_<x>.py` asserts nothing, so pytest is not optional
+# tooling here — it is the only thing that runs the tests at all.
+#
+# Previously the one unpinned name in CI, left to resolve to whatever was
+# newest at job time. 9.1.1 was published 2026-06-19, which clears the
+# cooling-off, and was still the newest release when it was pinned, so pinning
+# it changed no version CI was already resolving to.
+pytest==9.1.1
