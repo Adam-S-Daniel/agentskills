@@ -276,10 +276,9 @@ jobs:
           # inside a step summary nobody opens on a green run. Surfacing it as
           # an annotation puts it on the Actions list instead.
           #
-          # The healthy answers stay quiet on purpose - `fresh`, the drift
-          # verdict this workflow exists to react to, and `not-yet-bootstrapped`
-          # (nothing has been published yet, which is a state and not a fault).
-          # A warning on every run is a warning nobody reads. `unavailable` is
+          # The healthy answers stay quiet on purpose - `fresh` and the drift
+          # verdict this workflow exists to react to. A warning on every run is
+          # a warning nobody reads. `unavailable` is
           # quiet HERE for a different reason: it is set in exactly one place,
           # the `if [ -z "$verdict" ]` branch a few lines up, and by the time
           # that branch returns the fault behind it carries exactly one
@@ -320,7 +319,42 @@ jobs:
           case "$verdict" in
             stale|missing|unreadable)
               echo "::warning::the published account audit reads '$verdict' - the Tier-3 Routine has not published a usable result recently, so this run leaned on the local recording. Check that Routine and the eval-results branch of Adam-S-Daniel/skills-evals." ;;
-            fresh|not-yet-bootstrapped|unavailable|"$drift")
+            not-yet-bootstrapped)
+              # THE FOURTH MEMBER OF THE FAULT FAMILY THE COMMENT ABOVE
+              # ENUMERATES, and the only one that raises nothing. If
+              # skills-evals moves the published ARTIFACT PATH rather than a
+              # module, a function or a fixture key, both clones still succeed
+              # and the import still succeeds - the heredoc simply finds no
+              # `propagation/account/latest.json` and no `propagation/
+              # .bootstrapped`, which live in the same directory, so one rename
+              # takes both. `freshness_verdict` answers `not-yet-bootstrapped`,
+              # a word this repo has a name for, and the quiet arm swallowed
+              # it: green run, zero annotations, the whole cross-repo half of
+              # the evidence unused, and the Degraded notice reaching only the
+              # step summary nobody opens on a green run.
+              #
+              # MOVING IT TO THE LOUD ARM WOULD BE THE WRONG FIX. The verdict
+              # is honest when it is true - before the first audit run there is
+              # genuinely nothing published, and a workflow that annotates
+              # every run of a fresh install is a workflow whose annotations
+              # get ignored, which costs the ones above their meaning.
+              #
+              # The step already holds the fact that separates them: whether
+              # the eval-results clone SUCCEEDED. A branch that is not there
+              # yet is the fresh-install shape, and it annotated its own
+              # absence above. A branch that clones cleanly and contains
+              # neither the marker nor the artifact is a LAYOUT that moved -
+              # the marker is a committed file, and a committed file does not
+              # come back off, so a clean clone missing it is a regression
+              # rather than a beginning. Measured against the live branch on
+              # 2026-08-22: `propagation/.bootstrapped` and
+              # `propagation/account/latest.json` are both present on
+              # eval-results today, so this repo is past that beginning and
+              # cannot return to it.
+              if [ "$results_ok" = yes ]; then
+                echo "::warning::the published account audit reads '$verdict', but the eval-results branch cloned cleanly - so propagation/.bootstrapped and propagation/account/latest.json are not where this step reads them. Either skills-evals moved where it publishes, or the marker was deleted. The audit contributed no skill names, so this run fell back to the local recording alone. Check the propagation/ tree on the eval-results branch of Adam-S-Daniel/skills-evals."
+              fi ;;
+            fresh|unavailable|"$drift")
               : ;;
             *)
               echo "::warning::the published account audit reads '$verdict', which is not a status this repo knows - skills-evals' verdict vocabulary has moved under it. The audit contributed no skill names, so this run fell back to the local recording alone. Teach scripts/account_zip_selection.py the new name, and this step with it." ;;

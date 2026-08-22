@@ -447,7 +447,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         )
         return body[body.index(marker) + len(marker):]
 
-    def _run(self, tmp_path, verdict, *, annotated="no"):
+    def _run(self, tmp_path, verdict, *, annotated="no", results_ok="yes"):
         bash = require_bash()
         # `annotated` is the step head's own flag, delivered here because the
         # tail reads it: the empty-capture guard annotates only when no earlier
@@ -459,6 +459,10 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # under `set -u`, which exits non-zero and reds the assertion below
         # with the shell's own message. It cannot quietly test a stale shape.
         assert annotated in ("yes", "no"), annotated
+        # `results_ok` is the other flag the head sets and the tail reads: it
+        # is what tells `not-yet-bootstrapped` apart from a branch that is not
+        # published yet. "yes" - the clone worked - is the healthy head.
+        assert results_ok in ("yes", "no"), results_ok
         out = tmp_path / "gh_output"
         # Forward slashes: Git Bash reads the backslashes of a Windows path as
         # escapes inside the step's own `>> "$GITHUB_OUTPUT"` redirect, and
@@ -484,7 +488,8 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # would report the opposite of what the runner does.
         proc = subprocess.run(
             [bash, "-e", "-c",
-             f"set -uo pipefail\nannotated={annotated}\nverdict=$1\n"
+             f"set -uo pipefail\nannotated={annotated}\n"
+             f"results_ok={results_ok}\nverdict=$1\n"
              + self._tail(),
              "_", verdict],
             capture_output=True, text=True, env=env, cwd=str(REPO),
@@ -730,7 +735,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         assert f"status={verdict}" in out
 
     @pytest.mark.parametrize("verdict", [
-        "fresh", "not-yet-bootstrapped",
+        "fresh",
         # The drift verdict - the condition this whole workflow exists to react
         # to - reaches the case like any other and MUST stay quiet. It is also
         # the one status this file cannot spell (the module owns it, see
@@ -869,6 +874,59 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "the quiet arm's variable is no longer read from the module's "
             "constant, so it can hold anything - including nothing"
         )
+
+    def test_a_published_tree_that_moved_is_not_read_as_a_fresh_install(
+            self, tmp_path):
+        """THE FOURTH FAULT IN THE FAMILY, and the one that annotated nowhere.
+
+        The empty-capture guard covers skills-evals moving `account_store.py`,
+        renaming `freshness_verdict`, or renaming the
+        `account_audit_max_age_days` fixture key - all three raise, so the
+        capture is empty and the guard warns. Moving the published ARTIFACT
+        PATH raises nothing: both clones succeed, the import succeeds, the
+        heredoc simply finds no `propagation/account/latest.json` and no
+        `propagation/.bootstrapped` - they live in the same directory, so one
+        rename takes both - and `freshness_verdict` answers
+        `not-yet-bootstrapped`. That is a word this repo knows, so the empty
+        guard cannot see it and the `*)` arm cannot either. It sat in the quiet
+        arm: green run, zero annotations, the cross-repo half of the evidence
+        unused, and the Degraded notice reaching only the step summary.
+
+        The distinguishing fact is the clone, which is why this drives
+        `results_ok` rather than moving the status to the loud arm - see the
+        negative control below.
+        """
+        log, out = self._run(
+            tmp_path, "not-yet-bootstrapped", results_ok="yes")
+        assert log.count("::warning::") == 1, log
+        annotation = next(line for line in log.splitlines() if "::warning::" in line)
+        assert "not-yet-bootstrapped" in annotation, annotation
+        assert "cloned cleanly" in annotation, (
+            "the annotation does not say what makes this a fault rather than "
+            f"a beginning - that the branch was there and the tree was not: "
+            f"{annotation}"
+        )
+        assert out.strip() == "status=not-yet-bootstrapped"
+
+    def test_a_branch_that_is_not_published_yet_stays_quiet(self, tmp_path):
+        """The negative control for the test above, and the reason it is gated
+        on the clone rather than on the status.
+
+        `not-yet-bootstrapped` is the honest answer before the first audit run
+        ever publishes, and a workflow that annotates every run of a fresh
+        install is one whose annotations get ignored - which would cost every
+        other annotation in this step its meaning. When the eval-results branch
+        is genuinely absent the clone above says so and has already annotated
+        it; a second entry here would be one fault reported twice.
+
+        This case used to be a parameter of test_a_healthy_verdict_stays_quiet,
+        which asserted quiet for the status unconditionally. It is asserted
+        here for the state where quiet is CORRECT, and the test above asserts
+        loud for the state where it is not.
+        """
+        log, out = self._run(tmp_path, "not-yet-bootstrapped", results_ok="no")
+        assert "::warning::" not in log, log
+        assert out.strip() == "status=not-yet-bootstrapped"
 
     def test_nothing_in_this_workflow_overrides_the_runner_s_shell(self):
         """The premise the harness above rests on, asserted instead of assumed.
