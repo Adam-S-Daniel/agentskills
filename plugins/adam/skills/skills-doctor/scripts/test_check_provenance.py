@@ -2452,6 +2452,106 @@ def test_a_name_disagreement_the_lock_declares_is_still_a_finding(
     assert "alpha                        unattributed" in out, out
 
 
+def test_a_name_disagreement_with_no_readable_record_is_still_a_finding(
+        tmp_path, capsys, ephemeral):
+    """Reclassifying needs a record that is SILENT about the directory.
+
+    Withholding `untracked` says the delivery channels here can be ruled out,
+    and the only thing that supports that is a record which names installs and
+    does not name this one. With no record there is no silence to read: the
+    no-record `untracked` text says even "the hook installed it" cannot be ruled
+    out, and a note over the top of it asserting the opposite is the report
+    contradicting itself about one directory.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    seeded_skill(store, "helper", "some-other-name")
+    # No record at all — the state `read_record` calls ABSENT.
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[untracked] helper" in out, out
+    assert "[foreign] helper" not in out, out
+
+
+def test_the_foreign_note_does_not_claim_no_bundle_ever_delivered_it(
+        tmp_path, capsys, ephemeral):
+    """The note may report what the record says, not what it cannot know.
+
+    A record is not a history. A hook that fails to READ one rewrites it from
+    scratch and forgets every install before that run — a cause the `untracked`
+    finding's own list already names — so a present record's silence is evidence
+    and not proof. A registry whose CI does not run the name-dir-mismatch check
+    can also ship the frontmatter this recognises. Both leave "no bundle here
+    delivered it" a claim the tool cannot support, in a sentence a reader has no
+    way to check.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    seeded_skill(store, "session-start-hook", "startup-hook-skill")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "[foreign] session-start-hook" in out, out
+    assert "So no bundle here delivered it" not in flat(out), out
+    assert "nothing this script can see delivered it" in flat(out), out
+    # The two things the reclassification does NOT establish, named in the note
+    # rather than left for the reader to notice.
+    assert "forgets every install before that run" in flat(out), out
+    assert "does not run the name-dir-mismatch check" in flat(out), out
+
+
+def test_a_locked_name_disagreement_gets_no_foreign_note(tmp_path, capsys,
+                                                         ephemeral):
+    """One directory, two sentences that cannot both be true.
+
+    `hand-placed-over-locked` says it will not survive the next session start;
+    the `foreign` note says the hook will never remove it. The row already gave
+    the lock priority, but the note was emitted store-wide with no lock gate, so
+    a locked directory collected both.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    seeded_skill(store, "alpha", "something-else")
+    write_record(store)                       # a run that recorded no install
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[hand-placed-over-locked] alpha" in out, out
+    assert "[foreign] alpha" not in out, out
+    assert "will not survive the next session start" in flat(out), out
+    assert "the hook will not remove it" not in flat(out), out
+
+
+def test_a_name_one_lock_declares_is_not_foreign_under_another(tmp_path, capsys):
+    """The gate is store-wide because the claim is: "no bundle HERE delivered it".
+
+    With the gate applied per lock, the lock that does not name the directory
+    still reclassifies it, and the same run prints `hand-placed-over-locked`
+    from the lock that does. A name any readable lock declares is one some
+    bundle here delivers, so the premise fails under every lock at once.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    seeded_skill(store, "helper", "some-other-name")
+    write_record(store)                       # present, and names no install
+    project = tmp_path / "repos"
+    _repo_with_lock(project, "one", "helper")
+    _repo_with_lock(project, "two", "elsewhere")
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 1, out
+    assert "[hand-placed-over-locked] helper" in out, out
+    assert "[untracked] helper" in out, out
+    assert "[foreign] helper" not in out, out
+
+
 def test_an_ordinary_untracked_directory_is_still_a_finding(
         tmp_path, capsys, ephemeral):
     """The negative control: the recogniser must not blanket-mute `untracked`.
