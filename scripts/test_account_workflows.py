@@ -6,6 +6,7 @@ permissions a job holds, which triggers publish a context, what a `run:` block
 does). Same rule the fleet AGENTS.md states for workflow lints.
 """
 
+import itertools
 import os
 import re
 import shutil
@@ -454,10 +455,12 @@ def _shell_scan(body):
     what handles both. ALL THREE REJECTED MODELS ARE KEPT RUNNABLE - see
     `_model_per_line_quotes`, `_model_strip_then_mask`, `_model_mask_then_strip`
     - and test_each_rejected_quote_model_is_caught_by_its_own_fixture runs
-    each against the `_ARMS_OK` shape named for it every time this suite does.
-    A rejection nobody can re-run is the same unasserted claim #120 is about,
-    and it is also what makes the three wrapped shapes look like duplicates to
-    the next person tidying the set.
+    every one of them against every fixture in `_MODEL_MATRIX`, both
+    directions, each time this suite does. A rejection nobody can re-run is
+    the same unasserted claim #120 is about. Which fixture catches which
+    model is that matrix and not this paragraph, for a reason the comment
+    above the wrapped shapes in `_ARMS_OK` records: prose here said each of
+    those three caught a model the others did not, and two of them did not.
 
     `shlex` is the obvious alternative and is wrong twice over. It REMOVES
     quotes, and `"$drift"` versus `$drift` is exactly what
@@ -1175,16 +1178,30 @@ _ARMS_OK = [
     ("catch-all-with-an-empty-alternative", _arm('  *)', "  ''|*)")),
     ("catch-all-with-a-leading-empty-string", _arm('  *)', '  ""*)')),
     ("catch-all-with-a-trailing-empty-string", _arm('  *)', "  *'')")),
-    # THE THREE WRAPPED SHAPES DISCRIMINATE THE THREE QUOTE MODELS `_shell_scan`
-    # rejects, and each is here for a model the others do not catch. They wrap
-    # the FIRST arm rather than the catch-all deliberately: a terminator lost
-    # in the LAST arm costs nothing, because the closing `esac` ends that span
-    # anyway, so the same fixture at the bottom of the block discriminates
-    # nothing. Measured, this placement:
-    #   #-before-the-closing-quote   reds compose-per-line-strip-then-mask
-    #                                AND reds per-line masking
-    #   no-#-at-all                  reds per-line masking alone
-    #   quote-closes-on-a-later-line reds per-line masking alone
+    # THE THREE WRAPPED SHAPES, AND WHAT EACH IS WORTH. This comment claimed
+    # each was here for a model the others do not catch; its own table said
+    # otherwise three lines further down, and the table was right. Only ONE of
+    # the three reaches a second model. For model discrimination the other two
+    # are near-duplicates of the first, and saying so is the point - a reason
+    # that is not true is what makes a set look deletable to the next person
+    # tidying it.
+    #
+    # THE MATRIX IS `_MODEL_MATRIX`, ASSERTED IN BOTH DIRECTIONS, so the
+    # "alone" above is now a red rather than a sentence: every rejected model
+    # is run against every fixture here and has to red on exactly the ones
+    # recorded there.
+    #
+    # What keeps the second and third is not a model. Each is a different
+    # wrapped-string SHAPE the real scanner has to go on reading correctly - a
+    # continuation carrying no `#` at all, and a quote that does not close
+    # until two lines down - and every shape in this set is run against the
+    # control by test_a_reformat_leaves_the_step_answering_as_it_did.
+    # `_ARMS_OK`'s floor is what makes removing one red.
+    #
+    # They wrap the FIRST arm rather than the catch-all deliberately: a
+    # terminator lost in the LAST arm costs nothing, because the closing
+    # `esac` ends that span anyway, so the same fixture at the bottom of the
+    # block discriminates nothing.
     ("wrapped-warning-hash-before-the-closing-quote",
      _arm(_LIVENESS, '''    echo "::warning::the published account audit reads '$verdict' - the Tier-3
 Routine has not published a usable result recently. See #120 for the history." ;;''')),
@@ -3249,29 +3266,36 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"to the step: {message}"
         )
 
-    # WHICH FIXTURE CATCHES WHICH REJECTED MODEL. `_shell_scan`'s docstring
-    # names these pairings; this is where they are measured rather than
-    # remembered. A pairing that stops holding means either the model changed
-    # or the fixture stopped discriminating, and either way the docstring is
-    # what has to be corrected.
-    _MODEL_PAIRINGS = [
-        ("per-line-quotes", _model_per_line_quotes,
-         "wrapped-warning-hash-before-the-closing-quote"),
-        ("per-line-quotes", _model_per_line_quotes,
-         "wrapped-warning-with-no-hash"),
-        ("per-line-quotes", _model_per_line_quotes,
-         "wrapped-warning-hash-with-the-quote-closing-later"),
-        ("strip-then-mask", _model_strip_then_mask,
-         "wrapped-warning-hash-before-the-closing-quote"),
-        ("mask-then-strip", _model_mask_then_strip,
-         "apostrophe-inside-a-comment"),
-    ]
+    _REJECTED_MODELS = {
+        "per-line-quotes": _model_per_line_quotes,
+        "strip-then-mask": _model_strip_then_mask,
+        "mask-then-strip": _model_mask_then_strip,
+    }
+
+    # WHICH FIXTURE CATCHES WHICH REJECTED MODEL - THE WHOLE MATRIX, not only
+    # the cells that hold. `_shell_scan`'s docstring names the pairings and
+    # the `_ARMS_OK` comment above says which fixtures are near-duplicates of
+    # one another; both are claims about the EMPTY cells as much as the full
+    # ones, and a parametrization that only ran the full ones could not tell
+    # a fixture that discriminates nothing from one that discriminates two.
+    # So every model is run against every fixture below.
+    _MODEL_MATRIX = {
+        "wrapped-warning-hash-before-the-closing-quote":
+            {"per-line-quotes", "strip-then-mask"},
+        "wrapped-warning-with-no-hash": {"per-line-quotes"},
+        "wrapped-warning-hash-with-the-quote-closing-later": {"per-line-quotes"},
+        "apostrophe-inside-a-comment": {"mask-then-strip"},
+    }
+    # `itertools.product` rather than a comprehension: a comprehension in a
+    # class body cannot see the class's own names past its outermost
+    # iterable.
+    _MODEL_PAIRINGS = list(itertools.product(_REJECTED_MODELS, _MODEL_MATRIX))
 
     @pytest.mark.parametrize(
-        "model_name, model, fixture", _MODEL_PAIRINGS,
-        ids=[f"{m}/{f}" for m, _, f in _MODEL_PAIRINGS])
+        "model_name, fixture", _MODEL_PAIRINGS,
+        ids=[f"{m}/{f}" for m, f in _MODEL_PAIRINGS])
     def test_each_rejected_quote_model_is_caught_by_its_own_fixture(
-            self, monkeypatch, model_name, model, fixture):
+            self, monkeypatch, model_name, fixture):
         """The docstring's "measured wrong" list, measured here every run.
 
         `_shell_scan` rejects three quote models and says which `_ARMS_OK`
@@ -3280,12 +3304,16 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         makes it exactly the claim #120 is about. So the models are kept
         runnable next to the real one and the pairing is asserted.
 
-        THIS IS WHAT MAKES THE THREE WRAPPED SHAPES UNDELETABLE FOR THE RIGHT
-        REASON. Without it they look like three near-duplicates of one
-        another, and the first person tidying the set removes two of them.
+        BOTH DIRECTIONS, which is what the earlier version of this got wrong.
+        Running only the cells that hold says nothing about the empty ones, so
+        the comment above `_ARMS_OK` was free to claim each wrapped shape
+        catches a model the others do not while two of them caught nothing
+        extra. A cell here is a red either way round: a model that stops being
+        caught, and a model that starts being caught, both mean a description
+        somewhere has gone stale.
 
-        A pairing that stops holding is not a licence to delete the fixture:
-        it means the docstring is now wrong about something.
+        A cell that stops holding is not a licence to delete the fixture: it
+        means the docstring is now wrong about something.
         """
         blocks = dict(_ARMS_OK)
         body = _splice(blocks[fixture])
@@ -3293,12 +3321,25 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # The real scanner first, so a fixture broken for some other reason
         # cannot pass for a discriminating one.
         self.test_the_case_block_names_every_status_the_module_knows()
-        monkeypatch.setitem(globals(), "_shell_scan", model)
-        with pytest.raises(AssertionError):
+        monkeypatch.setitem(globals(), "_shell_scan",
+                            self._REJECTED_MODELS[model_name])
+        try:
             self.test_the_case_block_names_every_status_the_module_knows()
+        except AssertionError:
+            caught = True
+        else:
+            caught = False
+        assert caught == (model_name in self._MODEL_MATRIX[fixture]), (
+            f"`{fixture}` "
+            f"{'no longer reds' if not caught else 'now reds'} "
+            f"`{model_name}`, and `_MODEL_MATRIX` says the opposite. Correct "
+            f"the matrix and whichever description rests on it - "
+            f"`_shell_scan`'s rejected-model paragraph, or the comment above "
+            f"the wrapped shapes in `_ARMS_OK`."
+        )
 
     def test_the_regression_set_did_not_shrink(self):
-        """The one count in this file that a test holds, and a FLOOR.
+        """A FLOOR under the reformat set, not a count of it.
 
         #120 is about a comment that carried a number nothing asserted; it
         read as checked and went stale on the next edit. This number is the
