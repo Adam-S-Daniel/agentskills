@@ -988,6 +988,43 @@ def test_check_current_only_without_check_current_is_an_argparse_error(
     assert out.read_text(encoding="utf-8") == before
 
 
+# `--only "$REG"` with an unset REG is the ordinary route in a shell caller,
+# which is what the fleet bumper is — so the empty string is not a hypothetical
+# input, it is the failure mode of the intended one.
+_EMPTY_ONLY_SHAPES = [
+    pytest.param([], id="a plain generate"),
+    pytest.param(["--check"], id="--check"),
+    pytest.param(["--check-format"], id="--check-format"),
+]
+assert _EMPTY_ONLY_SHAPES, "an empty parametrize list SKIPS at exit 0"
+
+
+@pytest.mark.parametrize("other_flags", _EMPTY_ONLY_SHAPES)
+def test_only_with_an_empty_value_is_refused_rather_than_silently_ignored(
+        federated, tmp_path, other_flags):
+    """An unset shell variable must not degrade into a different command.
+
+    Both guards tested `args.only` for TRUTH, and the empty string is falsy, so
+    `--only ''` slipped past them and the run continued unscoped. On a plain
+    generate that is a data-loss path, not a cosmetic one: the run writes a
+    lock from the command line alone, which DE-FEDERATES the lock and replaces
+    its registry with DEFAULT_REGISTRY, at exit 0, with `--check` green
+    afterwards. On `--check` it answers the unscoped question while the caller
+    believes it was scoped.
+    """
+    primary, _, _extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), *other_flags, "--only", "",
+                         "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "--only" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+    assert "sources" in json.loads(out.read_text(encoding="utf-8"))
+
+
 def test_check_current_only_alongside_check_or_check_format_is_an_argparse_error(
         federated, tmp_path):
     """`status` is already the worst verdict across the verify flags, so a run
