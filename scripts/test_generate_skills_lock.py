@@ -7436,6 +7436,16 @@ def _report_invocations(primary: Path, out: Path) -> list:
     for name in dict.fromkeys(r for r in registries if isinstance(r, str) and r):
         calls.append((f"--check-current --only {name}",
                       ["--check-current", "--only", name, *common]))
+        # The PRODUCT of `--only` and `--ref`, which main allows together (its
+        # only guards are that `--only` needs `--check-current` and excludes
+        # `--check` / `--check-format`). Emitting each alone left their
+        # intersection uncovered and a defect lived exactly there: a scoped run
+        # READS one registry's tree, while an off-pin `--ref` makes the
+        # primary's bundles movable, so the shrink question got asked about
+        # content this run never looked at.
+        calls.append((f"--check-current --only {name} --ref HEAD",
+                      ["--check-current", "--only", name,
+                       "--ref", _head(primary), *common]))
     # `--check-current --ref <somewhere else>` asks the same verdict about a
     # DIFFERENT primary commit, and the line it prints anchors to that commit
     # rather than to the lock's own pin — so whether the primary can move under
@@ -7526,6 +7536,47 @@ def test_every_report_path_against_every_refusal(build, shape, tmp_path):
     assert seen <= set(reasons)
     (tmp_path.parent / f"observed-{abs(hash(shape))}.json").write_text(
         json.dumps(sorted(seen)), encoding="utf-8")
+
+
+@pytest.mark.parametrize("build, shape", [pytest.param(build, name, id=name)
+                                          for build, name in _MATRIX_SHAPES])
+def test_a_ref_a_scoped_question_never_reads_cannot_change_its_answer(
+        build, shape, tmp_path):
+    """`--check-current --only <source>` must answer the same with any `--ref`.
+
+    `--ref` names a commit of the PRIMARY, and `_select_sources` drops the
+    primary before anything is materialised — so on a source-scoped run that
+    flag changes nothing the verdict looked at. Two runs differing only in it
+    must therefore be byte-identical, exit code included.
+
+    The matrix above cannot catch a violation on its own: its property is "a
+    printed command runs, or the headline carries its reason", and a refusal
+    invented out of content the run never read satisfies the second half. This
+    is the other half — that a scoped verdict does not acquire an answer from a
+    commit outside its own question. Measured before the fix, on `both moved`
+    and on `the primary bundle is gone at HEAD and a source drifted`: the plain
+    scoped run printed `--repin --ref <lock ref> --repin-source '<src>@'`
+    (which runs at exit 0), while the same run with `--ref HEAD` printed no
+    command and blamed a shrink in `adam`, a bundle it had not read and which
+    exists at every commit involved.
+    """
+    primary, out, _scoped = build(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    sources = document.get("sources")
+    if not isinstance(sources, list):
+        pytest.skip("no federated source to scope to")
+    names = [source.get("registry") for source in sources
+             if isinstance(source.get("registry"), str) and source.get("registry")
+             and source.get("registry") != document.get("registry")]
+    if not names:
+        pytest.skip("no federated source to scope to")
+    common = ["--repo", str(primary), "-o", str(out)]
+    for name in dict.fromkeys(names):
+        plain = run_generator("--check-current", "--only", name, *common)
+        elsewhere = run_generator("--check-current", "--only", name,
+                                  "--ref", _head(primary), *common)
+        assert (elsewhere.returncode, elsewhere.stdout, elsewhere.stderr) == (
+            plain.returncode, plain.stdout, plain.stderr), (shape, name)
 
 
 def _observe_every_reason(tmp_path_factory, reasons: dict) -> set:
