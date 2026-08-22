@@ -522,6 +522,102 @@ def _model_mask_then_strip(body):
     return "".join(text), "".join(mask)
 
 
+def _strip_heredocs(body):
+    """`body` with every heredoc BODY blanked, line for line.
+
+    A heredoc is another language sitting inside the shell - the audit step's
+    is Python - and `_shell_scan` says so in its own limitations: it reads one
+    as shell and lets quote state carry through it. Anything classifying the
+    step's COMMANDS has to drop it first, or `sys.path.insert(0, "...")`
+    arrives as an unguarded command that can fail.
+
+    Blanked rather than deleted so a line number still means what it says, and
+    so quote state cannot leak out of the heredoc into the shell around it.
+    The delimiter line goes too: it is the heredoc's punctuation, not a
+    command. The opener is read off `_uncomment`'s output so a `<<` inside a
+    comment cannot start one.
+    """
+    out, delim = [], None
+    for line in body.split("\n"):
+        if delim is None:
+            out.append(line)
+            opener = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1",
+                               _uncomment(line))
+            if opener:
+                delim = opener.group(2)
+            continue
+        out.append(" " * len(line))
+        if line.strip() == delim:
+            delim = None
+    return "\n".join(out)
+
+
+def _logical_lines(body):
+    """A `run:` body as COMMANDS: (first line, last line, text, mask) tuples.
+
+    Heredocs blanked, comments blanked by `_shell_scan`, backslash
+    continuations joined, and a command that spans lines inside an unclosed
+    `$( )` joined with it - which is the only reason the audit step's heredoc
+    capture and its `|| verdict=""` end up in one entry rather than two.
+
+    TEXT AND MASK STAY THE SAME LENGTH, so an index found in the mask - an
+    operator that is not inside a `::warning::` - indexes the text. That is
+    why nothing here is `.strip()`ed: the mask blanks quoted characters, so
+    stripping the two independently slides them out of step.
+
+    A `)` that closes nothing takes the depth negative - a `case` pattern
+    terminator does exactly that - so the depth is reset per command rather
+    than carried.
+    """
+    text, mask = _shell_scan(_strip_heredocs(body))
+    commands, buf_t, buf_m, start, depth = [], "", "", None, 0
+    for number, (line_t, line_m) in enumerate(
+            zip(text.split("\n"), mask.split("\n")), 1):
+        if start is None:
+            if not line_t.strip():
+                continue
+            start = number
+        buf_t, buf_m = buf_t + line_t, buf_m + line_m
+        depth += line_m.count("(") - line_m.count(")")
+        if buf_t.rstrip().endswith("\\"):
+            cut = buf_t.rindex("\\")
+            buf_t, buf_m = buf_t[:cut], buf_m[:cut]
+            continue
+        if depth > 0:
+            buf_t, buf_m = buf_t + "\n", buf_m + "\n"
+            continue
+        commands.append((start, number, buf_t, buf_m))
+        buf_t, buf_m, start, depth = "", "", None, 0
+    assert start is None, (
+        f"a command starting at line {start} of this `run:` body never "
+        f"closed its `$(`, so the rest of the body was read as part of it"
+    )
+    return commands
+
+
+def _top_level(mask, tokens):
+    """Indices in `mask` where one of `tokens` sits outside `( )`."""
+    found, depth, i = [], 0, 0
+    while i < len(mask):
+        ch = mask[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            for token in tokens:
+                if mask.startswith(token, i):
+                    found.append((i, token))
+                    i += len(token)
+                    break
+            else:
+                i += 1
+                continue
+            continue
+        i += 1
+    return found
+
+
 def _code_index(text, mask, needle, what):
     """Index of the first `needle` that is CODE - not inside a string or a
     comment. `what` is the sentence to fail with if there is none."""
@@ -1467,6 +1563,225 @@ class TestAccountSkillZips:
         actual upload uses. The payload comes from `--prepare --zip-dir`.
         """
         assert any("--zip-dir" in body for body in runs(load(ZIPS)))
+
+
+class TestEveryFailableCommandInTheAuditStepIsGuarded:
+    """The audit step's tolerance rule, parsed - #124.
+
+    The rule was prose only. The paragraph above the step says no `echo`
+    carries a redirect except the `$GITHUB_OUTPUT` write, and that every
+    command that can plausibly fail sits in an `if` condition or a `||` list -
+    the two constructs errexit is defined not to act on. Nothing checked
+    either, so the next unguarded failable command was caught only if somebody
+    happened to write a test for that command. `58cfab6` is what that costs:
+    an unguarded `mkdir -p ../eval-results` aborted the step under `bash -e`,
+    in the one branch a comment promised was never fatal.
+
+    THE ERREXIT SUBTLETY A TEST WRITTEN FROM THE OLD COMMENT WOULD GET WRONG:
+    a command on the RIGHT of the final `||` is NOT exempt. Errexit's
+    exemption covers the command BEFORE the final `&&`/`||`; the one after it
+    aborts the step exactly like a bare one. Executed here rather than
+    restated - test_a_command_after_the_final_or_aborts_the_step_too runs both
+    shapes in a real bash - because the whole classification below turns on
+    it.
+
+    Parsed rather than scanned: the body comes out of the workflow through
+    `yaml`, its heredoc is blanked because it is Python, its comments are
+    blanked by `_shell_scan`, and its operators are found in the mask so a
+    `||` inside a `::warning::` is not one. AGENTS.md's rule for workflow
+    lints, applied to the shell inside the workflow as well as to the YAML
+    around it.
+    """
+
+    # THE CARVE-OUT LIST. Getting it wrong is worse than having no test - too
+    # broad and it certifies the shipped file while holding nothing, too
+    # narrow and it reds on a step that is correct. Each entry is a command
+    # that cannot plausibly fail, or one this step leaves unguarded on purpose
+    # with the reason written down:
+    #
+    #   `set -uo pipefail` - a builtin with valid options.
+    #   a bare assignment - `harness_ok=yes`, `verdict="${verdict#...}"`.
+    #     PARAMETER EXPANSION ONLY: an assignment whose right-hand side is a
+    #     `$( )` takes that command's status and can abort the step, so it is
+    #     deliberately NOT carved out. The step's own `verdict=$(python3 - ...)`
+    #     and `drift=$(...)` are guarded by their `|| ...=""`, which is what
+    #     this asymmetry exists to require.
+    #   `:` - the no-op the quiet `case` arm is made of.
+    #   an `echo` to stdout - an `echo` to a runner's stdout essentially never
+    #     fails. An `echo` that REDIRECTS is a different command and gets no
+    #     carve-out here; the redirect rule below is what covers it.
+    #   the `$GITHUB_OUTPUT` write - the one deliberately unguarded failable
+    #     command in the step. There is no degraded path when the runner
+    #     cannot write its own output file: aborting is the intended answer,
+    #     and test_the_output_write_is_left_unguarded_on_purpose holds that it
+    #     keeps no guard.
+    #   `{` and `}` - a brace group's punctuation, not a command.
+    _STRUCTURE = re.compile(
+        r"^(?:else|fi|done|do|then|esac|\{|\}|case\s+\S+\s+in)$")
+    _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+    _OUTPUT_WRITE = re.compile(r'^echo\s+.*>>\s*"\$GITHUB_OUTPUT"$')
+    _COMPOUND_HEAD = re.compile(r"^(?:if|elif|while|until)\b")
+
+    def _carved_out(self, command):
+        if command.startswith("{"):
+            command = command[1:].strip()
+        if command in ("", "}"):
+            return True
+        if self._STRUCTURE.match(command):
+            return True
+        if command in ("set -uo pipefail", ":"):
+            return True
+        _, mask = _shell_scan(command)
+        redirects = any(ch in mask for ch in "<>")
+        if (self._ASSIGNMENT.match(command) and "$(" not in mask
+                and "`" not in mask and not redirects):
+            return True
+        if command.startswith("echo") and not redirects:
+            return True
+        return bool(self._OUTPUT_WRITE.match(command))
+
+    def _classified(self):
+        """Every command in the step as (first line, text, guarded).
+
+        `guarded` is TRUE where errexit is defined not to act: an `if` /
+        `elif` / `while` / `until` condition, the left of the final `&&` or
+        `||`, and the shell's own punctuation. Everything else is FALSE,
+        including whatever sits to the right of that final operator.
+        """
+        classified = []
+        for start, _, text, mask in _logical_lines(_audit_body()):
+            for terminator in (";;&", ";;", ";&"):
+                if text.rstrip().endswith(terminator):
+                    cut = len(text.rstrip()) - len(terminator)
+                    text, mask = text[:cut], mask[:cut]
+                    break
+            head = text.strip()
+            if not head:
+                continue
+            if self._COMPOUND_HEAD.match(head):
+                assert head.endswith("then") or head.endswith("do"), (
+                    f"line {start} of the audit step opens a compound command "
+                    f"and puts something after its `then`/`do` on the same "
+                    f"line; this classifier would read the whole line as a "
+                    f"condition and exempt it: {head!r}"
+                )
+                classified.append((start, head, True))
+                continue
+            if self._STRUCTURE.match(head):
+                classified.append((start, head, True))
+                continue
+            if (mask.rstrip().endswith(")")
+                    and mask.count(")") > mask.count("(")):
+                # A `case` pattern, which is punctuation and not a command.
+                classified.append((start, head, True))
+                continue
+            guards = _top_level(mask, ("||", "&&"))
+            if guards:
+                at, token = guards[-1]
+                classified.append((start, text[:at].strip(), True))
+                text, mask = text[at + len(token):], mask[at + len(token):]
+            previous = 0
+            for at, _token in _top_level(mask, (";",)) + [(len(mask), ";")]:
+                segment = text[previous:at].strip()
+                previous = at + 1
+                if segment:
+                    classified.append((start, segment, False))
+        return classified
+
+    def test_the_classifier_reads_every_line_of_the_step(self):
+        """A classifier that sees nothing certifies everything.
+
+        Both rules below iterate what `_classified` returns, so a splitter
+        that silently dropped the second half of the body would pass them
+        while asserting nothing about it. This is the negative control: every
+        line of the step that carries code has to be inside a command, and
+        every command has to reach the classifier.
+        """
+        body = _audit_body()
+        spans = _logical_lines(body)
+        covered = set()
+        for start, end, _text, _mask in spans:
+            covered.update(range(start, end + 1))
+        text, _ = _shell_scan(_strip_heredocs(body))
+        for number, line in enumerate(text.split("\n"), 1):
+            assert not line.strip() or number in covered, (
+                f"line {number} of the audit step carries code and is in no "
+                f"command, so nothing below classifies it: {line.strip()!r}"
+            )
+        assert {start for start, _, _, _ in spans} == {
+            start for start, _, _ in self._classified()}, (
+            "a command came out of `_logical_lines` and produced no "
+            "classified segment, so the rules below never see it"
+        )
+
+    def test_no_echo_in_this_step_redirects_except_the_output_write(self):
+        """Redirection is what makes an `echo` failable.
+
+        An `echo` to a runner's stdout essentially never fails, which is why
+        the step leaves every one of them unguarded. An `echo` to a FILE or a
+        closed descriptor is an ordinary failable command, and one added in a
+        bare position would abort the step in whichever branch it sits in -
+        found only on the day that branch runs.
+        """
+        for line, command, _guarded in self._classified():
+            if not command.startswith("echo"):
+                continue
+            _, mask = _shell_scan(command)
+            if not any(ch in mask for ch in "<>"):
+                continue
+            assert self._OUTPUT_WRITE.match(command), (
+                f"line {line} of the audit step has an `echo` that redirects "
+                f"and is not the `$GITHUB_OUTPUT` write, so it can fail and "
+                f"abort the step: {command!r}. Put it in an `if` condition or "
+                f"a `||` list, or explain it in the carve-out list above."
+            )
+
+    def test_every_command_that_can_fail_sits_in_an_if_or_an_or_list(self):
+        """The rule the tolerance paragraph states and nothing held.
+
+        `if` and `||` are the two constructs errexit does not act on, and the
+        carve-out list above is what says which bare commands are safe anyway.
+        A command that is neither reds here rather than at 06:23 UTC.
+        """
+        for line, command, guarded in self._classified():
+            assert guarded or self._carved_out(command), (
+                f"line {line} of the audit step runs a command that can fail "
+                f"and is neither in an `if` condition nor in a `||` list: "
+                f"{command!r}. Under `bash -e` that aborts the whole step - "
+                f"the fault 58cfab6 fixed. Guard it, or add it to the "
+                f"carve-out list above with the reason it cannot fail."
+            )
+
+    def test_a_command_after_the_final_or_aborts_the_step_too(self, tmp_path):
+        """The errexit rule this classification turns on, executed.
+
+        An earlier version of the tolerance comment had it the other way and
+        called two `echo`s protected because a `||` sat to their left. Errexit
+        exempts the command BEFORE the final `&&`/`||`; the one after it is an
+        ordinary command. A test written from the old reading would exempt
+        exactly the wrong half, so the rule is run rather than cited.
+        """
+        bash = require_bash()
+        results = {}
+        for name, script in {
+            "after-a-||": 'false || echo hi >&-\necho reached\n',
+            "bare": 'echo hi >&-\necho reached\n',
+            "before-a-||": 'echo hi >&- || true\necho reached\n',
+        }.items():
+            proc = subprocess.run(
+                [bash, "-e", _script(tmp_path, script, name="errexit.sh")],
+                capture_output=True, text=True)
+            results[name] = (proc.returncode, "reached" in proc.stdout)
+        assert results["after-a-||"] == results["bare"], (
+            f"a failing command after the final `||` no longer behaves like a "
+            f"bare one, so the classifier above exempts the wrong half: "
+            f"{results}"
+        )
+        assert results["bare"][0] != 0 and not results["bare"][1], results
+        assert results["before-a-||"] == (0, True), (
+            f"a failing command BEFORE the final `||` aborted the script, so "
+            f"the exemption this classifier grants is not real: {results}"
+        )
 
 
 @pytest.fixture(scope="session")
