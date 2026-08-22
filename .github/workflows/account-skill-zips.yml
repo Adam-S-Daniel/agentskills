@@ -162,15 +162,35 @@ jobs:
         # there, and it is the reason the headline above says "reaches for
         # skills-evals" rather than "every".
         #
-        # THE QUALIFIER IS LOAD-BEARING, because an unqualified count here
+        # THE QUALIFIER IS LOAD-BEARING, because an unqualified claim here
         # would be false and this paragraph's own argument is that a wrong
-        # tolerance comment is worse than none. Twelve other `echo` commands
-        # sit equally bare - the two clone-success lines, every `::warning::`,
-        # and the `published account audit reads:` line - each of them in an
-        # `if` or `case` BODY, which errexit does act on. They are left that
-        # way because an `echo` to a runner's stdout essentially never fails;
-        # the one that also REDIRECTS is the one named above, and redirection
-        # is what makes it failable.
+        # tolerance comment is worse than none. Every OTHER `echo` in this
+        # step is left unguarded too, and errexit reaches all of them alike:
+        # the ones in an `if`, `elif`, `else` or `case` body, the ones at the
+        # step's top level, and the ones written as the right-hand side of a
+        # `||`.
+        #
+        # THAT LAST SHAPE IS THE ONE THAT LOOKS PROTECTED AND IS NOT. A `||`
+        # covers the `mkdir` or the `pip install` on its LEFT; the command
+        # AFTER the final `||` is the one member of the list errexit is not
+        # exempted from, so it aborts the step exactly like a bare one. In one
+        # line each, and they print the same thing and both exit 1:
+        #   bash -e -c 'false || echo hi >&-; echo reached'
+        #   bash -e -c 'echo hi >&-; echo reached'
+        #
+        # They are all left that way because an `echo` to a runner's stdout
+        # essentially never fails; the one that also REDIRECTS is the one
+        # named above, and redirection is what makes it failable.
+        #
+        # NO COUNT HERE, DELIBERATELY. There was one, and the set it named
+        # left out the `mkdir` fallback and the `no verdict, which follows
+        # from the clone failure` line. It was unstable as well - it moved
+        # inside the branch that wrote it, when the empty-capture guard grew a
+        # third arm - and nothing in this repo asserts it, so it read as
+        # checked while going stale on the next edit. The SHAPE is the durable
+        # claim: an `echo` may be left unguarded anywhere in this step, and
+        # every command that can plausibly fail belongs in an `if` condition
+        # or a `||` list.
         run: |
           set -uo pipefail
           # ONE ANNOTATION PER DISTINCT FAULT. Not "one annotation per run":
