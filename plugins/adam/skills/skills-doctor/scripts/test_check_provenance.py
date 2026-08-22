@@ -20,6 +20,7 @@ only because this repo happens not to have one.
 """
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -3492,3 +3493,223 @@ def test_the_shared_payload_digest_is_none_for_a_path_that_is_not_a_directory(
     plain.write_text("x", encoding="utf-8")
     assert prov.digest_shared_payload(plain) is None
     assert prov.digest_shared_payload(plain, fold=True) is None
+
+
+# ---------------------------------------------------------------------------
+# the matrix: origin x observation x record x lock
+#
+# Rounds one and two of this branch closed fifteen defects between them and
+# opened six, and almost every one was a cross-product nobody had enumerated —
+# a `foreign` directory fed to the shadow comparison, a `_tally` branch made
+# unreachable by a gate added elsewhere, two guards in `classify` that could no
+# longer fire. Patching pairs does not converge on that, because the thing
+# going wrong is the absence of a list.
+#
+# So this is the list. `CELLS` is built from `prov.ORIGINS` and
+# `prov.OBSERVATION_ORIGINS`, so a fifth origin or a fifth observation grows it
+# by itself and `test_the_matrix_is_complete` fails until `MATRIX` accounts for
+# the new cells. Each reachable cell asserts the origin assigned, the exact
+# kinds reported about the directory, whether each is a FINDING or a NOTE, and
+# the exit code. Each unreachable one asserts that the ladder cannot produce
+# that origin from those inputs at all — which is how a dead branch shows up
+# here as a fact rather than as a comment claiming it is live.
+# ---------------------------------------------------------------------------
+
+TARGET = "target"
+BODY = "line one\nline two\n"
+OBSERVATIONS = tuple(sorted(prov.OBSERVATION_ORIGINS))
+
+
+def matrix_store(tmp_path, origin, observation, record_present, lock_declares):
+    """The smallest store in which `target` has `origin` and `observation` fires.
+
+    Never refuses a combination. An unreachable cell is one this builds
+    faithfully and the ladder still declines to label the way the cell asked
+    for — asserting that is the point, and a builder that raised instead would
+    hide it behind the fixture.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    declared = "somewhere-else" if origin == prov.FOREIGN else TARGET
+    skill = store / TARGET
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(f"---\nname: {declared}\n---\n{BODY}",
+                                    encoding="utf-8")
+    if observation == "shadow":
+        # Byte-for-byte what the personal copy holds, so the benign NOTE is what
+        # a shadow produces here and a divergence never masquerades as one.
+        account_copy(store, TARGET, body=BODY, crlf=False)
+    if record_present:
+        write_record(store, *( [TARGET] if origin == prov.HOOK else [] ))
+    if observation == "integrity":
+        # After the record, so the recorded digest is the pre-edit one.
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {declared}\n---\n{BODY}edited\n", encoding="utf-8")
+    lock = tmp_path / "skills.lock"
+    write_lock(lock, store, *([TARGET] if lock_declares else []))
+    return store, lock
+
+
+def matrix_origin(out: str) -> str:
+    """The origin column of `target`'s row, read out of the report."""
+    for line in out.splitlines():
+        match = re.match(rf"  {TARGET}\s+(\S+)\s", line)
+        if match:
+            return match.group(1)
+    raise AssertionError(f"no row for {TARGET} in:\n{out}")
+
+
+def matrix_kinds(out: str):
+    """(finding kinds, note kinds) reported about `target`.
+
+    Parsed from the rendered report rather than from the functions' returns, so
+    the cell measures what a reader is shown — dedupe, per-lock attribution and
+    the finding/note split included.
+    """
+    findings, notes, section = set(), set(), None
+    for line in out.splitlines():
+        if line.startswith("FINDINGS ("):
+            section = findings
+        elif line.startswith("NOTES ("):
+            section = notes
+        elif line.startswith("INFERENCE"):
+            section = None
+        elif section is not None:
+            match = re.match(r"  \[([a-z-]+)\] (\S+)", line)
+            if match and match.group(2) == TARGET:
+                section.add(match.group(1))
+    return findings, notes
+
+
+_H, _U, _F, _K = prov.HOOK, prov.UNATTRIBUTED, prov.FOREIGN, prov.UNKNOWN
+
+# (origin, record present, lock declares, observation) ->
+#     (finding kinds, note kinds, exit code)
+# Every triple absent from the keys is unreachable and asserted to be.
+MATRIX = {
+    (_H, True, True, "lock-expectation"): (set(), set(), 0),
+    (_H, True, True, "integrity"): ({"edited-and-locked"}, set(), 1),
+    (_H, True, True, "shadow"): (set(), {"shadowed-by-the-account-store"}, 0),
+    (_H, True, True, "foreign"): (set(), set(), 0),
+
+    (_H, True, False, "lock-expectation"): (set(), {"stale"}, 0),
+    (_H, True, False, "integrity"): ({"edited-and-stale"}, set(), 1),
+    (_H, True, False, "shadow"): (set(),
+                                  {"stale", "shadowed-by-the-account-store"}, 0),
+    (_H, True, False, "foreign"): (set(), {"stale"}, 0),
+
+    (_U, True, True, "lock-expectation"): ({"hand-placed-over-locked"}, set(), 1),
+    (_U, True, True, "integrity"): ({"hand-placed-over-locked"}, set(), 1),
+    (_U, True, True, "shadow"): ({"hand-placed-over-locked"},
+                                 {"shadowed-by-the-account-store"}, 1),
+    (_U, True, True, "foreign"): ({"hand-placed-over-locked"}, set(), 1),
+
+    (_U, True, False, "lock-expectation"): ({"untracked"}, set(), 1),
+    (_U, True, False, "integrity"): ({"untracked"}, set(), 1),
+    (_U, True, False, "shadow"): ({"untracked"},
+                                  {"shadowed-by-the-account-store"}, 1),
+    (_U, True, False, "foreign"): ({"untracked"}, set(), 1),
+
+    # The pair that made this table. A FOREIGN directory whose basename the
+    # account store also holds emitted `shadow-copies-differ` at exit 1 beside
+    # its own note saying there was nothing to fix, and no upload could have
+    # cleared it. Its shadow cell is now the same as its other three.
+    (_F, True, False, "lock-expectation"): (set(), {"foreign"}, 0),
+    (_F, True, False, "integrity"): (set(), {"foreign"}, 0),
+    (_F, True, False, "shadow"): (set(), {"foreign"}, 0),
+    (_F, True, False, "foreign"): (set(), {"foreign"}, 0),
+
+    (_K, False, True, "lock-expectation"): (set(), set(), 0),
+    (_K, False, True, "integrity"): (set(), set(), 0),
+    (_K, False, True, "shadow"): (set(), {"shadowed-by-the-account-store"}, 0),
+    (_K, False, True, "foreign"): (set(), set(), 0),
+
+    (_K, False, False, "lock-expectation"): ({"untracked"}, set(), 1),
+    (_K, False, False, "integrity"): ({"untracked"}, set(), 1),
+    (_K, False, False, "shadow"): ({"untracked"},
+                                   {"shadowed-by-the-account-store"}, 1),
+    (_K, False, False, "foreign"): ({"untracked"}, set(), 1),
+}
+
+REACHABLE = {(origin, record, lock) for origin, record, lock, _ in MATRIX}
+CELLS = [(origin, record, lock, observation)
+         for origin in prov.ORIGINS
+         for record in (True, False)
+         for lock in (True, False)
+         for observation in OBSERVATIONS]
+
+
+def test_the_matrix_is_complete():
+    """No cell may be left out of the table, and none may be invented.
+
+    This is the assertion that makes the axes derived rather than decorative: a
+    new origin in `prov.ORIGINS` or a new observation in
+    `prov.OBSERVATION_ORIGINS` grows `CELLS` here and fails until `MATRIX`
+    accounts for it — either as a reachable cell with an expected outcome, or by
+    being absent and therefore claimed unreachable.
+    """
+    assert set(MATRIX) <= set(CELLS)
+    assert set(MATRIX) == {(origin, record, lock, observation)
+                           for origin, record, lock in REACHABLE
+                           for observation in OBSERVATIONS}
+    # And every origin the code names is REACHED by some cell. Without this the
+    # table absorbs a new origin silently: nothing assigns it, so all sixteen of
+    # its cells land in the unreachable branch and pass by saying nothing.
+    assert {origin for origin, _, _ in REACHABLE} == set(prov.ORIGINS)
+
+
+def test_every_origin_an_observation_declares_is_exercised():
+    """`OBSERVATION_ORIGINS` may not promise an origin no cell reaches.
+
+    An entry nothing exercises is the same defect as a guard nothing asserts —
+    it reads as covered, and the next reader who checks whether it matters
+    deletes it or, worse, trusts it.
+    """
+    for observation, origins in prov.OBSERVATION_ORIGINS.items():
+        kinds = set(prov.OBSERVATION_KINDS[observation])
+        for origin in origins:
+            exercised = any(
+                (findings | notes) & kinds
+                for (cell_origin, _, _, cell_observation), (findings, notes, _)
+                in MATRIX.items()
+                if cell_origin == origin and cell_observation == observation)
+            assert exercised, (observation, origin)
+
+
+@pytest.mark.parametrize(
+    "cell", CELLS,
+    ids=[f"{origin}-{'record' if record else 'norecord'}"
+         f"-{'locked' if lock else 'unlocked'}-{observation}"
+         for origin, record, lock, observation in CELLS])
+def test_the_origin_observation_matrix(tmp_path, capsys, ephemeral, cell):
+    """One cell of the cross-product, on the surface that raises the most.
+
+    Ephemeral deliberately: it is the surface that promotes absences to
+    findings, so an exit code recorded here is the worst case for that cell.
+    """
+    origin, record_present, lock_declares, observation = cell
+    store, lock = matrix_store(tmp_path, origin, observation,
+                               record_present, lock_declares)
+    code, out = run(store, lock, capsys)
+    assigned = matrix_origin(out)
+    assert assigned in prov.ORIGINS, out
+
+    if (origin, record_present, lock_declares) not in REACHABLE:
+        assert assigned != origin, (
+            f"the ladder was expected to be unable to label {TARGET} "
+            f"{origin!r} with record_present={record_present} and "
+            f"lock_declares={lock_declares}, and it did:\n{out}")
+        return
+
+    assert assigned == origin, out
+    findings, notes = matrix_kinds(out)
+    want_findings, want_notes, want_code = MATRIX[cell]
+    assert findings == want_findings, out
+    assert notes == want_notes, out
+    assert code == want_code, out
+    # Soundness, independent of the table above: nothing reported about this
+    # directory may come from an observation that does not cover its origin.
+    for kind in findings | notes:
+        assert kind in prov.OBSERVATION_OF, (kind, out)
+        assert assigned in prov.OBSERVATION_ORIGINS[prov.OBSERVATION_OF[kind]], (
+            kind, assigned, out)
