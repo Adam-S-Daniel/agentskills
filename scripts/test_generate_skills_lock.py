@@ -4517,6 +4517,79 @@ def test_the_report_quotes_the_refusal_the_flag_reaches_first(tmp_path):
     assert answer.reason in refusal.stderr, (answer.reason, refusal.stderr)
 
 
+# The two sentences that told a reader --check-format's read-set and got it
+# wrong. Both were true when written and made false by 36dfb87, which routed
+# this flag's remediation through `remediation`; neither is reachable by any
+# behavioural test, which is why they are named here as text.
+_RETIRED_CHECK_FORMAT_CLAIMS = ("no `registry`, no `sources`", "READ here")
+
+
+def test_check_format_reads_the_lock_and_its_addressing_and_no_clone(tmp_path):
+    """What `--check-format` actually reads, measured — and the prose about it.
+
+    The flag's calling convention is that it touches NO clone: the fleet
+    bumper runs it per consumer lock before it has cloned any registry. That
+    half is still true and is measured below against a `--repo` that does not
+    exist. What stopped being true is "reads `skills` and `ref` alone": its
+    remediation is `remediation`'s now, so the verdict depends on `registry`,
+    `bundles` and `sources` — the fields a `--repin` inherits — and on this
+    run's `--repo` and `--source-repo`, which the printed line restates.
+
+    Both the docstring and the argparse help still asserted the old read-set,
+    and a cross-repo contract is the wrong place for a sentence a reader can
+    check and find false. The prose half of this test is a text check because
+    prose is what regressed; the behavioural half is what the prose now says.
+    """
+    primary, out = _two_sources(tmp_path)
+    bare = _bare_digest_copy(out)
+
+    # NO CLONE. --repo at a path that does not exist, and the verdict lands
+    # anyway — so not one git call, and the flag stays answerable before the
+    # bumper has cloned anything.
+    nowhere = tmp_path / "no-such-clone"
+    assert not nowhere.exists()
+    verdict = run_generator("--check-format", "--repo", str(nowhere), "-o", str(bare))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert verdict.stdout.startswith("FAILED:"), verdict.stdout
+    printed = _printed_commands(verdict.stdout)
+    assert len(printed) == 1, verdict.stdout
+    # --repo READ: the line it prints names the clone this run was given.
+    assert f"--repo {shlex.quote(str(nowhere))}" in printed[0], printed[0]
+
+    # --source-repo READ, the same way.
+    where = tmp_path / "cms-platform"
+    spec = f"{where.resolve().as_uri()}={where}"
+    located = run_generator("--check-format", "--repo", str(primary),
+                            "--source-repo", spec, "-o", str(bare))
+    assert located.returncode == 1, located.stdout + located.stderr
+    assert f"--source-repo {shlex.quote(spec)}" in _printed_commands(located.stdout)[0]
+
+    # The lock's IDENTITY read: break one field and the flag stops offering a
+    # command, giving the refusal a --repin of that lock would give instead.
+    for field, value in (("registry", None), ("bundles", None), ("sources", {})):
+        document = json.loads(bare.read_text(encoding="utf-8"))
+        if value is None:
+            document.pop(field)
+        else:
+            document[field] = value
+        broken = tmp_path / f"broken-{field}.lock"
+        broken.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        answer = run_generator("--check-format", "--repo", str(primary),
+                               "-o", str(broken))
+        assert answer.returncode == 1, (field, answer.stdout + answer.stderr)
+        assert answer.stdout.startswith("FAILED:"), (field, answer.stdout)
+        assert not _printed_commands(answer.stdout), (field, answer.stdout)
+        assert "would refuse one: " in answer.stdout, (field, answer.stdout)
+        assert f"'{field}'" in answer.stdout, (field, answer.stdout)
+
+    source = GENERATOR.read_text(encoding="utf-8")
+    for claim in _RETIRED_CHECK_FORMAT_CLAIMS:
+        assert claim not in source, (
+            f"{claim!r} is back in generate_skills_lock.py. The measurements above "
+            "are what --check-format reads; a sentence saying otherwise is a "
+            "cross-repo contract that lies to the caller reading it.")
+
+
 def test_one_sources_emptied_bundle_does_not_suppress_anothers_remediation(tmp_path):
     """A block's refusal must be about the command that block prints.
 
