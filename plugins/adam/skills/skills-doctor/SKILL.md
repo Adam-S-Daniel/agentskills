@@ -180,6 +180,13 @@ entrypoint's shape — unproven against `remote_cowork`, held deliberately — s
 any other entrypoint with no session id reports as `unsure` and is judged as
 durable, which is the quiet reading.
 
+The same reading gates every sentence about what the NEXT run does. Those three
+arms are tested by the hook BEFORE it reads the lock, and failing all three it
+prints `skills: skipped` and exits — so on a durable or unsure machine there is
+no install, no refusal and no `skills:` verdict to read `DEGRADED`. Findings
+that promise any of those carry the caveat themselves rather than leaving the
+reader to reconcile them against the SURFACE block further up the report.
+
 **`hook-not-wired` is the finding to look for in a multi-repo session.** A lock
 plus a SessionStart hook wired only in a *child* of the project dir means no
 hook is consulted at all, so nothing is delivered and nothing says so — there is

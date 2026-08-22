@@ -675,6 +675,43 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
     return Surface(UNSURE, entrypoint, remote, forced)
 
 
+def when_the_hook_runs(surface: str) -> str:
+    """What a sentence about the NEXT run has to add, given this surface.
+
+    Every "the next session start …" clause in this file is a claim about a hook
+    that may never execute. `.claude/hooks/skills-bootstrap.sh` tests the surface
+    BEFORE it reads the lock — no remote session id, entrypoint not exactly
+    `remote`, `SKILLS_BOOTSTRAP_FORCE` unset — and on a machine failing all three
+    it prints `skills: skipped — durable session …, marketplace install is
+    authoritative` and returns. Nothing is installed, nothing is refused, no
+    `skills:` verdict exists to read `DEGRADED`.
+
+    Printing the surface in its own block two screens up is not the fix: that is
+    what the report already did while a finding below it promised a run. The
+    caveat goes on the sentence that needs it.
+
+    Empty on EPHEMERAL, where those clauses are true exactly as written. UNSURE
+    gets its own arm rather than being folded into either: `read_surface` treats
+    it as durable for judgements, and saying "this machine reads durable" about
+    a machine nobody could classify is the kind of unmeasured fact this file
+    exists not to print.
+    """
+    if surface == EPHEMERAL:
+        return ""
+    if surface == DURABLE:
+        return (" None of that happens on THIS machine: the SURFACE block above "
+                "reads durable, where the hook returns `skills: skipped` before "
+                "it reads the lock — so nothing here is installed, removed or "
+                "refused, and no session-start verdict is emitted to degrade. "
+                "What is described is what an ephemeral session on these bytes "
+                "would do.")
+    return (" Whether any of that happens here is unmeasured: the SURFACE block "
+            "above reads unsure, and the hook returns `skills: skipped` before "
+            "it reads the lock on any session it does not take for a remote "
+            "one. Those sentences hold on an ephemeral surface and are not "
+            "known to hold on this one.")
+
+
 def lock_names_the_bytes(lock: Lock, name: str,
                          measured: Optional[str]) -> bool:
     """`may_replace`'s second clause: are these bytes what the lock names?
@@ -1353,6 +1390,9 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
     notes: List[Finding] = []
     attributable = record.state == PRESENT
     expected = lock.state == PRESENT
+    # Bound once: every sentence below that says what a next run does is only
+    # true where a next run happens. See `when_the_hook_runs`.
+    but_here = when_the_hook_runs(surface)
 
     for name in names:
         origin = origins[name].kind
@@ -1372,8 +1412,9 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 continue
             if in_lock and lock_names_the_bytes(
                     lock, name, digest_skill_dir(skills_dir / name)):
-                notes.append(_observed("bytes-are-the-locked-ones", origin,
-                                       name, THE_BYTES_THE_LOCK_NAMES))
+                notes.append(_observed(
+                    "bytes-are-the-locked-ones", origin, name,
+                    THE_BYTES_THE_LOCK_NAMES + but_here))
             elif in_lock and origin == UNATTRIBUTED:
                 findings.append(_observed(
                     "hand-placed-over-locked", origin, name,
@@ -1386,7 +1427,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "delivery — including the project-collision path, which "
                     "the hook reaches only after deciding it may replace this "
                     "directory. Move it out of the store if you want the "
-                    "bundle's copy instead."))
+                    "bundle's copy instead." + but_here))
             elif in_lock:
                 # UNKNOWN and locked, and the bytes are not the ones the lock
                 # names. Both of the clauses that would let the hook overwrite
@@ -1405,7 +1446,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "accusation: it is the delivery consequence, which holds "
                     "whoever the answer turns out to be. Move the directory "
                     "out of the store and the next run installs the locked "
-                    "copy."))
+                    "copy." + but_here))
             elif origin == UNATTRIBUTED:
                 findings.append(_observed(
                     "untracked", origin, name,
@@ -1468,7 +1509,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             # left to fall through: there the record, the lock and the disk all
             # agree, and a note on every healthy locked skill is noise.
             notes.append(_observed("bytes-are-the-locked-ones", HOOK, name,
-                                   THE_BYTES_THE_LOCK_NAMES))
+                                   THE_BYTES_THE_LOCK_NAMES + but_here))
         elif in_lock and integrity in (EDITED, UNMEASURABLE):
             findings.append(_observed(
                 f"{integrity}-and-locked", HOOK, name,
@@ -1476,7 +1517,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 f"{HOOK_REFUSAL} Nothing here is lost; what stops is this "
                 f"skill's updates. Restore the bytes the record vouches for, "
                 f"or move the directory out of the store, and the next run "
-                f"installs the locked copy."))
+                f"installs the locked copy.{but_here}"))
         elif in_lock and integrity == ARTEFACTS_ONLY:
             extra = dropped_files(skills_dir / name)
             findings.append(_observed(
@@ -1490,7 +1531,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 f"locked digest nor the recorded one. {HOOK_REFUSAL} Delete "
                 f"those files and the next run installs normally. Running a "
                 f"skill's own test suite from inside the installed copy gets "
-                f"you here."))
+                f"you here.{but_here}"))
         elif in_lock:
             continue
         elif not in_scope:
@@ -1513,7 +1554,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 f"it in place and degrades its verdict for as long as that holds "
                 f"— but what preserves it is the MISMATCH, not having left the "
                 f"lock: restore the original bytes and the next run removes it. "
-                f"Move it out of the store to keep it."))
+                f"Move it out of the store to keep it.{but_here}"))
         elif integrity == ARTEFACTS_ONLY:
             extra = dropped_files(skills_dir / name)
             findings.append(_observed(
@@ -1528,7 +1569,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 f"happen. That run's `skills:` verdict names it after "
                 f"`DEGRADED`, as `no longer in the lock left in place, edited "
                 f"since install`. Delete those files and the next run cleans "
-                f"it up."))
+                f"it up.{but_here}"))
         else:
             notes.append(_observed(
                 "stale", HOOK, name,
@@ -1536,7 +1577,8 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 "bundle are still declared — the next bootstrap removes it. "
                 "Unless AGENTSKILLS_BUNDLE narrows that run away from its "
                 "bundle, which this cannot see from here: a narrowed run claims "
-                "authority over one bundle and leaves the rest alone."))
+                "authority over one bundle and leaves the rest alone." +
+                but_here))
 
     on_disk = set(names)
     # An unreadable store is not an empty one: "declared by the lock and not in
@@ -1636,7 +1678,8 @@ def _cause(integrity: str) -> str:
             "ones the hook installed,")
 
 
-def record_findings(record: Record, record_path: Path) -> List[Finding]:
+def record_findings(record: Record, record_path: Path,
+                    surface: str = DURABLE) -> List[Finding]:
     """What the record's own state costs, when it costs anything.
 
     An absent record is NOT one of these. On a durable machine it is exactly
@@ -1656,7 +1699,8 @@ def record_findings(record: Record, record_path: Path) -> List[Finding]:
             "Start one clean session. If it is still like this afterwards the run "
             "never reached the rewrite — the record is written last, after the "
             "lock read, the git probe and the fetch — so read that session's "
-            "`skills:` verdict, which names what stopped it."))
+            "`skills:` verdict, which names what stopped it." +
+            when_the_hook_runs(surface)))
     if record.skipped:
         findings.append(Finding(
             "record-entries-skipped", str(record_path),
@@ -1888,7 +1932,8 @@ def hook_findings(project_dir: Path, here: bool, user: bool,
         f"{UNREADABLE_LINKS} See docs/decisions/0005.")], []
 
 
-def lock_findings(lock: Lock, lock_path: Path) -> List[Finding]:
+def lock_findings(lock: Lock, lock_path: Path,
+                  surface: str = DURABLE) -> List[Finding]:
     """A lock the hook refuses is the loudest delivery failure there is.
 
     An ABSENT lock is not a finding: a machine with no lock is one this script
@@ -1901,13 +1946,15 @@ def lock_findings(lock: Lock, lock_path: Path) -> List[Finding]:
             f"the hook's lock reader refuses this file ({lock.reason}), so it "
             f"installs nothing from it at all — every session start reports "
             f"DEGRADED and the store keeps whatever it already had. Regenerate "
-            f"it with scripts/generate_skills_lock.py.")]
+            f"it with scripts/generate_skills_lock.py."
+            f"{when_the_hook_runs(surface)}")]
     if lock.state == UNREADABLE:
         return [Finding(
             "lock-unreadable", str(lock_path),
             "the file is there and is not valid JSON, so the hook cannot read "
             "it either: it installs nothing and reports DEGRADED at every "
-            "session start. Regenerate it with scripts/generate_skills_lock.py.")]
+            "session start. Regenerate it with scripts/generate_skills_lock.py."
+            + when_the_hook_runs(surface))]
     return []
 
 
@@ -2254,7 +2301,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             skills_dir, names, record, lock, origins, account=account,
             repo_owned=repo_owned, store_state=store_state, surface=surface[0])
         tagged = [finding._replace(lock=str(lock_path))
-                  for finding in lock_findings(lock, lock_path) + findings]
+                  for finding in lock_findings(lock, lock_path, surface[0])
+                  + findings]
         results.append(LockResult(
             lock_path, lock, rows, tagged,
             [note._replace(lock=str(lock_path)) for note in notes]))
@@ -2273,7 +2321,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         hook_raised
         + shadow_raised
         + store_findings(store_state, skills_dir)
-        + record_findings(record, record_path)
+        + record_findings(record, record_path, surface[0])
         + [finding for result in results for finding in result.findings])
     notes = dedupe(hook_noted
                    + shadow_noted
