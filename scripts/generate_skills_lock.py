@@ -740,6 +740,87 @@ def parse_source_repo(spec: str) -> Tuple[str, str]:
     return key.strip(), path.strip()
 
 
+def parse_repin_source(spec: str) -> Tuple[str, str]:
+    """Parse `--repin-source '<OWNER/REPO>@[<ref>]'`. Empty ref = that source's HEAD.
+
+    Deliberately NOT `parse_source`, and the omissions are the point: bundles
+    and layout are the lock's IDENTITY, so they stay inherited and are not
+    expressible here at all. A flag that could restate them would be `--source`
+    under another name, and `--source` alongside `--repin` is an error for a
+    reason this repo has already been bitten by.
+
+    `rpartition('@')` for the same reason `parse_source` uses it: a `file://`
+    registry carries colons, not '@', so the registry ends at the LAST '@'.
+    """
+    registry, sep, ref = spec.rpartition("@")
+    if not sep:
+        raise GeneratorError(
+            f"--repin-source {spec!r}: expected '<OWNER/REPO>@[<ref>]' "
+            "(empty ref = advance to that source's HEAD)"
+        )
+    registry = validate_registry(registry, f"--repin-source {spec!r}")
+    return registry, (validate_ref(ref, f"--repin-source {spec!r}") if ref else "")
+
+
+def _apply_repin_sources(
+    extras: Sequence[dict],
+    specs: Sequence[str],
+    repo: Path,
+    primary_registry: str,
+    overrides: Dict[str, str],
+) -> List[dict]:
+    """Merge --repin-source pins into the INHERITED array. Never adds, never drops.
+
+    Merge by registry KEY, never replace the array: that distinction is the
+    whole difference between this flag and `--source`, which took precedence
+    over the inherited `sources` and dropped every registry the command line
+    did not repeat. A source this flag does not name comes back by reference,
+    so it serializes byte-identically.
+
+    ADDING a source is refused rather than allowed as a convenience — it
+    changes what the lock means, which is a plain generate's decision — and so
+    is naming the primary, whose pin is what `--ref` (or a bare `--repin`)
+    advances.
+    """
+    wanted: Dict[str, str] = {}
+    for spec in specs:
+        reg, ref = parse_repin_source(spec)
+        if reg in wanted:
+            raise GeneratorError(f"--repin-source names {reg} twice; one pin per source")
+        wanted[reg] = ref
+    known = {source["registry"] for source in extras}
+    for reg in wanted:
+        if reg == primary_registry:
+            raise GeneratorError(
+                f"--repin-source {reg} is this lock's PRIMARY registry, not a federated "
+                "source; the primary's pin is what --ref (or bare --repin) advances"
+            )
+        if reg not in known:
+            raise GeneratorError(
+                f"--repin-source {reg} is not a source this lock federates "
+                f"({', '.join(sorted(known)) or 'none'}); ADDING a source changes what the "
+                "lock means and is a plain generate, not a re-pin"
+            )
+    merged: List[dict] = []
+    for source in extras:
+        ref = wanted.get(source["registry"])
+        if ref is None:
+            merged.append(source)            # untouched, byte-identical
+            continue
+        path = source_checkout(repo, source, overrides)
+        if not path.is_dir():
+            raise GeneratorError(
+                f"{source['registry']}: no checkout at {path} — clone it there, or point "
+                f"at it with --source-repo '{','.join(source['bundles'])}=<path>'"
+            )
+        # Resolved HERE, so the literal `HEAD` can never reach the extras array
+        # and be written into a lock: an extra source has no `generated_from` to
+        # record a resolution in, so an unresolved ref there is the one unpinned
+        # half of a document whose whole purpose is pinning.
+        merged.append({**source, "ref": resolve_ref(path, ref or "HEAD")})
+    return merged
+
+
 def source_checkout(primary_repo: Path, source: dict, overrides: Dict[str, str]) -> Path:
     """Where this source's git checkout lives on this machine.
 
@@ -1456,6 +1537,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "where the new pin and every digest are read from. Refuses to "
                              "create a lock that does not exist yet: there is no identity to "
                              "inherit, and choosing one is a plain generate.")
+    parser.add_argument("--repin-source", metavar="'OWNER/REPO@[REF]'", action="append",
+                        default=None,
+                        help="with --repin, advance the pin of ONE federated source the "
+                             "lock ALREADY names. An empty REF means that source's HEAD. "
+                             "Repeatable, one per source. It merges by registry key, so it "
+                             "can never add, drop or reorder a source — which is what "
+                             "separates it from --source, and why --source stays an error "
+                             "alongside --repin. Bundles and layout are the lock's identity "
+                             "and are not expressible here; they stay inherited.")
     parser.add_argument("--digest", metavar="DIR", default=None,
                         help="print the sha256 digest of one skill directory and exit "
                              "(the bootstrap hook's integrity check calls this)")
@@ -1497,6 +1587,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "decided."
             )
 
+    # Deliberately NOT in the `overriding` list above. --repin-source merges by
+    # registry key and never replaces the inherited array, so folding it in
+    # would make the one flag that can fix a federated pin an error alongside
+    # the only flag it means anything with.
+    if args.repin_source and not args.repin:
+        parser.error(
+            "--repin-source advances a pin the lock already carries, so it only "
+            "means anything alongside --repin; a plain generate states its "
+            "sources with --source.")
     if args.only and not args.check_current:
         parser.error("--only scopes --check-current; pass it alongside that flag.")
     if args.only and (args.check or args.check_format):
@@ -1624,6 +1723,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         extras = []
     overrides = dict(parse_source_repo(spec) for spec in args.source_repo or [])
+    # Guarded on BOTH flags, which is not redundant with the parser.error above:
+    # the two fail differently and that is the point. The parser.error is the
+    # exit-2 contract a test pins; this guard is what makes "--repin-source
+    # mutated a plain generate's sources" unrepresentable even if a later editor
+    # moves the parse. It has to sit after `overrides` is built, because
+    # resolving an empty ref goes through source_checkout's override lookup.
+    if args.repin and args.repin_source:
+        extras = _apply_repin_sources(extras, args.repin_source, repo, registry, overrides)
 
     if verifying:
         # Seeded with --check-format's verdict, printed above: the exit code is
