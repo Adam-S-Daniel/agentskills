@@ -440,6 +440,28 @@ ref for review, not the setting, to catch.
   (`python3 -m pytest <paths> -q`), never the file, and require the test COUNT
   back beside the exit code: a count is the cheapest proof that anything ran at
   all.
+- **A working subagent OWNS the tree — do not commit or push under it.** While a
+  subagent is editing, the branch is its workspace, not yours. Push into it and
+  the agent's own next `git commit --amend` — correct from where it stands, since
+  it has no way to know the commit went public — rewrites a commit that is now
+  published, and the branch diverges. Recovery is not a force-push: reset to the
+  published tip, re-apply the delta as working-tree changes, and commit it fresh
+  so history stays append-only. A working agent's `git checkout -- <file>` will
+  also discard uncommitted edits it did not make, including yours. (Real
+  incident, 2026-08-22: a checkpoint push landed mid-flight, the agent amended,
+  and unwinding it cost a reset-and-reapply.) Wait for the agent to report, then
+  push — a clean `git status` plus a recorded result is the signal, not elapsed
+  time. Note that a "you have uncommitted changes, please commit and push" stop
+  hook cannot see that a subagent holds the tree, so it will advise exactly this
+  mistake; say why you are declining rather than complying by reflex.
+- **A subagent that goes quiet is not working — check activity, not the clock.**
+  Its transcript file's mtime is the real signal; a run journal only writes on
+  start and finish, so silence there is expected and proves nothing. Decide the
+  staleness threshold in advance, and write the fallback INTO the check-in: what
+  to verify by hand if the agent never reports. An indefinite wait on a dead
+  agent is the quiet way a gate stops being a gate. (Real incident, 2026-08-22: a
+  verification agent wrote for five minutes, died, and left a run looking
+  in-flight for an hour.)
 - Don't assume the subagent sees this file: general-purpose and custom
   subagents receive the full memory hierarchy (imports included), but
   Explore/Plan-type agents and SDK harnesses with `settingSources: []` skip
