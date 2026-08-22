@@ -376,12 +376,26 @@ def _splice(block):
     `drift=$(` line it pins the constant read to sits above the `case`, and
     `code(body)` has to see real surroundings or the assertion would be
     passing against a fixture rather than against the step.
+
+    THE BLOCK IS FOUND WITH THE SAME HELPER THE SCANNER USES, and that is the
+    whole reason this is not two `lines.index` calls. Anchoring on
+    `case "$verdict" in` and `esac` as lines of their own re-imposes exactly
+    the line shape `_case_statuses` was taught to stop requiring - so applying
+    a reformat this file CERTIFIES as invisible, `opener-shares-its-line`
+    among them, to the real workflow made every fixture in `_ARMS_OK` and
+    `_ARMS_RED` die inside this function with a bare `ValueError` naming a
+    string. The scanner under test passed; the harness that feeds it did not,
+    at a blast radius larger than the false red the scanner was fixed for. A
+    harness may not be pickier than the thing it is testing.
     """
     body = _audit_body()
-    lines = body.splitlines()
-    start = lines.index('case "$verdict" in')
-    end = lines.index("esac", start)
-    return "\n".join(lines[:start] + block.splitlines() + lines[end + 1:]) + "\n"
+    text, mask = _shell_scan(body)
+    opener, _, closer = _case_block(
+        text, mask, _CASE_VERDICT,
+        "the audit step's `case \"$verdict\" in` is no longer a command this "
+        "fixture builder can find, so it cannot swap the block out for one",
+    )
+    return body[:opener.start()] + block + body[closer.end():]
 
 
 # The shipped `case`, reduced to its four arms: the fixtures below are this
@@ -513,6 +527,33 @@ Check that Routine and the eval-results branch." ;;''')),
           "  # skills-evals' verdict vocabulary is what this arm tracks\n"
           "  not-yet-bootstrapped)")),
 ]
+
+# REFORMATS OF THE WHOLE STEP, not of a fixture, and they exist for `_splice`
+# rather than for the scanner. `_splice` is what builds every block above out
+# of the real body, so a shape IT cannot read takes out the entire set at once
+# and does it with a message about a missing string rather than about the
+# workflow. Each of these is `bash -n` clean and says exactly what the shipped
+# step says; the first is `opener-shares-its-line` applied to the real file
+# instead of to a fixture.
+def _indent_the_case_block(body):
+    head, _, rest = body.partition('case "$verdict" in\n')
+    block, _, tail = rest.partition("\nesac\n")
+    lines = ['case "$verdict" in'] + block.splitlines() + ["esac"]
+    return (head + "if true; then\n"
+            + "\n".join("  " + l for l in lines)
+            + "\nfi\n" + tail)
+
+
+_BODY_REFORMATS = [
+    ("opener-shares-its-line",
+     lambda b: b.replace('case "$verdict" in\n', 'case "$verdict" in ', 1)),
+    ("trailing-comment-on-the-opener",
+     lambda b: b.replace(
+         'case "$verdict" in\n',
+         'case "$verdict" in  # dispatch on what skills-evals said\n', 1)),
+    ("the-whole-block-indented", _indent_the_case_block),
+]
+
 
 # The other direction, and the reason the set above is not just a licence to
 # accept anything: these are real divergences and they must still red.
@@ -1634,6 +1675,44 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         monkeypatch.setattr(type(self), "_body", lambda self: body)
         with pytest.raises(AssertionError):
             self.test_the_case_block_names_every_status_the_module_knows()
+
+    @pytest.mark.parametrize("name, reformat", _BODY_REFORMATS,
+                             ids=[n for n, _ in _BODY_REFORMATS])
+    def test_the_fixture_builder_reads_the_case_the_way_the_scanner_does(
+            self, tmp_path, monkeypatch, name, reformat):
+        """`_splice` may not be pickier about shape than the scanner it feeds.
+
+        The set above certifies that reformatting the `case` block changes
+        nothing this test can see. That certificate is worthless if applying
+        the same reformat to the SHIPPED file breaks the harness instead of
+        the scanner - the red just moves, and it moves somewhere with a worse
+        message, because a `ValueError` naming a string says nothing about the
+        workflow.
+
+        So the reformats here are applied to the real step body and `_splice`
+        has to go on locating the block. It found the block by `lines.index`
+        once, which required the opener and the `esac` to be lines reading
+        exactly that text; every case here defeats that and none of them
+        defeats bash.
+        """
+        real = _audit_body()
+        moved = reformat(real)
+        assert moved != real, (
+            f"the `{name}` reformat left the body unchanged, so this case "
+            f"proves nothing about `_splice`"
+        )
+        self._bash_n(tmp_path, moved, name)
+        monkeypatch.setitem(globals(), "_audit_body", lambda: moved)
+        spliced = _splice(_ARMS_BASE)
+        assert _ARMS_BASE in spliced, (
+            f"`_splice` did not put the fixture block into a body reformatted "
+            f"by `{name}`"
+        )
+        assert 'case "$verdict" in' not in spliced.replace(_ARMS_BASE, "", 1), (
+            f"`_splice` left the reformatted original `case` behind as well "
+            f"as the fixture block, so the spliced body holds two of them"
+        )
+        self._bash_n(tmp_path, spliced, name)
 
     def test_the_regression_set_did_not_shrink(self):
         """The one count in this change that a test holds.
