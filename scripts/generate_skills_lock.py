@@ -388,6 +388,20 @@ _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _REF_RE = re.compile(r"[A-Za-z0-9._/+:@-]+")
 _URL_RE = re.compile(r"(?:https|file)://[A-Za-z0-9._~:/?#@%!$&()*+,;=\[\]-]+")
 _CONTROL_RE = re.compile(r"[\s\x00-\x1f\x7f]")
+# A ref that IDENTIFIES a commit, as against `_REF_RE`, which only says a ref
+# is safe to hand to git and the hook. The distinction is load-bearing on the
+# --repin path alone: both identity probes there prove "this checkout is the
+# registry the lock names" by asking git whether the checkout contains the
+# commit the lock already pins, and that proves nothing at all for a ref that
+# is not a commit — `main^{commit}` resolves in ANY clone with a main branch.
+# The two sides differ in how a non-sha pin GETS there, measured rather than
+# assumed: a source's ref is resolved before it is written (`--source
+# 'b=reg@main:skills'` lands in the lock as a 40-hex sha), so a branch name
+# there is hand-written. The PRIMARY's is not — `--ref main` is written
+# verbatim, `"ref": "main"`, at exit 0 — so that half is reachable without
+# editing a lock at all. Either way what is on disk is not a pin, and --repin
+# is the one mode that treats it as one.
+_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 # Shared with the hook the same way, and by the same test: the number is stated
 # once per file, byte-identically, and drift between the two is an alarm rather
 # than a discovery. The hook's reason for the cap is that each source is fetched
@@ -825,6 +839,33 @@ def repin_source_blocker(extras: Sequence[dict], registry: str) -> Optional[str]
             "restate the whole array with a plain generate, which is where identity is "
             "decided."
         )
+    # A source pinned at something that is not a commit cannot be re-pinned
+    # from an unproven clone, because the pin is the whole proof. `validate_ref`
+    # accepts a BRANCH name in a source's ref, and while this generator always
+    # RESOLVES a source's ref before writing it (measured: `--source
+    # 'b=reg@main:skills'` lands as a 40-hex sha, unlike the primary's `--ref`),
+    # a hand-written lock can carry `"ref": "main"` — and `main^{commit}`
+    # resolves in a fork, in a same-named
+    # repo under another owner, in any clone at all. Measured before this
+    # refusal existed: with the sibling `../cms-platform` replaced by a wholly
+    # different repository that also has `main`, `--repin --repin-source` wrote
+    # the impostor's HEAD under the named registry at exit 0.
+    #
+    # Refused rather than resolved-and-hoped, because the alternative repairs
+    # the lock's ref by writing a commit nobody has verified belongs to that
+    # registry — which is the failure the probe exists to prevent, arriving
+    # through the repair. `test_repin_source_refuses_a_source_pinned_at_a_branch`
+    # is the measurement.
+    if matched and not _COMMIT_SHA_RE.fullmatch(matched[0]["ref"]):
+        return (
+            f"this lock pins that source at {matched[0]['ref']!r}, which is not a commit "
+            "sha — and the commit the lock pins is the ONLY thing that proves the "
+            "checkout this would re-pin from is that registry at all. A branch name "
+            "resolves in any clone, so re-pinning against one would write whatever some "
+            "unverified directory is sitting on. Restate that source at the commit it is "
+            "actually on with a plain generate (--source "
+            f"'{','.join(matched[0]['bundles'])}={registry}@<sha>:<layout>'), then advance it."
+        )
     return None
 
 
@@ -913,13 +954,23 @@ def _apply_repin_sources(
         # written under the right registry's name at exit 0, and --check is
         # green afterwards because it re-derives from that same wrong clone.
         # The pin the lock ALREADY carries is the proof: a checkout that is
-        # this registry has that commit.
+        # this registry has that commit. That sentence is only true because
+        # repin_source_blocker has already refused a source whose pin is not a
+        # commit sha — `main^{commit}` resolves in any clone with a main
+        # branch, so a branch-name pin proves nothing and this probe would pass
+        # an impostor. The two belong together; neither is the guard alone.
         #
-        # Every source this flag does NOT name gets the equivalent check for
-        # free downstream — plan_sources resolves its inherited ref in this
-        # same clone and fails there. The named source is precisely the one
-        # that loses it, because its ref is replaced before plan_sources sees
-        # it. This restores the guard rather than adding one.
+        # Every source this flag does NOT name is probed the same way by
+        # accident downstream, for a sha pin: plan_sources resolves its
+        # inherited ref in this same clone and fails there. That accident does
+        # NOT extend to a branch-name pin, which resolves anywhere — an unnamed
+        # source carrying one is re-resolved and can advance against an
+        # unproven clone, which is pre-existing behaviour this flag neither
+        # introduces nor repairs
+        # (`test_an_unnamed_source_with_a_branch_ref_is_re_resolved`). The
+        # NAMED source is what loses even the sha half of that accident,
+        # because its ref is replaced before plan_sources sees it. This
+        # restores the guard rather than adding one.
         if _git(path, "cat-file", "-e", f"{source['ref']}^{{commit}}").returncode != 0:
             raise GeneratorError(
                 f"{path} does not contain {source['ref']}, the commit this lock pins for "
@@ -1846,11 +1897,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # that commit. Deliberately checked even when --ref is given, because
         # the question is whether this clone is the registry, not which commit
         # was asked for.
+        #
+        # Which needs the pin to BE a commit, and is why the charset check
+        # below is not enough: `validate_ref` accepts a branch name, and
+        # `main^{commit}` resolves in every clone that has a main branch, so a
+        # branch-name pin turns the probe into a formality that any impostor
+        # passes. Reachable without a hand edit, unlike the source-side half in
+        # repin_source_blocker: `--ref main` is written to the lock verbatim
+        # (measured — a plain generate with it reports "from <registry>@main"
+        # and the file reads `"ref": "main"`), while a source's ref is resolved
+        # to a sha before it is written. So this refuses a lock that a
+        # supported invocation produced, and refuses it for what it is: not a
+        # pin, and therefore no proof of anything. Restating it as one is a
+        # plain generate's decision, not a re-pin's.
         pinned = existing.get("ref")
         if not isinstance(pinned, str) or not pinned:
             raise GeneratorError(
                 f"{output}: 'ref' is missing or unusable ({pinned!r}); --repin advances "
                 "an existing pin and this lock has none to advance."
+            )
+        if not _COMMIT_SHA_RE.fullmatch(pinned):
+            raise GeneratorError(
+                f"{output} pins '{registry}' at {pinned!r}, which is not a commit sha — "
+                "and the commit the lock pins is the ONLY thing that proves the clone at "
+                f"{repo} is that registry. A branch name resolves in any clone, so "
+                "re-pinning against one would write whatever this directory is sitting "
+                "on. Restate the pin at the commit it is actually on with a plain "
+                "generate (--registry / --ref / --bundles), then advance it."
             )
         if _git(repo, "cat-file", "-e", f"{pinned}^{{commit}}").returncode != 0:
             raise GeneratorError(

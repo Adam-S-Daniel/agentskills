@@ -3274,6 +3274,12 @@ def test_repin_source_refuses_a_checkout_that_is_not_the_source_it_names(
     before plan_sources sees it, so the wrong clone's HEAD is written under the
     right registry's name at exit 0. The commit the lock already pins is the
     probe, exactly as it is for the primary.
+
+    Which is proof only while the pin IS a commit: `main^{commit}` resolves in
+    any clone with a main branch, so the probe passes an impostor for a
+    branch-name pin and `repin_source_blocker` refuses that shape before this
+    check is reached. `test_repin_source_refuses_a_source_pinned_at_a_branch`
+    is the other half and neither covers the other.
     """
     primary, _, extra, extra_sha = federated
     out = tmp_path / "skills.lock"
@@ -3294,6 +3300,88 @@ def test_repin_source_refuses_a_checkout_that_is_not_the_source_it_names(
     assert "is not that registry" in proc.stderr, proc.stderr
     assert out.read_text(encoding="utf-8") == before
     assert decoy_sha not in out.read_text(encoding="utf-8")
+
+
+def test_repin_source_refuses_a_source_pinned_at_a_branch(federated, tmp_path):
+    """A branch name is not a pin, so it cannot be the identity probe either.
+
+    The probe asks git whether the checkout contains the commit the lock pins.
+    `main^{commit}` resolves in ANY clone with a main branch, so for a
+    branch-name pin the probe is a formality every impostor passes — and this
+    is the shape the generator's own docstrings establish as representable
+    (`validate_ref` accepts it; a source carrying one is re-resolved).
+
+    Measured before the refusal: with the sibling replaced by a wholly
+    different repository that also has `main`, this same command exited 0 and
+    wrote the impostor's HEAD under the named registry — the identity hole the
+    probe was added to close, surviving for one lock shape.
+    """
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["sources"][0]["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    before = out.read_text(encoding="utf-8")
+
+    # A DIFFERENT repository at the same sibling path. Its `main` resolves; it
+    # has nothing whatever to do with the registry the lock names.
+    shutil.rmtree(extra)
+    impostor_sha = make_registry(extra, {"cms-platform/deploy": SKILL_C}, layout="skills")
+    assert impostor_sha != extra_sha
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "not a commit sha" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+    assert impostor_sha not in out.read_text(encoding="utf-8")
+
+
+def test_repin_refuses_a_primary_pinned_at_a_branch(registry, tmp_path):
+    """The same rule on the primary, where no hand edit is needed to get there.
+
+    `--ref main` is written to the lock verbatim, so this shape comes out of a
+    supported invocation. --repin's own identity probe then asks whether
+    `--repo` contains the pinned "commit" — which any clone with a main branch
+    answers yes to, impostor or not.
+    """
+    root, _sha = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "--registry", "Acme/registry",
+                         "--ref", "main", "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["ref"] == "main"
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "not a commit sha" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_a_source_ref_is_resolved_before_it_is_written_and_a_primarys_is_not(
+        federated, tmp_path):
+    """The asymmetry the two refusals above are worded around, pinned.
+
+    Both comments state how a non-sha pin REACHES a lock — hand-written for a
+    source, `--ref <branch>` for the primary — and that difference is exactly
+    the kind of claim that rots silently. If either half changes, this goes red
+    and the prose has to be re-derived rather than left standing.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    proc = run_generator(
+        "--repo", str(primary), "--registry", "Acme/registry",
+        "--ref", "main", "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@main:skills",
+        "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    document = json.loads(out.read_text(encoding="utf-8"))
+    assert document["ref"] == "main"
+    assert re.fullmatch(r"[0-9a-f]{40}", document["sources"][0]["ref"]), document["sources"]
 
 
 def test_repin_source_with_a_missing_checkout_leaves_the_lock_untouched(
