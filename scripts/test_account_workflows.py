@@ -60,6 +60,36 @@ def code(body):
     )
 
 
+def _script(tmp_path, text, name="step.sh"):
+    """The step body as a FILE, which is how the runner delivers it.
+
+    NOT `bash -c "<body>"`. Two reasons, and the second one cost a red
+    pytest-windows run.
+
+    Fidelity first: GitHub runs a `run:` block as `/usr/bin/bash -e {0}`, where
+    `{0}` is a script file it wrote to disk. A `-c` string is a different
+    execution mode - `$0` means something else, and the body arrives through
+    the command line rather than a file - so a harness built on `-c` was never
+    running the step the way production does.
+
+    And on Windows it does not survive the trip. Python's `list2cmdline` quotes
+    an argument by MSVC CRT rules, escaping each embedded `"` as `\"`; Git
+    Bash's `bash.exe` then re-parses that raw Windows command line by MSYS2
+    rules, which are not the same rules. This step body carries dozens of
+    double quotes inside its `::warning::` strings, and the two conventions
+    disagreed often enough to hand bash a mangled script: 18 tests failed on
+    pytest-windows with `syntax error near unexpected token 'newline'` pointing
+    at a `case` arm that Linux `bash -n` parses cleanly. A file has no command
+    line to mangle.
+
+    Forward slashes for the same reason the GITHUB_OUTPUT path uses them: Git
+    Bash reads a Windows path's backslashes as escapes.
+    """
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return str(path).replace("\\", "/")
+
+
 def require_bash():
     """bash, or a hard FAILURE - deliberately not a skip.
 
@@ -486,12 +516,16 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # the flag that decides whether an unguarded failure aborts the step,
         # so a command that fails soft here would abort there and this suite
         # would report the opposite of what the runner does.
+        # `verdict` is $1 of the SCRIPT, so it is passed straight after the
+        # path - there is no `-c` placeholder $0 to absorb an argument.
+        script = _script(
+            tmp_path,
+            f"set -uo pipefail\nannotated={annotated}\n"
+            f"results_ok={results_ok}\nverdict=$1\n" + self._tail(),
+            name="tail.sh",
+        )
         proc = subprocess.run(
-            [bash, "-e", "-c",
-             f"set -uo pipefail\nannotated={annotated}\n"
-             f"results_ok={results_ok}\nverdict=$1\n"
-             + self._tail(),
-             "_", verdict],
+            [bash, "-e", script, verdict],
             capture_output=True, text=True, env=env, cwd=str(REPO),
         )
         assert proc.returncode == 0, proc.stderr
@@ -566,8 +600,9 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "FAIL_HARNESS": "yes" if "harness" in unreachable else "no",
             "FAIL_RESULTS": "yes" if "results" in unreachable else "no",
         }
+        script = _script(tmp_path, self.STUBS + self._body())
         proc = subprocess.run(
-            [bash, "-e", "-c", self.STUBS + self._body()],
+            [bash, "-e", script],
             capture_output=True, text=True, env=env, cwd=str(workspace),
         )
         assert proc.returncode == 0, (
