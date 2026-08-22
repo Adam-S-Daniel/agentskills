@@ -1436,7 +1436,15 @@ def _suite():
     lambda lock: lock.pop("bundles"),
     lambda lock: lock.update(bundles=[]),
     lambda lock: lock.update(registry="not a registry"),
-], ids=["no-bundles", "empty-bundles", "bad-registry"])
+    lambda lock: lock["skills"].update({"adam/alpha": "not-a-digest"}),
+    lambda lock: lock["skills"].update({"adam/alpha": 7}),
+    lambda lock: lock["skills"].update({"adam/synced": "0" * 64}),
+    lambda lock: lock["skills"].update({"adam/alpha/extra": "0" * 64}),
+    lambda lock: lock["skills"].update({"nobody/gamma": "0" * 64}),
+    lambda lock: lock.update(skills=["adam/alpha"]),
+], ids=["no-bundles", "empty-bundles", "bad-registry", "bad-digest",
+        "non-string-digest", "synced-key", "three-segment-key",
+        "unclaimed-bundle", "skills-not-an-object"])
 def test_a_lock_this_rejects_is_one_the_hook_rejects_too(tmp_path, mutate):
     """The binding for the SECOND copy of the hook's lock validation in this file.
 
@@ -1465,6 +1473,59 @@ def test_a_lock_this_rejects_is_one_the_hook_rejects_too(tmp_path, mutate):
     assert "could not read" in verdict, verdict
     # And nothing was installed, which is the consequence the finding states.
     assert not (tmp_path / "home" / ".claude" / "skills" / "alpha").exists(), verdict
+
+
+@pytest.mark.parametrize("mutate, cause", [
+    (lambda skills: skills.update({"adam/alpha": "not-a-digest"}),
+     "has no sha256 digest"),
+    (lambda skills: skills.update({"adam/synced": "0" * 64}),
+     "account-sync directory"),
+], ids=["bad-digest", "synced-key"])
+def test_a_lock_the_hook_refuses_outright_reds_naming_the_real_cause(
+        tmp_path, capsys, mutate, cause):
+    """The whole-lock gate, measured END TO END against the real hook.
+
+    Both shapes were reported as healthy locks before this. The malformed digest
+    exited 0 with `FINDINGS (0)` and `2 skill(s) declared` over a store the real
+    hook refuses on every session start; the `synced` key exited 1 with a
+    `[missing] synced` whose four-cause list did not contain the actual cause,
+    and said nothing at all about alpha and beta, whose delivery had stopped.
+
+    Driven through `_run_hook` rather than through the extracted lock reader,
+    because the defect is not in either parser: it is that the doctor had no
+    model of a gate that runs BEFORE the install loop, and only a whole hook run
+    shows the store the gate leaves behind.
+    """
+    suite = _suite()
+    root = tmp_path / "registry"
+    sha = suite.make_registry(root, {"adam/alpha": suite.SKILL_A,
+                                     "adam/beta": suite.SKILL_B})
+    project = tmp_path / "project"
+    lock_path = suite.make_project(project, root, sha)
+    home = tmp_path / "home"
+
+    data = json.loads(lock_path.read_text(encoding="utf-8"))
+    mutate(data["skills"])
+    lock_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = suite._verdict(proc)
+    assert "DEGRADED" in verdict and "could not read" in verdict, verdict
+    skills = home / ".claude" / "skills"
+    assert not (skills / "alpha").exists(), verdict
+    assert not (skills / "beta").exists(), verdict
+
+    code, out = run(skills, lock_path, capsys, project_dir=project)
+    text = flat(out)
+    assert code == 1, text
+    assert "[lock-rejected]" in text, text
+    assert cause in text, text
+    # And it does not go on to judge a store against an expectation the hook
+    # never applied: no name is called missing, and no count of declared skills
+    # is offered for a lock nothing was read out of.
+    assert "[missing]" not in text, text
+    assert "skill(s) declared" not in text, text
 
 
 def test_the_doctor_reads_the_record_the_hook_actually_writes(tmp_path):
@@ -1702,9 +1763,16 @@ def test_a_primary_listing_one_bundle_twice_is_not_a_collision(tmp_path):
     assert prov.read_lock(lock).state == prov.PRESENT
 
 
-def test_a_lock_whose_skills_are_not_a_mapping_reads_as_empty_not_a_crash(tmp_path):
-    """A hand-edited lock is the shape this has to survive; a traceback here
-    would replace the whole report."""
+def test_a_lock_whose_skills_are_not_a_mapping_is_refused_not_read_as_empty(
+        tmp_path):
+    """A hand-edited lock is the shape this has to survive, and "survive" is not
+    "read as empty": the hook exits on `'skills' must be an object`, so this lock
+    installs nothing at all. Reading it as an empty expectation reported a
+    machine with no lock rather than a machine whose lock is refused.
+
+    A traceback here would still replace the whole report, which is the other
+    half of what this pins.
+    """
     lock = tmp_path / "skills.lock"
     lock.write_text(json.dumps({
         "registry": REGISTRY_SLUG, "ref": "a" * 40, "bundles": ["adam"],
@@ -1712,8 +1780,27 @@ def test_a_lock_whose_skills_are_not_a_mapping_reads_as_empty_not_a_crash(tmp_pa
     }, indent=2) + "\n", encoding="utf-8")
 
     parsed = prov.read_lock(lock)
-    assert parsed.state == prov.PRESENT, parsed
+    assert parsed.state == prov.REJECTED, parsed
+    assert "'skills' must be an object" in (parsed.reason or ""), parsed.reason
     assert parsed.names == set(), parsed
+
+
+def test_a_null_or_empty_skills_map_is_the_hooks_no_skills_not_an_error(tmp_path):
+    """`lock.get("skills") or {}` is the hook's own line: absent, null and an
+    empty object are three spellings of "this lock declares no skills", and only
+    a TRUTHY non-object is the refusal above. Pinned because the obvious
+    tightening — `isinstance(..., dict)` on the raw value — turns every one of
+    those three into a rejected lock the hook is perfectly happy with.
+    """
+    for value in (None, {}, []):
+        raw = {"registry": REGISTRY_SLUG, "ref": "a" * 40, "bundles": ["adam"]}
+        if value is not None:
+            raw["skills"] = value
+        lock = tmp_path / "skills.lock"
+        lock.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+        parsed = prov.read_lock(lock)
+        assert parsed.state == prov.PRESENT, (value, parsed)
+        assert parsed.names == set(), (value, parsed)
 
 
 def test_two_locks_built_without_digests_cannot_share_a_mutable_default():
