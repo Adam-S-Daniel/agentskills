@@ -122,7 +122,7 @@ class _WordParens:
         return prev in _COMMENT_OPENS_AFTER
 
 
-def _uncomment(line):
+def _uncomment(line, parens=None):
     """One line of shell with a trailing `#` comment removed.
 
     Quote-aware, because the alternative is a lint that mangles the step's own
@@ -132,17 +132,30 @@ def _uncomment(line):
     a `#` inside `'...'` or `"..."` is data. A backslash escapes the next
     character everywhere except inside single quotes.
 
+    PAREN STATE IS THE CALLER'S, and that is what `parens` is for. A `$( )`
+    may span lines, so its closing `)` sits on a line whose own text holds no
+    `(` at all - and a fresh `_WordParens` per line reads that `)` as an
+    operator and cuts at the `#` after it. Measured in bash: `x=$(echo hi` /
+    `)#y` sets `x` to `hi#y`, so the `#` is data. `_shell_scan` walks a whole
+    body with ONE instance and got that right while this helper, called a
+    line at a time, deleted the `#y`; two scanners disagreeing about the same
+    bytes is the defect round 2 opened and this parameter is what closes it.
+    `code()` passes one instance for the whole body. A caller with a single
+    line and no wider context passes none and gets a fresh one.
+
     WHAT IT DELIBERATELY DOES NOT MODEL, stated so nobody reads more into it:
-    quoting is tracked per LINE, and a heredoc body is read as shell rather
-    than as its own language. A string left open at a newline, or a `#` inside
-    the Python heredoc, is therefore approximated. Both are the same
-    approximation the whole-line version already made, and both fail toward
-    dropping text rather than inventing it - which is the safe direction for
-    every assertion built on this: text that is not here cannot satisfy a
-    claim, and that is the point of the helper.
+    QUOTING is tracked per LINE - not paren state, which is now the caller's -
+    and a heredoc body is read as shell rather than as its own language. A
+    string left open at a newline, or a `#` inside the Python heredoc, is
+    therefore approximated. Both are the same approximation the whole-line
+    version already made, and both fail toward dropping text rather than
+    inventing it - which is the safe direction for every assertion built on
+    this: text that is not here cannot satisfy a claim, and that is the point
+    of the helper.
     """
     quote = None
-    parens = _WordParens()
+    if parens is None:
+        parens = _WordParens()
     i = 0
     while i < len(line):
         ch = line[i]
@@ -187,9 +200,16 @@ def code(body):
     makes no difference to who reads it.
 
     Lines that hold nothing but a comment drop out entirely, as before.
+
+    ONE `_WordParens` FOR THE WHOLE BODY, for the reason `_uncomment`'s own
+    `parens` paragraph gives: the audit step's verdict capture is a `$( )`
+    spanning twenty-odd lines, and a per-line instance reads its closing `)`
+    as an operator.
     """
+    parens = _WordParens()
     return "\n".join(
-        stripped for stripped in map(_uncomment, body.splitlines())
+        stripped for stripped in (
+            _uncomment(line, parens) for line in body.splitlines())
         if stripped.strip()
     )
 
@@ -453,7 +473,9 @@ def _model_strip_then_mask(body):
     """Comments stripped PER LINE first, then quotes masked over the whole
     text. Wrong because the per-line stripper cuts a wrapped string at a `#`
     on its continuation, taking the closing quote with it."""
-    text = "\n".join(_uncomment(l).ljust(len(l)) for l in body.split("\n"))
+    parens = _WordParens()
+    text = "\n".join(
+        _uncomment(l, parens).ljust(len(l)) for l in body.split("\n"))
     mask = list(text)
     quote, i, n = None, 0, len(text)
     while i < n:
@@ -549,7 +571,10 @@ def _strip_heredocs(body):
     so quote state cannot leak out of the heredoc into the shell around it.
     The delimiter line goes too: it is the heredoc's punctuation, not a
     command. The opener is read off `_uncomment`'s output so a `<<` inside a
-    comment cannot start one.
+    comment cannot start one - a line at a time, with no shared
+    `_WordParens`, because the loop below never feeds it the heredoc BODIES
+    and a paren state assembled from only some of a body's lines is worse
+    than none.
 
     AN OPENER WHOSE DELIMITER NEVER ARRIVES RAISES, and that is the second
     half of the fix above rather than tidiness. `_HEREDOC_OPENER` closes the
@@ -1195,6 +1220,15 @@ _COMMENT_OPENER_SCRIPTS = [
      "(( 1 ))#; echo LOUD\necho DONE\n", True),
     ("after-a-command-substitution-close",
      "x=$(echo hi)#; echo LOUD\necho DONE\n", False),
+    # THE SAME SUBSTITUTION SPREAD OVER TWO LINES, which is the shape the
+    # audit step actually ships - its verdict capture is a `$(` on one line
+    # and a `)` twenty-odd lines later. The closing line holds no `(` of its
+    # own, so a scanner that starts each line with an empty paren stack reads
+    # that `)` as an operator and cuts the line at the `#`. Nothing in this
+    # table could express it while the test below sliced ONE line out of the
+    # script; it runs `code()` over the whole script now, for that reason.
+    ("after-a-multi-line-command-substitution-close",
+     "x=$(echo hi\n)#; echo LOUD\necho DONE\n", False),
     ("after-an-arithmetic-expansion-close",
      "x=$((1+2))#; echo LOUD\necho DONE\n", False),
     ("after-a-subshell-nested-in-a-substitution",
@@ -1253,12 +1287,18 @@ class TestWhereAHashOpensAComment:
         ids=[n for n, _, _ in _COMMENT_OPENER_SCRIPTS])
     def test_this_files_scanners_agree_with_bash_about_where_a_comment_opens(
             self, name, script, opens):
-        """`_shell_scan` AND `_uncomment`, against the same table.
+        """`_shell_scan` AND `code()`, against the same table.
 
-        Both, because `code()` reads one and every `case` assertion reads the
-        other: a rule that drifted between them would leave one helper reading
-        prose as code while the other read code as prose, and the two failures
-        look nothing alike.
+        Both, because every `case` assertion reads one and `code()` is what
+        the workflow-text assertions read: a rule that drifted between them
+        would leave one helper reading prose as code while the other read
+        code as prose, and the two failures look nothing alike.
+
+        `code()` rather than `_uncomment` on the line carrying LOUD, and the
+        difference is not cosmetic. Slicing one line out asks the per-line
+        helper a question with no body around it, so no entry in the table
+        could ever express a construct that spans lines - and a `$( )` closing
+        on a later line is exactly the construct the two scanners drifted on.
         """
         text, mask = _shell_scan(script)
         assert len(text) == len(script) and len(mask) == len(script), (
@@ -1270,10 +1310,9 @@ class TestWhereAHashOpensAComment:
             f"comment {'opening' if opens else 'not opening'} there, LOUD "
             f"should be {'blanked' if opens else 'kept'} and it is not"
         )
-        line = next(l for l in script.splitlines() if "LOUD" in l)
-        assert ("LOUD" not in _uncomment(line)) == opens, (
-            f"`_uncomment` read `{name}` the other way from bash, so `code()` "
-            f"and the `case` scanners no longer agree about this shape"
+        assert ("LOUD" not in code(script)) == opens, (
+            f"`code()` read `{name}` the other way from bash, so it and the "
+            f"`case` scanners no longer agree about this shape"
         )
 
     def test_every_opener_this_file_models_is_executed_by_the_table(self):
