@@ -122,9 +122,10 @@ on disk, or in any log says which copy the model read.
 NOTE where the two copies match once CRLF is folded to LF, and a
 `shadow-copies-differ` FINDING where they do not. Both verdicts are over the
 files an UPLOAD carries — the account copy is the ZIP `zip_skill` built, so
-`__pycache__`, `.pytest_cache`, `.pyc`, `.b64`, `.venv` and `node_modules` are
-excluded from both sides, and a `diff -r` of the two directories can disagree
-with a NOTE that calls their instructions identical. Treat a match as a
+what the upload filter drops is excluded from both sides (`__pycache__`,
+`.pytest_cache`, `.pyc`, `.b64` and `node_modules` among them), and a `diff -r`
+of the two directories can disagree with a NOTE that calls their instructions
+identical. Treat a match as a
 measurement of the moment and not a guarantee — the two copies update on
 different clocks, and only the divergent case is a defect. Which channel wins
 when they disagree is an open question, not something the report answers.
