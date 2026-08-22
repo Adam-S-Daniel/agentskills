@@ -25,6 +25,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Collection, Optional, Tuple
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pytest
 
@@ -3777,6 +3779,54 @@ def _drifted_primary_and_source(tmp_path):
     return primary, out, []
 
 
+def _source_at_a_non_default_checkout(tmp_path):
+    """A federated source whose clone is NOT the sibling `../<repo-name>`.
+
+    The FLEET BUMPER's own layout, not an exotic one: bump-consumer-locks.sh
+    passes `--source-repo` for every registry it holds in BUMP_CHECKOUTS,
+    because it clones each one where it likes rather than beside the consumer.
+    Every other fixture here puts its source at the default sibling, so a
+    printed command that drops that flag runs anyway — which is how a whole
+    class of unrunnable commands survived a round whose central property is
+    that printed commands run verbatim.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "deep" / "elsewhere" / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert not (tmp_path / "cms-platform").exists(), "the default sibling must not exist"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--source-repo", f"{extra.resolve().as_uri()}={extra}",
+        "-o", str(out)).returncode == 0
+    _source_drifted(extra)
+    return primary, out, []
+
+
+def _primary_and_a_non_default_source_both_drifted(tmp_path):
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    _primary_drifted(primary)
+    return primary, out, []
+
+
+def _a_non_default_source_lock_gone_stale(tmp_path):
+    """The same layout, hand-edited so `--check` has a command to print.
+
+    `--check`'s remediation is the one that is not a `--repin`: a plain
+    generate restating the lock's whole identity, every `--source` included.
+    Every source it restates needs a checkout to read, so this is the cell
+    where a missing `--source-repo` costs the reader the whole document.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["skills"].pop("cms-platform/deploy")
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return primary, out, []
+
+
 def _branch_primary_drifted(tmp_path):
     """`--ref main` is a supported invocation and writes the branch verbatim.
 
@@ -7415,6 +7465,29 @@ def _bare_digest_copy(out: Path, name: str = "bare.lock") -> Path:
     return copy
 
 
+def _source_repo_flags(primary: Path, document: dict) -> list:
+    """`--source-repo` for every source whose checkout is not the default sibling.
+
+    DERIVED from the lock rather than declared beside each fixture, so a shape
+    that puts a registry anywhere but `../<repo-name>` is covered the moment it
+    is added rather than when someone remembers to widen a list. These
+    fixtures' registries are `file://` URIs naming the checkout itself, which
+    is what makes the derivation possible; a shape whose registry is an
+    `OWNER/REPO` string contributes nothing and needs none.
+    """
+    flags = []
+    sources = document.get("sources")
+    for source in sources if isinstance(sources, list) else []:
+        registry = source.get("registry") if isinstance(source, dict) else None
+        if not isinstance(registry, str) or not registry.startswith("file://"):
+            continue
+        path = Path(url2pathname(urlparse(registry).path))
+        name = registry.rstrip("/").rsplit("/", 1)[-1]
+        if path != primary.resolve().parent / name:
+            flags += ["--source-repo", f"{registry}={path}"]
+    return flags
+
+
 def _report_invocations(primary: Path, out: Path) -> list:
     """Every way this file reports on one lock: (label, argv).
 
@@ -7426,7 +7499,8 @@ def _report_invocations(primary: Path, out: Path) -> list:
     asked over the whole document says so.
     """
     document = json.loads(out.read_text(encoding="utf-8"))
-    common = ["--repo", str(primary), "-o", str(out)]
+    common = ["--repo", str(primary),
+              *_source_repo_flags(primary, document), "-o", str(out)]
     calls = [("--check", ["--check", *common]),
              ("--check-current", ["--check-current", *common])]
     sources = document.get("sources")
@@ -7487,10 +7561,21 @@ _MATRIX_SHAPES = [(build, name) for build, name, _ in _DRIFT_SHAPES] + [
     (_hand_broken_lock("ref"), "the lock lost its 'ref'"),
     (_hand_broken_lock("bundles", ["adam", "not a bundle name!"]),
      "a 'bundles' entry is not a plausible name"),
+    # The LAYOUT column, not another lock-shape column: every shape above puts
+    # its source at the default sibling `../<repo-name>`, so a printed command
+    # that omits `--source-repo` runs there regardless and the property this
+    # matrix exists for is measured on the one machine layout that cannot
+    # expose it. These three carry a source the sibling lookup does not find.
+    (_source_at_a_non_default_checkout,
+     "a source moved, at a checkout that is not the default sibling"),
+    (_primary_and_a_non_default_source_both_drifted,
+     "both moved, the source at a checkout that is not the default sibling"),
+    (_a_non_default_source_lock_gone_stale,
+     "the lock is stale, its source at a checkout that is not the default sibling"),
 ]
 # Stated, because an empty or shortened list is the edit that turns the whole
 # matrix green against a generator it no longer exercises.
-assert len(_MATRIX_SHAPES) == 21
+assert len(_MATRIX_SHAPES) == 24
 
 
 @pytest.mark.parametrize("build, shape", [pytest.param(build, name, id=name)
@@ -7570,7 +7655,8 @@ def test_a_ref_a_scoped_question_never_reads_cannot_change_its_answer(
              and source.get("registry") != document.get("registry")]
     if not names:
         pytest.skip("no federated source to scope to")
-    common = ["--repo", str(primary), "-o", str(out)]
+    common = ["--repo", str(primary),
+              *_source_repo_flags(primary, document), "-o", str(out)]
     for name in dict.fromkeys(names):
         plain = run_generator("--check-current", "--only", name, *common)
         elsewhere = run_generator("--check-current", "--only", name,
@@ -7598,13 +7684,15 @@ def _observe_every_reason(tmp_path_factory, reasons: dict) -> set:
     for build, name in _MATRIX_SHAPES:
         tmp_path = tmp_path_factory.mktemp("cover")
         primary, out, _scoped = build(tmp_path)
+        located = _source_repo_flags(
+            primary, json.loads(out.read_text(encoding="utf-8")))
         observed |= _reason_ids(
-            _joined(run_generator("--repo", str(primary), "--check-current",
-                                  "-o", str(out))), reasons)
+            _joined(run_generator("--repo", str(primary), *located,
+                                  "--check-current", "-o", str(out))), reasons)
         bare = _bare_digest_copy(out)
         observed |= _reason_ids(
-            _joined(run_generator("--repo", str(primary), "--check-format",
-                                  "-o", str(bare))), reasons)
+            _joined(run_generator("--repo", str(primary), *located,
+                                  "--check-format", "-o", str(bare))), reasons)
     return observed
 
 
