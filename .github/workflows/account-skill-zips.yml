@@ -378,18 +378,43 @@ jobs:
               # every run of a fresh install is a workflow whose annotations
               # get ignored, which costs the ones above their meaning.
               #
-              # The step already holds the fact that separates them: whether
-              # the eval-results clone SUCCEEDED. A branch that is not there
-              # yet is the fresh-install shape, and it annotated its own
-              # absence above. A branch that clones cleanly and contains
-              # neither the marker nor the artifact is a LAYOUT that moved -
-              # the marker is a committed file, and a committed file does not
-              # come back off, so a clean clone missing it is a regression
-              # rather than a beginning. Measured against the live branch on
-              # 2026-08-22: `propagation/.bootstrapped` and
-              # `propagation/account/latest.json` are both present on
-              # eval-results today, so this repo is past that beginning and
-              # cannot return to it.
+              # SO THE GATE IS THE CLONE - AND IT IS A GATE ON THIS
+              # ACCOUNT'S CURRENT STATE, NOT ON A GENERAL TRUTH. A branch that
+              # is not there yet is the fresh-install shape, and it annotated
+              # its own absence above. But read the claim this does NOT make:
+              # a clean clone is not evidence the tree was ever bootstrapped.
+              # eval-results is a SHARED results branch that three other lanes
+              # write - `badges/` published to it from 2026-07-16 and
+              # `results/` from 2026-07-17, while `propagation/.bootstrapped`
+              # first appeared on 2026-08-14. For the 29 days in between, a
+              # genuinely never-bootstrapped audit cloned this branch cleanly,
+              # and this arm would have annotated it every single day. An
+              # earlier version of this comment asserted the opposite as a
+              # fact; the branch's own history is what falsifies it.
+              #
+              # What makes the gate right HERE is that the window is behind
+              # this repo, not that it cannot exist. Measured against the live
+              # branch on 2026-08-22: `propagation/.bootstrapped` and
+              # `propagation/account/latest.json` are both present, and every
+              # scheduled audit since 2026-08-14 has republished them. From
+              # here, a clean clone holding neither is something that CHANGED.
+              #
+              # Which leaves the annotation's two readings, both of them live.
+              # The published path moved is one. The marker was deleted is the
+              # other, and it is not the rhetorical half: this is an
+              # unprotected results branch that AGENTS.md designates untrusted
+              # generated data, so it can be reset, force-pushed or recreated,
+              # and a committed file can most certainly come back off.
+              #
+              # THE COST THIS ACCEPTS, NAMED RATHER THAN ARGUED AWAY: a repo
+              # adopting this workflow before its own first audit publishes
+              # gets this annotation daily until it does. The obvious narrower
+              # gate - demand a sibling `propagation/account/*.json` as
+              # positive evidence of a past publish - is worse, because the
+              # fault this arm exists for is a PATH MOVE and that takes the
+              # whole `propagation/` directory with it. There would be no
+              # sibling then either, so the arm would fall silent on exactly
+              # the case it was added for, which is the hole it closed.
               if [ "$results_ok" = yes ]; then
                 echo "::warning::the published account audit reads '$verdict', but the eval-results branch cloned cleanly - so propagation/.bootstrapped and propagation/account/latest.json are not where this step reads them. Either skills-evals moved where it publishes, or the marker was deleted. The audit contributed no skill names, so this run fell back to the local recording alone. Check the propagation/ tree on the eval-results branch of Adam-S-Daniel/skills-evals."
               fi ;;
