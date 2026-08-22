@@ -788,9 +788,11 @@ def _apply_repin_sources(
 ) -> List[dict]:
     """Merge --repin-source pins into the INHERITED array. Never adds, never drops.
 
-    Never advances a source the caller did not name either: a registry this
-    lock federates TWICE is refused below rather than fanned out, so one spec
-    moves exactly one pin or none.
+    Never fans one spec out across two entries either: a registry this lock
+    federates TWICE is refused below rather than merged into both, so a spec
+    moves exactly one pin or none. (Said this way, not as "never advances a
+    source the caller did not name", because that would be an end-to-end claim
+    and this function is not the end — see the branch-ref paragraph below.)
 
     Merge by registry KEY, never replace the array: that distinction is the
     whole difference between this flag and `--source`, which took precedence
