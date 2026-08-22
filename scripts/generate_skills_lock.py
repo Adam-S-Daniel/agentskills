@@ -343,13 +343,14 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import (Collection, Dict, Iterable, List, Mapping, Optional, Sequence,
-                    Set, Tuple)
+from typing import (Collection, Dict, Iterable, List, Mapping, NamedTuple, Optional,
+                    Sequence, Set, Tuple)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY = "Adam-S-Daniel/agentskills"
@@ -1157,7 +1158,7 @@ def _repin_shrink_guard(
     Asked after build_lock rather than from a blocker the earlier guards read,
     because the answer is not in the lock: it is in the content at the commit
     the re-pin would write, which is exactly what build_lock has just gone and
-    read. `report_drift` asks the same predicate, with the same `movable` set
+    read. `remediation` asks the same predicate, with the same `movable` set
     from `_movable_bundles`, off `--check-current`'s own reading of that
     content.
     """
@@ -1583,37 +1584,7 @@ def digest_format_offenders(skills: Dict[str, str]) -> List[str]:
     return offenders
 
 
-def _suggested_repin_ref(document: dict) -> Optional[str]:
-    """The lock's own `ref`, if it is one this generator would have written.
-
-    Charset-guarded because the caller below prints it into a COPY-PASTEABLE
-    shell command, and the fleet bumper slices that command verbatim into a PR
-    body. The document arrives as found on disk, so a hand-edited `ref` is
-    arbitrary text; `_REF_RE` is the predicate the rest of this file already
-    uses for "a ref we would write and the hook would accept", and its charset
-    is exactly what is safe unquoted in a shell. Reused rather than re-spelled,
-    for the reason stated above `_LOCK_DIGEST_RE`.
-
-    Shell-safe is not the whole job, though, so `_REF_RE` alone is not the
-    whole guard: its charset admits a leading `-`, and a ref of `--repo`
-    renders as `--ref --repo --repo <clone>`, where the echoed value is no
-    longer a value but an OPTION to the command it lands in. Measured across
-    `--repo` / `-o` / `--repin` / `-1` / `-`: every one fails loudly and
-    leaves the lock untouched (argparse exit 2, or exit 1 from git), so this
-    is a printed command that cannot RUN rather than one that runs wrong. That
-    is still the defect this pair exists to close — a remediation line that
-    does not do what the sentence above it promises — so a dash-leading ref
-    takes the placeholder path instead. Nothing legitimate is lost: a commit
-    sha never starts with `-`, and git itself will not take a refname that
-    does.
-    """
-    ref = document.get("ref")
-    if isinstance(ref, str) and _REF_RE.fullmatch(ref) and not ref.startswith("-"):
-        return ref
-    return None
-
-
-def report_digest_format(document: dict, output: Path) -> int:
+def report_digest_format(document: dict, output: Path, repo: Path) -> int:
     """Print --check-format's verdict for one lock and return its exit status.
 
     Reads `skills`, and `ref` only to name it in the remediation command below
@@ -1703,12 +1674,13 @@ def report_digest_format(document: dict, output: Path) -> int:
         print(f"OK: every digest in {output} is "
               f"{LOCK_DIGEST_PREFIX}<64 hex> ({len(skills)} skills).")
         return 0
-    print(f"FAILED: {len(offenders)} of {len(skills)} digests in {output} are not "
-          f"{LOCK_DIGEST_PREFIX}<64 lowercase hex>. The fix is a RE-PIN, which "
-          "recomputes every digest from the pinned ref and labels it on the way "
-          "out — not a hand edit, which would paste a label onto a value nobody "
-          "recomputed and turn the lock into an attestation over unverified "
-          "bytes:")
+    headline = (f"{len(offenders)} of {len(skills)} digests in {output} are not "
+                f"{LOCK_DIGEST_PREFIX}<64 lowercase hex>. The fix is a RE-PIN, which "
+                "recomputes every digest from the pinned ref and labels it on the "
+                "way out — not a hand edit, which would paste a label onto a value "
+                "nobody recomputed and turn the lock into an attestation over "
+                "unverified bytes")
+    answer = remediation("format", existing=document, output=output, repo=repo)
     # `--ref` is part of the command, not decoration. `--repin` deliberately
     # does NOT inherit `ref` (advancing it is the whole operation), so a
     # remediation printed without one falls through to `resolve_ref(repo,
@@ -1756,14 +1728,20 @@ def report_digest_format(document: dict, output: Path) -> int:
     # either half still has to be carried across by hand, exactly like the
     # prefix split above; naming the block is what keeps "by hand" from meaning
     # "by search".
-    suggested_ref = _suggested_repin_ref(document)
-    print(f"  python3 scripts/generate_skills_lock.py --repin "
-          f"--ref {suggested_ref or '<the commit this lock pins>'} "
-          "--repo <a clone of the registry this lock names> -o <this lock>")
-    if suggested_ref is None:
-        print("  (this lock carries no usable 'ref' of its own, so name the commit it "
-              "should describe: --repin will not repair a lock whose pin it cannot "
-              "read.)")
+    if answer.reason:
+        # SAME VERDICT, no command. `FAILED:` still leads the line — the digests
+        # really are malformed, which is the question this flag answers and the
+        # string the fleet bumper branches on — but this lock has some OTHER
+        # defect that makes the re-pin above impossible, and printing the line
+        # anyway sends the bumper to a nightly exit 1 with no automated exit.
+        # Measured before this: a lock whose `bundles` had been lost, and one
+        # with a source pinned at a branch, each printed a --repin that the same
+        # generator refused.
+        print(f"FAILED: {headline}. No re-pin command is printed for it because "
+              f"this generator would refuse one: {answer.reason}")
+    else:
+        print(f"FAILED: {headline}:")
+        print(f"  {answer.command}")
     for name in offenders[:_FORMAT_REPORT_CAP]:
         print(f"  - {name}")
     if len(offenders) > _FORMAT_REPORT_CAP:
@@ -1993,7 +1971,9 @@ def _parse_bundles(raw: Optional[str], where: str = "--bundles") -> Optional[Lis
     return bundles
 
 
-def repin_inherit_blocker(existing: dict, output: Path) -> Optional[str]:
+def repin_inherit_blocker(
+    existing: dict, output: Path, extras: Sequence[dict] = ()
+) -> Optional[str]:
     """Why this lock has nothing --repin can safely inherit — or None.
 
     Strict where the generate path is permissive, and that asymmetry is the
@@ -2036,7 +2016,7 @@ def repin_inherit_blocker(existing: dict, output: Path) -> Optional[str]:
             f"{output}: 'registry' is missing or unusable ({registry!r}), so there is "
             "nothing for --repin to inherit — and defaulting would silently re-point "
             "this lock at another repository. Fix the field, or generate the lock "
-            "without --repin."
+            "without --repin." + restated_sources(extras)
         )
     bundles = existing.get("bundles")
     if not isinstance(bundles, list) or not bundles:
@@ -2045,6 +2025,7 @@ def repin_inherit_blocker(existing: dict, output: Path) -> Optional[str]:
             "so there is nothing for --repin to inherit — and defaulting would silently "
             f"narrow this lock to {list(DEFAULT_BUNDLES)}, dropping every other bundle's "
             "skills. Fix the field, or generate the lock without --repin."
+            + restated_sources(extras)
         )
     for bundle in bundles:
         if not isinstance(bundle, str) or not _NAME_RE.fullmatch(bundle):
@@ -2065,16 +2046,214 @@ def repin_inherit_blocker(existing: dict, output: Path) -> Optional[str]:
     return None
 
 
-def _repin_inherit_guard(existing: dict, output: Path) -> None:
+def _repin_inherit_guard(existing: dict, output: Path, extras: Sequence[dict]) -> None:
     """Refuse a --repin whose lock cannot be read for what it declares.
 
     FIRST of the re-pin guards, matching the order `report_drift` composes the
     predicates in: everything after this reads `registry`, `bundles` and
     `sources` as though they are there.
     """
-    blocker = repin_inherit_blocker(existing, output)
+    blocker = repin_inherit_blocker(existing, output, extras)
     if blocker:
         raise GeneratorError(blocker)
+
+
+class Remediation(NamedTuple):
+    """A report's answer to "what should the reader type" — one or the other.
+
+    `command` is a complete shell line, carrying the `--repo` and `-o` this run
+    was given so it can be pasted verbatim. `reason` is the sentence the apply
+    path would refuse with, for a lock where no command exists. Exactly one is
+    set, and `remediation` is the only thing that builds either.
+    """
+
+    command: Optional[str] = None
+    reason: Optional[str] = None
+
+
+# Every remediation this file prints, by the verdict that prints it. Named so
+# `remediation` is total over a closed set rather than over whatever strings
+# four call sites happened to pass.
+#
+#   stale   --check: the lock's bytes are not what its own pinned ref describes
+#   format  --check-format: its stored digests are the wrong shape
+#   primary --check-current: the primary's bundles moved past the pinned commit
+#   source  --check-current: one federated source's bundles did
+REMEDIATION_KINDS = ("stale", "format", "primary", "source")
+
+_SCRIPT = f"python3 scripts/{Path(__file__).name}"
+
+
+def _addressing(output: Path, repo: Path) -> str:
+    """The flags a printed command needs to reach the same lock and clone.
+
+    Omitted when they are the defaults this script would pick anyway, so this
+    repo's own remediation lines stay the short ones people already know. A
+    CONSUMER lock is the case that needs them: `--check -o <their lock>` that
+    printed a command without `-o` was telling the reader to regenerate a
+    DIFFERENT file.
+    """
+    flags = ""
+    if repo.resolve() != REPO_ROOT:
+        flags += f" --repo {shlex.quote(str(repo))}"
+    if output.resolve() != DEFAULT_LOCK:
+        flags += f" -o {shlex.quote(str(output))}"
+    return flags
+
+
+def _declared_sources(existing: dict) -> Tuple[List[dict], Optional[str]]:
+    """This lock's `sources`, or why they cannot be read. Never raises.
+
+    `--check-format` is answered off the file alone, above the point where main
+    parses this array, so the one path that has no `extras` to hand parses its
+    own here. `normalize_source` is the same validator main uses, so the two
+    cannot come to disagree about what a source is.
+    """
+    raw = existing.get("sources")
+    if not isinstance(raw, list):
+        return [], None
+    try:
+        return [normalize_source(entry, f"sources[{index}]")
+                for index, entry in enumerate(raw)], None
+    except GeneratorError as error:
+        return [], str(error)
+
+
+def remediation(
+    kind: str,
+    *,
+    existing: dict,
+    output: Path,
+    repo: Path,
+    registry: Optional[str] = None,
+    extras: Optional[Sequence[dict]] = None,
+    ref: Optional[str] = None,
+    document: Optional[dict] = None,
+    source_registry: Optional[str] = None,
+    working: Optional[Mapping[str, str]] = None,
+    primary_drifted: bool = False,
+) -> Remediation:
+    """THE one place a remediation command is decided, for every report path.
+
+    Four verdicts tell a reader what to type — `--check`, `--check-format`, and
+    `--check-current` both scoped and unscoped — and each used to compose its
+    own line and consult its own subset of the refusals. That is the shape of
+    the defect class this function exists to make unrepresentable: a report
+    prints a command the same generator then refuses, or one whose literal
+    execution destroys part of the lock. Four rounds closed instances of it in
+    pairs and each round re-opened one somewhere else, because "which refusals
+    apply to this line" was answered four times.
+
+    So it is answered once. Every report path calls this and prints what comes
+    back; none of them formats a command
+    (`test_no_report_path_writes_a_command_of_its_own` reads the AST for it).
+    Every apply-path guard reads the same `*_blocker` predicates this composes
+    (`test_every_refusal_a_repin_can_give_is_one_both_paths_read`). And
+    `test_every_report_path_against_every_refusal` runs the whole matrix: each
+    path against each derived reason, requiring either no command with the
+    reason in the headline, or a command that RUNS at exit 0 and comes back
+    with `registry`, `bundles` and `sources` intact.
+
+    The two things a command must therefore be, which no single call site kept:
+
+      * ACCEPTED. Three of the four kinds print a `--repin`, so each meets
+        every re-pin refusal — inheritance, the primary's pin, an unproven
+        source, a document that cannot be planned, the named source, and a
+        re-pin that would empty a bundle — composed here in the order the apply
+        path meets them, so the sentence quoted is the sentence the flag says.
+      * COMPLETE. A plain generate takes its whole identity from the command
+        line, so `stale`'s line restates `--registry`, `--bundles` and every
+        `--source`; omitting them re-pointed the lock at DEFAULT_REGISTRY and
+        narrowed it to DEFAULT_BUNDLES at exit 0, which is data loss from
+        following the tool's own advice.
+
+    `ref` is the effective ref of the run asking (the lock's own, on every
+    verify path). `working` is `--check-current`'s reading of the working tree,
+    and its absence is what tells the shrink question there is nothing to
+    predict — `format`'s line holds the pin, so it moves no content.
+    """
+    assert kind in REMEDIATION_KINDS, kind
+    addressing = _addressing(output, repo)
+
+    if kind == "stale":
+        # The one remediation that is NOT a --repin: --check's verdict is
+        # "these bytes do not describe the ref this lock pins", and the repair
+        # is to rebuild the same document at the same pin. `document` is the
+        # rebuild that just happened, so the command restates what it holds
+        # rather than what the lock on disk claims — which is the point, since
+        # the lock on disk is the thing that was found wrong.
+        sources = "".join(f" --source '{_source_spec(source)}'"
+                          for source in document.get("sources", []))
+        return Remediation(command=(
+            f"{_SCRIPT} --registry {shlex.quote(document['registry'])} "
+            f"--ref {shlex.quote(document['ref'])} "
+            f"--bundles {shlex.quote(','.join(document['bundles']))}"
+            f"{sources}{addressing}"))
+
+    if extras is None:
+        extras, unreadable = _declared_sources(existing)
+        if unreadable:
+            return Remediation(reason=unreadable)
+    if registry is None:
+        registry = existing.get("registry")
+
+    # Inheritance first: everything after it reads `registry` and `bundles`
+    # straight off the lock, exactly as main does once that guard has passed.
+    blocked = repin_inherit_blocker(existing, output, extras)
+    if blocked:
+        return Remediation(reason=blocked)
+    bundles = list(existing["bundles"])
+    blocked = (repin_primary_blocker(existing, extras, registry, output)
+               or repin_unproven_sources_blocker(extras, output)
+               or repin_plan_blocker(bundles, extras, registry))
+    if blocked:
+        return Remediation(reason=blocked)
+
+    if kind == "format":
+        # A RELABEL, so it holds the lock's own pin — see report_digest_format
+        # for why the ref is part of the command. `repin_primary_blocker` above
+        # has already refused every lock whose `ref` is not a commit sha, which
+        # is exactly the set this used to print a `<placeholder>` for; a line a
+        # reader must edit before it runs is not a command this can promise.
+        #
+        # That refusal is also what retired `_suggested_repin_ref`, whose whole
+        # job was keeping a hand-edited `ref` from being echoed into a shell
+        # command — a ref of `--repo` rendered as `--ref --repo --repo <clone>`,
+        # where the echoed value is an OPTION to the command it lands in. A
+        # 40-hex sha needs no charset guard of its own, and anything else now
+        # gets a reason instead of a line.
+        return Remediation(
+            command=f"{_SCRIPT} --repin --ref {existing['ref']}{addressing}")
+
+    if kind == "source":
+        blocked = repin_source_blocker(extras, source_registry, registry)
+        if blocked:
+            return Remediation(reason=blocked)
+
+    # --ref is part of the source command, not decoration: --repin deliberately
+    # does not inherit `ref`, so a source-only repair printed without one falls
+    # through to resolve_ref(repo, "HEAD") and advances the PRIMARY pin too.
+    # Dropped when the primary drifted as well, because its own block is then
+    # telling the reader to advance it and one bare --repin does both.
+    primary_moves = kind == "primary" or primary_drifted
+    if kind == "primary":
+        command = f"{_SCRIPT} --repin{addressing}"
+    else:
+        anchor = "" if primary_drifted else f"--ref {ref} "
+        command = (f"{_SCRIPT} --repin {anchor}"
+                   f"--repin-source '{source_registry}@'{addressing}")
+
+    if working is not None:
+        declared = existing.get("skills")
+        blocked = repin_shrink_blocker(
+            declared if isinstance(declared, dict) else {},
+            working,
+            _movable_bundles(bundles, extras, primary_moves=primary_moves,
+                             named=() if kind == "primary" else (source_registry,)),
+            extras)
+        if blocked:
+            return Remediation(reason=blocked)
+    return Remediation(command=command)
 
 
 def report_drift(
@@ -2085,16 +2264,15 @@ def report_drift(
     existing: dict,
     extras: Sequence[dict],
     registry: str,
+    repo: Path,
     working: Mapping[str, str],
 ) -> None:
     """Print one FAILED block per drifted source, with its repair or its reason.
 
-    A separate function so that "the path that RECOMMENDS a re-pin" is a name a
-    test can point at:
-    `test_every_refusal_a_repin_can_give_is_one_both_paths_read` reads this
-    module's AST and requires every `*_blocker` predicate to be called both
-    here and on the apply path. Recommending and refusing answering separately
-    is the defect class this whole arrangement exists to make unrepresentable.
+    Framing only: WHICH command, or which refusal, comes from `remediation` —
+    the one function every report path in this file asks, and the only one that
+    builds either. This loop decides the wording around the answer and nothing
+    about the answer.
     """
     # THE CROSS-REPO CONTRACT this loop must keep, as three facts a
     # reader can check rather than a promise:
@@ -2112,7 +2290,7 @@ def report_drift(
     #      UNTRUNCATED stream. Either the line IMMEDIATELY under
     #      its headline is the command that fixes it, or there is
     #      no command to print and the headline says so itself
-    #      (see repin_source_blocker). Never a command under one
+    #      (see `remediation`). Never a command under one
     #      headline that repairs a different block. That is the
     #      property this loop holds and all it holds.
     #
@@ -2183,137 +2361,57 @@ def report_drift(
     # hold (2) and (3).
     # Whether the primary's own block is about to tell the reader
     # to advance it decides whether the federated blocks below hold
-    # its pin. See the --ref anchor there.
+    # its pin. See the --ref anchor in `remediation`.
     primary_drifted = any(entry["is_primary"] for entry, _ in drifted)
-    # EVERY command below is a `--repin`, the federated
-    # `--repin --ref <r> --repin-source '<reg>@'` included, so a primary-side
-    # refusal rejects a source's remediation as surely as the primary's own.
-    # Asked once, up here, and consulted by both branches: asking it only in
-    # the branch it was written for is precisely how the source-side fix left
-    # the primary side printing a command the generator refuses.
-    # Composed in the order the apply path meets them — inheritance first (main
-    # reads `registry` and `bundles` straight off the lock once that guard has
-    # passed), then the primary pin, then the sources. A report that quoted a
-    # later reason would hand the reader a sentence the flag never says.
-    # `repin_plan_blocker` last of the four: build_lock is what runs
-    # plan_sources, and build_lock runs after the guards above it.
-    # `existing["bundles"]` is safe to read there because the inheritance
-    # blocker short-circuits the chain when it is not.
-    blocked = (repin_inherit_blocker(existing, output)
-               or repin_primary_blocker(existing, extras, registry, output)
-               or repin_unproven_sources_blocker(extras, output)
-               or repin_plan_blocker(existing.get("bundles") or (), extras, registry))
-    # Asked PER BLOCK, off `_movable_bundles`, because each block prints a
-    # different command and they move different pins. The primary's is a bare
-    # `--repin`, which advances the primary and holds every source at the sha
-    # the lock records; a source's holds the primary with `--ref` and advances
-    # that one source. Asking one question for the whole report is what had a
-    # source's remediation suppressed over a shrink in an UNRELATED source's
-    # bundles — a command that, run, exits 0 and does exactly what its block
-    # asked for. `existing["skills"]` may be any JSON — a lock the hook would
-    # reject reaches here on the way to being told so.
-    skills = existing.get("skills")
-    declared_skills = skills if isinstance(skills, dict) else {}
-
-    def shrink_for(source) -> Optional[str]:
-        return repin_shrink_blocker(
-            declared_skills, working,
-            _movable_bundles(
-                existing.get("bundles") or (), extras,
-                primary_moves=source["is_primary"] or primary_drifted,
-                named=() if source["is_primary"] else (source["registry"],)),
-            extras)
     for source, differences in drifted:
+        # ASKED BEFORE THE COMMAND IS PRINTED, not after it is
+        # rejected — and asked of `remediation`, which is the only
+        # thing in this file that decides either half. A report that
+        # printed the command anyway sends its reader, or the fleet
+        # bumper that builds the same flag from its own list, to an
+        # exit 1 with nothing else offered. The reason the flag
+        # would give is the reason printed here, verbatim and in the
+        # headline itself, so the block carries its own answer
+        # instead of a command that has none.
+        answer = remediation(
+            "primary" if source["is_primary"] else "source",
+            existing=existing, output=output, repo=repo, registry=registry,
+            extras=extras, ref=ref, working=working,
+            source_registry=None if source["is_primary"] else source["registry"],
+            primary_drifted=primary_drifted)
         if source["is_primary"]:
-            # `or shrink` last, matching the order the apply path meets them:
-            # `_repin_primary_guard` runs before build_lock, `_repin_shrink_guard`
-            # after it, so a lock tripping both is refused with the first.
-            blocked_here = blocked or shrink_for(source)
-            if blocked_here:
-                print(f"FAILED: the bundle has moved on since {ref}, which {output} "
-                      "still pins — nothing added or changed since then reaches an "
-                      "ephemeral surface. No re-pin command is printed for it "
-                      f"because this generator would refuse one: {blocked_here}")
-                for line in differences:
-                    print(f"  - {line}")
-                continue
-            print(f"FAILED: the bundle has moved on since {ref}, which {output} "
-                  "still pins — nothing added or changed since then reaches an "
-                  "ephemeral surface. Re-pin it (after committing the content) "
-                  "with:")
-            # --repin, not a bare re-run: this lock may federate, and a
-            # plain generate takes `sources` from the command line alone,
-            # so following that instruction literally would de-federate it
-            # at exit 0. The remediation line is the one place a reader is
-            # told which command to type, so it must name the safe one.
-            print("  python3 scripts/generate_skills_lock.py --repin")
-            # PRIMARY-ONLY, deliberately. This note reasons about the
-            # reader's own merge base, and is simply false about another
-            # registry's drift.
-            print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
-            print("  before another commit touched a locked skill: the lock is still faithful")
-            print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
+            headline = (f"the bundle has moved on since {ref}, which {output} "
+                        "still pins — nothing added or changed since then reaches "
+                        "an ephemeral surface.")
+            refused = "No re-pin command is printed for it"
+            invite = "Re-pin it (after committing the content) with:"
         else:
-            # ASKED BEFORE THE COMMAND IS PRINTED, not after it is
-            # rejected. --repin-source refuses some shapes outright
-            # (see repin_source_blocker), and a report that prints
-            # the command anyway sends its reader — or the fleet
-            # bumper, which builds the same flag from its own list
-            # — to an exit 1 with nothing else offered. The reason
-            # the flag would give is the reason printed here,
-            # verbatim and in the headline itself, so the block
-            # carries its own answer instead of a command that has
-            # none.
-            # Same precedence as `_repin_primary_guard`, deliberately: the
-            # command this block would print is a --repin, so it meets those
-            # refusals first, and a report that named a later reason would be
-            # handing the reader a sentence the flag never says.
-            blocker = (blocked or repin_source_blocker(
-                extras, source["registry"], registry) or shrink_for(source))
-            if blocker:
-                # "the commit its pin resolves to", not "which the lock still
-                # pins": `source` here is PLANNED, so its ref is resolved, and
-                # the reason below may be about a lock that records a branch
-                # name. Naming the resolved sha as what the lock pins and then
-                # quoting the recorded ref one clause later asserted two
-                # different pins in one sentence.
-                print(f"FAILED: {source['registry']}'s bundles have moved on "
-                      f"since {source['ref']}, the commit {output}'s pin for it "
-                      "resolves to — nothing added or changed there reaches an ephemeral "
-                      "surface. No --repin-source command is printed for it "
-                      f"because this generator would refuse one: {blocker}")
-                for line in differences:
-                    print(f"  - {line}")
-                continue
-            print(f"FAILED: {source['registry']}'s bundles have moved on since "
-                  f"{source['ref']}, which {output} still pins for it — nothing "
-                  "added or changed there reaches an ephemeral surface. Advance "
-                  "that source's pin (after committing the content in that "
-                  "registry) with:")
-            # --ref is part of the command, not decoration, and
-            # this is the same defect #108 fixed for
-            # --check-format's line: --repin deliberately does not
-            # inherit `ref`, so a command printed without one falls
-            # through to resolve_ref(repo, "HEAD") and advances the
-            # PRIMARY pin — a content advance this verdict just
-            # said had not happened, arriving as a side effect of a
-            # source-only repair. Measured by the verifier on a
-            # fixture where only the source drifted: the printed
-            # command took the lock's primary ref from 60f17465 to
-            # the clone's HEAD 4bd46e75, at exit 0. The fleet
-            # bumper quotes these lines into a PR body as the
-            # command that produced the diff beneath it, which is
-            # only honest if running it produces that diff and no
-            # other.
-            #
-            # Dropped when the primary drifted too, because its own
-            # block above is then telling the reader to advance it:
-            # anchoring here would hand them two lines that
-            # contradict each other, and one bare
-            # `--repin --repin-source` is what advances both.
-            anchor = "" if primary_drifted else f"--ref {ref} "
-            print("  python3 scripts/generate_skills_lock.py --repin "
-                  f"{anchor}--repin-source '{source['registry']}@'")
+            # "the commit its pin resolves to", not "which the lock still
+            # pins": `source` here is PLANNED, so its ref is resolved, and
+            # the reason below may be about a lock that records a branch
+            # name. Naming the resolved sha as what the lock pins and then
+            # quoting the recorded ref one clause later asserted two
+            # different pins in one sentence.
+            headline = (f"{source['registry']}'s bundles have moved on since "
+                        f"{source['ref']}, the commit {output}'s pin for it resolves "
+                        "to — nothing added or changed there reaches an ephemeral "
+                        "surface.")
+            refused = "No --repin-source command is printed for it"
+            invite = ("Advance that source's pin (after committing the content in "
+                      "that registry) with:")
+        if answer.reason:
+            print(f"FAILED: {headline} {refused} because this generator would "
+                  f"refuse one: {answer.reason}")
+        else:
+            print(f"FAILED: {headline} {invite}")
+            print(f"  {answer.command}")
+            if source["is_primary"]:
+                # PRIMARY-ONLY, deliberately. This note reasons about the
+                # reader's own merge base, and is simply false about another
+                # registry's drift.
+                print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
+                print("  before another commit touched a locked skill: the lock is still faithful")
+                print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
         for line in differences:
             print(f"  - {line}")
 
@@ -2539,9 +2637,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # compose the way --check and --check-current always have.
     format_status = 0
     if args.check_format:
-        format_status = report_digest_format(existing, output)
+        format_status = report_digest_format(existing, output, repo)
         if not (args.check or args.check_current):
             return format_status
+    # Inherited by every mode that reads the lock at all, verify and re-pin
+    # alike — the one field with a mode-dependent answer is `ref` below. A
+    # --check that silently dropped the federated half would go green while
+    # verifying only some of what the lock promises; a --repin that dropped it
+    # would WRITE that half away, and then pass --check for having done so.
+    #
+    # Read BEFORE the inheritance guard because that guard's refusals send the
+    # reader to a plain generate, which takes `sources` from the command line
+    # alone — so the sentence has to name every source the lock federates or it
+    # is an instruction to de-federate the lock at exit 0.
+    raw_sources = existing.get("sources")
+    # `declared` is `extras` as the LOCK spells it, kept apart from the merged
+    # array `--repin-source` produces: the refusal below restates the sources a
+    # plain generate would need, and the array to restate is the one that
+    # exists on disk, not the one this run was about to write.
+    if args.source:
+        extras = [parse_source(spec) for spec in args.source]
+    elif isinstance(raw_sources, list):
+        extras = [
+            normalize_source(raw, f"sources[{index}]")
+            for index, raw in enumerate(raw_sources)
+        ]
+    else:
+        extras = []
+    declared = extras
     if args.repin:
         # Strict, because this is the path that WRITES what it inherited: the
         # generate path's fall-through to DEFAULT_REGISTRY / DEFAULT_BUNDLES is
@@ -2549,7 +2672,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # something should have been. Every reason it refuses is in
         # `repin_inherit_blocker`, which --check-current reads before it
         # recommends this flag.
-        _repin_inherit_guard(existing, output)
+        _repin_inherit_guard(existing, output, extras)
         registry = existing["registry"]
         bundles = list(existing["bundles"])
     else:
@@ -2565,26 +2688,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # A verify mode inherits it for the opposite reason — see the docstring:
     # --check asks whether the lock is faithful to the ref it PINS.
     ref = args.ref or (existing.get("ref") if verifying else None) or resolve_ref(repo, "HEAD")
-    # Inherited by every mode that reads the lock at all, verify and re-pin
-    # alike — the one field with a mode-dependent answer is `ref` above. A
-    # --check that silently dropped the federated half would go green while
-    # verifying only some of what the lock promises; a --repin that dropped it
-    # would WRITE that half away, and then pass --check for having done so.
-    raw_sources = existing.get("sources")
-    # `declared` below is `extras` as the LOCK spells it, kept apart from the
-    # merged array `--repin-source` produces: the shrink refusal restates the
-    # sources a plain generate would need, and the array to restate is the one
-    # that exists on disk, not the one this run was about to write.
-    if args.source:
-        extras = [parse_source(spec) for spec in args.source]
-    elif isinstance(raw_sources, list):
-        extras = [
-            normalize_source(raw, f"sources[{index}]")
-            for index, raw in enumerate(raw_sources)
-        ]
-    else:
-        extras = []
-    declared = extras
     overrides = dict(parse_source_repo(spec) for spec in args.source_repo or [])
     if args.repin:
         # Every reason this refuses is in `repin_primary_blocker` or in the
@@ -2600,6 +2703,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # moves the parse. It has to sit after `overrides` is built, because
     # resolving an empty ref goes through source_checkout's override lookup.
     if args.repin and args.repin_source:
+        declared = extras
         extras = _apply_repin_sources(extras, args.repin_source, repo, registry, overrides)
 
     if verifying:
@@ -2618,11 +2722,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"OK: {output} is current ({len(document['skills'])} skills at {ref}).")
             else:
                 print(f"FAILED: {output} is stale — regenerate it with:")
-                sources_flags = "".join(
-                    f" --source '{_source_spec(source)}'"
-                    for source in document.get("sources", [])
-                )
-                print(f"  python3 {Path(__file__).name} --ref {ref}{sources_flags}")
+                print("  " + remediation("stale", existing=existing, output=output,
+                                         repo=repo, document=document).command)
                 for line in _differences(
                     json.loads(on_disk) if on_disk.strip() else {}, document
                 ):
@@ -2656,13 +2757,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       f"({len(working)} skills).")
             else:
                 report_drift(drifted, ref=ref, output=output, existing=existing,
-                             extras=extras, registry=registry, working=working)
+                             extras=extras, registry=registry, repo=repo,
+                             working=working)
                 status = 1
         return status
 
     document = build_lock(repo, registry, ref, bundles, extras, overrides)
     if args.repin:
-        # The same `_movable_bundles` question `report_drift` asks about the
+        # The same `_movable_bundles` question `remediation` asks about the
         # command it prints, so the report and this refusal cannot disagree
         # about which bundles a given re-pin could empty. The primary moves
         # unless this run pinned it back where the lock already had it — which
