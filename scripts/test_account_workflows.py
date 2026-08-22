@@ -699,7 +699,7 @@ def _model_mask_then_strip(body):
 # test_a_here_string_does_not_blank_the_rest_of_the_step runs that exact
 # shape.
 _HEREDOC_OPENER = re.compile(
-    r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+    r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 
 
 def _strip_heredocs(body):
@@ -720,27 +720,41 @@ def _strip_heredocs(body):
     and a paren state assembled from only some of a body's lines is worse
     than none.
 
-    AN OPENER WHOSE DELIMITER NEVER ARRIVES RAISES, and that is the second
-    half of the fix above rather than tidiness. `_HEREDOC_OPENER` closes the
-    one misreading that has been demonstrated; the assertion closes the
-    CONSEQUENCE of any other, because every misreading of this kind ends the
-    same way - a delimiter that no later line equals, and a tail blanked to
-    the end of the body. An arithmetic `$(( x<<n ))` is the next candidate and
-    is NOT excluded by the regex: `n` reads as a delimiter. It reds here
-    instead, loudly, naming the line. A `run:` body with a genuinely
+    AN OPENER WHOSE DELIMITER NEVER ARRIVES RAISES. `_HEREDOC_OPENER` closes
+    the one misreading of an OPENER that has been demonstrated - a here-string
+    - and the assertion closes the consequence of reading an opener where
+    there is none, because a word that is not a delimiter is a word no later
+    line equals: the tail is blanked to the end of the body and every rule
+    built on this classifies nothing. An arithmetic `$(( x<<n ))` is the next
+    candidate and is NOT excluded by the regex: `n` reads as a delimiter. It
+    reds here instead, loudly, naming the line. A `run:` body with a genuinely
     unterminated heredoc reds here too, which is correct - bash warns about
     that one as well.
+
+    THE ASSERTION DOES NOT COVER THE OPPOSITE MISREADING, AND THIS DOCSTRING
+    CLAIMED IT DID. Ending a heredoc EARLY blanks less rather than more, so no
+    delimiter goes missing and nothing raises; the lines after the false
+    terminator come back as live shell, and in this step they fold into the
+    `verdict=$(python3 - <<'PY' ... ) || verdict=""` command, whose final `||`
+    marks the whole blob guarded. That direction is closed by MATCHING BASH'S
+    OWN TERMINATOR RULE instead: a terminator is the delimiter alone on a
+    line, at column 0, and only `<<-` allows anything before it - TABS, never
+    spaces. `  EOF` indented under a plain `<<EOF` is DATA and the heredoc
+    runs past it, which is what
+    test_an_indented_terminator_does_not_end_a_heredoc runs in a real bash
+    and then requires of this helper.
     """
-    out, delim, opened_at = [], None, None
+    out, delim, dash, opened_at = [], None, "", None
     for number, line in enumerate(body.split("\n"), 1):
         if delim is None:
             out.append(line)
             opener = _HEREDOC_OPENER.search(_uncomment(line))
             if opener:
-                delim, opened_at = opener.group(2), number
+                dash, delim = opener.group(1), opener.group(3)
+                opened_at = number
             continue
         out.append(" " * len(line))
-        if line.strip() == delim:
+        if (line.lstrip("\t") if dash else line) == delim:
             delim = None
     assert delim is None, (
         f"line {opened_at} of this `run:` body reads as a heredoc opening on "
@@ -2132,6 +2146,63 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"and bash ran it as {commands}: {found!r}. A command joined "
                 f"onto another one is a command the guard below never "
                 f"classifies."
+            )
+
+    # BASH'S TERMINATOR RULE, AND THE TWO WAYS THIS FILE USED TO BREAK IT.
+    # A heredoc ends at the delimiter ALONE ON A LINE AT COLUMN 0; `<<-`
+    # allows TABS before it and nothing else. `line.strip() == delim` ignored
+    # both halves, so an indented `EOF` that bash hands over as DATA ended the
+    # heredoc here and the lines after it came back as live shell.
+    _HEREDOC_TERMINATORS = (
+        ("an-indented-terminator-under-a-plain-heredoc",
+         "cat <<EOF\nline1\n  EOF\nmkdir -p /proc/nope/child\nEOF\n"
+         "echo AFTER\n",
+         ["line1", "  EOF", "mkdir -p /proc/nope/child", "AFTER"],
+         ["cat <<EOF", "echo AFTER"]),
+        ("a-tab-indented-terminator-under-a-dash-heredoc",
+         "cat <<-EOF\n\tline1\n\tEOF\necho AFTER\n",
+         ["line1", "AFTER"],
+         ["cat <<-EOF", "echo AFTER"]),
+        ("a-space-indented-terminator-under-a-dash-heredoc",
+         "cat <<-EOF\nline1\n  EOF\nmkdir -p /proc/nope/child\nEOF\n"
+         "echo AFTER\n",
+         ["line1", "  EOF", "mkdir -p /proc/nope/child", "AFTER"],
+         ["cat <<-EOF", "echo AFTER"]),
+    )
+
+    def test_an_indented_terminator_does_not_end_a_heredoc(self, tmp_path):
+        """The misreading `assert delim is None` cannot see.
+
+        Ending a heredoc EARLY blanks less rather than more: no delimiter
+        goes missing, so the assertion never fires, and the heredoc's own
+        data comes back as live shell. In this step that is silent rather
+        than loud - the un-blanked lines fold into the
+        `verdict=$(python3 - <<'PY' ... ) || verdict=""` command, whose final
+        `||` marks the whole blob guarded - so a command spliced into the
+        Python heredoc under an indented `PY` was exempted and nothing reded.
+
+        The fix is not another assertion; it is matching bash. Each row runs
+        in a real bash first, and what bash treats as DATA this helper has to
+        blank.
+        """
+        bash = require_bash()
+        for name, body, printed, live in self._HEREDOC_TERMINATORS:
+            proc = subprocess.run(
+                [bash, _script(tmp_path, body, name="heredoc.sh")],
+                capture_output=True, text=True)
+            assert proc.returncode == 0, (
+                f"the `{name}` script did not run, so what bash printed for "
+                f"it says nothing about the rule:\n{proc.stderr}"
+            )
+            assert proc.stdout.splitlines() == printed, (
+                f"bash disagrees with this table about `{name}`: it printed "
+                f"{proc.stdout!r}, and the table expects {printed!r}"
+            )
+            kept = [l for l in _strip_heredocs(body).split("\n") if l.strip()]
+            assert kept == live, (
+                f"`_strip_heredocs` read `{name}` the other way from bash. "
+                f"It left {kept!r} as shell, and bash ran only {live!r} - "
+                f"everything else was heredoc data."
             )
 
     def test_no_echo_in_this_step_redirects_except_the_output_write(self):
