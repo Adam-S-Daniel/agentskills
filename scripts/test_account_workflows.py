@@ -416,6 +416,134 @@ _CASE_SKILL = re.compile(r'(?<![\w.-])case\s+"?\$SKILL"?(?![\w.-])')
 _CASE_FROM_RUN = re.compile(r'(?<![\w.-])case\s+"?\$FROM_RUN"?(?![\w.-])')
 
 
+# A HEREDOC OPENER IS `<<` OR `<<-`, AND `<<<` IS NOT ONE. A here-string has
+# no body - it feeds one word to stdin - so reading its word as a delimiter
+# blanks every line from there to the end of the step. That is not a false
+# red; it is a silent green, because every rule downstream iterates commands
+# and a blanked line produces none. `if grep -q fresh <<<yes; then` above the
+# `case` was enough to hide a bare `mkdir` from the guard below without reding
+# anything. So the `<<` may not touch a third `<` on either side, and
+# test_a_here_string_does_not_blank_the_rest_of_the_step runs that exact
+# shape.
+_HEREDOC_OPENER = re.compile(
+    r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+
+
+# THE ONE WALK, AND THE KINDS IT MARKS. Every recogniser in this file that
+# needs to know whether a byte is code reads THIS, and none of them re-derives
+# it. `_KIND_CODE` is shell the runner executes; the other four are the four
+# ways a byte can be something else. Single and double quotes are told apart
+# because they are different rules - a backslash escapes inside `"` and not
+# inside `'` - even though every derivation below blanks both.
+#
+# THE HEREDOC KIND IS WHY THIS IS ONE WALK RATHER THAN TWO. A heredoc opener
+# is a word in CODE position: `<<PY` inside a `::warning::` string is text,
+# and reading it as an opener blanks every line to the step's real `PY` - four
+# commands in the shipped body, gone, with every rule downstream iterating an
+# emptier list and passing. That is what a heredoc scan that reads a
+# comment-stripped-but-quote-intact copy of the line does, which is what this
+# file did until the walk below.
+_KIND_CODE = " "
+_KIND_COMMENT = "#"
+_KIND_SINGLE = "'"
+_KIND_DOUBLE = '"'
+_KIND_HEREDOC = "h"
+
+
+def _scan(body, heredocs=False):
+    """One walk over a `run:` body. (text, mask, kinds, unterminated heredoc).
+
+    `text`, `mask` and `kinds` are all the SAME LENGTH as `body`, so an index
+    found in any of them indexes all four.
+
+    `heredocs` is what separates the two callers, and it is not a preference.
+    With it ON a heredoc BODY is data: it is marked `_KIND_HEREDOC`, its shell
+    quote state is not tracked, and an opener whose delimiter never arrives
+    comes back as `unterminated`. With it OFF the walk has no notion of a
+    heredoc at all - which is `_shell_scan`'s documented limitation, and the
+    only setting that is safe for a body whose heredocs are ALREADY blanked:
+    the opener line survives blanking, so a second heredoc-aware pass would
+    read `<<\'PY\'` again, find no `PY` below it, and blank the rest.
+
+    The rest of the rules - where a comment opens, what a backslash does to
+    the mask - are the same in both settings because they are the same code.
+    """
+    text = list(body)
+    mask = list(body)
+    kinds = [_KIND_CODE] * len(body)
+    quote = None
+    parens = _WordParens()
+    pending, unterminated = [], None
+    line, i, n = 1, 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\" and quote != "'":
+            if i + 1 < n and body[i + 1] == "\n":
+                mask[i] = "\\"
+            else:
+                mask[i] = " "
+                if i + 1 < n:
+                    mask[i + 1] = " "
+                    parens.saw(body, i + 1, True)
+            if i + 1 < n and body[i + 1] == "\n":
+                line += 1
+            i += 2
+            continue
+        if quote:
+            if ch != "\n":
+                mask[i] = " "
+            else:
+                line += 1
+            kinds[i] = quote
+            parens.saw(body, i, True)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            mask[i] = " "
+            kinds[i] = ch
+            quote = ch
+            i += 1
+            continue
+        if ch == "#" and parens.opens_comment(body, i):
+            j = body.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                text[k] = " "
+                mask[k] = " "
+                kinds[k] = _KIND_COMMENT
+            i = j
+            continue
+        if heredocs and ch == "<":
+            opener = _HEREDOC_OPENER.match(body, i)
+            if opener:
+                pending.append((opener.group(1), opener.group(3), line))
+        parens.saw(body, i, False)
+        i += 1
+        if ch == "\n":
+            line += 1
+            while pending:
+                dash, delim, opened = pending.pop(0)
+                closed = False
+                while i < n:
+                    end = body.find("\n", i)
+                    end = n if end == -1 else end
+                    for k in range(i, end):
+                        text[k] = " "
+                        mask[k] = " "
+                        kinds[k] = _KIND_HEREDOC
+                    closed = (body[i:end].lstrip("\t") if dash
+                              else body[i:end]) == delim
+                    i = min(end + 1, n)
+                    line += 1
+                    if closed:
+                        break
+                if not closed and unterminated is None:
+                    unterminated = (opened, delim)
+    return "".join(text), "".join(mask), "".join(kinds), unterminated
+
+
 def _shell_scan(body):
     """(text, mask) for a `run:` body. Both are the SAME LENGTH as `body`.
 
@@ -514,47 +642,8 @@ def _shell_scan(body):
     passing quietly - loud, but with a diagnosis that may point at the wrong
     file.
     """
-    text = list(body)
-    mask = list(body)
-    quote = None
-    parens = _WordParens()
-    i, n = 0, len(body)
-    while i < n:
-        ch = body[i]
-        if ch == "\\" and quote != "'":
-            if i + 1 < n and body[i + 1] == "\n":
-                mask[i] = "\\"
-            else:
-                mask[i] = " "
-                if i + 1 < n:
-                    mask[i + 1] = " "
-                    parens.saw(body, i + 1, True)
-            i += 2
-            continue
-        if quote:
-            if ch != "\n":
-                mask[i] = " "
-            parens.saw(body, i, True)
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in "'\"":
-            mask[i] = " "
-            quote = ch
-            i += 1
-            continue
-        if ch == "#" and parens.opens_comment(body, i):
-            j = body.find("\n", i)
-            j = n if j == -1 else j
-            for k in range(i, j):
-                text[k] = " "
-                mask[k] = " "
-            i = j
-            continue
-        parens.saw(body, i, False)
-        i += 1
-    return "".join(text), "".join(mask)
+    text, mask, _kinds, _unterminated = _scan(body)
+    return text, mask
 
 
 # THE THREE QUOTE MODELS `_shell_scan` REJECTS, KEPT RUNNABLE. Its docstring
@@ -701,19 +790,6 @@ def _model_mask_then_strip(body):
     return "".join(text), "".join(mask)
 
 
-# A HEREDOC OPENER IS `<<` OR `<<-`, AND `<<<` IS NOT ONE. A here-string has
-# no body - it feeds one word to stdin - so reading its word as a delimiter
-# blanks every line from there to the end of the step. That is not a false
-# red; it is a silent green, because every rule downstream iterates commands
-# and a blanked line produces none. `if grep -q fresh <<<yes; then` above the
-# `case` was enough to hide a bare `mkdir` from the guard below without reding
-# anything. So the `<<` may not touch a third `<` on either side, and
-# test_a_here_string_does_not_blank_the_rest_of_the_step runs that exact
-# shape.
-_HEREDOC_OPENER = re.compile(
-    r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
-
-
 def _strip_heredocs(body):
     """`body` with every heredoc BODY blanked, line for line.
 
@@ -726,11 +802,19 @@ def _strip_heredocs(body):
     Blanked rather than deleted so a line number still means what it says, and
     so quote state cannot leak out of the heredoc into the shell around it.
     The delimiter line goes too: it is the heredoc's punctuation, not a
-    command. The opener is read off `_uncomment`'s output so a `<<` inside a
-    comment cannot start one - a line at a time, with no shared
-    `_WordParens`, because the loop below never feeds it the heredoc BODIES
-    and a paren state assembled from only some of a body's lines is worse
-    than none.
+    command.
+
+    THE OPENER IS READ OFF `_scan`'s KINDS, WHICH IS THE ONLY PLACE IT CAN BE
+    READ CORRECTLY. It used to be read off `_uncomment`'s output, which
+    removes comments and leaves QUOTED STRINGS intact - so a `<<PY` inside a
+    `::warning::` was an opener, and because the shipped step already has a
+    real `PY` terminator below it, four live commands between the two were
+    blanked and every rule built on this went on passing over the smaller
+    list. A word inside a quoted string is exactly a word a later line CAN
+    equal. `_scan` marks quoted bytes `_KIND_SINGLE`/`_KIND_DOUBLE` in the
+    same walk that finds the opener, so the opener can only be found in code,
+    and test_a_heredoc_opener_inside_a_string_opens_no_heredoc runs the
+    shape.
 
     AN OPENER WHOSE DELIMITER NEVER ARRIVES RAISES. `_HEREDOC_OPENER` closes
     the one misreading of an OPENER that has been demonstrated - a here-string
@@ -756,26 +840,18 @@ def _strip_heredocs(body):
     test_an_indented_terminator_does_not_end_a_heredoc runs in a real bash
     and then requires of this helper.
     """
-    out, delim, dash, opened_at = [], None, "", None
-    for number, line in enumerate(body.split("\n"), 1):
-        if delim is None:
-            out.append(line)
-            opener = _HEREDOC_OPENER.search(_uncomment(line))
-            if opener:
-                dash, delim = opener.group(1), opener.group(3)
-                opened_at = number
-            continue
-        out.append(" " * len(line))
-        if (line.lstrip("\t") if dash else line) == delim:
-            delim = None
-    assert delim is None, (
-        f"line {opened_at} of this `run:` body reads as a heredoc opening on "
-        f"`{delim}`, and no later line is that delimiter. Either the heredoc "
+    _text, _mask, kinds, unterminated = _scan(body, heredocs=True)
+    assert unterminated is None, (
+        f"line {unterminated[0] if unterminated else 0} of this `run:` body "
+        f"reads as a heredoc opening on "
+        f"`{unterminated[1] if unterminated else None}`, and no later line "
+        f"is that delimiter. Either the heredoc "
         f"is unterminated, or this is not an opener at all and the rest of "
         f"the body has just been blanked - which would leave every rule built "
         f"on this classifying nothing and passing."
     )
-    return "\n".join(out)
+    return "".join(" " if kind == _KIND_HEREDOC else ch
+                   for ch, kind in zip(body, kinds))
 
 
 def _logical_lines(body):
@@ -1930,6 +2006,11 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         r"^(?:else|fi|done|do|then|esac|\{|\}|case\s+\S+\s+in)$")
     _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
     _OUTPUT_WRITE = re.compile(r'^echo\s+.*>>\s*"\$GITHUB_OUTPUT"$')
+    # The write itself, as the step writes it. A LOCATOR, not a pattern: the
+    # tests that ask "did the classifier still reach the last line of the
+    # step" need one command they can name, and a regex that admits a family
+    # cannot say which member it found.
+    _OUTPUT_WRITE_COMMAND = 'echo "status=$verdict" >> "$GITHUB_OUTPUT"'
     _COMPOUND_HEAD = re.compile(r"^(?:if|elif|while|until)\b")
     _CASE_OPEN = re.compile(r"^case\s+\S+\s+in$")
     _ARM_TERMINATORS = (";;&", ";;", ";&")
@@ -2238,6 +2319,104 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             "a here-string above the `case` cost the classifier the step's "
             "`$GITHUB_OUTPUT` write, so everything below it was blanked and "
             "the rules certified an empty set"
+        )
+
+        monkeypatch.setitem(globals(), "_audit_body", lambda: armed)
+        with pytest.raises(AssertionError) as caught:
+            self.test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+        assert "mkdir -p ../scratch" in str(caught.value), (
+            f"the guard reded on the armed control, but not about the bare "
+            f"`mkdir` this control adds: {caught.value}"
+        )
+
+    # A `<<PY` INSIDE A QUOTED STRING, AND THE REAL `PY` THAT MAKES IT
+    # DANGEROUS. Bash prints all four lines of the script below; a heredoc
+    # scan that reads a quote-intact copy of the line reads the first `<<PY`
+    # as an opener, and the `PY` further down as its terminator, so
+    # everything between them stops being shell.
+    _QUOTED_OPENER_SCRIPT = (
+        'echo "a <<PY inside a string"\n'
+        "echo second\n"
+        "cat <<PY\n"
+        "data\n"
+        "PY\n"
+        "echo third\n"
+    )
+    _QUOTED_OPENER_PRINTS = ["a <<PY inside a string", "second", "data",
+                             "third"]
+    _QUOTED_OPENER_LIVE = ['echo "a <<PY inside a string"', "echo second",
+                           "cat <<PY", "echo third"]
+    _QUOTED_OPENER_LINE = (
+        'echo "::warning::the verdict block <<PY could not be read"')
+
+    def test_a_heredoc_opener_inside_a_string_opens_no_heredoc(
+            self, monkeypatch, tmp_path):
+        """The here-string defect's other half, and the costlier one.
+
+        `_strip_heredocs` used to find its opener in `_uncomment`'s output,
+        which removes comments and leaves quoted strings alone. So a `<<PY`
+        written inside a `::warning::` opened a heredoc, and the step's own
+        `PY` - the terminator of the Python capture twenty lines down - closed
+        it. Measured on the real body: the spliced `echo`, the `pip install`,
+        the `verdict=$(python3 - <<'PY'` capture and its `|| verdict=""` guard
+        all left `_classified()`, a bare `mkdir` beside them went with them,
+        and nothing in this file reded. `assert delim is None` cannot see it:
+        a word inside a string is exactly a word a later line can equal.
+
+        Bash answers first. Its output for the script above discriminates the
+        two readings on its own - all four lines, against the two that survive
+        if the string opens a heredoc - so what this helper has to do is
+        measured rather than asserted from the fix.
+
+        Then both directions on the real step, for the reason
+        test_a_here_string_does_not_blank_the_rest_of_the_step gives: with the
+        `::warning::` alone the classifier must still reach the last line of
+        the step, and with a bare `mkdir` beside it the guard must name that
+        `mkdir`.
+        """
+        bash = require_bash()
+        proc = subprocess.run(
+            [bash, _script(tmp_path, self._QUOTED_OPENER_SCRIPT,
+                           name="quoted-opener.sh")],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, (
+            f"the quoted-opener script did not run, so what bash printed for "
+            f"it says nothing about the rule:\n{proc.stderr}"
+        )
+        assert proc.stdout.splitlines() == self._QUOTED_OPENER_PRINTS, (
+            f"bash disagrees with this table about a `<<PY` inside a string: "
+            f"it printed {proc.stdout!r}, and the table expects "
+            f"{self._QUOTED_OPENER_PRINTS!r}"
+        )
+        kept = [l for l in
+                _strip_heredocs(self._QUOTED_OPENER_SCRIPT).split("\n")
+                if l.strip()]
+        assert kept == self._QUOTED_OPENER_LIVE, (
+            f"`_strip_heredocs` read the quoted `<<PY` the other way from "
+            f"bash. It left {kept!r} as shell, and bash ran "
+            f"{self._QUOTED_OPENER_LIVE!r}."
+        )
+
+        clean = self._with_lines_before_the_case([self._QUOTED_OPENER_LINE])
+        armed = self._with_lines_before_the_case(
+            [self._QUOTED_OPENER_LINE, "mkdir -p ../scratch"])
+        for name, body in (("clean", clean), ("armed", armed)):
+            syntax = subprocess.run(
+                [bash, "-n", _script(tmp_path, body, name=f"{name}-py.sh")],
+                capture_output=True, text=True)
+            assert syntax.returncode == 0, (
+                f"the `{name}` control body is not valid bash, so what the "
+                f"guard says about it is about the fixture:\n{syntax.stderr}"
+            )
+        monkeypatch.setitem(globals(), "_audit_body", lambda: clean)
+        self.test_the_classifier_reads_every_line_of_the_step()
+        self.test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+        assert any(command == self._OUTPUT_WRITE_COMMAND
+                   for _, command, _ in self._classified()), (
+            "a `<<PY` inside a `::warning::` cost the classifier the step's "
+            "`$GITHUB_OUTPUT` write, so everything between the false opener "
+            "and the step's real `PY` was blanked and the rules certified a "
+            "shorter step"
         )
 
         monkeypatch.setitem(globals(), "_audit_body", lambda: armed)
