@@ -1890,6 +1890,13 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     #     deliberately NOT carved out. The step's own `verdict=$(python3 - ...)`
     #     and `drift=$(...)` are guarded by their `|| ...=""`, which is what
     #     this asymmetry exists to require.
+    #     AND A SIMPLE COMMAND, for the same reason the `echo` below is:
+    #     `_ASSIGNMENT` is anchored only at the start, so it matches the whole
+    #     of `harness_ok=yes | mkdir ...` and of `harness_ok=yes & mkdir ...`.
+    #     A pipeline takes the status of what it ends with and an `&` list
+    #     takes the status of what follows the `&` - neither is an
+    #     assignment - and both abort under `bash -e`, which
+    #     test_the_assignment_carve_out_admits_only_a_simple_assignment runs.
     #   `:` - the no-op the quiet `case` arm is made of.
     #   an `echo` to stdout - an `echo` to a runner's stdout essentially never
     #     fails. THE COMMAND WORD HAS TO BE `echo` EXACTLY AND THE COMMAND
@@ -1914,20 +1921,24 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     _COMPOUND_HEAD = re.compile(r"^(?:if|elif|while|until)\b")
 
     @staticmethod
-    def _headed_by(command, name):
+    def _one_command(mask):
+        """True when `mask` holds no `|`, `&` or `;` - one command, not a list.
+
+        Errexit's exemption is about a command's position in a list, so a
+        carve-out that admits a whole pipeline or `&` list on the strength of
+        its first word admits whatever that list ends with.
+        """
+        return not any(ch in mask for ch in "|&;")
+
+    def _headed_by(self, command, name):
         """True when `command` is a SIMPLE command whose name is `name`.
 
         Both halves are what `command.startswith(name)` got wrong. The name
         has to be the whole first word, and the command has to be one command
-        - no `|`, no `&`, no `;` outside quotes - because errexit's exemption
-        is about a command's position in a list, and a carve-out that admits
-        a whole pipeline on the strength of its first word admits whatever
-        the pipeline ends with.
+        - see `_one_command`.
         """
         _, mask = _shell_scan(command)
-        if any(ch in mask for ch in "|&;"):
-            return False
-        return command.split()[:1] == [name]
+        return self._one_command(mask) and command.split()[:1] == [name]
 
     def _carved_out(self, command):
         if command.startswith("{"):
@@ -1940,8 +1951,8 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             return True
         _, mask = _shell_scan(command)
         redirects = any(ch in mask for ch in "<>")
-        if (self._ASSIGNMENT.match(command) and "$(" not in mask
-                and "`" not in mask and not redirects):
+        if (self._ASSIGNMENT.match(command) and self._one_command(mask)
+                and "$(" not in mask and "`" not in mask and not redirects):
             return True
         if not self._headed_by(command, "echo"):
             return False
@@ -2265,6 +2276,59 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             )
             syntax = subprocess.run(
                 [bash, "-n", _script(tmp_path, armed, name="carve-body.sh")],
+                capture_output=True, text=True)
+            assert syntax.returncode == 0, (
+                f"the body carrying `{command}` is not valid bash, so what "
+                f"the guard says about it is about the fixture:"
+                f"\n{syntax.stderr}"
+            )
+            monkeypatch.setitem(globals(), "_audit_body", lambda b=armed: b)
+            with pytest.raises(AssertionError) as caught:
+                self.\
+                    test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+            assert command in str(caught.value), (
+                f"the guard reded on a step carrying `{command}`, but about "
+                f"something else: {caught.value}"
+            )
+
+    _NOT_A_SIMPLE_ASSIGNMENT = (
+        "harness_ok=yes | mkdir -p /proc/nope/child",
+        "harness_ok=yes & mkdir -p /proc/nope/child",
+    )
+
+    def test_the_assignment_carve_out_admits_only_a_simple_assignment(
+            self, monkeypatch, tmp_path):
+        """`_headed_by`'s lesson, applied to the branch beside it.
+
+        `_ASSIGNMENT` is anchored at the start and says nothing about what
+        follows, so `harness_ok=yes | mkdir ...` matched it whole and the
+        carve-out admitted the pipeline on the strength of its first word -
+        the same defect the `echo` branch had, in the same method, left
+        standing when that one was fixed. A pipeline takes the status of what
+        it ends with and an `&` list takes the status of what follows the
+        `&`, so neither is the assignment the carve-out list describes.
+
+        Run under `bash -e` first, so what makes each dangerous is measured
+        rather than argued, then spliced into the step so the guard has to
+        name it.
+        """
+        bash = require_bash()
+        # Every body built BEFORE anything is monkeypatched, or the second
+        # one would be built from a step that already carries the first.
+        armed_bodies = {c: self._with_lines_before_the_case([c])
+                        for c in self._NOT_A_SIMPLE_ASSIGNMENT}
+        for command, armed in armed_bodies.items():
+            script = f"set -uo pipefail\n{command}\necho reached\n"
+            proc = subprocess.run(
+                [bash, "-e", _script(tmp_path, script, name="assign.sh")],
+                capture_output=True, text=True)
+            assert proc.returncode != 0 and "reached" not in proc.stdout, (
+                f"`{command}` no longer aborts under `bash -e`, so this case "
+                f"proves nothing about the carve-out: {proc.returncode}, "
+                f"{proc.stdout!r}"
+            )
+            syntax = subprocess.run(
+                [bash, "-n", _script(tmp_path, armed, name="assign-body.sh")],
                 capture_output=True, text=True)
             assert syntax.returncode == 0, (
                 f"the body carrying `{command}` is not valid bash, so what "
