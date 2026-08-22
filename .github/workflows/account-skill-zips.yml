@@ -312,9 +312,17 @@ jobs:
           # lists cannot disagree, because there is only one list. If that read
           # fails, `drift` is empty, the drift verdict falls to `*)` and warns
           # about a status that is in fact recognised - wrong, but loud, and it
-          # cannot happen quietly: reading it fails only when the module cannot
-          # be imported, and the very next step runs that same module under
-          # `set -euo pipefail`, which reds the job.
+          # cannot ship quietly. WHAT MAKES THAT TRUE IS
+          # scripts/test_account_workflows.py, NOT THE NEXT STEP. That file
+          # imports this constant by name, so a rename reds it at COLLECTION;
+          # and test_a_healthy_verdict_stays_quiet[reported-failure] executes
+          # this exact read, so anything writing to stdout at import time -
+          # which turns `drift` into a two-line string that matches nothing -
+          # reds that test. Both measured. The next step is NOT the backstop
+          # this comment used to name: it runs `python3
+          # scripts/account_zip_selection.py`, which needs the module to import
+          # but not this name to exist, and does not care what the module
+          # printed on the way in.
           drift=$(PYTHONPATH=scripts python3 -c 'from account_zip_selection import AUDIT_DRIFT_STATUS as s; print(s)') || drift=""
           case "$verdict" in
             stale|missing|unreadable)
