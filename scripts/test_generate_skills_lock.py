@@ -131,6 +131,7 @@ def _registry_shipping_the_generator(root: Path, skills: dict,
 SKILL_A = {"SKILL.md": "---\nname: alpha\n---\nalpha body\n", "notes.md": "a\n"}
 SKILL_B = {"SKILL.md": "---\nname: beta\n---\nbeta body\n"}
 SKILL_C = {"SKILL.md": "---\nname: gamma\n---\ngamma body\n"}
+SKILL_D = {"SKILL.md": "---\nname: delta\n---\ndelta body\n"}
 # A skill directory built to make two independently written digest
 # implementations disagree if they differ at all: a nested directory, an EMPTY
 # file, CRLF line endings, a non-ASCII filename, and a file with no trailing
@@ -3425,7 +3426,7 @@ def _primary_drifted(primary: Path) -> str:
 # The two ends of the re-pin path, by name. `_repin_primary_guard` and
 # `_apply_repin_sources` are what REFUSE; `report_drift` is what RECOMMENDS.
 _REPIN_APPLY_PATH = ("_repin_inherit_guard", "_repin_primary_guard",
-                     "_apply_repin_sources", "_repin_shrink_guard")
+                     "_apply_repin_sources", "plan_sources", "_repin_shrink_guard")
 _REPIN_REPORT_PATH = ("report_drift",)
 
 
@@ -3706,6 +3707,74 @@ def _emptied_source_bundle_scoped(tmp_path):
     return primary, out, ["--only", (tmp_path / "cms-platform").resolve().as_uri()]
 
 
+def _three_sources(tmp_path):
+    """A primary and THREE federated sources, all sound. Returns (primary, out)."""
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    args = ["--repo", str(primary), "--registry", primary.resolve().as_uri(),
+            "--ref", sha, "--bundles", "adam"]
+    for name, bundle, skill in (("cms-platform", "cms-platform", SKILL_B),
+                                ("other-platform", "other", SKILL_C),
+                                ("third-platform", "third", SKILL_D)):
+        root = tmp_path / name
+        root_sha = make_registry(root, {f"{bundle}/{name}-skill": skill}, layout="skills")
+        args += ["--source", f"{bundle}={root.resolve().as_uri()}@{root_sha}:skills"]
+    out = tmp_path / "skills.lock"
+    assert run_generator(*args, "-o", str(out)).returncode == 0
+    return primary, out
+
+
+def _a_bundle_claimed_twice_asked_with_only(tmp_path):
+    """A whole-document defect, asked about a source the scope leaves sound.
+
+    `_select_sources` narrows `extras` BEFORE plan_sources sees them, so the
+    scoped run plans the primary plus ONE source and meets no conflict — it can
+    only learn of this from a predicate asked over the whole lock. Measured
+    before `repin_plan_blocker`: this printed
+    `--repin --ref <sha> --repin-source '<third>@'`, and running that line
+    exited 1 with "bundle 'cms-platform' is claimed by both ...".
+
+    The bumper's live path, not a curiosity: _agent-guidance builds its
+    federated report by concatenating one `--check-current --only <registry>`
+    block per drifted source.
+    """
+    primary, out = _three_sources(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["sources"][1]["bundles"] = document["sources"][0]["bundles"]
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    third = tmp_path / "third-platform"
+    _write(third / "skills" / "third-platform-skill" / "SKILL.md",
+           "---\nname: third\n---\nedited\n")
+    return primary, out, ["--only", third.resolve().as_uri()]
+
+
+def _more_sources_than_the_cap_asked_with_only(tmp_path):
+    """The other whole-document refusal plan_sources gives, scoped the same way."""
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    args = ["--repo", str(primary), "--registry", primary.resolve().as_uri(),
+            "--ref", sha, "--bundles", "adam"]
+    roots = []
+    for index in range(gsl.MAX_SOURCES + 1):
+        root = tmp_path / f"src{index}"
+        root_sha = make_registry(root, {f"b{index}/skill{index}": SKILL_A}, layout="skills")
+        roots.append(root)
+        args += ["--source", f"b{index}={root.resolve().as_uri()}@{root_sha}:skills"]
+    out = tmp_path / "skills.lock"
+    # Written by hand, because the generator will not WRITE an over-cap lock
+    # either — which is the point: the shape reaches a report through a merge
+    # or a hand edit, never through this script.
+    assert run_generator(*args[:-2], "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    last = roots[-1]
+    document["sources"].append({
+        "registry": last.resolve().as_uri(), "ref": _head(last),
+        "bundles": [f"b{gsl.MAX_SOURCES}"], "layout": "skills"})
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    _write(roots[0] / "skills" / "skill0" / "SKILL.md", "---\nname: skill0\n---\nedited\n")
+    return primary, out, ["--only", roots[0].resolve().as_uri()]
+
+
 def _hand_broken_lock(field, value=None):
     """A really-drifted lock with one field --repin cannot inherit.
 
@@ -3758,6 +3827,10 @@ _DRIFT_SHAPES = [
     (_hand_broken_lock("bundles"), "the lock lost its 'bundles'", False),
     (_hand_broken_lock("sources", {}), "the lock's 'sources' is an object", False),
     (_emptied_primary_bundle, "the primary bundle lost every skill", False),
+    (_a_bundle_claimed_twice_asked_with_only,
+     "two sources claim one bundle, asked with --only about a third", False),
+    (_more_sources_than_the_cap_asked_with_only,
+     "more sources than the cap, asked with --only about one of them", False),
 ]
 # Shapes where --check-current must print no command, but where the command it
 # declined to print would have failed for a DIFFERENT reason than the one the
