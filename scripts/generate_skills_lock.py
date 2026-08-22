@@ -1895,14 +1895,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 #      the path substitution beside that slice names the
                 #      primary lock alone.
                 #   3. Every headline is IMMEDIATELY followed by its own
-                #      remediation line. That is what makes the 20-line cap
-                #      safe: a truncation can drop a whole trailing block, but
-                #      it can never separate a headline from the command that
-                #      fixes it.
+                #      remediation line — in the UNTRUNCATED stream. That is
+                #      the property this loop holds and all it holds.
+                #
+                # (3) was first written here claiming it made the 20-line cap
+                # SAFE — "a truncation can drop a whole trailing block, but it
+                # can never separate a headline from the command that fixes
+                # it". That is false, and the arithmetic is short enough that
+                # it should have been done: the primary's block is 5 fixed
+                # lines (headline, remediation, three note lines) plus one line
+                # per difference, so with 14 differences the first federated
+                # headline lands on line 20 — kept — and its remediation on
+                # line 21 — cut. Both adversarial verifiers reproduced exactly
+                # that against this generator, and
+                # `test_the_bumper_cap_can_cut_a_later_headline_from_its_command`
+                # measures the sliced output rather than the raw stream, so the
+                # absolute cannot be restated without a red test.
+                #
+                # What the cap DOES guarantee is the primary's own pair, and
+                # only because of (2): the primary's headline is line 1 of the
+                # slice and its remediation line 2. That is the block the
+                # bumper's path substitution names, and today's bumper slices
+                # only the primary-scoped, single-block run — so nothing is
+                # live. A scoped per-source slice would be a NEW consumer and
+                # would need its own guarantee; it does not inherit one here.
                 #
                 # Plan order gives (2) for free — plan_sources puts the primary
-                # first — and `test_check_current_names_both_when_primary_and_source_both_drift`
-                # and `test_every_failed_line_is_followed_by_its_own_remediation_command`
+                # first — and `test_check_current_names_both_when_primary_and_source_both_drift`,
+                # `test_every_failed_line_is_followed_by_its_own_remediation_command`
+                # and `test_the_bumper_cap_always_keeps_the_primary_headline_with_its_command`
                 # are what say so out loud.
                 # Whether the primary's own block is about to tell the reader
                 # to advance it decides whether the federated blocks below hold
