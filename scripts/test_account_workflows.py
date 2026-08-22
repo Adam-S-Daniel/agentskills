@@ -43,8 +43,45 @@ def echoed(body):
     return " ".join(m.group(1) for m in ECHOED.finditer(body))
 
 
+def _uncomment(line):
+    """One line of shell with a trailing `#` comment removed.
+
+    Quote-aware, because the alternative is a lint that mangles the step's own
+    `::warning::` text. Bash starts a comment at a `#` that begins a WORD -
+    line start or after whitespace - and only when it is not quoted, so
+    `${v#x}`, `$#` and `a#b` are untouched, and a `#` inside `'...'` or
+    `"..."` is data. A backslash escapes the next character everywhere except
+    inside single quotes.
+
+    WHAT IT DELIBERATELY DOES NOT MODEL, stated so nobody reads more into it:
+    quoting is tracked per LINE, and a heredoc body is read as shell rather
+    than as its own language. A string left open at a newline, or a `#` inside
+    the Python heredoc, is therefore approximated. Both are the same
+    approximation the whole-line version already made, and both fail toward
+    dropping text rather than inventing it - which is the safe direction for
+    every assertion built on this: text that is not here cannot satisfy a
+    claim, and that is the point of the helper.
+    """
+    quote = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i].rstrip()
+        i += 1
+    return line
+
+
 def code(body):
-    """A `run:` block with its comment lines dropped.
+    """A `run:` block reduced to what the SHELL runs - comments removed.
 
     The counterpart to `echoed()` and there for the same reason. The audit
     step's comments quote its own shell at length - the paragraph above the
@@ -54,9 +91,21 @@ def code(body):
     left the full verifier at 945 passed, with the predicate both repos key on
     now written a second time inside the workflow, which is the one thing the
     design forbids.
+
+    TRAILING COMMENTS COUNT, and dropping only WHOLE-LINE ones left that hole
+    half open. `drift=$(python3 -c '...')  # was read from AUDIT_DRIFT_STATUS`
+    is a hardcode with the name surviving in a comment, and it kept the
+    assertion green at the full verifier's 953 passed - the same finding, in
+    the same place, closed for the shape it was first reported in and not for
+    the shape beside it. A claim that only survives in a comment must not
+    count as if it reached the reader, and where that comment sits on the line
+    makes no difference to who reads it.
+
+    Lines that hold nothing but a comment drop out entirely, as before.
     """
     return "\n".join(
-        line for line in body.splitlines() if not line.strip().startswith("#")
+        stripped for stripped in map(_uncomment, body.splitlines())
+        if stripped.strip()
     )
 
 
@@ -133,6 +182,71 @@ def runs(workflow):
         for step in job.get("steps", []):
             if step.get("run"):
                 yield step["run"]
+
+
+class TestTheCommentStripperTheseAssertionsRestOn:
+    """`code()` is load-bearing, so it is tested rather than trusted.
+
+    Every assertion of the form "this claim reached the SHELL and not just a
+    comment" is only as good as this helper. It dropped whole-line comments
+    alone, so the claim could be met by a comment after all - just one sitting
+    at the end of a code line instead of on its own - and the full verifier
+    stayed at 953 passed while the predicate both repos key on was hardcoded a
+    second time inside the workflow.
+
+    The two directions are tested together on purpose. A stripper that is too
+    eager is the failure that gets a correct guard deleted: it would cut the
+    step's own `::warning::` text at any `#` a message happened to contain,
+    and accuse an author of a divergence they did not introduce.
+    """
+
+    def test_it_drops_a_trailing_comment(self):
+        """The exact mutation the whole-line version let through."""
+        body = (
+            'drift=$(python3 -c \'print("reported" + "-failure")\') '
+            '|| drift=""  # was read from AUDIT_DRIFT_STATUS\n'
+        )
+        assert "AUDIT_DRIFT_STATUS" not in code(body), (
+            "a name that survives only in a trailing comment still counts as "
+            "if the shell read it, so the hardcode this helper exists to "
+            "catch passes"
+        )
+        assert "drift=$(" in code(body), "the command itself was thrown away"
+
+    def test_it_keeps_a_hash_inside_a_quoted_string(self):
+        """The negative control, and the reason this is not a regex.
+
+        A `#` inside quotes is data - a run-page message, a URL fragment, an
+        issue number. Cutting there would silently shorten the text these
+        tests assert on and red a workflow that is perfectly correct.
+        """
+        body = (
+            'echo "::warning::see issue #118 for why"\n'
+            "echo 'a # inside single quotes is data too'\n"
+            'echo "trailing is still a comment"  # but this one is not data\n'
+        )
+        kept = code(body)
+        assert "#118" in kept, "a quoted `#` was read as the start of a comment"
+        assert "a # inside single quotes is data too" in kept
+        assert "but this one is not data" not in kept, (
+            "the trailing comment survived on a line that also holds quotes"
+        )
+
+    def test_it_leaves_shell_syntax_that_merely_contains_a_hash(self):
+        """`#` only opens a comment at the start of a word.
+
+        `${v#x}` is prefix removal and `$#` is the argument count; neither is
+        a comment, and a stripper that cut at them would delete real commands
+        from the text every claim here is checked against.
+        """
+        body = 'name=${dest#../}\nif [ $# -gt 0 ]; then :; fi\n'
+        kept = code(body)
+        assert "${dest#../}" in kept
+        assert "$# -gt 0" in kept
+
+    def test_it_drops_a_whole_line_comment_as_it_always_did(self):
+        body = "  # a whole line of prose\nreal_command\n"
+        assert code(body).strip() == "real_command"
 
 
 class TestRecordAccountUpload:
@@ -1034,9 +1148,24 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # the raw body "would let a claim that only survives in a comment count
         # as if it reached the reader".
         step = code(body)
-        assert "drift=$(" in step and "AUDIT_DRIFT_STATUS" in step, (
+        assert "drift=$(" in step, (
             "the quiet arm's variable is no longer read from the module's "
             "constant, so it can hold anything - including nothing"
+        )
+        # ON THE `drift=$(` LINE, not merely somewhere in the step. The step
+        # is one long body and the name could reach it from anywhere - an
+        # `echo` that mentions the constant, an unrelated command - while the
+        # read itself was quietly replaced by a literal. Pinning the claim to
+        # the command that has to make it leaves the assertion nowhere else to
+        # be satisfied from.
+        read = [l for l in step.splitlines() if l.strip().startswith("drift=$(")]
+        assert len(read) == 1, (
+            f"expected exactly one `drift=$(` command to check, found "
+            f"{len(read)}: {read}"
+        )
+        assert "AUDIT_DRIFT_STATUS" in read[0], (
+            "the drift verdict is no longer read from the module's constant - "
+            f"it is spelled a second time inside the workflow: {read[0]}"
         )
 
     def test_a_published_tree_that_moved_is_not_read_as_a_fresh_install(
