@@ -664,6 +664,42 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "constant, so it can hold anything - including nothing"
         )
 
+    def test_nothing_in_this_workflow_overrides_the_runner_s_shell(self):
+        """The premise the harness above rests on, asserted instead of assumed.
+
+        `_run` spawns the step's tail under `bash -e` BECAUSE that is what the
+        runner gives it: with no `shell:` and no `defaults:` anywhere in the
+        file, GitHub runs every `run:` body as `/usr/bin/bash -e {0}`, and the
+        step's own `set -uo pipefail` cannot take errexit away because `set -o`
+        only ENABLES options. That premise was stated twice in comments - once
+        in the workflow, once in `_run` - and enforced nowhere.
+
+        A `defaults: {run: {shell: bash --noprofile --norc {0}}}` is a normal,
+        reasonable-looking thing to add to a workflow, and it drops errexit in
+        production while this harness keeps it. Every execution test above
+        would stay green on a step that no longer behaves the way they run it,
+        which is the harness lying in the safer-looking direction: a command
+        that fails soft here would abort there.
+
+        Parsed, per AGENTS.md - the same shape as scripts/test_ci_workflow.py
+        holding ci.yml's no-`concurrency` invariant.
+        """
+        wf = load(ZIPS)
+        assert "defaults" not in wf, (
+            "a workflow-level `defaults:` overrides the runner's "
+            "`/usr/bin/bash -e {0}`, so the shell the tests execute is no "
+            "longer the shell the step gets"
+        )
+        for job_id, job in wf["jobs"].items():
+            assert "defaults" not in job, (
+                f"job `{job_id}` declares `defaults:`; see above"
+            )
+            for step in job.get("steps", []):
+                assert "shell" not in step, (
+                    f"step `{step.get('name') or step.get('id')}` in job "
+                    f"`{job_id}` declares `shell:`; see above"
+                )
+
     def test_the_verdict_still_reaches_the_step_output(self, tmp_path):
         """Whatever else the step says, `status=` is the only thing the next
         step consumes. An annotation that swallowed it would be a worse bug
