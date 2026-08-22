@@ -63,13 +63,15 @@ def normalise_status(value: str | None) -> str:
 
     THE `.strip()` STAYS NOW THAT THE WORKFLOW ALSO TRIMS, and not as a
     leftover. account-skill-zips.yml normalises its own capture before it
-    dispatches on it, so this call no longer carries that step - but
-    `--audit-status` is a public entry point with other callers, and dropping
-    the strip here would buy agreement with a NEW false negative: `fresh\r`
-    would silently degrade to `unavailable` everywhere, and the annotation
-    that reported it would still name the wrong cause. Two places trim
+    dispatches on it, so on today's one shipping path this call no longer
+    carries that step. It is kept because the answer this function gives is
+    its own contract and must not depend on a caller having trimmed first:
+    drop the strip and `fresh\r` becomes `unavailable` for any caller that
+    has not, with an annotation naming the wrong cause. Two places trim
     because two places have to answer the question; they agree, which is the
-    property test_the_step_and_the_module_agree_on_what_a_verdict_is holds.
+    property test_the_step_and_the_module_agree_on_what_a_verdict_is holds -
+    removing this strip reds that test and
+    test_any_unrecognised_status_reads_as_unavailable with it.
     """
     text = (value or "").strip()
     return text if text in KNOWN_STATUSES else UNAVAILABLE
