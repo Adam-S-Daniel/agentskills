@@ -359,6 +359,23 @@ def _folded(data: bytes, fold: bool) -> bytes:
     return data.replace(CRLF, LF) if fold else data
 
 
+def carries_crlf(path: Path) -> Optional[bool]:
+    """Does any file both channels carry hold a CRLF? None if unreadable.
+
+    Only so that a note about line endings can say WHICH copy has them rather
+    than assuming. Folding CRLF reconciled the pair is evidence that they
+    disagree about line endings; it is not evidence about the direction, and a
+    reader who checks the bytes is entitled to find the sentence true.
+    """
+    entries = uploaded_files(Path(path))
+    if entries is None:
+        return None
+    try:
+        return any(CRLF in file_path.read_bytes() for _, file_path in entries)
+    except OSError:
+        return None
+
+
 def remote_url(registry: object) -> Optional[str]:
     """The git remote URL a lock's `registry` field stands for, or None.
 
@@ -1168,6 +1185,27 @@ def record_findings(record: Record, record_path: Path) -> List[Finding]:
     return findings
 
 
+def _crlf_side(mine: Path, theirs: Path) -> str:
+    """Which copy carries the CRLF, as a clause, or "" when nothing was measured.
+
+    Folding CRLF reconciled a pair says the two disagree about line endings. It
+    does NOT say which one is CRLF, and the earlier text asserted the account
+    store was — an assumption, true of the copies that prompted it and not
+    measured on the pair in front of the reader. Both directories are already in
+    hand, so the direction is readable rather than assumable.
+    """
+    ours, yours = carries_crlf(mine), carries_crlf(theirs)
+    if ours is None or yours is None:
+        return ""                     # unmeasured: say nothing rather than guess
+    if yours and not ours:
+        return " — the account copy carries CRLF and this one does not"
+    if ours and not yours:
+        return " — this copy carries CRLF and the account copy does not"
+    if ours and yours:
+        return " — both carry CRLF, and they disagree about where"
+    return ""
+
+
 def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
                     ) -> Tuple[List[Finding], List[Finding]]:
     """(findings, notes) for every bare name BOTH channels deliver into one session.
@@ -1270,8 +1308,7 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
                     f"the drift deliberately."))
                 continue
             sameness = ("The two copies are byte-identical once CRLF line "
-                        "endings are folded to LF — the account store is CRLF "
-                        "where the registry is LF")
+                        "endings are folded to LF" + _crlf_side(mine, theirs))
 
         notes.append(Finding(
             "shadowed-by-the-account-store", name,

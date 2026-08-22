@@ -2921,6 +2921,58 @@ def test_the_same_directory_with_a_skill_md_is_a_shadow(tmp_path, capsys,
     assert "[shadowed-by-the-account-store] beta" in out, out
 
 
+def test_the_note_says_which_copy_carries_the_crlf(tmp_path, capsys, ephemeral):
+    """Folding reconciled the pair says they disagree, not which way round.
+
+    The sentence names a direction, so it has to be read off the bytes. Asserted
+    in both directions, because a hard-coded string satisfies either one alone.
+    """
+    store, lock = shadowed_store(tmp_path)      # personal LF, account CRLF
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "the account copy carries CRLF and this one does not" in flat(out), out
+
+    other = tmp_path / "reversed"
+    other.mkdir()
+    store = other / "skills"
+    store.mkdir()
+    skill = store / "alpha"
+    skill.mkdir()
+    (skill / "SKILL.md").write_bytes(b"---\r\nname: alpha\r\n---\r\nbody\r\n")
+    write_record(store, "alpha")
+    account_copy(store, "alpha", body="body\n", crlf=False)
+    lock = write_lock(other / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "this copy carries CRLF and the account copy does not" in flat(out), out
+
+
+def test_crlf_on_both_sides_is_described_as_being_on_both_sides(tmp_path, capsys,
+                                                                ephemeral):
+    """The reading no fixed sentence can cover: neither copy is "the CRLF one".
+
+    Each copy spells a different file with CRLF, so folding reconciles them
+    while both sides carry some.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    skill = store / "alpha"
+    skill.mkdir()
+    (skill / "SKILL.md").write_bytes(b"---\r\nname: alpha\r\n---\r\nbody\r\n")
+    (skill / "reference.md").write_bytes(b"one\ntwo\n")
+    write_record(store, "alpha")
+    theirs = store / prov.ACCOUNT_DIR / "alpha"
+    theirs.mkdir(parents=True)
+    (theirs / "SKILL.md").write_bytes(b"---\nname: alpha\n---\nbody\n")
+    (theirs / "reference.md").write_bytes(b"one\r\ntwo\r\n")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "both carry CRLF, and they disagree about where" in flat(out), out
+
+
 def test_the_folded_digest_folds_crlf_and_the_unfolded_one_does_not(tmp_path):
     """The two digests must disagree on a CRLF pair, or normalising is a no-op.
 
