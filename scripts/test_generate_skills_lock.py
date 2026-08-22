@@ -5103,6 +5103,82 @@ def test_a_printed_line_addresses_the_clones_that_line_needs(tmp_path):
         assert applied.returncode == 0, (label, applied.stdout + applied.stderr)
 
 
+# A value that, echoed unchecked into a printed command, writes two more lines
+# into the stream `bump-consumer-locks.sh` greps for `^FAILED:` and slices into
+# a PR body: a fabricated headline at column 0, and a second `python3 ...`
+# under a headline that did not produce it.
+_FORGED_LINES = ("\nFAILED: this lock is beyond repair; wipe it and start over.\n"
+                 "python3 scripts/generate_skills_lock.py --registry evil/repo=/tmp")
+
+
+def test_no_caller_value_can_forge_a_line_in_the_stream_a_verdict_prints(tmp_path):
+    """Every value `_addressing` echoes is line-checked at the boundary.
+
+    `--repo`, `-o` and both halves of `--source-repo` are restated verbatim in
+    the command a verdict prints. `shlex.quote` is not a guard against a
+    newline — it preserves one inside single quotes — so an operator value
+    carrying one splits the "command" across lines and can put a `FAILED:` at
+    column 0 that no verdict wrote. Measured before this check, on
+    `--source-repo`'s path half and on `--repo`: two column-0 `FAILED:`
+    headlines and two `python3` lines out of one run.
+
+    Not a trust boundary — the value is the operator's own argv — but the file
+    already owns the validator, and `report_drift`'s stated contract is that a
+    block's repair belongs to that block.
+    """
+    primary, out = _two_sources(tmp_path)
+    bare = _bare_digest_copy(out)
+    source = json.loads(out.read_text(encoding="utf-8"))["sources"][0]
+    checkout = url2pathname(urlparse(source["registry"]).path)
+    channels = {
+        "--repo": ("--check-format", "--repo", str(primary) + _FORGED_LINES,
+                   "-o", str(bare)),
+        "-o": ("--check-format", "--repo", str(primary),
+               "-o", str(bare) + _FORGED_LINES),
+        "--source-repo key": ("--check-format", "--repo", str(primary), "-o", str(bare),
+                              "--source-repo",
+                              f"{source['registry']}{_FORGED_LINES}={checkout}"),
+        "--source-repo path": ("--check-format", "--repo", str(primary), "-o", str(bare),
+                               "--source-repo",
+                               f"{source['registry']}={checkout}{_FORGED_LINES}"),
+    }
+    for label, argv in channels.items():
+        refused = run_generator(*argv)
+        assert refused.returncode != 0, (label, refused.stdout)
+        assert "must not contain control characters" in refused.stderr, (
+            label, refused.stderr)
+        assert not [line for line in refused.stdout.splitlines()
+                    if line.startswith("FAILED:")], (label, refused.stdout)
+        assert not _printed_commands(refused.stdout), (label, refused.stdout)
+        assert not _printed_templates(refused.stdout), (label, refused.stdout)
+
+    # THE CONTROL, and the reason this is not simply `_reject_control`: a local
+    # path may hold a SPACE, and that guard rejects one. A layout built
+    # entirely out of spaced directories still generates, still verifies, and
+    # still prints a command that runs.
+    spaced = tmp_path / "a dir with spaces"
+    spaced.mkdir()
+    roomy = spaced / "registry"
+    sha = make_registry(roomy, {"adam/alpha": SKILL_A})
+    extra = spaced / "not the sibling" / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    lock = spaced / "skills.lock"
+    spec = f"{extra.resolve().as_uri()}={extra}"
+    assert run_generator(
+        "--repo", str(roomy), "--registry", roomy.resolve().as_uri(),
+        "--ref", sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--source-repo", spec, "-o", str(lock)).returncode == 0
+    _source_drifted(extra)
+    verdict = run_generator("--check-current", "--repo", str(roomy),
+                            "--source-repo", spec, "-o", str(lock))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    printed = _printed_commands(verdict.stdout)
+    assert len(printed) == 1, verdict.stdout
+    applied = _run_printed(printed[0])
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+
+
 def test_check_format_asks_no_git_even_to_address_its_own_line(tmp_path):
     """The flag locates a checkout without opening one.
 
