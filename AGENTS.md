@@ -557,6 +557,27 @@ marketplace `renames` map is append-only.
 - After any bundle restructure, re-run `bash setup.sh` on every machine right
   away. A stale global sync-skills pre-push hook keeps pointing at the old
   plugin path and fails every `git push` from every repo until re-registered.
+- **`python3 scripts/test_<x>.py` cannot fail, so never verify with it.**
+  Running a test file directly executes only what is at module scope: unless
+  the file ends in an `if __name__ == "__main__"` block that invokes a runner,
+  Python imports the module, defines its classes and exits 0 having asserted
+  nothing — and it looks exactly like a suite that passed. All 8 files under
+  `scripts/` lack such a block, so all 8 are that trap. Exactly one test file
+  in the repo does not:
+  `plugins/adam-local/skills/rename-pdfs/scripts/test_extract_pdf_context.py`
+  ends with `unittest.main()`, and running THAT one directly really does run
+  its tests — which is why the habit to build is naming the runner rather than
+  auditing each file for a footer. Measured: appending
+  `def test_this_must_fail(): assert False` to
+  `scripts/test_account_zip_selection.py` left `python3
+  scripts/test_account_zip_selection.py` at exit 0, while `python3 -m pytest`
+  on that same file exited 1 with "1 failed, 53 passed". This is a live
+  instance of *"The watch finished" is not "CI passed"* above — an exit code
+  that reports the harness rather than the tests, the `cmd | tail` /
+  `${PIPESTATUS[0]}` trap wearing different clothes. The one command that
+  actually runs this repo's suite is the one CI runs:
+  `python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q`,
+  and read its result from `$?` directly rather than through a pipe.
 
 ### One-way doors get an adversarial round
 
