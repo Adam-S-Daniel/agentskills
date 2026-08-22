@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Every `pip install` in this repo's workflows installs requirements-dev.txt.
 
-Issue #121. The four Python packages this repo tests itself with used to be
-pinned inline in five `pip install` lines across .github/workflows/, and the
-five named different subsets of them. Nothing required any two to agree, and
-nothing outside Actions could read the set at all. requirements-dev.txt is now
-the one place a version of any of them is written; these tests are what makes
-that claim hold rather than describe the day it was made.
+Issue #121. The packages this repo tests itself with used to be pinned inline
+in the `pip install` lines of .github/workflows/, restated once per job, and no
+two of those lines named the same subset. Nothing required any two to agree,
+and nothing outside Actions could read the set at all. requirements-dev.txt is
+now the one place a version of any of them is written; these tests are what
+makes that claim hold rather than describe the day it was made.
 
 The rule they enforce is deliberately shaped so it needs no list of its own:
 
   * every `pip install` a workflow runs must install `-r <requirements file>`,
     and that file must be the declared one;
   * it may name no package of its own, pinned or not — a name on the command
-    line is a second place a version can live, or a fifth dependency nobody
+    line is a second place a version can live, or a dependency nobody
     declared;
   * so a package added to requirements-dev.txt is covered the moment it is
     added, and nothing here has to be widened to notice it.
