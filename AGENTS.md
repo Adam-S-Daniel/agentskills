@@ -542,11 +542,18 @@ marketplace `renames` map is append-only.
 - After any bundle restructure, re-run `bash setup.sh` on every machine right
   away. A stale global sync-skills pre-push hook keeps pointing at the old
   plugin path and fails every `git push` from every repo until re-registered.
-- **`python3 scripts/test_<x>.py` cannot fail, so never verify with it.** No
-  test file in this repo has an `if __name__ == "__main__"` block, so running
-  one directly imports the module, defines its classes and exits 0 having
-  asserted nothing — and it looks exactly like a suite that passed. Measured:
-  appending `def test_this_must_fail(): assert False` to
+- **`python3 scripts/test_<x>.py` cannot fail, so never verify with it.**
+  Running a test file directly executes only what is at module scope: unless
+  the file ends in an `if __name__ == "__main__"` block that invokes a runner,
+  Python imports the module, defines its classes and exits 0 having asserted
+  nothing — and it looks exactly like a suite that passed. All 8 files under
+  `scripts/` lack such a block, so all 8 are that trap. Exactly one test file
+  in the repo does not:
+  `plugins/adam-local/skills/rename-pdfs/scripts/test_extract_pdf_context.py`
+  ends with `unittest.main()`, and running THAT one directly really does run
+  its tests — which is why the habit to build is naming the runner rather than
+  auditing each file for a footer. Measured: appending
+  `def test_this_must_fail(): assert False` to
   `scripts/test_account_zip_selection.py` left `python3
   scripts/test_account_zip_selection.py` at exit 0, while `python3 -m pytest`
   on that same file exited 1 with "1 failed, 53 passed". This is a live
