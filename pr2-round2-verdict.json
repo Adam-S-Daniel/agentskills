@@ -1,0 +1,72 @@
+{
+  "closedConfirmed": [
+    "BLOCKING V0.D0 \u2014 degraded PR bodies. Reproduced independently: full fleet fixture, both scoped flags stripped via strip-scoped-flags.py (verified 0 hits for --only and --repin-source in --help), non-dry-run. Three bodies generated (repo-fed-stale, repo-federated, repo-stale). No body contains '**unchanged**' or 'answered that its bundles have'; both federated bodies carry '**Federated sources keep their pins, and this run could not ask whether they should.**' and label each source '\u2014 **not asked**'. repo-fed-stale's source HAS moved and is not called unchanged. Pushed locks keep the original source pins.",
+    "V0.D5 \u2014 hoisted degraded annotation. Both drifted-primary federated repos emit '::warning::<repo>: the primary has moved, and this generator cannot say whether a FEDERATED source has moved with it'; repo-fed-current (primary current) still gets the other wording. Both reproduced in my own fleet run.",
+    "V0.D2 \u2014 generator_error_line. test_bump_generator_error_line reproduces: log carries 'could not decide whether skills.lock is current \u2014 gen.py: error: unrecognized arguments' and never 'current \u2014 usage:'. Helper is applied at all five generator-output report sites.",
+    "V0.D1 \u2014 the two soft probes are real capability checks. Ran both probe argv against the REAL generator (agentskills ag58-generator @ c906bbf): `--only probe/probe -o /dev/null` exits 2 with '--only scopes --check-current; pass it alongside that flag.', `--repin-source 'probe/probe@' -o /dev/null` exits 2 with '--repin-source advances a pin the lock already carries...'. Both needles match; -o is not required by the real generator so passing it is harmless. only-prefix fixture degrades and leaves the federated pin at BUMP_SRC_CONTENT.",
+    "V0.D3 \u2014 self-federating lock. My run: '0 failed, 1 proposed', primary pin advanced, self-named source entry carried through untouched, no unanswerable scoped question put.",
+    "V0.D4 \u2014 one-flag strip. Both partial strips run; exactly one probe warning each; no federated advance; no 'unrecognized arguments'.",
+    "V1.D3 \u2014 dedupe. twice-federated run reports the generator's 'federates that registry twice' diagnosis and never the bumper's own 'one pin per source'; 1 failed, no branch pushed.",
+    "THEME V1.D0/V2.D2 \u2014 format+federated. Captured the real artifact: title 'chore: relabel skills.lock digests as sha256:<64 hex> and advance its federated pin for bumporg/cms-platform (primary pin unchanged)'; header names both halves; commit subject/body carry both clauses.",
+    "THEME V1.D1/V2.D3 \u2014 derived_note keyed on whether the lock has sources. Verified across repo-fed-stale, repo-federated, repo-fed-current, repo-selffed and repo-fmtfed: none says 'newly pinned commit' / 'the commit this lock already pinned' when sources exist.",
+    "THEME V1.D1 \u2014 the scoped verdict is quoted on the content+federated and format+federated paths, not only on the federated-only one. Seen in both captured bodies.",
+    "THEME V1.D2 and the #65 cross-repo request. Verified the three script needles and the fourth cross-repo needle each matched exactly once at 4c505e3 and zero times now, so they can go red. Same check on the three ADR needles (1 -> 0 each) and the surviving positive needle 'only the primary edited' (1 -> 1).",
+    "V1.D5 / V2.D0 / V2.D1 / V2.D5 \u2014 stub parity. Ran four of the five asserted refusals against the REAL generator at c906bbf on a live two-registry fixture: `--only ''` refused at exit 2; a --source-repo pointing at the wrong clone refused with 'does not contain <pinned sha>'; a twice-federated `--check-current --only` prints a FAILED headline carrying the reason and NO --repin-source command, and `--repin-source` refuses in the same words; a branch-name primary pin refused with 'which is not a commit sha'. The stand-in matches on all four.",
+    "V2.D4 \u2014 ADR 0009's re-taken measurement. I rebuilt the two-registry scenario myself and ran c906bbf three ways: primary-only -> exit 1, one FAILED naming the primary sha; source-only -> exit 1, one headline naming org/cms-platform and its own pin with `--repin --ref <primary> --repin-source 'org/cms-platform@'` under it; both -> exit 1 and TWO headlines, primary first. All three bullets reproduce exactly as written.",
+    "V2.D6 \u2014 the unanswerable-scope branch has a fixture and it passes (5 assertions).",
+    "The three previously-hollow needles (1c49d62 / c7e5569) are genuinely wired now \u2014 each matched once in the pre-fix file and zero times in the current one."
+  ],
+  "countObserved": "641 passed, 0 failed. Gate run ONCE, sequentially: `cd /home/user/_agent-guidance && npm ci && ./test/run-tests.sh`, exit code read from $? directly with no pipe. npm ci exit 0, run-tests.sh exit 0. The log carries exactly ONE `Results:` block (line 780) and zero `  FAIL:` lines, so no concurrent-run collision. All my later probe drivers were separate copies of the harness run strictly after the gate finished and never concurrently with each other.",
+  "exitCodeObserved": 0,
+  "defects": [
+    {
+      "summary": "The V0.D5 fix (7fec27e) hoisted the degraded federated report out of the `current_exit -eq 0` branch, so on a federated lock whose PRIMARY question could not be answered the run now blames the federated half for a primary-side failure \u2014 and swallows the accurate message that used to be printed.",
+      "evidence": "scripts/bump-consumer-locks.sh:1191. Measured on a fixture I built: a federated lock pinning an unresolvable primary ref (9999...), run three ways against the same fleet harness. (a) branch tip, both scoped flags present: `ERROR: bumporg/repo-badprim: could not decide whether skills.lock is current \u2014 ERROR: cannot resolve ref '9999...' in <registry>` \u2014 accurate. (b) branch tip, both flags stripped: `ERROR: bumporg/repo-badprim: could not read this lock's federated half \u2014 ERROR: cannot resolve ref '9999...' in <registry>` \u2014 the unresolvable ref is the PRIMARY's, in the PRIMARY's checkout, and the lock's federated half is intact. (c) pre-fix script at 4c505e3, same stripped generator: `could not decide whether skills.lock is current` \u2014 accurate. So the degraded path is the only one that misattributes, and it did not before this commit. The new block also spends a full combined `--check-current` on a lock already known unanswerable and then `continue`s, so the primary-side report at line 1306 is never reached.",
+      "severity": "should-fix",
+      "file": "scripts/bump-consumer-locks.sh",
+      "introducedByFix": true
+    },
+    {
+      "summary": "`self_named_note` is unconditional on $FED_ADVANCE_AVAILABLE \u2014 the same shape as the BLOCKING defect \u2014 so on a degraded run a self-federating lock's PR body asserts `--check-current --only` and `--repin-source` behaviour from a generator that has neither flag.",
+      "evidence": "scripts/bump-consumer-locks.sh:1938-1945 (and the matching log() at :1125). Measured: self-federating lock (bumporg/agentskills as both primary and a source), both flags stripped. Body says: \"A `--check-current --only bumporg/agentskills` has two answers under that one name, so the question was not put; `--repin-source` refuses that name outright for the same reason.\" Neither flag exists on that generator \u2014 the run had already emitted `::warning::... has no '--check-current --only <REGISTRY>'` and `... has no '--repin --repin-source <REGISTRY>@'` \u2014 so the stated reason no question was put is false, and the flag whose refusal is described was never available. The three-state fix in 72c994e covered the per-source LIST but not this paragraph beside it. Same log line fires in degraded mode with the same wrong reason.",
+      "severity": "should-fix",
+      "file": "scripts/bump-consumer-locks.sh",
+      "introducedByFix": true
+    },
+    {
+      "summary": "A hollow assertion introduced by the V1.D4 fix: the needle it forbids has never existed in the file it greps, in either version, so the guard is a green light wired to nothing \u2014 the exact defect class 1c49d62/c7e5569 were written to close.",
+      "evidence": "test/run-tests.sh:5760-5763 \u2014 `assert_not_contains \"$REPO_ROOT/scripts/bump-consumer-locks.sh\" \"can never separate a headline from the command\" \"slice: no comment promises a guarantee this slice does not have\"`. Counted directly: `git show 4c505e3:scripts/bump-consumer-locks.sh | grep -cF 'can never separate a headline from the command'` = 0, and the same grep on the current file = 0. The only occurrence of anything near that phrase anywhere in the repo is test/run-tests.sh:1067, inside the stub generator's own heredoc, and it reads \"must never separate a headline from the command that fixes it\" \u2014 which the needle would not match either. So unlike the other three needles this round repaired (each 1 -> 0 across the fix), this one is 0 -> 0 and cannot go red for any edit that reintroduces the absolute in the wording the script would actually use.",
+      "severity": "should-fix",
+      "file": "test/run-tests.sh",
+      "introducedByFix": true
+    },
+    {
+      "summary": "On the federated-only path (repin_reason=federated) the PR body now contradicts itself: the header says a federated source moved \"and nothing else\", and the hoisted evidence block three paragraphs later says a federated source moved \"too\".",
+      "evidence": "scripts/bump-consumer-locks.sh:1737 vs :1798. Captured body for bumporg/repo-fed-current in a normal fleet run: header \"**What moved:** a FEDERATED source, and nothing else.\", why_note \"What has moved is a federated source, whose bundles this lock also installs and whose pin only `--repin-source` advances.\", then immediately \"**A FEDERATED source moved too, and its pin advances with this PR.** Its bundles are installed by this lock and only `--repin-source` advances its pin.\" \u2014 \"too\" asserts something else also moved, which the header denies, and the second sentence restates the first almost verbatim. Pre-fix this block lived inside the `federated` branch with no such heading (`git show 4c505e3:scripts/bump-consumer-locks.sh` has zero matches for \"moved too\"); 7732439 hoisted it and gave it wording written for the primary-also-moved case.",
+      "severity": "should-fix",
+      "file": "scripts/bump-consumer-locks.sh",
+      "introducedByFix": true
+    },
+    {
+      "summary": "`derived_note`'s new sources-aware branch sends the reader to \"the ref listed for it below\" on a path where nothing is listed below \u2014 a self-federating lock, whose second entry's digests really are derived at a ref the body never names.",
+      "evidence": "scripts/bump-consumer-locks.sh:1843-1848 keys on `${#source_registries[@]} -gt 0`, but `federated_lines` is built by a loop that skips `$reg == $primary_registry` (:1918), so a lock whose only source IS its primary produces an empty list and federated_note becomes \"**No federated source in this lock could be asked about.**\". Captured body for bumporg/repo-selffed: \"...`bumporg/agentskills`'s own bundles at `8b159af`, and each federated source's at the ref listed for it below, in the repository that publishes it.\" followed by no list at all. The self-named entry's pin is carried through at the OLD ref (a988f05, asserted by the suite itself) and its digests are re-derived there, so in the general case \u2014 a self-named entry carrying real bundles rather than this fixture's empty one \u2014 the body promises a pin it never prints. Same dangling sentence appears on the degraded self-federating run.",
+      "severity": "should-fix",
+      "file": "scripts/bump-consumer-locks.sh",
+      "introducedByFix": true
+    },
+    {
+      "summary": "The format+federated repro_note claims \"The whole of it was <command>\" for a command that omits --repo, --source-repo and -o, so it is not the whole invocation and will not run \u2014 a weaker claim than the unbranched sentence it replaced, which quoted a line that did carry those placeholders.",
+      "evidence": "scripts/bump-consumer-locks.sh:1687-1690, built from `repin_command_shown` (:1459-1463). Captured bumporg/repo-fmtfed body: \"The whole of it was `python3 scripts/generate_skills_lock.py --repin --ref f867ec9... --repin-source 'bumporg/cms-platform@'`\". The actual invocation (:1470-1476) also passes `--repo \"$primary_dir\"`, `--source-repo bumporg/cms-platform=<path>` and `-o skills.lock`; --source-repo is not optional for a federated re-pin (the generator exits `ERROR: <reg>: no checkout \u2014 pass --source-repo`). The quoted --check-format remediation line directly above it, by contrast, does carry `--repo <a clone of the registry this lock names> -o <this lock>`, so a reader comparing the \"half\" with the \"whole\" sees the whole missing pieces the half had. The comment at :1455-1458 justifies dropping runner paths; the body's word \"whole\" is what the comment does not license.",
+      "severity": "nit",
+      "file": "scripts/bump-consumer-locks.sh",
+      "introducedByFix": true
+    },
+    {
+      "summary": "The stub inventory added for V2.D7 states a count that its own list contradicts three lines later.",
+      "evidence": "test/run-tests.sh:5465-5466: \"THE STUB INVENTORY, recorded so the next flag does not rediscover it. There are FOUR generator stand-ins in this file, and only the first is under test here:\" \u2014 followed by a FIVE-item list (write_stub_generator, generator-no-repin.py, generator-no-check-format.py, generator-format-error.py, generator-errline.py) and then \"The last four carry neither...\", which is only coherent for five. The fix report itself says the inventory \"names all five stand-ins now present\". The file in fact holds more surgery-derived stand-ins than either number covers: generator-no-scoped-flags.py, generator-degraded-fed.py, generator-only-bundles.py and generator-missing-{only,repin-source}.py. A comment that asserts a checkable count and gets it wrong is the thing this repo's own rule forbids.",
+      "severity": "nit",
+      "file": "test/run-tests.sh",
+      "introducedByFix": true
+    }
+  ]
+}
