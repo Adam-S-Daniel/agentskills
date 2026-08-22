@@ -863,6 +863,21 @@ def restated_sources(extras: Sequence[dict], unproven: Collection[str] = ()) -> 
     advise restating the pin as the string that is not a pin. A plain `str`
     would be a Collection of its own characters and match nothing, so callers
     pass a tuple or a set.
+
+    WHERE THOSE CLONES ARE is named as a RULE and not as a path, and that is
+    the derived answer rather than a hedge. A `--source` is read from a local
+    checkout that `source_checkout` looks for beside `--repo`, and the plain
+    generate this sentence describes carries no `--repo` of its own — the
+    reader picks one. So there is no single path to state: the answer that
+    holds for every `--repo` the reader might use is the lookup rule plus the
+    flag that overrides it. (The `--repin` LINES a report prints are the
+    opposite case and are addressed the opposite way: each names the `--repo`
+    it will run with, so `_addressing` derives a real path per source and
+    marks the line a template when it cannot.) Without this clause, following
+    the sentence verbatim on a machine whose clone is not the default sibling
+    exits 1 at "no checkout at ..." — measured on the layout
+    `_source_at_a_non_default_checkout` builds, and held by
+    `test_the_plain_generate_a_refusal_names_says_where_its_clones_are_read_from`.
     """
     assert not isinstance(unproven, str), "unproven is a collection of registries"
     if not extras:
@@ -875,7 +890,11 @@ def restated_sources(extras: Sequence[dict], unproven: Collection[str] = ()) -> 
     return (
         " Note that a plain generate takes `sources` from the command line alone, so it "
         "must carry a --source for every source the lock is to keep, or the ones it "
-        f"omits are dropped at exit 0 — this lock's are: {flags}"
+        f"omits are dropped at exit 0 — this lock's are: {flags}. Each of those is read "
+        "from a local git checkout, looked for at the sibling ../<repo-name> of "
+        "whatever --repo that generate is given, so a source whose clone is anywhere "
+        "else needs a --source-repo '<bundles>=<path>' beside its --source or the run "
+        "stops at 'no checkout at ...'."
     )
 
 
