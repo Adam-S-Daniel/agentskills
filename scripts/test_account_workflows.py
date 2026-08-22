@@ -864,7 +864,24 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "statuses exist; every one the module knows needs an arm, or it "
             "is annotated as unrecognised when it is not"
         )
-        assert variables == {'"$drift"'}
+        # QUOTED, and that is behaviour rather than house style. A `case`
+        # pattern undergoes parameter expansion, and an UNQUOTED expansion is
+        # then read as a pattern - so if the module's constant ever held a glob
+        # metacharacter the quiet arm would stop matching one status and start
+        # matching everything, swallowing every verdict this step exists to
+        # annotate. Measured, with the two forms side by side:
+        #
+        #   d="*"; case anything in fresh|"$d") quiet ;; *) loud ;; esac -> loud
+        #   d="*"; case anything in fresh|$d)   quiet ;; *) loud ;; esac -> quiet
+        #
+        # The set is asserted whole for the other half of the same guarantee:
+        # `"$drift"` matching NOTHING at all - a read that silently returned
+        # empty - looks exactly like a working arm on every verdict except the
+        # drift one, which is the single verdict this workflow exists for.
+        assert variables == {'"$drift"'}, (
+            "the quiet arm no longer matches the drift verdict through exactly "
+            "one quoted expansion of the module's constant"
+        )
         # `code(body)`, never `body`: see that helper. The claim here is about
         # what the step RUNS, and this file's own docstring says asserting on
         # the raw body "would let a claim that only survives in a comment count
