@@ -414,9 +414,13 @@ def _audit_body():
 def _splice(block):
     """The REAL audit body with its `case` block swapped for `block`.
 
-    In memory, and there are no fixture FILES on purpose:
-    `plugins/*/skills/*/tests/` is a CI glob and a fixtures directory under
-    `scripts/` would need its own salient-path entry in ci.yml.
+    In memory, and there are no fixture FILES on purpose. A file would be a
+    second copy of the shipped `case` with nothing keeping it in step with the
+    first, and a stale fixture is a test asserting a shape the workflow no
+    longer has - green, and about nothing. Built here, every block is the real
+    body with one thing changed, and `_ARMS_OK["control"]` runs the full
+    status assertion over `_ARMS_BASE` itself, so a fixture that drifts from
+    the step reds with the drift message rather than passing.
 
     The rest of the body is kept because the test under test reads it - the
     `drift=$(` line it pins the constant read to sits above the `case`, and
