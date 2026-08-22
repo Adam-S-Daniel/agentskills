@@ -224,8 +224,11 @@ jobs:
             echo "::warning::eval-results branch not present yet, so there is no published audit to read and this run used the local recording alone."
           fi
           pip_ok=yes
-          python3 -m pip install --quiet pyyaml==6.0.3 \
-            || { pip_ok=no; echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"; }
+          # The whole declared set, though only pyyaml is imported below —
+          # requirements-dev.txt is the single place any of these versions is
+          # written down, and this job reads it rather than restating one.
+          python3 -m pip install --quiet -r requirements-dev.txt \
+            || { pip_ok=no; echo "::warning::the requirements-dev.txt install failed; unless pyyaml is already present the verdict will be unavailable"; }
           verdict=$(python3 - <<'PY'
           import json
           import sys
@@ -306,7 +309,7 @@ jobs:
             if [ "$harness_ok" = no ] || [ "$results_ok" = no ]; then
               echo "no verdict, which follows from the clone failure annotated above; this run used the local recording alone"
             elif [ "$pip_ok" = no ]; then
-              echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the pyyaml install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
+              echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the dependency install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
             else
               echo "::warning::could not compute the published account audit verdict - both clones and the pyyaml install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
             fi
