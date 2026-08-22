@@ -4043,7 +4043,11 @@ def test_the_stale_note_and_the_lock_findings_are_gated_too(tmp_path, capsys):
 # The kinds the binding test claims to cover, and the one it does not.
 # `unmeasurable-and-locked` needs `digest_skill_dir` to fail, which needs a path
 # this process cannot read — and the suite runs as root in CI, where a chmod is
-# not a refusal. Named here so the comment above HOOK_REFUSAL can say "these
+# not a refusal. Its DOCTOR half is exercised all the same, by
+# `test_an_unmeasurable_directory_reaches_all_three_locked_refusals`, which
+# simulates the failed measurement; what stays unmeasured is the hook's, since
+# no store here can hand the extracted `may_replace` a directory `digest_dir`
+# declines to hash. Named here so the comment above HOOK_REFUSAL can say "these
 # states" and have it mean a closed set rather than a gesture.
 UNEXERCISED_REFUSAL_KINDS = frozenset({"unmeasurable-and-locked"})
 
@@ -4143,6 +4147,43 @@ def test_an_artefacts_finding_always_has_a_file_to_name(tmp_path, capsys):
     assert "[artefacts-and-locked] alpha" in flat(out), out
     assert " ()" not in out, out
     assert "`__pycache__" in out, out
+
+
+@pytest.mark.parametrize("recorded,kind", [
+    (("alpha",), "unmeasurable-and-locked"),
+    ((), "hand-placed-over-locked"),
+    (None, "unattributable-over-locked"),
+])
+def test_an_unmeasurable_directory_reaches_all_three_locked_refusals(
+        tmp_path, capsys, monkeypatch, ephemeral, recorded, kind):
+    """`may_replace` refuses an unmeasurable directory too, and so must the words.
+
+    `digest_dir` prints nothing when it fails and the hook turns that into a
+    refusal outright (`[ -n "$have" ] || return 1`), so the second clause is not
+    merely false here, it is unanswerable. Two of these findings said the bytes
+    "are not" what the lock names, which is a claim about bytes nobody read —
+    the class of sentence this whole branch is about.
+
+    Simulated rather than built: making `digest_skill_dir` fail needs a path
+    this process cannot read, and CI runs as root. So this exercises the
+    DOCTOR's half only; `UNEXERCISED_REFUSAL_KINDS` is what says the hook's half
+    of `unmeasurable-and-locked` is still unmeasured, and it stays there.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    if recorded is not None:
+        write_record(store, *recorded)
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha",
+                      digests={"alpha": NOT_ON_DISK})
+    # After the fixtures, which measure the store to build themselves.
+    monkeypatch.setattr(prov, "digest_skill_dir", lambda path: None)
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert f"[{kind}] alpha" in flat(out), out
+    assert flat(prov.HOOK_REFUSAL) in flat(out), out
+    assert "are not the bytes the lock names" not in flat(out), out
 
 
 def _hook_verdict_line(source: str, phrase: str) -> str:
