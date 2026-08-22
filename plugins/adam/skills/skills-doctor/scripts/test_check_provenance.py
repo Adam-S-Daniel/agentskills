@@ -2552,8 +2552,8 @@ def test_a_name_the_record_names_in_a_skipped_entry_is_not_foreign(
     # reason it was rerouted. `untracked` used to end "A seeded directory is
     # recognised and reported as a `foreign` NOTE instead when its SKILL.md
     # declares a name other than its own basename; this one does not" — about a
-    # directory whose SKILL.md declares `some-other-name`, three lines under a
-    # finding pointing at the record entry that is the real reason.
+    # directory whose SKILL.md declares `some-other-name`, in a report whose
+    # own `record-entries-skipped` finding points at the real reason.
     assert "declares `name: some-other-name`" in flat(out), out
     assert "this one does not, so that evidence is absent" not in flat(out), out
     assert "the install record carries an entry for it that the hook's own " \
@@ -2621,8 +2621,8 @@ def _account_skill(store: Path, name: str, text: str) -> Path:
     """An account-store directory whose SKILL.md is written verbatim.
 
     `account_copy` always declares the basename, which is exactly the one case
-    the collision clause used to assume and the reason it went three rounds
-    unmeasured.
+    the collision clause assumed — so no fixture could have caught it asserting
+    that assumption.
     """
     skill = store / prov.ACCOUNT_DIR / name
     skill.mkdir(parents=True, exist_ok=True)
@@ -3367,7 +3367,7 @@ def test_running_a_suite_inside_an_installed_skill_does_not_make_it_edited(
     assert "[edited-and-locked] alpha" not in out, out
     assert "[artefacts-and-locked] alpha" in out, out
     # The extra files are NAMED, from this directory, rather than illustrated
-    # with the three artefacts that are usually the cause.
+    # with whichever artefacts are the usual cause.
     assert "`__pycache__/helper.cpython-311.pyc`" in flat(out), out
     # And no sentence promises the hook will tidy them up.
     assert "replaced at the next session start" not in flat(out), out
@@ -3597,10 +3597,10 @@ def test_the_shared_payload_digest_is_none_for_a_path_that_is_not_a_directory(
 # the binding to the hook's own refusal rule
 #
 # Every finding that says what happens NEXT is a claim about
-# `.claude/hooks/skills-bootstrap.sh`, and for three rounds those claims were
-# written by reading this file's earlier prose rather than that script. All of
-# them said the directory is replaced or removed at the next session start,
-# which is the one thing `may_replace` is written never to do.
+# `.claude/hooks/skills-bootstrap.sh`, and every one of them was written by
+# reading this file's earlier prose rather than that script. All of them said
+# the directory is replaced or removed at the next session start, which is the
+# one thing `may_replace` is written never to do.
 #
 # So the rule is not restated here, it is EXECUTED: `hook_may_replace` extracts
 # `may_replace` and `digest_dir` from the hook and runs them, in bash, against
@@ -3747,13 +3747,20 @@ def test_the_hook_does_overwrite_the_bytes_it_already_ships(tmp_path):
     the answer REPLACE, which only the real second clause produces: the bytes on
     disk already digest to the digest the lock names.
     """
-    store, lock, pristine, recorded = _refusal_state(tmp_path, "identical")
-    assert hook_may_replace(store, "alpha", pristine, recorded)
-    # And with no record at all, still REPLACE: content-identical outranks
-    # provenance, which is the exception `hand-placed-over-locked` states.
-    assert hook_may_replace(store, "alpha", pristine, ())
-    # A directory that is not there is the third true case.
+    store, _lock, pristine, recorded = _refusal_state(tmp_path, "identical")
+    # All three of the cases HOOK_REFUSAL's comment enumerates, so the count in
+    # it is measured rather than read off the hook once and copied.
+    #
+    # (1) Nothing is there.
     assert hook_may_replace(store, "not-installed", pristine, ())
+    # (2) The bytes already digest to the digest the LOCK names — with no
+    # record at all, which is the exception `hand-placed-over-locked` states.
+    assert hook_may_replace(store, "alpha", pristine, ())
+    # (3) The record names it and the bytes still digest to what was recorded.
+    # Separated from (2) by a locked digest the directory does NOT match, so
+    # only the record clause can be what says yes.
+    assert hook_may_replace(store, "alpha", "b" * 64, recorded)
+    assert not hook_may_replace(store, "alpha", "b" * 64, ())
 
 
 def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory(
@@ -3795,10 +3802,10 @@ def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory
 #
 # The last axis is an observation's OUTCOME, not its name. Round 3's table had
 # only the names, and that is a weaker thing than it reads as: the fixture
-# planted one shadow, one integrity state and one lock scope, so three
-# observations fired in twenty-eight cells and between them could not produce
-# `shadow-copies-differ`, `artefacts-and-*` or `stale-out-of-scope` anywhere at
-# all. `OBSERVATION_VARIANTS` below is where a new observation declares what its
+# planted one shadow, one integrity state and one lock scope, so three of the
+# four observations were in every reachable cell and between them could not
+# produce `shadow-copies-differ`, `artefacts-and-*` or `stale-out-of-scope`
+# anywhere at all. `OBSERVATION_VARIANTS` below is where a new observation declares what its
 # outcomes are, and `test_the_matrix_is_complete` will not let one be added
 # without them. Each unreachable one asserts that the ladder cannot produce
 # that origin from those inputs at all — which is how a dead branch shows up
@@ -3809,12 +3816,12 @@ TARGET = "target"
 BODY = "line one\nline two\n"
 
 # Each observation's distinguishable OUTCOMES, and the axis the round-3 table
-# was missing. `shadow` fired in six cells and produced
-# `shadowed-by-the-account-store` in all six, because the fixture always planted
-# a byte-identical account copy — so the divergent kind, the one at the centre
-# of the defect the table was built to stop recurring, was in no cell at all. A
-# cross-product over observation NAMES covers the names; this covers the
-# behaviour.
+# was missing. `shadow` was in one cell per reachable triple and produced
+# `shadowed-by-the-account-store` in every one of them, because the fixture
+# always planted a byte-identical account copy — so the divergent kind, the one
+# at the centre of the defect the table was built to stop recurring, was in no
+# cell at all. A cross-product over observation NAMES covers the names; this
+# covers the behaviour.
 #
 # The same audit over the other three: `integrity` always edited, so
 # `artefacts-and-*` was likewise unreachable from the table, and
@@ -3913,9 +3920,10 @@ _H, _U, _F, _K = prov.HOOK, prov.UNATTRIBUTED, prov.FOREIGN, prov.UNKNOWN
 # Every triple absent from the keys is unreachable and asserted to be.
 # (origin, record present, lock declares, observation, variant) ->
 #     (finding kinds, note kinds, exit code)
-# Every key absent from this table is unreachable and asserted to be. 49 of the
-# 112 cells are reachable: seven (origin, record, lock) triples the ladder can
-# produce, times the seven observation outcomes.
+# Every key absent from this table is unreachable and asserted to be. The
+# arithmetic in `test_the_matrix_is_complete` is the checkable statement of the
+# shape: 49 of 112 cells reachable, being the seven (origin, record, lock)
+# triples the ladder can produce times the seven observation outcomes.
 MATRIX = {
     ('hook', True, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
     ('hook', True, True, 'integrity', 'edited'): ({'edited-and-locked'}, set(), 1),
@@ -4001,6 +4009,11 @@ def test_the_matrix_is_complete():
     # and could only ever produce one of its two kinds.
     assert set(OBSERVATION_VARIANTS) == set(prov.OBSERVATION_ORIGINS)
     assert all(variants for variants in OBSERVATION_VARIANTS.values())
+    # The three numbers the section comment quotes, so that changing the shape
+    # of the table and leaving the prose behind is a failure rather than a
+    # stale sentence nobody re-derives.
+    assert (len(REACHABLE), len(OBSERVATIONS)) == (7, 7)
+    assert (len(MATRIX), len(CELLS)) == (49, 112)
     assert set(MATRIX) <= set(CELLS)
     assert set(MATRIX) == {(origin, record, lock, observation, variant)
                            for origin, record, lock in REACHABLE
