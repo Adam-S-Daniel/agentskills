@@ -355,14 +355,23 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
 
     THE FAILURE THIS LOCKS OUT IS A GREEN RUN THAT ASKED NOTHING. Every other
     failure in that step (both clones, the pyyaml install) raises a
-    `::warning::`, and the empty-capture fallback - the one path that fails
-    OPEN - did not. That is the path taken when the cross-repo IMPORT breaks:
-    skills-evals moves `account_store.py`, renames `freshness_verdict`, or
-    renames the `account_audit_max_age_days` fixture key. Both clones succeed,
-    neither existing warning fires, the heredoc raises, and with a clean local
-    recording `count=0` skips the zip job. The run ends GREEN with zero
-    annotations, and scheduled-run-health.yml - which scans for FAILED runs -
-    never reports it either.
+    `::warning::`; TWO paths failed OPEN, and each has its own test below.
+
+    The first is the empty-capture fallback, taken when the cross-repo IMPORT
+    breaks: skills-evals moves `account_store.py`, renames
+    `freshness_verdict`, or renames the `account_audit_max_age_days` fixture
+    key. Both clones succeed, neither existing warning fires, the heredoc
+    raises, and with a clean local recording `count=0` skips the zip job. The
+    run ends GREEN with zero annotations, and scheduled-run-health.yml - which
+    scans for FAILED runs - never reports it either.
+
+    The second is quieter still, because nothing raises at all: a verdict that
+    is not empty and is not a status this repo has a name for. It passes the
+    empty-capture guard, and until the `case` grew a `*)` arm it matched
+    nothing, said nothing, and was folded to `unavailable` one step later. A
+    skills-evals RENAME of the drift status is exactly that shape - the whole
+    cross-repo half of the evidence goes unused and the run page shows no sign
+    of it.
 
     The liveness verdicts are here for the same reason one level out: `stale`,
     `missing` and `unreadable` all mean the Tier-3 Routine stopped publishing a
@@ -507,28 +516,73 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         assert "::warning::" not in log, verdict
         assert f"status={verdict}" in out
 
-    def _case_statuses(self):
-        """The arm patterns of the audit step's `case`, split from the parsed
-        YAML rather than scanned out of the file.
-
-        Returns (literal statuses, variable patterns). A pattern list is the
-        whole line up to its `)`; the arm bodies end in `;;` and are skipped.
-        """
-        body = next(
+    def _body(self):
+        return next(
             s["run"] for s in load(ZIPS)["jobs"]["pick"]["steps"]
             if s.get("id") == "audit"
         )
-        start = body.index('case "$verdict" in')
-        block = body[start:body.index("esac", start)]
+
+    def _case_statuses(self):
+        """The arm patterns of the audit step's `case`, split on `;;`.
+
+        Returns (the step body, literal statuses, variable patterns).
+
+        SPLIT ON `;;` RATHER THAN ON NEWLINES, WHICH IS THE WHOLE POINT OF
+        THIS HELPER. An arm is `PATTERN) BODY ;;` and bash does not care where
+        the newlines fall inside it: `quota-exceeded) : ;;` written on ONE line
+        is the same arm as the two-line form. This used to look for a pattern
+        by scanning for a line ENDING in `)`, which sees neither half of that
+        arm - the pattern shares its line with the body, so no line ends in
+        `)` - and skipped it in silence. Splicing exactly that line above the
+        catch-all left the full verifier at 945 passed while the `case` quietly
+        swallowed a status account_zip_selection.py has never heard of, which
+        is verbatim the divergence the test below exists to prevent. The
+        one-line form is not hypothetical either: setup.sh:69, :70 and :270 all
+        use it, and so does record-account-upload.yml.
+        The asymmetry ran the wrong way as well - reformatting the CORRECT
+        `*)` arm onto one line made the same scan report that the catch-all was
+        MISSING, so it accused on a harmless reformat and stayed quiet on a
+        harmful one. AGENTS.md's rule for workflow invariants is the parsed
+        one for this reason: a scan "reads clean on text it cannot see".
+
+        Anything inside the block that is neither a comment nor an arm with a
+        pattern is an ERROR rather than a skip, so a shape this does not
+        understand cannot pass for an empty one.
+        """
+        body = self._body()
+        # Anchored on a LINE OF CODE, not on the first occurrence of the text.
+        # This step's comments quote its own shell heavily (the paragraph above
+        # the `case` names `$verdict` twice), and `body.index` would follow the
+        # first comment that ever quotes the opener verbatim - relocating the
+        # slice to a region with no arms in it, where every assertion below
+        # passes on an empty set.
+        opener = re.search(r'^[^\S\n]*case "\$verdict" in[^\S\n]*$', body, re.M)
+        assert opener, (
+            "the audit step's `case` opener is no longer a line of its own; "
+            "this test no longer knows which block it is reading"
+        )
+        block = body[opener.end():body.index("esac", opener.end())]
         literals, variables = set(), set()
-        for line in block.splitlines()[1:]:
-            line = line.strip()
-            if line.startswith("#") or not line.endswith(")"):
+        # All three arm terminators, because bash has three: `;;` ends an arm,
+        # `;&` falls through to the next arm's body and `;;&` goes on testing
+        # patterns. Splitting on `;;` alone would swallow the arm after a `;&`
+        # exactly the way the line scan swallowed a one-line one.
+        for chunk in re.split(r";;&|;;|;&", block):
+            code = "\n".join(
+                line for line in chunk.splitlines()
+                if not line.strip().startswith("#")
+            ).strip()
+            if not code:
                 continue
-            for token in line[:-1].split("|"):
+            pattern, closer, _ = code.partition(")")
+            assert closer, (
+                "an arm of the audit step's `case` has no pattern this test "
+                f"can read, so its statuses were counted as absent:\n{code}"
+            )
+            for token in pattern.split("|"):
                 token = token.strip()
                 (variables if "$" in token else literals).add(token)
-        return literals, variables
+        return body, literals, variables
 
     def test_the_case_block_names_every_status_the_module_knows(self):
         """The two vocabularies inside THIS repo cannot drift apart silently.
@@ -554,7 +608,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         no network and does not depend on that repo - which is why the runtime
         `*)` annotation, not this test, is what covers that case.
         """
-        literals, variables = self._case_statuses()
+        body, literals, variables = self._case_statuses()
         assert "*" in literals, (
             "no catch-all arm: a status this repo has never heard of matches "
             "nothing, says nothing, and the run goes green having used the "
@@ -568,10 +622,6 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "is annotated as unrecognised when it is not"
         )
         assert variables == {'"$drift"'}
-        body = next(
-            s["run"] for s in load(ZIPS)["jobs"]["pick"]["steps"]
-            if s.get("id") == "audit"
-        )
         assert "drift=$(" in body and "AUDIT_DRIFT_STATUS" in body, (
             "the quiet arm's variable is no longer read from the module's "
             "constant, so it can hold anything - including nothing"
