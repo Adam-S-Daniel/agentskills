@@ -2964,6 +2964,40 @@ def test_repin_source_leaves_the_primary_ref_alone_when_only_a_source_is_named(
     assert after["sources"][0]["ref"] == advanced
 
 
+def test_an_unnamed_source_with_a_branch_ref_is_re_resolved(federated_two, tmp_path):
+    """The limit of "comes back by reference", measured rather than asserted.
+
+    `_apply_repin_sources` genuinely does not touch a source it was not given,
+    but plan_sources resolves every source's ref before build_lock writes it —
+    so a lock carrying a BRANCH name there (which `validate_ref` accepts) has
+    that source re-pinned to whatever the branch now points at, by a re-pin
+    aimed at a different registry entirely. The behaviour is pre-existing: a
+    bare `--repin` does the same, and pinning is what this generator is for.
+    What was new and false was a docstring promising byte-identical
+    serialization for the source nobody named.
+    """
+    primary, _, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    document = json.loads(out.read_text(encoding="utf-8"))
+    unnamed = _source_named(document, other.resolve().as_uri())
+    unnamed["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    advanced = _move_head(other)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    after = _source_named(json.loads(out.read_text(encoding="utf-8")),
+                          other.resolve().as_uri())
+    assert after["ref"] == advanced
+    # Everything else about it IS carried through untouched — the by-reference
+    # half of the docstring, which is the half this function controls.
+    assert {key: value for key, value in after.items() if key != "ref"} == \
+           {key: value for key, value in unnamed.items() if key != "ref"}
+
+
 def test_repin_source_refuses_a_registry_the_lock_does_not_federate(
         federated, tmp_path):
     """ADDING a source changes what the lock means; that is a plain generate."""
