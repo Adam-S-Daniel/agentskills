@@ -1,0 +1,62 @@
+{
+ "countObserved": "978 passed, exit 0 \u2014 reproduced independently in my own worktree at 2330e9c with `python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q > file 2>&1; echo $?` (unpiped $?). Agrees with the fix report. Targeted file: 16 passed. Baseline pytest here is 9.1.1, pyyaml 6.0.1, markdown-it-py 4.2.0, jsonschema 4.26.0.",
+ "exitCodeObserved": 0,
+ "defects": [
+  {
+   "summary": "The pip-install recogniser anchors on the command STARTING with pip/python -m pip, so any wrapper token in front hides a drifted pin completely \u2014 and the \"second pair of eyes\" stray-scalar test shares the same recogniser, so nothing catches it. The file's central promise (\"FAIL-CLOSED IS THE POINT... not a silent pass\") is false.",
+   "evidence": "PIP_INSTALL (scripts/test_workflow_dependency_pins.py:61-65) requires the match to sit at start-of-string or right after one of [\\n;&|(], with only an optional `python|python3 [-opts] -m ` prefix. Nothing may sit between `pip` and `install` either. I replaced ci.yml's pytest-windows install line with each of the following and ran `python3 -m pytest scripts/test_workflow_dependency_pins.py -q` (all restored afterwards; `git status` clean):\n  rc=0 `sudo python3 -m pip install pyyaml==6.0.1`\n  rc=0 `env FOO=1 pip install pyyaml==6.0.1`\n  rc=0 `uv pip install pyyaml==6.0.1`\n  rc=0 `$PY -m pip install pyyaml==6.0.1`\n  rc=0 `python3 -m pip -q install pytest pyyaml==6.0.1 markdown-it-py==4.2.0 jsonschema==4.26.0`\nEach drops from 16 to 14 passed (the two parametrized checks for that install simply stop being generated) and exits 0. For the last one \u2014 a drifted pyyaml pin AND an unpinned pytest, i.e. exactly the pre-change state the branch exists to prevent \u2014 I also ran the real gate: `python3 -m pytest scripts/ -q` \u2192 exit 0, \"581 passed\". `pip <global-opt> install` is documented pip usage and `sudo`/`$PY` prefixes are ordinary. The vacuous-pass guard only fires when EVERY install is hidden (verified: hiding all of them gives \"1 failed, 5 passed, 2 skipped\"); partial drift is silent. This also falsifies requirements-dev.txt:6-8 (\"asserts that every `pip install` in every workflow installs THIS FILE\") and the docstring's \"a FAILURE naming the file and line\" \u2014 workflow failures name file/job/step index, never a line. Contrast: `--quiet`, `pip3 install`, `python -m pip install`, `\\`-continuations, `if`-blocks and heredoc bodies are all correctly RED, so the fix is narrowing the anchor, not rebuilding the walk.",
+   "severity": "blocking",
+   "file": "scripts/test_workflow_dependency_pins.py",
+   "line": 61
+  },
+  {
+   "summary": "`-c/--constraint` is deliberately consumed as a value option, so a constraints file \u2014 which silently overrides every pin in requirements-dev.txt \u2014 passes green, defeating the \"ONLY place a version is written down\" claim the test exists to hold.",
+   "evidence": "VALUE_OPTIONS at scripts/test_workflow_dependency_pins.py:79-87 includes \"-c\" and \"--constraint\", and install_operands() skips their value (line 191-192). Measured: replacing ci.yml's pytest-windows install with `python3 -m pip install -r requirements-dev.txt -c constraints.txt` \u2192 rc=0, \"16 passed\". A constraints file is functionally a second pin file \u2014 `pyyaml==6.0.1` in constraints.txt beats `pyyaml==6.0.3` in requirements-dev.txt \u2014 which is precisely the \"second place a version is written down\" that test_a_workflow_install_reads_the_declared_requirements_file rejects for a second `-r`. `-r` is validated against REQUIREMENTS; `-c` should be too (or rejected outright). Same measurement for `--index-url https://evil.example.com/simple` \u2192 rc=0, which redirects every declared pin to another index without a test noticing.",
+   "severity": "should-fix",
+   "file": "scripts/test_workflow_dependency_pins.py",
+   "line": 79
+  },
+  {
+   "summary": "requirements-dev.txt's header asserts \"every entry here is a pure-Python wheel\" \u2014 false for PyYAML, and nothing checks it. This is the exact #120 shape: an unverifiable claim load-bearing in the design argument for installing the whole set everywhere.",
+   "evidence": "requirements-dev.txt:16-18: \"every entry here / is a pure-Python wheel, so the extra install is cheap next to the checkouts / and clones these jobs already do.\" PyPI, queried this session: pyyaml 6.0.3 publishes 73 files and ZERO `py3-none-any` wheels \u2014 every wheel is a cp3XX platform wheel (`pyyaml-6.0.3-cp310-cp310-manylinux2014_aarch64...whl` etc.), because PyYAML builds the libyaml C extension. markdown-it-py 4.2.0 and jsonschema 4.26.0 do ship pure wheels; jsonschema also pulls `rpds-py`, a Rust extension, transitively. The sentence is the whole cost argument for the whole-set decision, so a reader who checks it finds the argument's premise wrong. The pre-rewrite wording (\"The four are pure-Python wheels\", commit 2330e9c) was equally false \u2014 the cleanup commit generalised it rather than checking it.",
+   "severity": "should-fix",
+   "file": "requirements-dev.txt",
+   "line": 17
+  },
+  {
+   "summary": "Two added comments assert that no two of the old inline pip lines named the same package subset. Checkably false from the very diff that removes them \u2014 ci.yml's `pytest` and `pytest-windows` lines were byte-identical, and the comment this change deletes said so in as many words.",
+   "evidence": "requirements-dev.txt:4-6 \"the same pins were restated inline in every workflow job that needed them, each naming a different subset\"; scripts/test_workflow_dependency_pins.py:5-7 \"restated once per job, and no two of those lines named the same subset\". At the base commit b81f6f1, `git show b81f6f1:.github/workflows/ci.yml | grep -n 'pip install'` gives line 271 and line 357 both as `python3 -m pip install pytest pyyaml==6.0.3 markdown-it-py==4.2.0 jsonschema==4.26.0` \u2014 identical. The deleted comment at ci.yml:264-266 read \"Pins are deliberately IDENTICAL to the consistency and skills-conformance jobs above\". \"restated once per job\" is also wrong: account-skill-zips' `zip` job, ci.yml's `plugin-validate` and `shellcheck`, and every job in record-account-upload.yml and scheduled-run-health.yml had no install. Commit 2330e9c introduced both sentences while removing counts, i.e. it traded a true count for a false universal.",
+   "severity": "should-fix",
+   "file": "requirements-dev.txt",
+   "line": 5
+  },
+  {
+   "summary": "The vacuous-pass guard's docstring claims deleting every install makes \"the rest of this file go quiet\" \u2014 measured, five other tests still run and pass, and the last test's own docstring says the opposite.",
+   "evidence": "scripts/test_workflow_dependency_pins.py:204-205: \"Every assertion below is over the installs found; delete them all and the rest of this file goes quiet.\" I rewrote every workflow install as `sudo python3 -m pip install ...` (hiding all of them) and got \"1 failed, 5 passed, 2 skipped\": the four parametrized test_no_pip_install_hides_where_the_parsed_walk_cannot_see_it cases and test_every_declared_requirement_is_pinned_exactly all still ran. test_every_declared_requirement_is_pinned_exactly's own docstring (line 326-328) explicitly says it exists to run \"even on a day when no workflow names a package\", directly contradicting the guard's claim.",
+   "severity": "nit",
+   "file": "scripts/test_workflow_dependency_pins.py",
+   "line": 204
+  },
+  {
+   "summary": "test_every_declared_requirement_is_pinned_exactly's failure message asserts it catches extras; it does not. A requirement with an extra passes.",
+   "evidence": "scripts/test_workflow_dependency_pins.py:331-334 asserts on the version half only and says \"An environment marker, extra or URL here would make what CI installs depend on the runner.\" Appending `pytest-cov[toml]==7.0.0` to requirements-dev.txt \u2192 rc=0, \"16 passed\": canonical() leaves `pytest-cov[toml]` intact as the name and `7.0.0` satisfies the version regex. The marker case (`requests==2.32.3 ; python_version < \"3.13\"`) and the bare/range/duplicate/recursive-`-r` cases do all correctly RED \u2014 extras are the one member of the message's own list that slips through, so the message names a guarantee the code does not give.",
+   "severity": "nit",
+   "file": "scripts/test_workflow_dependency_pins.py",
+   "line": 331
+  },
+  {
+   "summary": "A package declared in requirements-dev.txt that nothing in the repo imports is never flagged, and no comment carves that out \u2014 while the docstring's \"covered the moment it is added\" reads as though it were.",
+   "evidence": "Appending `requests==2.32.3` to requirements-dev.txt \u2192 rc=0, \"16 passed\", and the full `scripts/` suite stays green. Since every job now installs the whole set, a stale entry costs install time in five jobs and is invisible. scripts/test_workflow_dependency_pins.py:18-19 says \"a package added to requirements-dev.txt is covered the moment it is added, and nothing here has to be widened to notice it\" \u2014 true only in the workflow-side direction; nothing checks the file-side direction, and neither the docstring nor the requirements header says so.",
+   "severity": "nit",
+   "file": "requirements-dev.txt",
+   "line": 3
+  },
+  {
+   "summary": "Composite actions under .github/actions/**/action.yml are ungoverned and the stated scope carve-out does not mention them, so the omission reads as unconsidered rather than decided.",
+   "evidence": "workflow_files() (scripts/test_workflow_dependency_pins.py:126-127) globs .github/workflows/*.yml|*.yaml only. I created .github/actions/setup/action.yml containing a composite step `python3 -m pip install pyyaml==6.0.1` \u2192 rc=0, \"16 passed\" (removed afterwards). The scope paragraph at lines 37-40 justifies the boundary solely by the shipped skill asset (plugins/adam/skills/github-actions-repo-settings/assets/workflows/), which is a real and correct carve-out; composite actions are a different, in-repo surface a future change would naturally add, and the fix report records them only in its own stillOpen notes, not in the repo. Per AGENTS.md durable findings belong in the repo.",
+   "severity": "nit",
+   "file": "scripts/test_workflow_dependency_pins.py",
+   "line": 37
+  }
+ ]
+}
