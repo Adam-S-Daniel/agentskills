@@ -1424,9 +1424,10 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 f"hook's whole-directory digest differ from the recorded one. "
                 f"The hook removes only what it can show it installed "
                 f"unchanged, so the removal this would otherwise get does not "
-                f"happen and the session's `skills:` verdict reads `DEGRADED` "
-                f"with this skill named as left in place, edited since "
-                f"install. Delete those files and the next run cleans it up."))
+                f"happen. That run's `skills:` verdict names it after "
+                f"`DEGRADED`, as `no longer in the lock left in place, edited "
+                f"since install`. Delete those files and the next run cleans "
+                f"it up."))
         else:
             notes.append(_observed(
                 "stale", HOOK, name,
