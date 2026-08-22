@@ -983,8 +983,8 @@ def assign_origins(skills_dir: Path, names: List[str], record: Record,
     Total by construction: four arms ending in an unconditional `else`, so
     there is no directory the ladder declines to place and none two arms can
     claim. That is the property `OBSERVATION_ORIGINS` and the matrix test rest
-    on. It replaces an arrangement in which `classify` decided the row,
-    `reported_foreign` decided the note, and each re-applied its own subset of
+    on. It replaces an arrangement in which `classify` decided the row, a
+    separate function decided the note, and each re-applied its own subset of
     the gates — which is how one directory came to be described two ways in one
     report, and how a gate that could no longer fire went on being described as
     live.
