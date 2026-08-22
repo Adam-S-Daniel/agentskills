@@ -2832,6 +2832,61 @@ def test_repin_source_honours_source_repo_for_an_out_of_tree_clone(
     assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] == advanced
 
 
+def _lock_federating_one_registry_twice(tmp_path) -> tuple:
+    """A lock whose `sources` names ONE registry twice, with independent pins.
+
+    Representable and `--check`-green: plan_sources' uniqueness check is keyed
+    on BUNDLE, and these two entries claim different bundles, read different
+    layouts and pin different commits. Two layouts are what keep the skill
+    BASENAMES distinct as well, which `_reject_basename_collisions` requires.
+    """
+    primary = tmp_path / "registry"
+    primary_sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    first = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    _write(extra / "other" / "publish" / "SKILL.md", SKILL_C["SKILL.md"])
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "a second bundle, one commit later")
+    second = _head(extra)
+    assert first != second
+
+    out = tmp_path / "skills.lock"
+    uri = extra.resolve().as_uri()
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={uri}@{first}:skills",
+        "--source", f"other={uri}@{second}:{{bundle}}",
+        "-o", str(out)).returncode == 0
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert [source["ref"] for source in lock["sources"]] == [first, second]
+    return primary, extra, uri, out
+
+
+def test_repin_source_refuses_a_registry_the_lock_federates_twice(tmp_path):
+    """One spec, one source — or no re-pin at all.
+
+    Merging by registry key over a lock that federates that registry TWICE
+    advances both entries, so a caller naming one moves a pin nobody asked
+    about, at exit 0, with its digests rewritten to the new content. The module
+    docstring says this flag advances ONE source; this refusal is what makes
+    that sentence true rather than usually true. It is the same answer
+    `_select_sources` already gives to the analogous ambiguity on the read-only
+    path ("scoping to it has two answers, so it gets none").
+    """
+    primary, extra, uri, out = _lock_federating_one_registry_twice(tmp_path)
+    before = out.read_text(encoding="utf-8")
+    _move_head(extra)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{uri}@", "-o", str(out))
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "twice" in proc.stderr, proc.stderr
+    # Both bundles named, so the reader can see WHICH two entries collide.
+    assert "cms-platform" in proc.stderr and "other" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
 def test_repin_source_refuses_a_checkout_that_is_not_the_source_it_names(
         federated, tmp_path):
     """The identity probe the primary's --repin has, applied per source.
