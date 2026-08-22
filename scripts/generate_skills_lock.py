@@ -975,9 +975,16 @@ def repin_source_blocker(
     # Refused rather than resolved-and-hoped, because the alternative repairs
     # the lock's ref by writing a commit nobody has verified belongs to that
     # registry — which is the failure the probe exists to prevent, arriving
-    # through the repair. `test_repin_source_refuses_a_source_pinned_at_a_branch`
-    # is the measurement.
-    if matched and not _COMMIT_SHA_RE.fullmatch(matched[0]["ref"]):
+    # through the repair.
+    #
+    # SUBSUMED as things stand, and deliberately kept: the same condition makes
+    # `repin_unproven_sources_blocker` refuse the whole invocation, and both
+    # paths consult that one first — so this branch is not what makes
+    # `test_repin_source_refuses_a_source_pinned_at_a_branch` pass today, and a
+    # reader should not go looking for the coverage here. It stays because this
+    # predicate's contract is "every reason THIS flag refuses a spec", and a
+    # total predicate does not need another one's call order to be right.
+    if not _COMMIT_SHA_RE.fullmatch(matched[0]["ref"]):
         return (
             f"this lock pins that source at {matched[0]['ref']!r}, which is not a commit "
             "sha — and the commit the lock pins is the ONLY thing that proves the "
