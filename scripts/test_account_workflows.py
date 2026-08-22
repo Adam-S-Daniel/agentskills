@@ -1758,19 +1758,25 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         self._bash_n(tmp_path, spliced, name)
 
     def test_the_regression_set_did_not_shrink(self):
-        """The one count in this change that a test holds.
+        """The one count in this file that a test holds, and a FLOOR.
 
         #120 is about a comment that carried a number nothing asserted; it
         read as checked and went stale on the next edit. This number is the
         opposite shape - it is asserted here, so deleting a shape from the set
-        reds rather than passing quietly, and dropping a shape is exactly how
-        the eleven false reds got in.
+        reds rather than passing quietly, and dropping a shape is how a
+        scanner starts false-reding on it again.
+
+        `>=`, NOT `==`, and the difference is the test's own name. Equality
+        reds when the set GROWS, so every contributor adding a shape has to
+        edit a number to get back to green - and a number you must edit to
+        make a red go away is one people learn to edit rather than read.
+        Removing a shape is the thing being prevented; adding one is the thing
+        being invited, and the assertion now says only that.
         """
-        assert len(_ARMS_OK) == 27, (
+        assert len(_ARMS_OK) >= 27, (
             "a shape came out of the reformat set. Removing one is how a "
-            "scanner starts false-reding on it again; add shapes freely and "
-            "update this number, but do not take one out to make a helper "
-            "pass."
+            "scanner starts false-reding on it again; add shapes freely, but "
+            "do not take one out to make a helper pass."
         )
 
     def test_a_crlf_checkout_does_not_read_as_a_vocabulary_drift(
