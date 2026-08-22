@@ -447,8 +447,18 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         )
         return body[body.index(marker) + len(marker):]
 
-    def _run(self, tmp_path, verdict):
+    def _run(self, tmp_path, verdict, *, annotated="no"):
         bash = require_bash()
+        # `annotated` is the step head's own flag, delivered here because the
+        # tail reads it: the empty-capture guard annotates only when no earlier
+        # guard did. "no" is the healthy head - both clones and the install
+        # green - which is the state every verdict-driven test below assumes.
+        #
+        # Hardcoding the NAME is safe in the direction that matters. Rename the
+        # flag in the workflow and the tail dereferences an unset variable
+        # under `set -u`, which exits non-zero and reds the assertion below
+        # with the shell's own message. It cannot quietly test a stale shape.
+        assert annotated in ("yes", "no"), annotated
         out = tmp_path / "gh_output"
         # Forward slashes: Git Bash reads the backslashes of a Windows path as
         # escapes inside the step's own `>> "$GITHUB_OUTPUT"` redirect, and
@@ -473,7 +483,9 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # so a command that fails soft here would abort there and this suite
         # would report the opposite of what the runner does.
         proc = subprocess.run(
-            [bash, "-e", "-c", "set -uo pipefail\nverdict=$1\n" + self._tail(),
+            [bash, "-e", "-c",
+             f"set -uo pipefail\nannotated={annotated}\nverdict=$1\n"
+             + self._tail(),
              "_", verdict],
             capture_output=True, text=True, env=env, cwd=str(REPO),
         )
@@ -562,6 +574,67 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"above did not stand in for the real ones:\n{proc.stdout}"
         )
         return proc.stdout, out.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("unreachable, names, why", [
+        (("harness", "results"), "could not reach Adam-S-Daniel/skills-evals",
+         "one unreachable repository is ONE fault - the two clones pull from "
+         "the same one, so whatever takes out the first takes out the second"),
+        (("harness",), "could not clone the skills-evals harness",
+         "the harness clone alone"),
+        (("results",), "eval-results branch not present yet",
+         "the published-artifact clone alone"),
+        ((), "the import inside this step",
+         "both clones green and the heredoc still raised, which is the "
+         "cross-repo import breaking and the one this annotation may blame"),
+    ])
+    def test_a_fault_in_the_step_head_raises_exactly_one_annotation(
+            self, tmp_path, unreachable, names, why):
+        """EXACTLY one, and it must be about the fault that actually happened.
+
+        This is the step's most likely failure and the only one that needs no
+        cross-repo rename: skills-evals unreachable, on an outage, a rate limit
+        or the repo renamed or made private. It produced THREE annotations -
+        one per clone, then the empty-capture fallback - and the third told the
+        reader "the clones can succeed while the import inside this step
+        breaks", sending them to hunt a moved module in the other repo while
+        the real cause sat two lines above, already annotated.
+
+        A wrong label is worse than no label because it is read and believed,
+        and the count matters for the same reason the class docstring gives:
+        a reader who learns the annotations are duplicated stops counting them,
+        and the silent one goes unnoticed.
+        """
+        log, out = self._run_step(tmp_path, unreachable=unreachable)
+        annotations = [line for line in log.splitlines() if "::warning::" in line]
+        assert len(annotations) == 1, f"{why}\n{log}"
+        assert names in annotations[0], (
+            f"the annotation does not name the fault that happened: "
+            f"{annotations[0]}"
+        )
+        if unreachable:
+            assert "import inside this step" not in annotations[0], (
+                "the annotation blames the cross-repo import on a run where a "
+                "clone failed, so it asserts a path succeeded that never ran"
+            )
+        # The verdict still reaches the next step, whichever fault it was.
+        assert "status=unavailable" in out
+
+    def test_an_empty_verdict_does_not_re_annotate_a_reported_fault(
+            self, tmp_path):
+        """The tail half of the same invariant.
+
+        `unavailable` set by the empty-capture guard is not a fault of its own
+        when a guard above already annotated one - it is that fault's
+        consequence. The log still records it; the Actions list does not get a
+        second entry for it.
+        """
+        log, out = self._run(tmp_path, "", annotated="yes")
+        assert "::warning::" not in log, log
+        assert "no verdict" in log, (
+            "the empty capture went unrecorded entirely; quiet on the "
+            "annotations list is not quiet in the log"
+        )
+        assert out.strip() == "status=unavailable"
 
     def test_a_placeholder_it_cannot_create_does_not_abort_the_step(
             self, tmp_path):
