@@ -46,7 +46,8 @@ import re
 import sys
 import textwrap
 from pathlib import Path
-from typing import (Dict, FrozenSet, List, NamedTuple, Optional, Set,
+from types import MappingProxyType
+from typing import (Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Set,
                     Tuple)
 
 RECORD_NAME = ".skills-bootstrap-installed.json"
@@ -341,6 +342,18 @@ class Record(NamedTuple):
     skipped_names: Set[str] = frozenset()
 
 
+# The default `digests` every `Lock` built without one shares. A NamedTuple's
+# default is ONE object evaluated at class-creation time, so a plain `{}` here
+# hands the same dict to every lock in the session — a single
+# `lock.digests.setdefault(...)` anywhere would leak across all of them, and the
+# `Dict[...]` annotation said nothing about that. Nothing mutates it today; a
+# read-only view is what keeps that a property of the type rather than of the
+# current call sites, so the next edit fails loudly here instead of quietly
+# somewhere else. `Mapping` on the field is the other half: it is the annotation
+# under which `.setdefault` does not typecheck.
+NO_DIGESTS: Mapping[str, FrozenSet[str]] = MappingProxyType({})
+
+
 class Lock(NamedTuple):
     """A lock file's expectation, as much of it as changes what is reported.
 
@@ -355,7 +368,7 @@ class Lock(NamedTuple):
     names: Set[str]
     claims: Set[Tuple[str, str]]
     reason: Optional[str] = None
-    digests: Dict[str, FrozenSet[str]] = {}
+    digests: Mapping[str, FrozenSet[str]] = NO_DIGESTS
 
 
 class Surface(NamedTuple):

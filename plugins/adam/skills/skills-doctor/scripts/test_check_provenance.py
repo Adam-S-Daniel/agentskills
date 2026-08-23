@@ -1716,6 +1716,25 @@ def test_a_lock_whose_skills_are_not_a_mapping_reads_as_empty_not_a_crash(tmp_pa
     assert parsed.names == set(), parsed
 
 
+def test_two_locks_built_without_digests_cannot_share_a_mutable_default():
+    """A NamedTuple default is ONE object, and `digests` used to be a bare `{}`.
+
+    Nothing mutated it, which is why nothing was wrong and why this is worth
+    pinning: the trap is invisible until an edit adds the first
+    `lock.digests.setdefault(...)`, at which point one lock's digests appear in
+    every other lock of the session — including the three `read_lock` early
+    returns, which build a `Lock` with no digests at all. Asserting the default
+    REFUSES mutation is the property; asserting the two are different objects
+    would not be, because sharing an immutable empty mapping is fine.
+    """
+    a = prov.Lock(prov.PRESENT, set(), set())
+    b = prov.Lock(prov.REJECTED, set(), set())
+    assert a.digests == {} and b.digests == {}
+    with pytest.raises(TypeError):
+        a.digests["alpha"] = frozenset({"a" * 64})       # type: ignore[index]
+    assert b.digests == {}, "the default is shared, so a write leaks across locks"
+
+
 def test_a_record_entry_with_a_non_string_registry_is_skipped(tmp_path):
     """Every field is type-checked, not just the one a test happened to probe."""
     assert prov._entry({"name": "alpha", "registry": 7,
