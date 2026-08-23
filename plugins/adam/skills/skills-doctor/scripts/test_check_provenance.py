@@ -115,6 +115,11 @@ def write_record(store: Path, *names: str, registry: str = REGISTRY_URL,
 # that says it refuses.
 NOT_ON_DISK = "c" * 64
 
+# A second digest no directory here ever has, for the row the hook reads FIRST
+# when the record names one name twice. Distinct from `NOT_ON_DISK` so that a
+# fixture cannot pass by having the lock and the stale record row agree.
+RECORDED_EARLIER = "d" * 64
+
 
 def write_lock(path: Path, store: Path, *names: str, registry: str = REGISTRY_SLUG,
                bundle: str = "adam", digests: dict = None) -> Path:
@@ -1810,6 +1815,61 @@ def test_two_lock_rows_on_one_destination_are_reported_as_a_deletion(
     verdict = suite._verdict(proc)
     assert "share a destination name" in verdict, verdict
     assert not (store / "alpha").exists(), verdict
+
+
+def _forge(store: Path, name: str, **fields) -> None:
+    """Rewrite one record row's fields in place, leaving the rest of it alone."""
+    path = store / prov.RECORD_NAME
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for entry in data["installed"]:
+        if entry["name"] == name:
+            entry.update(fields)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def test_a_row_the_hook_accepts_and_the_planner_skips_still_lets_it_overwrite(
+        tmp_path, capsys):
+    """The hook reads its record TWICE, and the doctor was using the wrong copy.
+
+    `may_replace`'s record clause is fed by a loop that validates `name` and
+    `digest` and nothing else; the planner that decides the prune also demands
+    `registry` and `bundle`. So a row with a null `bundle` is one the planner
+    throws away and `may_replace` honours — and the doctor, deriving
+    replaceability from its planner-rules origin, called the directory
+    hand-placed and told the reader the next session start "copies nothing here,
+    leaves these bytes exactly as they are".
+
+    Measured end to end, both halves: the report the reader gets, and then the
+    real hook's next run on the same store, which overwrote the bytes the report
+    promised would survive.
+    """
+    suite, root, project, home, store, _lock_path = _installed(tmp_path)
+    _forge(store, "alpha", bundle=None)
+    # The lock moves alpha forward, so its own clause cannot be what says yes:
+    # only the record row the planner skips can.
+    moved = dict(suite.SKILL_A)
+    moved["SKILL.md"] = "---\nname: alpha\n---\nalpha body v2\n"
+    sha = suite.make_registry(root, {"adam/alpha": moved, "adam/beta": suite.SKILL_B})
+    lock_path = suite.make_project(project, root, sha)
+
+    code, out = run(store, lock_path, capsys, project_dir=project)
+    text = flat(out)
+    assert "[hand-placed-over-locked] alpha" not in text, text
+    assert flat(prov.HOOK_REFUSAL) not in text, text
+    # And not the opposite error either: the note quotes the LOCK's digest as
+    # the reason the overwrite is harmless, and the lock names other bytes here.
+    # It is the record clause that says yes, so the note would be false.
+    assert "bytes-are-the-locked-ones" not in text, text
+    # The row the hook honours is still a row the PRUNE cannot see, so the
+    # record's own finding stays — this is not a demand for silence.
+    assert "[record-entries-skipped]" in text, text
+    assert code == 1, text
+
+    before = (store / "alpha" / "SKILL.md").read_text(encoding="utf-8")
+    proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert suite._verdict(proc).startswith("skills: 2/2 "), suite._verdict(proc)
+    after = (store / "alpha" / "SKILL.md").read_text(encoding="utf-8")
+    assert before != after and "v2" in after, (before, after)
 
 
 def test_a_project_skills_dir_that_cannot_be_listed_is_not_read_as_empty(
@@ -4301,6 +4361,25 @@ def _may_replace_state(tmp_path, which: str):
             "---\nname: alpha\n---\nsomebody's copy\n", encoding="utf-8")
         return store, lock, pristine, ()
 
+    if which == "recorded-twice":
+        # The two record readers disagreeing, which is the only way they can.
+        # `entries` keeps the LAST row for a name and `may_replace` scans to the
+        # FIRST, so a record naming one directory twice with different digests
+        # gives the doctor "unchanged since install" and the hook "not mine".
+        # The lock names bytes that are not here, so its own clause cannot be
+        # what decides it either way.
+        lock = write_lock(lock_path, store, "alpha",
+                          digests={"alpha": NOT_ON_DISK})
+        record = store / prov.RECORD_NAME
+        record.write_text(json.dumps({"version": 1, "installed": [
+            {"name": "alpha", "registry": REGISTRY_URL, "bundle": "adam",
+             "digest": RECORDED_EARLIER},
+            {"name": "alpha", "registry": REGISTRY_URL, "bundle": "adam",
+             "digest": pristine},
+        ]}, indent=2) + "\n", encoding="utf-8")
+        return store, lock, NOT_ON_DISK, (("alpha", RECORDED_EARLIER),
+                                          ("alpha", pristine))
+
     # --- states in which it REPLACES -------------------------------------
     if which == "lock-already-has-these-bytes":
         # `may_replace`'s SECOND clause, with no record naming the directory:
@@ -4331,6 +4410,7 @@ def _may_replace_state(tmp_path, which: str):
 
 REFUSAL_STATES = {
     # state -> the finding kind the doctor raises about it
+    "recorded-twice": "recorded-twice-and-locked",
     "edited": "edited-and-locked",
     "artefacts": "artefacts-and-locked",
     "hand-placed": "hand-placed-over-locked",
@@ -4664,6 +4744,20 @@ def test_every_kind_that_quotes_the_refusal_is_exercised_or_declared_not():
     assert set(REFUSAL_STATES.values()) | UNEXERCISED_REFUSAL_KINDS \
         == prov.REFUSAL_KINDS
     assert not set(REFUSAL_STATES.values()) & UNEXERCISED_REFUSAL_KINDS
+
+
+def test_the_skill_document_names_every_refusal_finding():
+    """SKILL.md's list of them, bound to the set the module closes.
+
+    That sentence is what a reader uses to decide whether a finding in front of
+    them is one of the "your bytes are safe, your updates have stopped" family.
+    It shipped naming four of the then-five, so it was already an enumeration
+    nothing checked — the defect #120 is about, in the user-facing document.
+    """
+    text = (Path(prov.__file__).parent.parent / "SKILL.md").read_text(
+        encoding="utf-8")
+    listed = {kind for kind in prov.REFUSAL_KINDS if f"`{kind}`" in text}
+    assert listed == prov.REFUSAL_KINDS, sorted(prov.REFUSAL_KINDS - listed)
 
 
 def test_a_new_finding_cannot_quote_the_refusal_without_joining_that_set():
