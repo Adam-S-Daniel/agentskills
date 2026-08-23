@@ -3153,7 +3153,8 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     # WHAT THAT DOES AND DOES NOT BUY, measured by restoring each defect one
     # at a time and running this file. Restoring the `^NAME=` prefix rule
     # reds this test at `an-assignment-prefixed-command` and nowhere else in
-    # the sweep; restoring the `_OUTPUT_WRITE` `.*` pattern reds it at
+    # the sweep; restoring the `.*` redirect pattern the `$GITHUB_OUTPUT`
+    # write used to be recognised by reds it at
     # `an-echo-with-an-extra-redirect` and nowhere else. The bare `mkdir`
     # payload is CLEAN under both - which is the whole reason the other three
     # are here.
@@ -4277,20 +4278,44 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"as above - the docstring is what needs correcting."
         )
 
+    # NAMES THIS FILE'S PROSE POINTS AT THAT ARE DEFINED IN ANOTHER FILE,
+    # with the file that defines each. Asserted below rather than skipped, so
+    # this is a redirection and not an exemption: an entry whose name has
+    # moved out of the file named here reds like any other dead pointer.
+    _NAMES_DEFINED_ELSEWHERE = {
+        "_include_in_zip":
+            "plugins/adam-local/skills/sync-skills/sync_skills.py",
+    }
+
     def test_every_test_this_file_names_in_its_prose_exists(self):
         """#120's rule, applied to this file's own favourite kind of claim.
 
         The prose here argues by pointing: an exemption is defended by naming
         the test that holds the other half, a docstring says which test runs
-        the shape it describes. That is the right way to write it - and every
-        one of those names is a claim a reader can check, so an unchecked one
-        is exactly the comment #120 is about. A renamed or deleted test
-        leaves the sentence reading as if the coverage were still there, and
-        it is the sentence a reviewer trusts instead of going to look.
+        the shape it describes, a comment explains a branch by naming the
+        helper it stands in for. That is the right way to write it - and
+        every one of those names is a claim a reader can check, so an
+        unchecked one is exactly the comment #120 is about. A renamed or
+        deleted name leaves the sentence reading as if the thing were still
+        there, and it is the sentence a reviewer trusts instead of going to
+        look.
 
         It has already happened twice in this file's own history and once in
         the round that added this test, which is why it is a test and not a
         resolution.
+
+        BOTH KINDS OF NAME, because the version that checked only `test_`
+        names stopped one character short of the claim class it was added
+        for. The very next round deleted two helpers and left a docstring
+        describing both in the present tense; a reader who grepped for either
+        found nothing, which is the exact failure the `test_` half exists to
+        stop. This paragraph does not name them, and that is not squeamish -
+        naming a deleted helper in backticks is the thing being forbidden,
+        and the check below found this docstring doing it on the first run.
+
+        A helper name counts only when it is written in BACKTICKS. Bare `_`
+        words appear in ordinary prose and all over the code; a backticked
+        one is the file pointing at something, which is the claim class here.
 
         A NAME WRAPPED ACROSS TWO COMMENT LINES BREAKS AT AN UNDERSCORE, and
         that is the only join rule. A line ending in `_` continues into the
@@ -4318,19 +4343,50 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             else:
                 prose.append(stripped)
         prose.append(pending)
-        named = set()
+        # Helpers, classes and constants: a `def`, a `class`, or a binding at
+        # any indentation, which covers this file's module-level constants
+        # and its classes' tables alike. `[^=]` keeps a `==` comparison from
+        # reading as a definition.
+        defined |= set(re.findall(r"^\s*(?:def|class) (_\w+)", source, re.M))
+        defined |= set(re.findall(r"^\s*(_\w+)\s*=[^=]", source, re.M))
+        named, helpers = set(), set()
         for line in prose:
             named.update(re.findall(r"\btest_\w+", line))
+            helpers.update(re.findall(r"`(_\w+)`", line))
         # Names of FILES, which live in this repo's `scripts/` beside this
         # one and are not functions here.
         named -= {"test_account_zip_selection", "test_ci_workflow",
                   "test_account_workflows"}
+        # NEITHER HALF MAY BE VACUOUS. Every assertion below is satisfied by
+        # a regex that matches nothing, and a silently-empty half is how the
+        # `test_` one could have been shipped broken and never noticed. This
+        # file's prose points at dozens of each kind; if either set comes
+        # back empty the collector is what broke, not the prose.
+        assert named and helpers, (
+            f"this test collected {len(named)} test name(s) and "
+            f"{len(helpers)} backticked helper name(s) out of a file whose "
+            f"prose is full of both, so one half of the collector is "
+            f"matching nothing and asserting nothing."
+        )
+        named |= helpers
+        for name, where in self._NAMES_DEFINED_ELSEWHERE.items():
+            path = Path(__file__).resolve().parent.parent / where
+            assert re.search(rf"^\s*(?:def|class) {name}\b|^\s*{name}\s*=[^=]",
+                             path.read_text(encoding="utf-8"), re.M), (
+                f"this file's prose points at `{name}` and says it lives in "
+                f"{where}, and it does not - so the redirection is a dead "
+                f"pointer with an extra step. Update the path, or write what "
+                f"the code does now."
+            )
+            defined.add(name)
         missing = sorted(name for name in named if name not in defined)
         assert not missing, (
-            f"the prose in this file names {len(missing)} test(s) that do "
+            f"the prose in this file names {len(missing)} thing(s) that do "
             f"not exist: {missing}. A sentence that defends a decision by "
-            f"pointing at a test is only worth the pointer being real - "
-            f"rename the reference, or write what actually holds the claim."
+            f"pointing at a test or a helper is only worth the pointer being "
+            f"real - rename the reference, write what actually holds the "
+            f"claim, or if it is defined in another file put it in "
+            f"`_NAMES_DEFINED_ELSEWHERE` with the path."
         )
 
     def test_no_comment_in_this_step_counts_its_own_echoes(self):
