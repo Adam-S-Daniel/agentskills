@@ -220,6 +220,19 @@ REPLACED it, dropping every other registry. The trap, through the flag written
 to close it. Changing a lock's identity and advancing its pin are two different
 decisions and are now two different commands.
 
+What that left with no command at all was the legitimate half of the operator's
+intent: a federated source whose registry really has moved. Inheritance is
+still the only thing that carries a source's ref forward, and a bare `--repin`
+still brings every source through verbatim. `--repin-source
+'<REGISTRY>@[<ref>]'` is now the one way to advance ONE of them, and it merges
+by registry KEY into the inherited array — an empty ref meaning that source's
+HEAD, resolved before it is written — so it can never add, drop or reorder a
+source. Bundles and layout are not expressible on it, because they are the
+lock's identity. `--source` therefore stays an error alongside `--repin`
+forever: the distinction being preserved is merge-by-key versus
+replace-the-array, not "which flag names a source", and a flag that could
+restate bundles and layout would be `--source` under a second name.
+
 Inheritance also means the lock's fields are REQUIRED, not merely preferred.
 A plain generate falls back to `DEFAULT_REGISTRY` / `DEFAULT_BUNDLES` because
 nothing was inherited and a default is the only answer; under `--repin` that
@@ -301,9 +314,11 @@ Usage:
                                           [--source 'b1,b2=OWNER/REPO@REF[:LAYOUT]']
                                           [--source-repo 'KEY=PATH']
   python3 scripts/generate_skills_lock.py --repin [--ref REF] [--repo PATH]
+                                          [--repin-source 'OWNER/REPO@[REF]']
                                           [--source-repo 'KEY=PATH'] [-o PATH]
   python3 scripts/generate_skills_lock.py --check [same flags]
-  python3 scripts/generate_skills_lock.py --check-current [same flags]
+  python3 scripts/generate_skills_lock.py --check-current [--only REGISTRY]
+                                          [same flags]
   python3 scripts/generate_skills_lock.py --check-format [-o PATH]
   python3 scripts/generate_skills_lock.py --digest DIR
 
@@ -1167,14 +1182,17 @@ def report_digest_format(document: dict, output: Path) -> int:
     # deliberately there must not be one an operator's terminal hands them by
     # omission here.
     #
-    # One consequence to expect rather than re-discover: the bumper's OWN
-    # re-pin passes no `--ref`, so a format-repair PR it opens does advance the
-    # pin — deliberately, and its PR body says so. That body also quotes this
-    # report verbatim, so the command a reviewer reads there names the OLD pin
-    # and would not reproduce the diff beneath it. That is the asymmetry
-    # working as intended, not a mismatch to reconcile: the bot's pin advance
-    # is a decision someone wrote down, and this line is for a human at a
-    # terminal who asked only about shape.
+    # The fleet bumper anchors a format repair the same way, so there is no
+    # asymmetry left to expect. Its `repin_reason` is `format` exactly when this
+    # verdict fired, and on that branch it builds `repin_ref_args=(--ref
+    # "$old_ref")` before invoking --repin. The two paths therefore AGREE: a
+    # shape repair holds the pin whether a human at a terminal or the nightly
+    # performs it. That is what makes quoting this report verbatim into a PR
+    # body honest — the command a reviewer reads there is the command that
+    # produced the diff beneath it. Checkable from the other side, in
+    # scripts/bump-consumer-locks.sh; nothing compares the two copies
+    # automatically, so a change to either half still has to be carried across
+    # by hand, exactly like the prefix split above.
     suggested_ref = _suggested_repin_ref(document)
     print(f"  python3 scripts/generate_skills_lock.py --repin "
           f"--ref {suggested_ref or '<the commit this lock pins>'} "
