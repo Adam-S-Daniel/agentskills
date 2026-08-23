@@ -3424,8 +3424,8 @@ def _primary_drifted(primary: Path) -> str:
 
 # The two ends of the re-pin path, by name. `_repin_primary_guard` and
 # `_apply_repin_sources` are what REFUSE; `report_drift` is what RECOMMENDS.
-_REPIN_APPLY_PATH = ("_repin_primary_guard", "_apply_repin_sources",
-                     "_repin_shrink_guard")
+_REPIN_APPLY_PATH = ("_repin_inherit_guard", "_repin_primary_guard",
+                     "_apply_repin_sources", "_repin_shrink_guard")
 _REPIN_REPORT_PATH = ("report_drift",)
 
 
@@ -3706,6 +3706,25 @@ def _emptied_source_bundle_scoped(tmp_path):
     return primary, out, ["--only", (tmp_path / "cms-platform").resolve().as_uri()]
 
 
+def _hand_broken_lock(field, value=None):
+    """A really-drifted lock with one field --repin cannot inherit.
+
+    Each of these has always been refused by --repin and each was recommended
+    by --check-current anyway: the refusals lived in the readers main calls on
+    the write path and nothing on the report path knew about them.
+    """
+    def build(tmp_path):
+        primary, out, extra_args = _drifted_plain(tmp_path)
+        document = json.loads(out.read_text(encoding="utf-8"))
+        if value is None:
+            document.pop(field)
+        else:
+            document[field] = value
+        out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        return primary, out, extra_args
+    return build
+
+
 def _emptied_primary_bundle(tmp_path):
     primary = tmp_path / "registry"
     sha = make_registry(primary, {"adam/alpha": SKILL_A})
@@ -3735,6 +3754,9 @@ _DRIFT_SHAPES = [
     (_emptied_source_bundle, "a source bundle lost every skill", False),
     (_emptied_source_bundle_scoped,
      "a source bundle lost every skill, asked with --only", False),
+    (_hand_broken_lock("registry"), "the lock lost its 'registry'", False),
+    (_hand_broken_lock("bundles"), "the lock lost its 'bundles'", False),
+    (_hand_broken_lock("sources", {}), "the lock's 'sources' is an object", False),
     (_emptied_primary_bundle, "the primary bundle lost every skill", False),
 ]
 # Shapes where --check-current must print no command, but where the command it

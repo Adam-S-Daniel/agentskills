@@ -1912,48 +1912,54 @@ def _parse_bundles(raw: Optional[str], where: str = "--bundles") -> Optional[Lis
     return bundles
 
 
-def _inherited_registry(existing: dict, output: Path) -> str:
-    """The primary registry, read off a lock that `--repin` is advancing.
+def repin_inherit_blocker(existing: dict, output: Path) -> Optional[str]:
+    """Why this lock has nothing --repin can safely inherit — or None.
 
     Strict where the generate path is permissive, and that asymmetry is the
-    point: a plain generate falls back to DEFAULT_REGISTRY because nothing was
-    inherited, while a re-pin whose lock has lost its `registry` — a botched
-    merge-conflict resolution is the realistic route — would be silently
-    re-pointed at THIS repo, a different repository than the consumer declared,
-    at exit 0. `--check` reports that same lock as stale and names the field;
-    the write path must not launder what the verify path correctly rejects.
+    point: a plain generate falls back to DEFAULT_REGISTRY / DEFAULT_BUNDLES
+    because nothing was inherited, while a re-pin whose lock has lost one of
+    those fields — a botched merge-conflict resolution is the realistic route —
+    would silently re-point the lock at another repository, or narrow it to the
+    default bundle and drop every other bundle's skills, at exit 0. `--check`
+    reports that same lock as stale and names the field; the write path must
+    not launder what the verify path correctly rejects.
+
+    A PREDICATE rather than three raises inside the two readers it replaced,
+    because --check-current recommends `--repin` and every one of these
+    refusals rejects it. Measured on this branch before this predicate, on a
+    lock that had really drifted: with `registry` removed, with `bundles`
+    removed, and with `sources` set to a JSON object, --check-current printed
+    `python3 scripts/generate_skills_lock.py --repin` under its FAILED verdict
+    each time, and running that line verbatim exited 1 each time.
+
+    The bundle list is validated per element, not merely type-checked. A bundle
+    name is substituted into a filesystem path by `layout_dir` and into every
+    skills key: `["../../../outside"]` escapes the `git archive` extraction and
+    digests content that is in no commit of any registry, and a non-string
+    element escapes as a traceback out of `str.replace` or a dict lookup. An
+    empty list is refused for the same reason a missing key is — it is falsy,
+    so the generate path's `or list(DEFAULT_BUNDLES)` would silently narrow the
+    lock.
+
+    `sources` is checked for TYPE only, and only on this path: falling through
+    to "no sources" is harmless on --check (the rebuilt document has none, so
+    the comparison goes red and names it) and is a DELETION on a re-pin — the
+    federated half written away under a normal `Wrote ...` line at exit 0, and
+    --check green afterwards. The hook calls the same shape fatal ("lock:
+    'sources' must be a list"), so the repair tool must not "fix" it by
+    discarding the array.
     """
     registry = existing.get("registry")
     if not isinstance(registry, str) or not registry:
-        raise GeneratorError(
+        return (
             f"{output}: 'registry' is missing or unusable ({registry!r}), so there is "
             "nothing for --repin to inherit — and defaulting would silently re-point "
             "this lock at another repository. Fix the field, or generate the lock "
             "without --repin."
         )
-    return registry
-
-
-def _inherited_bundles(existing: dict, output: Path) -> List[str]:
-    """The primary bundle list, read off a lock that `--repin` is advancing.
-
-    Validated per element, not merely type-checked as a list. A bundle name is
-    substituted into a filesystem path by `layout_dir` and into every skills
-    key, and until `--repin` existed the inherited value could only be reached
-    by `--check`, which never writes — so nothing downstream of it was ever a
-    write. `["../../../outside"]` escapes the `git archive` extraction and
-    digests content that is in no commit of any registry, writing an
-    attestation over bytes nobody published; a non-string element reaches
-    `str.replace` or a dict lookup and escapes as a traceback. Both are refused
-    here, before `plan_sources` can be handed either.
-
-    An empty list is refused for the same reason a missing key is: it is falsy,
-    so the generate path's `or list(DEFAULT_BUNDLES)` would narrow the lock to
-    the default bundle and drop every other bundle's skills, at exit 0.
-    """
     bundles = existing.get("bundles")
     if not isinstance(bundles, list) or not bundles:
-        raise GeneratorError(
+        return (
             f"{output}: 'bundles' is missing or is not a non-empty list ({bundles!r}), "
             "so there is nothing for --repin to inherit — and defaulting would silently "
             f"narrow this lock to {list(DEFAULT_BUNDLES)}, dropping every other bundle's "
@@ -1961,14 +1967,33 @@ def _inherited_bundles(existing: dict, output: Path) -> List[str]:
         )
     for bundle in bundles:
         if not isinstance(bundle, str) or not _NAME_RE.fullmatch(bundle):
-            raise GeneratorError(
+            return (
                 f"{output}: {bundle!r} in 'bundles' is not a plausible bundle name "
                 f"(must match {_NAME_RE.pattern}) — a bundle name becomes a directory "
                 "path under the fetched tree and a key in 'skills', so re-pinning one "
                 "would digest content from outside the pinned tree and write a lock "
                 "the bootstrap hook refuses WHOLESALE. Fix the field."
             )
-    return list(bundles)
+    raw_sources = existing.get("sources")
+    if raw_sources is not None and not isinstance(raw_sources, list):
+        return (
+            f"{output}: 'sources' must be a list, got {type(raw_sources).__name__} — "
+            "--repin will not silently drop a federated source list it cannot read. "
+            "Fix the field (the bootstrap hook refuses this lock for the same reason)."
+        )
+    return None
+
+
+def _repin_inherit_guard(existing: dict, output: Path) -> None:
+    """Refuse a --repin whose lock cannot be read for what it declares.
+
+    FIRST of the re-pin guards, matching the order `report_drift` composes the
+    predicates in: everything after this reads `registry`, `bundles` and
+    `sources` as though they are there.
+    """
+    blocker = repin_inherit_blocker(existing, output)
+    if blocker:
+        raise GeneratorError(blocker)
 
 
 def report_drift(
@@ -2086,7 +2111,12 @@ def report_drift(
     # Asked once, up here, and consulted by both branches: asking it only in
     # the branch it was written for is precisely how the source-side fix left
     # the primary side printing a command the generator refuses.
-    blocked = (repin_primary_blocker(existing, extras, registry, output)
+    # Composed in the order the apply path meets them — inheritance first (main
+    # reads `registry` and `bundles` straight off the lock once that guard has
+    # passed), then the primary pin, then the sources. A report that quoted a
+    # later reason would hand the reader a sentence the flag never says.
+    blocked = (repin_inherit_blocker(existing, output)
+               or repin_primary_blocker(existing, extras, registry, output)
                or repin_unproven_sources_blocker(extras, output))
     # Asked off what THIS run read, and scoped to the bundles it read: a
     # `--only` run reads one source and the command it prints holds every other
@@ -2419,12 +2449,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not (args.check or args.check_current):
             return format_status
     if args.repin:
-        # Strict, because this is the path that WRITES what it inherited. See
-        # the helpers: the generate path's fall-through to DEFAULT_REGISTRY /
-        # DEFAULT_BUNDLES is correct when nothing was inherited and silently
-        # destructive when something should have been.
-        registry = _inherited_registry(existing, output)
-        bundles = _inherited_bundles(existing, output)
+        # Strict, because this is the path that WRITES what it inherited: the
+        # generate path's fall-through to DEFAULT_REGISTRY / DEFAULT_BUNDLES is
+        # correct when nothing was inherited and silently destructive when
+        # something should have been. Every reason it refuses is in
+        # `repin_inherit_blocker`, which --check-current reads before it
+        # recommends this flag.
+        _repin_inherit_guard(existing, output)
+        registry = existing["registry"]
+        bundles = list(existing["bundles"])
     else:
         registry = args.registry or existing.get("registry") or DEFAULT_REGISTRY
         bundles = (
@@ -2446,19 +2479,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_sources = existing.get("sources")
     if args.source:
         extras = [parse_source(spec) for spec in args.source]
-    elif args.repin and raw_sources is not None and not isinstance(raw_sources, list):
-        # Present but the wrong JSON type. Falling through to "no sources" is
-        # harmless on --check (the rebuilt document has none, so the comparison
-        # goes red and names it) and is a DELETION here: the federated half
-        # would be written away under a normal `Wrote ...` line at exit 0, and
-        # --check green afterwards. The hook calls the same shape fatal
-        # ("lock: 'sources' must be a list"), so the repair tool must not
-        # "fix" it by discarding the array.
-        raise GeneratorError(
-            f"{output}: 'sources' must be a list, got {type(raw_sources).__name__} — "
-            "--repin will not silently drop a federated source list it cannot read. "
-            "Fix the field (the bootstrap hook refuses this lock for the same reason)."
-        )
     elif isinstance(raw_sources, list):
         extras = [
             normalize_source(raw, f"sources[{index}]")
