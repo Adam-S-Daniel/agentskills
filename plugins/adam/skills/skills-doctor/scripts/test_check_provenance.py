@@ -1891,6 +1891,40 @@ def test_a_directory_the_ladder_cannot_place_raises_instead_of_defaulting():
                        replaceable=True, repo_owned=set())
 
 
+def test_the_ladders_order_is_the_hooks_order(tmp_path):
+    """The rungs are only a ladder while the hook asks them in this order.
+
+    `hook_fate` returns the FIRST rung that answers, so its arms encode an order
+    as much as a set: put the collision rung above the dup guard and a store
+    that is both gets the wrong sentence and the wrong finding/note split. That
+    order is a property of `.claude/hooks/skills-bootstrap.sh`, so it is read
+    out of the hook rather than restated here — and then confirmed against the
+    ladder on a store that trips both rungs at once, where only the order
+    decides which answer comes back.
+    """
+    lines = _hook_path().read_text(encoding="utf-8").splitlines()
+
+    def only(needle):
+        at = [i for i, line in enumerate(lines) if needle in line]
+        assert len(at) == 1, (needle, at)
+        return at[0]
+
+    gate = only('if ! may_replace "$name" "$want"; then')
+    dup = only('if [ "$status" = "dup" ]; then')
+    collision = only('if [ -f "$PROJECT_DIR/.claude/skills/$name/SKILL.md" ]; then')
+    copy = only('if ! cp -R "$src" "$DEST/$name"')
+    assert gate < dup < collision < copy, (gate, dup, collision, copy)
+
+    # Both rungs true at once. The dup guard is above the collision guard in the
+    # hook, so `dup` is the answer; reversing the two arms in `hook_fate` is what
+    # this reds on, and nothing else in the suite would.
+    lock = prov.Lock(prov.PRESENT, {"alpha"}, set(),
+                     digests={"alpha": frozenset({"a" * 64})},
+                     duplicates=frozenset({"alpha"}))
+    assert prov.hook_fate(lock, "alpha", replaceable=True,
+                          repo_owned={"alpha"}) == prov.DELETED_BY_THE_DUP_GUARD
+
+
 def test_only_a_still_delivering_fate_may_say_delivery_is_unaffected():
     """The sentence, bound to the ladder's answer rather than to a habit.
 
