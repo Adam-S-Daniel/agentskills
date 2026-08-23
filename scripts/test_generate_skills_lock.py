@@ -3424,7 +3424,8 @@ def _primary_drifted(primary: Path) -> str:
 
 # The two ends of the re-pin path, by name. `_repin_primary_guard` and
 # `_apply_repin_sources` are what REFUSE; `report_drift` is what RECOMMENDS.
-_REPIN_APPLY_PATH = ("_repin_primary_guard", "_apply_repin_sources")
+_REPIN_APPLY_PATH = ("_repin_primary_guard", "_apply_repin_sources",
+                     "_repin_shrink_guard")
 _REPIN_REPORT_PATH = ("report_drift",)
 
 
@@ -3681,6 +3682,43 @@ def _source_hand_pinned_at_a_branch(tmp_path):
     return primary, out, []
 
 
+def _emptied_source_bundle(tmp_path):
+    """The registry deleted a bundle's last skill — agentskills #125.
+
+    A re-pin here writes a lock that no longer installs those skills anywhere,
+    at exit 0. The fleet bumper refuses to propose it; the generator did not
+    refuse to write it.
+    """
+    primary, out = _two_sources(tmp_path)
+    extra = tmp_path / "cms-platform"
+    shutil.rmtree(extra / "skills" / "deploy")
+    # A file that is not a skill, so the tree at the new commit is EMPTIED OF
+    # SKILLS rather than empty: `git archive` of a wholly empty tree writes
+    # zero bytes, which is its own defect and has its own test.
+    _write(extra / "README.md", "still a repository\n")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "the bundle is gone")
+    return primary, out, []
+
+
+def _emptied_source_bundle_scoped(tmp_path):
+    primary, out, _ = _emptied_source_bundle(tmp_path)
+    return primary, out, ["--only", (tmp_path / "cms-platform").resolve().as_uri()]
+
+
+def _emptied_primary_bundle(tmp_path):
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", sha, "--bundles", "adam", "-o", str(out)).returncode == 0
+    shutil.rmtree(primary / "plugins" / "adam" / "skills" / "alpha")
+    _write(primary / "README.md", "still a repository\n")
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "the bundle is gone")
+    return primary, out, []
+
+
 # (builder, id, does --check-current have a command it can honestly print?)
 _DRIFT_SHAPES = [
     (_drifted_plain, "the primary moved", True),
@@ -3694,6 +3732,10 @@ _DRIFT_SHAPES = [
      "one registry is both the primary and a source", False),
     (_registry_federated_twice, "one registry is federated twice", False),
     (_source_hand_pinned_at_a_branch, "a source is pinned at a branch", False),
+    (_emptied_source_bundle, "a source bundle lost every skill", False),
+    (_emptied_source_bundle_scoped,
+     "a source bundle lost every skill, asked with --only", False),
+    (_emptied_primary_bundle, "the primary bundle lost every skill", False),
 ]
 _EVERY_SHAPE = [pytest.param(build, printable, id=name)
                 for build, name, printable in _DRIFT_SHAPES]
@@ -3895,6 +3937,60 @@ def test_the_report_and_the_refusal_give_the_same_reason(build, tmp_path):
         assert refusal.returncode == 1, (registry, refusal.stdout + refusal.stderr)
         assert reason in refusal.stderr, (reason, refusal.stderr)
         assert out.read_text(encoding="utf-8") == before, "a refused re-pin still wrote"
+
+
+@pytest.mark.parametrize("build, emptied, federated", [
+    pytest.param(_emptied_primary_bundle, "adam", False, id="a bare --repin"),
+    pytest.param(_emptied_source_bundle, "cms-platform", True,
+                 id="--repin --repin-source"),
+])
+def test_a_repin_that_would_empty_a_bundle_is_refused(
+        build, emptied, federated, tmp_path):
+    """agentskills #125: the fleet bumper refusing this was never cover.
+
+    Measured on this branch before the guard, and identically for both forms:
+    a registry that deleted a bundle's last skill re-pinned at exit 0, "Wrote
+    ...", and the skills were simply gone from the lock — after which --check
+    is green for having dropped them, and no ephemeral session installs them
+    again. bump-consumer-locks.sh refuses to PROPOSE that, which covers the
+    scheduled fan-out and nothing else: a hand re-pin, or any consumer whose
+    re-pin is not the bumper's, got the silent version. #58 makes a second
+    registry's content move on a schedule, which is what makes it routine.
+    """
+    primary, out, _ = build(tmp_path)
+    before = out.read_text(encoding="utf-8")
+    # The two forms need different fixtures because they advance different
+    # pins: a bare --repin re-resolves the primary's ref, while a source's sha
+    # pin re-resolves to itself and only --repin-source moves it.
+    flags = (["--repin-source", f"{(tmp_path / 'cms-platform').resolve().as_uri()}@"]
+             if federated else [])
+
+    proc = run_generator("--repo", str(primary), "--repin", *flags, "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"bundle(s) {emptied} with no skills at all" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_a_repin_that_only_removes_some_skills_is_still_allowed(tmp_path):
+    """The guard is a bundle that EMPTIED, not a lock that got smaller.
+
+    Deleting one of a bundle's skills is an ordinary registry change and an
+    ordinary re-pin; refusing it would make the guard something a caller learns
+    to route around. Deliberately the same line
+    `_agent-guidance`'s `skills_shrink_reason` draws.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A, "adam/beta": SKILL_B})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", sha, "--bundles", "adam", "-o", str(out)).returncode == 0
+    shutil.rmtree(primary / "plugins" / "adam" / "skills" / "beta")
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "one skill retired")
+
+    proc = run_generator("--repo", str(primary), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert sorted(json.loads(out.read_text(encoding="utf-8"))["skills"]) == ["adam/alpha"]
 
 
 def test_an_uppercase_commit_sha_is_treated_as_the_commit_sha_it_is(registry, tmp_path):
