@@ -156,7 +156,17 @@ DIRECTORY_CHANGERS = frozenset({"cd", "pushd", "popd"})
 # handed to the command, not shell — `python3 - <<PY ... PY` is the same
 # hole as `shell: python` written inside a bash step, and the tokeniser read
 # the Python as more shell commands and found nothing.
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+#
+# THE DELIMITER HAS THREE QUOTED FORMS AND BASH READS ALL THREE THE SAME:
+# `<<'PY'`, `<<"PY"` and `<<\PY`. The backslash one was missing, and it is the
+# form the negative control that found this used — `python3 - <<\PY` opened no
+# heredoc here, so the Python body was never lifted out and
+# `subprocess.check_call([sys.executable, "-m", "pip", "install", …])`
+# tokenised as ordinary words: no `pip` token, no `install` token, a silent
+# pass. The conditional tail keeps the quoted forms balanced — a closing quote
+# is required exactly when an opening one was found.
+HEREDOC = re.compile(
+    r"<<-?\s*(?:\\|(['\"]))?([A-Za-z_][A-Za-z0-9_]*)(?(1)\1)")
 
 # A token that names the pip program: `pip`, `pip3`, `pip3.11`, and the same
 # reached by path. Deliberately a full match — `pipefail` and `pip_ok=no` both
@@ -343,8 +353,16 @@ def governed_files(root=REPO_ROOT):
 def join_continuations(body: str) -> str:
     """Fold `\\`-continued shell lines into one, so a command split across
     lines is one command to the scanner. account-skill-zips.yml's install is
-    written that way."""
-    return re.sub(r"\\\n[ \t]*", " ", body)
+    written that way.
+
+    The continuation is REMOVED rather than replaced by a space, because that
+    is what bash does: `pi\\` newline `p install` is `pip install` to bash, and
+    substituting a space made it `pi p install` here — a command with no `pip`
+    token, so an install split mid-word passed in silence. The next line's
+    leading whitespace is left where it is; it already separates whatever bash
+    separates.
+    """
+    return re.sub(r"\\\n", "", body)
 
 
 def runs_a_command_line(shell) -> bool:
@@ -1083,6 +1101,20 @@ def test_a_continued_install_is_one_command():
         (["requirements-dev.txt"], [], [])]
 
 
+def test_a_continuation_inside_a_word_does_not_split_it():
+    """The other thing a `\\`-continuation can do, and the one that hid an
+    install: bash DELETES the backslash-newline rather than separating on it,
+    so `pi\\` newline `p install` is `pip install`. Substituting a space here
+    made it `pi p install` — a command with no `pip` token, which the walk
+    then read as QUIET. Both halves are asserted, because a fix that joins
+    everything would break the ordinary continuation above."""
+    found, unplaceable = scan_shell_body(
+        "python3 -m pi\\\np install pyyaml==6.0.1")
+    assert not unplaceable, unplaceable
+    assert [install_operands(args) for _, args in found] == [
+        ([], ["pyyaml==6.0.1"], [])]
+
+
 VERSION_CHANGING_OPTIONS = [
     "python3 -m pip install -r requirements-dev.txt -c constraints.txt",
     "python3 -m pip install -r requirements-dev.txt --constraint=constraints.txt",
@@ -1230,6 +1262,17 @@ HEREDOC_INSTALLS = [
     "PY",
     "python3 - <<PY\nsubprocess.check_call(['pip', 'install', 'x'])\nPY",
     "\tpython3 - <<-PY\n\tpip install pyyaml==6.0.1\n\tPY",
+    # `<<\PY` — bash's THIRD quoted delimiter, and the one the recogniser did
+    # not know. It is not an exotic spelling: it is what the negative control
+    # that found this hole was written with, and it means exactly `<<'PY'`.
+    # Unrecognised, no heredoc opened, the Python fell through to shlex as
+    # ordinary words, and the gate returned a clean pass over an install of
+    # `pyyaml==6.0.1`.
+    'python3 - <<\\PY\n'
+    'import subprocess, sys\n'
+    'subprocess.check_call([sys.executable, "-m", "pip", "install", "pyyaml==6.0.1"])\n'
+    'PY',
+    '\tpython3 - <<-\\PY\n\tpip install pyyaml==6.0.1\n\tPY',
 ]
 
 
