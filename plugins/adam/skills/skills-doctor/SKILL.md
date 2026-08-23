@@ -442,8 +442,12 @@ figure. No remediation is performed — recommend, do not do.
   folding onto one destination name (`deleted-by-the-dup-guard`, a finding —
   neither row installs) and the project shipping a `.claude/skills/<name>` of
   its own (`deleted-by-the-collision-guard`, a note — repo-owned is supposed to
-  win). Where the project's skills directory is there and unlistable the answer
-  to that last question is unknown, and the doctor says so
+  win). That last question is asked the hook's own way — one
+  `[ -f .claude/skills/<name>/SKILL.md ]` per name, never a listing of the
+  directory — so a plain file, a missing directory or a symlink loop where
+  `.claude/skills` belongs is a measured "the project ships nothing", exactly as
+  it is for the hook. Only a stat that fails for a reason which is not about the
+  path leaves it unknown, and the doctor says so
   (`collision-guard-unmeasured`) rather than assuming the benign reading.
   `bytes-are-the-locked-ones` is now raised only where every local rung is
   clear, which is the only state in which "delivery is unaffected" is a

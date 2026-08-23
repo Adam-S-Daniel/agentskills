@@ -41,8 +41,10 @@ import argparse
 import datetime
 import hashlib
 import json
+import errno
 import os
 import re
+import stat as stat_module
 import sys
 import textwrap
 from pathlib import Path
@@ -209,15 +211,17 @@ COLLISION_GUARD_DELETES = (
     "report would lead a reader to expect of a directory whose digest the lock "
     "names.")
 COLLISION_GUARD_UNMEASURED = (
-    "the project's `.claude/skills` is there and could not be listed, so "
-    "whether the project ships a `{name}` of its own is UNMEASURED — and that "
+    "`.claude/skills/{name}/SKILL.md` in the project could not be statted, and "
+    "the reason was not one that settles the question — not absent, not behind "
+    "a non-directory, not a symlink loop. So whether the project ships a "
+    "`{name}` of its own is UNMEASURED — and that "
     "is the one question left between this directory and the hook's copy. If it "
     "does, the next run deletes these bytes so the repo-owned copy wins; if it "
     "does not, the bundle's copy is installed over them. Reported rather than "
-    "resolved, because an unreadable directory answers neither way and the "
-    "answer this script would otherwise assume is the benign one. Make "
-    "`.claude/skills` readable — or point --project-dir at the directory the "
-    "session actually opens on — and re-run.")
+    "resolved, because a failure of that kind may be about THIS process rather "
+    "than about the path, and the session that runs the hook asks the same "
+    "`-f` and can get an answer. Re-run where the stat completes — or point "
+    "--project-dir at the directory the session actually opens on.")
 
 # The hook's charsets, applied to the same fields on the way out of the same file.
 # An entry failing any of them is one the hook SKIPS, so it is invisible to the
@@ -930,11 +934,16 @@ def hook_fate(lock: Lock, name: str, *, replaceable: bool,
     the hook can only satisfy the lock clause. Passing the answer in keeps one
     ladder rather than two copies of it that can disagree.
 
-    `repo_owned` is `None` when the project's skills directory is there and could
-    not be listed. That is the collision rung with no answer, and it gets a fate
-    of its own instead of the empty set's: an unreadable directory is not an
-    empty one, and rounding it to "no collision" is how the benign note this
+    `repo_owned` is `None` when some name's `SKILL.md` could not be statted for a
+    reason that does not settle the question — see `project_ships`. That is the
+    collision rung with no answer, and it gets a fate of its own instead of the
+    empty set's: rounding it to "no collision" is how the benign note this
     ladder exists to gate would come back through the one input nobody measured.
+    It is a NARROW state, and deliberately: the hook asks `-f`, which answers
+    false through a plain file, a missing directory or a symlink loop and stays
+    false, so those are measured "no" and not this. Reading the directory with
+    `iterdir` instead made every one of them unmeasured, which put a finding at
+    exit 1 on a store the hook goes on to install into without complaint.
     """
     if lock.state in (REJECTED, UNREADABLE):
         # Rung zero, and it is answered for every name at once: the reader exits
@@ -1441,28 +1450,58 @@ def scan(skills_dir: Path) -> Tuple[str, List[str]]:
                      and not child.name.startswith(".")]
 
 
-def readable_skill_names(directory: Path) -> Optional[Set[str]]:
-    """`skill_names`, with "could not be read" kept apart from "nothing there".
+# The errnos on which the hook's own `[ -f … ]` is false and will stay false
+# however many times it is asked, because they are answers ABOUT THE PATH: there
+# is no such entry, a component of it is not a directory, the links loop, the
+# name is too long. Anything else `os.stat` raises — EACCES, EMFILE, EIO — may
+# be about THIS process rather than about the path, which is `read_record`'s
+# argument for re-checking with `stat`, and the session that runs the hook can
+# get a different answer.
+SETTLED_BY_THE_PATH = frozenset({
+    errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG})
 
-    Not a distinction `skill_names` can make, and one rung of `hook_fate` needs
-    it: whether the project ships a skill of some name decides whether the next
-    run DELETES the personal copy, and a directory that is there and unlistable
-    answers that question neither way. Folding it into the empty set answers it
-    "no", which is the benign reading, which is the reading this ladder exists
-    to stop being assumed.
 
-    FileNotFoundError is the empty set and not None on purpose: a project with
-    no `.claude/skills` at all ships no skill of any name, and that IS measured.
-    Everything else — a plain file where the directory should be, a permission
-    refusal, an I/O error — is None.
+def hook_sees_a_file(path: Path) -> Optional[bool]:
+    """`[ -f "$path" ]` as the hook asks it, or None where the answer is not ours.
+
+    A single `stat`, following symlinks, true only for a regular file — bash's
+    own `-f`. None is NOT "the file might not be there": it is "this process
+    could not complete the syscall for a reason that is not about the path", and
+    it is the only state in which the hook's answer is genuinely unknown from
+    here.
     """
     try:
-        children = sorted(directory.iterdir())
-    except FileNotFoundError:
-        return set()
-    except OSError:
-        return None
-    return {child.name for child in children if (child / "SKILL.md").is_file()}
+        return stat_module.S_ISREG(os.stat(path).st_mode)
+    except OSError as failure:
+        return False if failure.errno in SETTLED_BY_THE_PATH else None
+
+
+def project_ships(project_skills: Path, names: Set[str]) -> Optional[Set[str]]:
+    """Which of `names` the project delivers, measured the way the hook measures.
+
+    ONE STAT PER NAME, because that is the whole of the hook's collision guard:
+    `[ -f "$PROJECT_DIR/.claude/skills/$name/SKILL.md" ]` at
+    skills-bootstrap.sh:1120. The hook never lists that directory, and listing it
+    here answered a harder question than the one being asked — a plain FILE at
+    `.claude/skills` makes `iterdir` raise NotADirectoryError, which read as "the
+    answer is unknown", while the hook's `-f` through a non-directory is
+    definitively false and its next run installed both skills and deleted
+    nothing. Measured: that fixture gave `[collision-guard-unmeasured]` for
+    every locked name at exit 1 over a store the real hook then reported
+    `skills: 2/2 … — OK` on.
+
+    None when ANY name's stat is unresolvable, because the fate this feeds is
+    per-name only after the set is known, and a caller handed a partial set
+    cannot tell a measured "no" from an unmeasured one.
+    """
+    shipped: Set[str] = set()
+    for name in sorted(names):
+        answer = hook_sees_a_file(project_skills / name / "SKILL.md")
+        if answer is None:
+            return None
+        if answer:
+            shipped.add(name)
+    return shipped
 
 
 def skill_names(directory: Path) -> Set[str]:
@@ -1473,10 +1512,13 @@ def skill_names(directory: Path) -> Set[str]:
     incidental directory as a skill. Unreadable reads as empty here because the
     question it answers ("is there a second copy of this name?") is one an
     absent answer already leaves unraised; the project channel needs the other
-    treatment and uses `readable_skill_names` directly.
+    treatment and uses `project_ships`, which asks the hook's own per-name test.
     """
-    names = readable_skill_names(directory)
-    return set() if names is None else names
+    try:
+        children = sorted(directory.iterdir())
+    except OSError:
+        return set()
+    return {child.name for child in children if (child / "SKILL.md").is_file()}
 
 
 def declared_name(skill_dir: Path) -> Optional[str]:
@@ -1785,7 +1827,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
     are here only so that "not in the personal store" does not get reported as
     "not delivered": both of those channels satisfy a locked name without the
     hook installing anything. `repo_owned` is None when the project's skills
-    directory could not be listed — see `readable_skill_names` — and every use
+    directory answered no name's stat — see `project_ships` — and every use
     of it below has to say what it does with an answer nobody has.
     """
     rows: List[Row] = []
@@ -2779,13 +2821,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     record = read_record(record_path)
     store_state, names = scan(skills_dir)
     account = skill_names(skills_dir / ACCOUNT_DIR)
-    repo_owned = readable_skill_names(project_dir / ".claude" / "skills")
     # Every lock is read BEFORE any of them is judged against, because the
     # foreign gate is store-wide: "some bundle here delivers this name" is a
     # question about all the locks at once, and asking it lock by lock is how the
     # row and the note came to disagree about one directory.
     locks = [(path, read_lock(path))
              for path in discover_locks(args.lock, project_dir)]
+    # After the locks, because `project_ships` needs the names to ask about: the
+    # hook asks its collision question once per row it is installing, so the
+    # candidates are the store's directories plus every name any lock declares.
+    repo_owned = project_ships(
+        project_dir / ".claude" / "skills",
+        set(names) | {name for _, lock in locks for name in lock.names})
     origins = assign_origins(
         skills_dir, names, record,
         {name for _, lock in locks for name in lock.names})
