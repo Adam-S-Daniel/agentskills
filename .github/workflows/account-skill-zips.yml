@@ -194,8 +194,14 @@ jobs:
         # plausibly fail and has a degraded path to take belongs in an `if`
         # condition or a `||` list.
         #
-        # scripts/test_account_workflows.py holds both halves of that: it reds
-        # if a count comes back into this paragraph, and it reds if the
+        # scripts/test_account_workflows.py holds that shape rather than
+        # leaving it to be read - see #124.
+        # TestEveryFailableCommandInTheAuditStepIsGuarded parses this step's
+        # body, blanks the Python heredoc and the comments, and reds on an
+        # `echo` that redirects anywhere but the `$GITHUB_OUTPUT` write, and
+        # on any command sitting outside an `if` condition and a `||` list
+        # that is not in that test's own commented carve-out list. It also
+        # reds if a count comes back into this paragraph, and if the
         # `status=` write acquires the guard the sentence above says it must
         # not have.
         run: |
