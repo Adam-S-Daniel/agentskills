@@ -1910,6 +1910,49 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"branch, so it was diagnosed as something it is not:\n{log}"
         )
 
+    # WHITESPACE THAT HAPPENS TO BE A NEWLINE, which is where the two lines
+    # this step normalises with and the one it condemns with meet. `fresh\n`
+    # and `\nfresh` are the shape a heredoc emits when something prints a bare
+    # newline at import time, or when `print()` is called with no argument -
+    # padding, not a second value.
+    @pytest.mark.parametrize("verdict", [
+        "\nfresh", "\n\nfresh", " \nfresh", "\tfresh\n",
+        "fresh\n", "fresh\n\n", "fresh \n",
+    ])
+    def test_a_capture_padded_with_a_newline_is_trimmed_not_condemned(
+            self, tmp_path, verdict):
+        """THE ORDER OF THE TRIM AND THE NEWLINE-REJECT, executed.
+
+        The step trims leading and trailing whitespace and then rejects any
+        capture that still holds a newline. Swap those two and the rejection
+        sees the padding as a second line: every case here degrades to
+        `unavailable` and raises an annotation about a cross-repo import that
+        did not break. Nothing else in this file notices - measured, moving
+        the reject above the two trim lines leaves the whole of `scripts/`
+        green - so the ordering was argued in a comment and held by nothing,
+        which is the shape #120 is about.
+
+        `$( )` already discards a TRAILING blank line, so condemning a LEADING
+        one would make the step's answer depend on which end the blank arrived
+        at. That asymmetry is what these cases pin.
+
+        THE POLICY BOUNDARY IS RIGHT HERE and not in the sibling test above:
+        that one asserts a capture holding a second VALUE (`junk\nfresh`) is
+        rejected, and this one asserts a capture holding only padding is not.
+        Both directions of one rule, and neither is safe to infer from the
+        other.
+        """
+        out, written = self._run(tmp_path, verdict)
+        assert written == "status=fresh\n", (
+            f"a capture padded with a newline was condemned rather than "
+            f"trimmed: {verdict!r} wrote {written!r}. The newline-reject runs "
+            f"before the trim."
+        )
+        assert "::warning::" not in out, (
+            f"a healthy verdict padded with whitespace raised an annotation: "
+            f"{verdict!r} -> {out!r}"
+        )
+
     @pytest.mark.parametrize("verdict", [
         "fresh", " fresh", "fresh ", "fresh\r", "\tfresh",
         sel.AUDIT_DRIFT_STATUS, sel.AUDIT_DRIFT_STATUS + "\r",
