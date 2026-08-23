@@ -793,26 +793,61 @@ def parse_repin_source(spec: str) -> Tuple[str, str]:
     return registry, (validate_ref(ref, f"--repin-source {spec!r}") if ref else "")
 
 
-def repin_source_blocker(extras: Sequence[dict], registry: str) -> Optional[str]:
+def repin_source_blocker(
+    extras: Sequence[dict], registry: str, primary_registry: str
+) -> Optional[str]:
     """Why `--repin-source <registry>@` cannot advance that source — or None.
 
     ONE predicate, read by the flag that REFUSES it (`_apply_repin_sources`)
-    and by the report that RECOMMENDS it (`check_current`'s federated
-    remediation). Those two answering separately is how a tool comes to print a
-    command it then rejects at exit 1: --check-current reported the drift and
-    named the repair, and the repair was refused, leaving a drifted lock with
-    no route the tool itself would accept. The whole sentence is returned
-    rather than re-worded at each site, so the refusal and the report cannot
-    come to say different things —
+    and by the report that RECOMMENDS it (`report_drift`). Those two answering
+    separately is how a tool comes to print a command it then rejects at exit
+    1: --check-current reported the drift and named the repair, and the repair
+    was refused, leaving a drifted lock with no route the tool itself would
+    accept. The whole sentence is returned rather than re-worded at each site,
+    so the refusal and the report cannot come to say different things —
     `test_the_report_and_the_refusal_give_the_same_reason` compares the two
     strings.
 
-    None for a registry this lock does not federate at all: refusing THAT is
-    `_apply_repin_sources`' own "ADDING a source" case, which is about a spec
-    naming something absent rather than about an existing pin, and
-    check_current only ever asks about a source it has just read.
+    EVERY reason this flag refuses a spec lives here, including the two that
+    read as command-line mistakes rather than lock defects. Leaving one out is
+    not a saving: the "not a federated source" refusal was left in
+    `_apply_repin_sources` on the reasoning that check_current only ever asks
+    about a source it has just read — true of THAT one and false of the
+    primary-registry refusal beside it, because a lock may name one registry as
+    both its primary and a federated source, and then check_current does read
+    such a source and did print a `--repin-source` the flag rejected. A
+    predicate that is total needs no such reasoning to stay correct.
     """
     matched = [source for source in extras if source["registry"] == registry]
+    if registry == primary_registry:
+        if matched:
+            # BOTH halves under one name. `--check` is green on it —
+            # plan_sources' uniqueness check is keyed on bundle — and
+            # `_select_sources` already refuses to SCOPE to such a registry
+            # for the same reason: one name, two entries, two answers. So the
+            # drift is reported by the unscoped run alone, and before this
+            # refusal was visible to the report it was reported with a
+            # `--repin-source` command that exited 1.
+            return (
+                "this lock names that registry as BOTH its primary registry and a "
+                "federated source. --repin-source advances a FEDERATED pin and refuses "
+                "the primary's name outright, so under one name there is no spec that "
+                "reaches the federated entry alone. Give the two halves two names — the "
+                "federated entry is the one to re-point, since the primary's pin is what "
+                "--ref (or a bare --repin) advances."
+            )
+        return (
+            "that is this lock's PRIMARY registry, not a federated source; the primary's "
+            "pin is what --ref (or bare --repin) advances"
+        )
+    if not matched:
+        federated = ", ".join(
+            dict.fromkeys(source["registry"] for source in extras)
+        ) or "none"
+        return (
+            f"that is not a source this lock federates ({federated}); ADDING a source "
+            "changes what the lock means and is a plain generate, not a re-pin"
+        )
     if len(matched) > 1:
         # A registry the lock federates TWICE is representable and --check
         # green: plan_sources' uniqueness check is keyed on BUNDLE, so two
@@ -869,6 +904,92 @@ def repin_source_blocker(extras: Sequence[dict], registry: str) -> Optional[str]
     return None
 
 
+def repin_primary_blocker(
+    existing: dict, extras: Sequence[dict], registry: str, output: Path
+) -> Optional[str]:
+    """Why a `--repin` cannot advance this lock's PRIMARY pin — or None.
+
+    `repin_source_blocker`'s counterpart, and it exists because that one was
+    not enough: EVERY command --check-current prints is a `--repin`, the
+    federated `--repin --ref <r> --repin-source '<reg>@'` included, so a
+    primary-side refusal rejects the source-side remediation too. Consulting
+    only the source predicate is how the report came to print `--repin` for a
+    lock this same generator refuses at exit 1.
+
+    Read by the guard that REFUSES (`_repin_primary_guard`) and by the report
+    that RECOMMENDS (`report_drift`), by the same rule as its counterpart: one
+    sentence, returned rather than re-worded, so the two cannot disagree.
+    """
+    pinned = existing.get("ref")
+    if not isinstance(pinned, str) or not pinned:
+        return (
+            f"{output}: 'ref' is missing or unusable ({pinned!r}); --repin advances "
+            "an existing pin and this lock has none to advance."
+        )
+    if not _COMMIT_SHA_RE.fullmatch(pinned):
+        return (
+            f"{output} pins '{registry}' at {pinned!r}, which is not a commit sha — "
+            "and the commit the lock pins is the ONLY thing that proves the clone "
+            "--repin reads is that registry. A branch name resolves in any clone, so "
+            "re-pinning against one would write whatever that directory is sitting "
+            "on. Restate the pin at the commit it is actually on with a plain "
+            "generate (--registry / --ref / --bundles), then advance it."
+        )
+    return None
+
+
+def _repin_primary_guard(
+    existing: dict, extras: Sequence[dict], registry: str, output: Path, repo: Path
+) -> None:
+    """Refuse a --repin whose primary pin cannot be advanced from this clone.
+
+    The lock names a registry; --repo names a clone. Nothing else ties the two
+    together, and when they are different repositories the re-pin writes a
+    commit from one under the name of the other — exit 0, and --check green
+    because it re-derives from the same wrong clone. The pin already in the
+    lock is the probe: a clone that IS this registry has that commit.
+    Deliberately checked even when --ref is given, because the question is
+    whether this clone is the registry, not which commit was asked for.
+
+    Which needs the pin to BE a commit — `main^{commit}` resolves in every
+    clone that has a main branch, so a branch-name pin turns the probe into a
+    formality any impostor passes. That half is `repin_primary_blocker`'s,
+    because a report can foresee it from the lock alone and must not recommend
+    a command it would trip. The probe below is the half a report cannot
+    foresee: it depends on the clone in front of this process, which is not in
+    the lock.
+    """
+    blocker = repin_primary_blocker(existing, extras, registry, output)
+    if blocker:
+        raise GeneratorError(blocker)
+    pinned = existing["ref"]
+    if _git(repo, "cat-file", "-e", f"{pinned}^{{commit}}").returncode != 0:
+        raise GeneratorError(
+            f"{repo} does not contain {pinned}, the commit {output} pins for "
+            f"'{registry}' — so this checkout is not that registry, and re-pinning "
+            "from it would write a commit the registry does not have (the hook then "
+            "cannot fetch it, and every consumer session reports DEGRADED). Point "
+            "--repo at a clone of that registry, or fetch the pinned commit into "
+            "this one."
+        )
+
+
+def _parse_repin_specs(specs: Sequence[str]) -> Dict[str, str]:
+    """`--repin-source` specs as {registry: ref}, refusing a repeated registry.
+
+    A COMMAND-LINE refusal, not a lock one: it is about what this invocation
+    asked for twice, so there is nothing for a report to foresee and it stays
+    out of `repin_source_blocker`.
+    """
+    wanted: Dict[str, str] = {}
+    for spec in specs:
+        reg, ref = parse_repin_source(spec)
+        if reg in wanted:
+            raise GeneratorError(f"--repin-source names {reg} twice; one pin per source")
+        wanted[reg] = ref
+    return wanted
+
+
 def _apply_repin_sources(
     extras: Sequence[dict],
     specs: Sequence[str],
@@ -903,34 +1024,16 @@ def _apply_repin_sources(
     ADDING a source is refused rather than allowed as a convenience — it
     changes what the lock means, which is a plain generate's decision — and so
     is naming the primary, whose pin is what `--ref` (or a bare `--repin`)
-    advances.
+    advances. Both of those refusals live in `repin_source_blocker` with the
+    rest, so the report that recommends this flag sees every one of them.
     """
-    wanted: Dict[str, str] = {}
-    for spec in specs:
-        reg, ref = parse_repin_source(spec)
-        if reg in wanted:
-            raise GeneratorError(f"--repin-source names {reg} twice; one pin per source")
-        wanted[reg] = ref
-    known: Dict[str, List[dict]] = {}
-    for source in extras:
-        known.setdefault(source["registry"], []).append(source)
+    wanted = _parse_repin_specs(specs)
     for reg in wanted:
-        if reg == primary_registry:
-            raise GeneratorError(
-                f"--repin-source {reg} is this lock's PRIMARY registry, not a federated "
-                "source; the primary's pin is what --ref (or bare --repin) advances"
-            )
-        if reg not in known:
-            raise GeneratorError(
-                f"--repin-source {reg} is not a source this lock federates "
-                f"({', '.join(sorted(known)) or 'none'}); ADDING a source changes what the "
-                "lock means and is a plain generate, not a re-pin"
-            )
         # Read, never re-derived: `repin_source_blocker` is what
         # --check-current consults before it recommends this flag, and a second
-        # copy of the condition here is how the two drift into recommending and
-        # refusing the same command.
-        blocker = repin_source_blocker(extras, reg)
+        # copy of any of its conditions here is how the two drift into
+        # recommending and refusing the same command.
+        blocker = repin_source_blocker(extras, reg, primary_registry)
         if blocker:
             raise GeneratorError(f"--repin-source {reg}: {blocker}")
     merged: List[dict] = []
@@ -1650,6 +1753,201 @@ def _inherited_bundles(existing: dict, output: Path) -> List[str]:
     return list(bundles)
 
 
+def report_drift(
+    drifted: Sequence[Tuple[dict, List[str]]],
+    *,
+    ref: str,
+    output: Path,
+    existing: dict,
+    extras: Sequence[dict],
+    registry: str,
+) -> None:
+    """Print one FAILED block per drifted source, with its repair or its reason.
+
+    A separate function so that "the path that RECOMMENDS a re-pin" is a name a
+    test can point at:
+    `test_every_refusal_a_repin_can_give_is_one_both_paths_read` reads this
+    module's AST and requires every `*_blocker` predicate to be called both
+    here and on the apply path. Recommending and refusing answering separately
+    is the defect class this whole arrangement exists to make unrepresentable.
+    """
+    # THE CROSS-REPO CONTRACT this loop must keep, as three facts a
+    # reader can check rather than a promise:
+    #
+    #   1. Every verdict line begins at column 0 with the literal
+    #      `FAILED:`. _agent-guidance's
+    #      scripts/bump-consumer-locks.sh branches on
+    #      `grep -q '^FAILED:'`, and anything else there is an
+    #      ERROR it refuses to act on.
+    #   2. The primary's block comes FIRST. That script slices
+    #      `sed -n '/^FAILED:/,$p' | head -20` into a PR body, and
+    #      the path substitution beside that slice names the
+    #      primary lock alone.
+    #   3. A block's repair belongs to that block — in the
+    #      UNTRUNCATED stream. Either the line IMMEDIATELY under
+    #      its headline is the command that fixes it, or there is
+    #      no command to print and the headline says so itself
+    #      (see repin_source_blocker). Never a command under one
+    #      headline that repairs a different block. That is the
+    #      property this loop holds and all it holds.
+    #
+    # (3) was first written here claiming it made the 20-line cap
+    # SAFE — "a truncation can drop a whole trailing block, but it
+    # can never separate a headline from the command that fixes
+    # it". That is false, and the arithmetic is short enough that
+    # it should have been done: the primary's block is 5 fixed
+    # lines (headline, remediation, three note lines) plus one line
+    # per difference, so with 14 differences the first federated
+    # headline lands on line 20 — kept — and its remediation on
+    # line 21 — cut. Both adversarial verifiers reproduced exactly
+    # that against this generator, and
+    # `test_the_bumper_cap_can_cut_a_later_headline_from_its_command`
+    # measures the sliced output rather than the raw stream, so the
+    # absolute cannot be restated without a red test.
+    #
+    # Its replacement then asserted two more things nobody had
+    # checked — that the bumper slices "only the primary-scoped,
+    # single-block run", and that a scoped per-source slice "would
+    # be a NEW consumer" — and both were false when written. The
+    # four statements below are a dated reading of that script
+    # rather than a standing promise about it: measured in
+    # _agent-guidance's scripts/bump-consumer-locks.sh at 4c505e3,
+    # 2026-08-22. Re-read it before relying on the first one; the
+    # other three are about this file and are held by tests.
+    #
+    #   * That script applies `sed -n '/^FAILED:/,$p' | head -20`
+    #     to THREE streams, two of them from this report. One is
+    #     `check_out`, a single UNSCOPED `--check-current`. The
+    #     other is `fed_check_out`, which it builds by
+    #     CONCATENATING one `--check-current --only <registry>`
+    #     block per drifted source — a multi-block scoped stream,
+    #     sliced today, under a heading that says as much ("each
+    #     block below was produced by `--check-current --only <that
+    #     registry>`").
+    #   * What no cap above two lines can split is the FIRST
+    #     block's headline from the command under it, when it has
+    #     one: headline on line 1 of the slice, command on line 2,
+    #     whichever block is first. In the unscoped
+    #     stream that is the primary's block whenever the primary
+    #     drifted, by (2) — plan_sources puts it first.
+    #   * A LATER block whose command is a separate line has no
+    #     such protection, in either stream, and both are
+    #     reachable. Unscoped: the primary's 5 fixed lines plus 14
+    #     differences puts the first federated headline on line 20
+    #     and its command on 21. Scoped and concatenated: a source
+    #     block is 2 fixed lines plus its differences, so 17
+    #     differences in the first source's block orphans the
+    #     SECOND source's headline the same way — and that stream
+    #     carries no primary block at all (`_select_sources`
+    #     returns include_primary False when `only` names a
+    #     source), so "the primary's pair survives" is not merely
+    #     unhelpful there, it is about a block that is not present.
+    #   * A block the refusal above left without a command cannot
+    #     be orphaned by any cap, because its answer is inside its
+    #     headline.
+    #
+    # Plan order gives (2) for free, and the tests that measure the
+    # SLICED output rather than the raw stream are what keep any of
+    # this from being restated on intuition:
+    # `test_the_bumper_cap_always_keeps_the_primary_headline_with_its_command`,
+    # `test_the_bumper_cap_can_cut_a_later_headline_from_its_command`
+    # and
+    # `test_the_bumper_cap_can_cut_a_scoped_headline_from_its_command`.
+    # `test_check_current_names_both_when_primary_and_source_both_drift`
+    # and `test_every_failed_line_is_followed_by_its_own_remediation_command`
+    # hold (2) and (3).
+    # Whether the primary's own block is about to tell the reader
+    # to advance it decides whether the federated blocks below hold
+    # its pin. See the --ref anchor there.
+    primary_drifted = any(entry["is_primary"] for entry, _ in drifted)
+    # EVERY command below is a `--repin`, the federated
+    # `--repin --ref <r> --repin-source '<reg>@'` included, so a primary-side
+    # refusal rejects a source's remediation as surely as the primary's own.
+    # Asked once, up here, and consulted by both branches: asking it only in
+    # the branch it was written for is precisely how the source-side fix left
+    # the primary side printing a command the generator refuses.
+    primary_blocked = repin_primary_blocker(existing, extras, registry, output)
+    for source, differences in drifted:
+        if source["is_primary"]:
+            if primary_blocked:
+                print(f"FAILED: the bundle has moved on since {ref}, which {output} "
+                      "still pins — nothing added or changed since then reaches an "
+                      "ephemeral surface. No re-pin command is printed for it "
+                      f"because this generator would refuse one: {primary_blocked}")
+                for line in differences:
+                    print(f"  - {line}")
+                continue
+            print(f"FAILED: the bundle has moved on since {ref}, which {output} "
+                  "still pins — nothing added or changed since then reaches an "
+                  "ephemeral surface. Re-pin it (after committing the content) "
+                  "with:")
+            # --repin, not a bare re-run: this lock may federate, and a
+            # plain generate takes `sources` from the command line alone,
+            # so following that instruction literally would de-federate it
+            # at exit 0. The remediation line is the one place a reader is
+            # told which command to type, so it must name the safe one.
+            print("  python3 scripts/generate_skills_lock.py --repin")
+            # PRIMARY-ONLY, deliberately. This note reasons about the
+            # reader's own merge base, and is simply false about another
+            # registry's drift.
+            print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
+            print("  before another commit touched a locked skill: the lock is still faithful")
+            print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
+        else:
+            # ASKED BEFORE THE COMMAND IS PRINTED, not after it is
+            # rejected. --repin-source refuses some shapes outright
+            # (see repin_source_blocker), and a report that prints
+            # the command anyway sends its reader — or the fleet
+            # bumper, which builds the same flag from its own list
+            # — to an exit 1 with nothing else offered. The reason
+            # the flag would give is the reason printed here,
+            # verbatim and in the headline itself, so the block
+            # carries its own answer instead of a command that has
+            # none.
+            blocker = primary_blocked or repin_source_blocker(
+                extras, source["registry"], registry)
+            if blocker:
+                print(f"FAILED: {source['registry']}'s bundles have moved on "
+                      f"since {source['ref']}, which {output} still pins for it "
+                      "— nothing added or changed there reaches an ephemeral "
+                      "surface. No --repin-source command is printed for it "
+                      f"because this generator would refuse one: {blocker}")
+                for line in differences:
+                    print(f"  - {line}")
+                continue
+            print(f"FAILED: {source['registry']}'s bundles have moved on since "
+                  f"{source['ref']}, which {output} still pins for it — nothing "
+                  "added or changed there reaches an ephemeral surface. Advance "
+                  "that source's pin (after committing the content in that "
+                  "registry) with:")
+            # --ref is part of the command, not decoration, and
+            # this is the same defect #108 fixed for
+            # --check-format's line: --repin deliberately does not
+            # inherit `ref`, so a command printed without one falls
+            # through to resolve_ref(repo, "HEAD") and advances the
+            # PRIMARY pin — a content advance this verdict just
+            # said had not happened, arriving as a side effect of a
+            # source-only repair. Measured by the verifier on a
+            # fixture where only the source drifted: the printed
+            # command took the lock's primary ref from 60f17465 to
+            # the clone's HEAD 4bd46e75, at exit 0. The fleet
+            # bumper quotes these lines into a PR body as the
+            # command that produced the diff beneath it, which is
+            # only honest if running it produces that diff and no
+            # other.
+            #
+            # Dropped when the primary drifted too, because its own
+            # block above is then telling the reader to advance it:
+            # anchoring here would hand them two lines that
+            # contradict each other, and one bare
+            # `--repin --repin-source` is what advances both.
+            anchor = "" if primary_drifted else f"--ref {ref} "
+            print("  python3 scripts/generate_skills_lock.py --repin "
+                  f"{anchor}--repin-source '{source['registry']}@'")
+        for line in differences:
+            print(f"  - {line}")
+
+
 def _source_spec(source: dict) -> str:
     """Render a source back as the `--source` flag that would recreate it.
 
@@ -1888,52 +2186,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             or (existing.get("bundles") if isinstance(existing.get("bundles"), list) else None)
             or list(DEFAULT_BUNDLES)
         )
-    if args.repin:
-        # The lock names a registry; --repo names a clone. Nothing else ties the
-        # two together, and when they are different repositories the re-pin
-        # writes a commit from one under the name of the other — exit 0, and
-        # --check green because it re-derives from the same wrong clone. The pin
-        # already in the lock is the probe: a clone that IS this registry has
-        # that commit. Deliberately checked even when --ref is given, because
-        # the question is whether this clone is the registry, not which commit
-        # was asked for.
-        #
-        # Which needs the pin to BE a commit, and is why the charset check
-        # below is not enough: `validate_ref` accepts a branch name, and
-        # `main^{commit}` resolves in every clone that has a main branch, so a
-        # branch-name pin turns the probe into a formality that any impostor
-        # passes. Reachable without a hand edit, unlike the source-side half in
-        # repin_source_blocker: `--ref main` is written to the lock verbatim
-        # (measured — a plain generate with it reports "from <registry>@main"
-        # and the file reads `"ref": "main"`), while a source's ref is resolved
-        # to a sha before it is written. So this refuses a lock that a
-        # supported invocation produced, and refuses it for what it is: not a
-        # pin, and therefore no proof of anything. Restating it as one is a
-        # plain generate's decision, not a re-pin's.
-        pinned = existing.get("ref")
-        if not isinstance(pinned, str) or not pinned:
-            raise GeneratorError(
-                f"{output}: 'ref' is missing or unusable ({pinned!r}); --repin advances "
-                "an existing pin and this lock has none to advance."
-            )
-        if not _COMMIT_SHA_RE.fullmatch(pinned):
-            raise GeneratorError(
-                f"{output} pins '{registry}' at {pinned!r}, which is not a commit sha — "
-                "and the commit the lock pins is the ONLY thing that proves the clone at "
-                f"{repo} is that registry. A branch name resolves in any clone, so "
-                "re-pinning against one would write whatever this directory is sitting "
-                "on. Restate the pin at the commit it is actually on with a plain "
-                "generate (--registry / --ref / --bundles), then advance it."
-            )
-        if _git(repo, "cat-file", "-e", f"{pinned}^{{commit}}").returncode != 0:
-            raise GeneratorError(
-                f"{repo} does not contain {pinned}, the commit {output} pins for "
-                f"'{registry}' — so this checkout is not that registry, and re-pinning "
-                "from it would write a commit the registry does not have (the hook then "
-                "cannot fetch it, and every consumer session reports DEGRADED). Point "
-                "--repo at a clone of that registry, or fetch the pinned commit into "
-                "this one."
-            )
     # `ref` is the ONE field --repin does not inherit, and the asymmetry is the
     # whole flag: advancing the pin is the operation, so inheriting it would
     # rewrite the lock to what it already said and report success for a no-op.
@@ -1969,6 +2221,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         extras = []
     overrides = dict(parse_source_repo(spec) for spec in args.source_repo or [])
+    if args.repin:
+        # Every reason this refuses is in `repin_primary_blocker` or in the
+        # clone probe beside it — see `_repin_primary_guard`. After `extras`,
+        # because the primary's pin is not the only thing a bare --repin
+        # re-resolves, and BEFORE `_apply_repin_sources`, because the primary's
+        # pin is what anchors whatever that flag then advances.
+        _repin_primary_guard(existing, extras, registry, output, repo)
     # Guarded on BOTH flags, which is not redundant with the parser.error above:
     # the two fail differently and that is the point. The parser.error is the
     # exit-2 contract a test pins; this guard is what makes "--repin-source
@@ -2031,165 +2290,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"OK: the working tree still matches {scoped_ref} "
                       f"({len(working)} skills).")
             else:
-                # THE CROSS-REPO CONTRACT this loop must keep, as three facts a
-                # reader can check rather than a promise:
-                #
-                #   1. Every verdict line begins at column 0 with the literal
-                #      `FAILED:`. _agent-guidance's
-                #      scripts/bump-consumer-locks.sh branches on
-                #      `grep -q '^FAILED:'`, and anything else there is an
-                #      ERROR it refuses to act on.
-                #   2. The primary's block comes FIRST. That script slices
-                #      `sed -n '/^FAILED:/,$p' | head -20` into a PR body, and
-                #      the path substitution beside that slice names the
-                #      primary lock alone.
-                #   3. A block's repair belongs to that block — in the
-                #      UNTRUNCATED stream. Either the line IMMEDIATELY under
-                #      its headline is the command that fixes it, or there is
-                #      no command to print and the headline says so itself
-                #      (see repin_source_blocker). Never a command under one
-                #      headline that repairs a different block. That is the
-                #      property this loop holds and all it holds.
-                #
-                # (3) was first written here claiming it made the 20-line cap
-                # SAFE — "a truncation can drop a whole trailing block, but it
-                # can never separate a headline from the command that fixes
-                # it". That is false, and the arithmetic is short enough that
-                # it should have been done: the primary's block is 5 fixed
-                # lines (headline, remediation, three note lines) plus one line
-                # per difference, so with 14 differences the first federated
-                # headline lands on line 20 — kept — and its remediation on
-                # line 21 — cut. Both adversarial verifiers reproduced exactly
-                # that against this generator, and
-                # `test_the_bumper_cap_can_cut_a_later_headline_from_its_command`
-                # measures the sliced output rather than the raw stream, so the
-                # absolute cannot be restated without a red test.
-                #
-                # Its replacement then asserted two more things nobody had
-                # checked — that the bumper slices "only the primary-scoped,
-                # single-block run", and that a scoped per-source slice "would
-                # be a NEW consumer" — and both were false when written. The
-                # four statements below are a dated reading of that script
-                # rather than a standing promise about it: measured in
-                # _agent-guidance's scripts/bump-consumer-locks.sh at 4c505e3,
-                # 2026-08-22. Re-read it before relying on the first one; the
-                # other three are about this file and are held by tests.
-                #
-                #   * That script applies `sed -n '/^FAILED:/,$p' | head -20`
-                #     to THREE streams, two of them from this report. One is
-                #     `check_out`, a single UNSCOPED `--check-current`. The
-                #     other is `fed_check_out`, which it builds by
-                #     CONCATENATING one `--check-current --only <registry>`
-                #     block per drifted source — a multi-block scoped stream,
-                #     sliced today, under a heading that says as much ("each
-                #     block below was produced by `--check-current --only <that
-                #     registry>`").
-                #   * What no cap above two lines can split is the FIRST
-                #     block's headline from the command under it, when it has
-                #     one: headline on line 1 of the slice, command on line 2,
-                #     whichever block is first. In the unscoped
-                #     stream that is the primary's block whenever the primary
-                #     drifted, by (2) — plan_sources puts it first.
-                #   * A LATER block whose command is a separate line has no
-                #     such protection, in either stream, and both are
-                #     reachable. Unscoped: the primary's 5 fixed lines plus 14
-                #     differences puts the first federated headline on line 20
-                #     and its command on 21. Scoped and concatenated: a source
-                #     block is 2 fixed lines plus its differences, so 17
-                #     differences in the first source's block orphans the
-                #     SECOND source's headline the same way — and that stream
-                #     carries no primary block at all (`_select_sources`
-                #     returns include_primary False when `only` names a
-                #     source), so "the primary's pair survives" is not merely
-                #     unhelpful there, it is about a block that is not present.
-                #   * A block the refusal above left without a command cannot
-                #     be orphaned by any cap, because its answer is inside its
-                #     headline.
-                #
-                # Plan order gives (2) for free, and the tests that measure the
-                # SLICED output rather than the raw stream are what keep any of
-                # this from being restated on intuition:
-                # `test_the_bumper_cap_always_keeps_the_primary_headline_with_its_command`,
-                # `test_the_bumper_cap_can_cut_a_later_headline_from_its_command`
-                # and
-                # `test_the_bumper_cap_can_cut_a_scoped_headline_from_its_command`.
-                # `test_check_current_names_both_when_primary_and_source_both_drift`
-                # and `test_every_failed_line_is_followed_by_its_own_remediation_command`
-                # hold (2) and (3).
-                # Whether the primary's own block is about to tell the reader
-                # to advance it decides whether the federated blocks below hold
-                # its pin. See the --ref anchor there.
-                primary_drifted = any(entry["is_primary"] for entry, _ in drifted)
-                for source, differences in drifted:
-                    if source["is_primary"]:
-                        print(f"FAILED: the bundle has moved on since {ref}, which {output} "
-                              "still pins — nothing added or changed since then reaches an "
-                              "ephemeral surface. Re-pin it (after committing the content) "
-                              "with:")
-                        # --repin, not a bare re-run: this lock may federate, and a
-                        # plain generate takes `sources` from the command line alone,
-                        # so following that instruction literally would de-federate it
-                        # at exit 0. The remediation line is the one place a reader is
-                        # told which command to type, so it must name the safe one.
-                        print("  python3 scripts/generate_skills_lock.py --repin")
-                        # PRIMARY-ONLY, deliberately. This note reasons about the
-                        # reader's own merge base, and is simply false about another
-                        # registry's drift.
-                        print("  (Seeing this on a freshly merged branch usually means the re-pin was cut")
-                        print("  before another commit touched a locked skill: the lock is still faithful")
-                        print("  to the ref it pins — that ref just is not the bundle. Same fix, re-pin.)")
-                    else:
-                        # ASKED BEFORE THE COMMAND IS PRINTED, not after it is
-                        # rejected. --repin-source refuses some shapes outright
-                        # (see repin_source_blocker), and a report that prints
-                        # the command anyway sends its reader — or the fleet
-                        # bumper, which builds the same flag from its own list
-                        # — to an exit 1 with nothing else offered. The reason
-                        # the flag would give is the reason printed here,
-                        # verbatim and in the headline itself, so the block
-                        # carries its own answer instead of a command that has
-                        # none.
-                        blocker = repin_source_blocker(extras, source["registry"])
-                        if blocker:
-                            print(f"FAILED: {source['registry']}'s bundles have moved on "
-                                  f"since {source['ref']}, which {output} still pins for it "
-                                  "— nothing added or changed there reaches an ephemeral "
-                                  "surface. No --repin-source command is printed for it "
-                                  f"because this generator would refuse one: {blocker}")
-                            for line in differences:
-                                print(f"  - {line}")
-                            continue
-                        print(f"FAILED: {source['registry']}'s bundles have moved on since "
-                              f"{source['ref']}, which {output} still pins for it — nothing "
-                              "added or changed there reaches an ephemeral surface. Advance "
-                              "that source's pin (after committing the content in that "
-                              "registry) with:")
-                        # --ref is part of the command, not decoration, and
-                        # this is the same defect #108 fixed for
-                        # --check-format's line: --repin deliberately does not
-                        # inherit `ref`, so a command printed without one falls
-                        # through to resolve_ref(repo, "HEAD") and advances the
-                        # PRIMARY pin — a content advance this verdict just
-                        # said had not happened, arriving as a side effect of a
-                        # source-only repair. Measured by the verifier on a
-                        # fixture where only the source drifted: the printed
-                        # command took the lock's primary ref from 60f17465 to
-                        # the clone's HEAD 4bd46e75, at exit 0. The fleet
-                        # bumper quotes these lines into a PR body as the
-                        # command that produced the diff beneath it, which is
-                        # only honest if running it produces that diff and no
-                        # other.
-                        #
-                        # Dropped when the primary drifted too, because its own
-                        # block above is then telling the reader to advance it:
-                        # anchoring here would hand them two lines that
-                        # contradict each other, and one bare
-                        # `--repin --repin-source` is what advances both.
-                        anchor = "" if primary_drifted else f"--ref {ref} "
-                        print("  python3 scripts/generate_skills_lock.py --repin "
-                              f"{anchor}--repin-source '{source['registry']}@'")
-                    for line in differences:
-                        print(f"  - {line}")
+                report_drift(drifted, ref=ref, output=output, existing=existing,
+                             extras=extras, registry=registry)
                 status = 1
         return status
 
