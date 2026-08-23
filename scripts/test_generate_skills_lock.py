@@ -742,6 +742,29 @@ def test_check_current_failure_attributes_a_federated_drift_to_its_own_registry(
     assert difference_lines and all(primary_sha not in line for line in difference_lines)
 
 
+
+def _rmtree(path: Path) -> None:
+    """`shutil.rmtree`, but able to remove a git object store on Windows.
+
+    Git writes loose objects and packs read-only. POSIX only consults the
+    DIRECTORY's write bit to unlink, so `shutil.rmtree` never notices; Windows
+    consults the FILE's, and refuses with `PermissionError: [WinError 5]`.
+    Three tests here delete a clone whole, so all three failed there while
+    passing on Linux -- the harness's portability, not the generator's.
+
+    The handler clears the read-only attribute and retries once; anything it
+    cannot clear re-raises, so a real permission problem is still a failure.
+    """
+    def _clear_readonly(func, target, _exc):
+        os.chmod(target, 0o700)
+        func(target)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly)
+    else:  # pragma: no cover - the pinned CI interpreters are all >= 3.12
+        shutil.rmtree(path, onerror=lambda f, t, _e: _clear_readonly(f, t, None))
+
+
 def _addressing(primary: Path, out: Path) -> str:
     """The `--repo` / `-o` a printed command must carry to reach this fixture.
 
@@ -751,8 +774,15 @@ def _addressing(primary: Path, out: Path) -> str:
     or regenerates this repo's own `skills.lock` instead. So the assertions
     below spell them out, and `_run_printed` runs what was printed rather than
     re-adding them.
+
+    Quoted with `shlex.quote`, the same call the generator uses, rather than
+    interpolated raw. A retyped expectation is the defect this branch spent a
+    round closing elsewhere, and it bites here on Windows: a path holding a
+    drive letter and separators is quoted by the code and was not quoted here,
+    so five assertions compared a bare path against a quoted one and failed on
+    a difference that is not about addressing at all.
     """
-    return f" --repo {primary} -o {out}"
+    return f" --repo {shlex.quote(str(primary))} -o {shlex.quote(str(out))}"
 
 
 def _source_drifted(extra: Path, message: str = "the source really moved") -> str:
@@ -1700,7 +1730,7 @@ def test_check_current_flags_a_skill_removed_from_the_working_tree(registry, tmp
     out = tmp_path / "skills.lock"
     _lock_for(root, out)
 
-    shutil.rmtree(root / "plugins" / "adam" / "skills" / "beta")
+    _rmtree(root / "plugins" / "adam" / "skills" / "beta")
 
     proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
     assert proc.returncode == 1, proc.stdout + proc.stderr
@@ -2319,7 +2349,8 @@ def test_check_format_ignores_repo_entirely(registry, tmp_path):
         # REPO_ROOT is what the command defaults to, so naming it would be
         # noise; anything else has to be said or the line addresses the wrong
         # clone.
-        expected = "" if Path(repo_arg).resolve() == REPO_ROOT else f"--repo {repo_arg}"
+        expected = ("" if Path(repo_arg).resolve() == REPO_ROOT
+                    else f"--repo {shlex.quote(str(repo_arg))}")
         assert expected in printed[0], (repo_arg, printed[0])
         if not expected:
             assert "--repo" not in printed[0], printed[0]
@@ -3206,7 +3237,7 @@ def test_an_unnamed_source_pinned_at_a_branch_refuses_the_whole_repin(
 
     # A DIFFERENT repository at the unnamed source's sibling path. Its `main`
     # resolves; it has nothing to do with the registry the lock names.
-    shutil.rmtree(other)
+    _rmtree(other)
     impostor_sha = make_registry(other, {"other/publish": SKILL_A}, layout="skills")
     assert impostor_sha != other_sha
 
@@ -3486,7 +3517,7 @@ def test_repin_source_refuses_a_checkout_that_is_not_the_source_it_names(
     # A DIFFERENT repository at the same sibling path, so the default
     # `../<repo-name>` lookup finds it and the lock's registry string still
     # matches. Its HEAD resolves; the commit the lock pins does not exist.
-    shutil.rmtree(extra)
+    _rmtree(extra)
     decoy_sha = make_registry(extra, {"cms-platform/deploy": SKILL_C}, layout="skills")
     assert decoy_sha != extra_sha
 
@@ -3524,7 +3555,7 @@ def test_repin_source_refuses_a_source_pinned_at_a_branch(federated, tmp_path):
 
     # A DIFFERENT repository at the same sibling path. Its `main` resolves; it
     # has nothing whatever to do with the registry the lock names.
-    shutil.rmtree(extra)
+    _rmtree(extra)
     impostor_sha = make_registry(extra, {"cms-platform/deploy": SKILL_C}, layout="skills")
     assert impostor_sha != extra_sha
 
@@ -4673,7 +4704,7 @@ def _emptied_source_bundle(tmp_path):
     """
     primary, out = _two_sources(tmp_path)
     extra = tmp_path / "cms-platform"
-    shutil.rmtree(extra / "skills" / "deploy")
+    _rmtree(extra / "skills" / "deploy")
     # A file that is not a skill, so the tree at the new commit is EMPTIED OF
     # SKILLS rather than empty: `git archive` of a wholly empty tree writes
     # zero bytes, which is its own defect and has its own test.
@@ -4786,7 +4817,7 @@ def _primary_bundle_gone_at_head_with_a_drifted_source(tmp_path):
     command the shrink guard then refuses.
     """
     primary, out = _two_sources(tmp_path)
-    shutil.rmtree(primary / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha")
+    _rmtree(primary / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha")
     _write(primary / "README.md", "still a repository\n")
     _git(primary, "add", "-A")
     _git(primary, "commit", "-q", "-m", "the primary bundle is gone")
@@ -4820,7 +4851,7 @@ def _emptied_primary_bundle(tmp_path):
     out = tmp_path / "skills.lock"
     assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
                          "--ref", sha, "--bundles", "adam", "-o", str(out)).returncode == 0
-    shutil.rmtree(primary / "plugins" / "adam" / "skills" / "alpha")
+    _rmtree(primary / "plugins" / "adam" / "skills" / "alpha")
     _write(primary / "README.md", "still a repository\n")
     _git(primary, "add", "-A")
     _git(primary, "commit", "-q", "-m", "the bundle is gone")
@@ -5594,7 +5625,7 @@ def test_the_addressing_moves_with_the_machine_and_the_verdict_does_not(tmp_path
         if state == "an empty sibling":
             sibling.mkdir()
         if state == "the clone at the sibling":
-            shutil.rmtree(sibling)
+            _rmtree(sibling)
             shutil.copytree(real, sibling)
         verdict = ask()
         assert verdict.returncode == 1, (state, verdict.stdout + verdict.stderr)
@@ -5618,6 +5649,13 @@ def test_the_addressing_moves_with_the_machine_and_the_verdict_does_not(tmp_path
     assert answers["the clone at the sibling"][2] == "command", answers
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the shim is an extension-less #!/bin/sh file and PATH is set to it "
+           "alone; Windows CreateProcess cannot execute one, so the run dies "
+           "with WinError 2 before reaching the branch under test and the "
+           "marker records nothing. Same class as _path_farm's guard below. "
+           "The invariant itself is POSIX-shaped and the Linux job covers it.")
 def test_check_format_asks_no_git_even_to_address_its_own_line(tmp_path):
     """The flag locates a checkout without opening one.
 
@@ -5687,7 +5725,7 @@ def test_one_sources_emptied_bundle_does_not_suppress_anothers_remediation(tmp_p
     primary, out = _two_sources(tmp_path)
     before = json.loads(out.read_text(encoding="utf-8"))
     src_a, src_b = tmp_path / "cms-platform", tmp_path / "other-platform"
-    shutil.rmtree(src_a / "skills" / "deploy")
+    _rmtree(src_a / "skills" / "deploy")
     _write(src_a / "README.md", "still a repository\n")
     _git(src_a, "add", "-A")
     _git(src_a, "commit", "-q", "-m", "the bundle is gone")
@@ -5718,7 +5756,7 @@ def _emptied_source_tree(tmp_path):
     """A source registry with NOTHING at its new commit, not even a README."""
     primary, out = _two_sources(tmp_path)
     extra = tmp_path / "cms-platform"
-    shutil.rmtree(extra / "skills")
+    _rmtree(extra / "skills")
     _git(extra, "add", "-A")
     _git(extra, "commit", "-q", "-m", "everything is gone")
     return primary, out, extra
@@ -5813,7 +5851,7 @@ def test_a_repin_that_only_removes_some_skills_is_still_allowed(tmp_path):
     out = tmp_path / "skills.lock"
     assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
                          "--ref", sha, "--bundles", "adam", "-o", str(out)).returncode == 0
-    shutil.rmtree(primary / "plugins" / "adam" / "skills" / "beta")
+    _rmtree(primary / "plugins" / "adam" / "skills" / "beta")
     _git(primary, "add", "-A")
     _git(primary, "commit", "-q", "-m", "one skill retired")
 
