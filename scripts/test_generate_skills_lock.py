@@ -3706,38 +3706,167 @@ def test_every_refusal_a_repin_can_give_is_one_both_paths_read():
             "reason so each can frame it")
 
 
+# What makes a printed line a COMMAND rather than prose: it names something to
+# run. Every other fragment — `--repin`, a ref, a quoted spec — is inert text
+# without it, which is why these two tokens and not a list of flags are what
+# the report paths may not spell.
+_INVOCATION_TOKENS = ("python", ".py")
+
+# A flag as it appears in a command line: at the start of a token. Counted,
+# not banned — a verdict says "No --repin-source command is printed for it",
+# which is prose ABOUT a flag, while two flags in one literal is a command
+# skeleton with the invocation left to be filled in.
+_FLAG_TOKEN = re.compile(r"(?:^|\s)(--?[a-z][a-z0-9-]*)")
+
+
+def _module_command_names() -> set:
+    """Module-level names whose value spells a way to invoke this script.
+
+    Read off the imported module rather than listed here, so `_SCRIPT` under
+    any other name — a rename, a second one added beside it — is covered the
+    moment it exists rather than when someone remembers to widen a list.
+    `__file__` lands in this set for free, which is right: it is the other
+    module-level route to the script's own name.
+    """
+    banned = set()
+    for name in dir(gsl):
+        value = getattr(gsl, name)
+        if isinstance(value, str) and any(token in value
+                                          for token in _INVOCATION_TOKENS):
+            banned.add(name)
+    assert "_SCRIPT" in banned, (
+        "the module no longer has a name holding the script's invocation — this "
+        "check has nothing to key on and must be rewritten, not deleted")
+    return banned
+
+
+def _outside_remediation(node):
+    """Walk `node`, pruning any subtree that is a `remediation(...)` call.
+
+    What that call is GIVEN is not what gets printed, so its own arguments —
+    the kind literal, the keywords — must not be read as printed text.
+    """
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "remediation"):
+        return
+    yield node
+    for child in ast.iter_child_nodes(node):
+        yield from _outside_remediation(child)
+
+
+def _print_calls(function: ast.FunctionDef) -> list:
+    return [node for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "print"]
+
+
+def _printed_literals(function: ast.FunctionDef) -> list:
+    """Every string literal that can reach stdout from this function.
+
+    Literals inside a `print(...)` argument, plus literals assigned to any
+    local name such an argument reads — the one level of indirection the
+    report paths actually use (`headline`, `refused`, `invite`). Stated as the
+    limit it is: a literal reaching print through two hops is not seen here,
+    and the name ban above is what keeps such a hop from carrying an
+    invocation. Scoping to what is PRINTED is what lets `main` keep argparse
+    help that names every flag this script has.
+    """
+    printed_names = set()
+    literals = []
+    for call in _print_calls(function):
+        for arg in call.args:
+            for node in _outside_remediation(arg):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    literals.append(node)
+                elif isinstance(node, ast.Name):
+                    printed_names.add(node.id)
+    for node in ast.walk(function):
+        if not (isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in printed_names
+                for target in node.targets)):
+            continue
+        for child in _outside_remediation(node.value):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                literals.append(child)
+    return literals
+
+
 def test_no_report_path_writes_a_command_of_its_own():
     """The structural half of the choke point, read off the module's own AST.
 
     `remediation` being total is worth nothing if a verdict can still assemble
     its own line beside it — that is exactly how four verdicts came to consult
-    four different subsets of the refusals. So: no function that PRINTS a
-    verdict may contain a string that looks like a command. The one place the
-    script's own name may appear in a command is `remediation`'s module-level
-    `_SCRIPT`, which is where the invitation to run something is decided.
+    four different subsets of the refusals.
 
-    Docstrings are exempt, and only docstrings: a paragraph explaining why a
-    line carries `--ref` is prose, and stripping it would push the reasoning
-    away from the code it is about. Anything else — an f-string, a `print`
-    argument, a helper's default — is a command being built.
+    This was a blacklist of four substrings, and a blacklist of four cannot be
+    total. MEASURED: patching `report_drift` to print
+    `f"  {_SCRIPT} --repin --ref {ref} --repin-source " + chr(39) + ...`
+    — a complete, runnable remediation built beside the choke point — left it
+    green, because `_SCRIPT` is an `ast.Name` and the remaining literals match
+    none of the four needles. So it is stated the other way round: a report
+    path may reach the invocation by NO route, and what it prints beside
+    `remediation`'s answer must be prose.
+
+      1. It may not reference a module-level name holding the invocation.
+         `_module_command_names` derives that set from the module itself, so a
+         renamed or duplicated `_SCRIPT` — and `__file__` — are in it without
+         being listed. `sys.argv` / `sys.executable` are the attribute-shaped
+         route and are banned by name.
+      2. No literal that can reach `print` may contain an invocation token, or
+         two flag tokens (a command skeleton waiting for one). Prose about a
+         single flag stays legal, which is what the verdicts actually write.
+      3. Whatever `remediation` answered is printed VERBATIM: a `print` that
+         reaches `.command` may carry nothing but whitespace beside it, so a
+         verdict cannot append a flag to a line the choke point decided.
+
+    Docstrings are exempt from (2) by construction — they cannot reach
+    `print` — so the reasoning stays next to the code it is about.
     """
     functions = _module_functions()
+    banned_names = _module_command_names()
     for name in _REPORT_PATHS:
         assert name in functions, name
-        body = functions[name].body
-        docstring = body[0].value if (body and isinstance(body[0], ast.Expr)
-                                      and isinstance(body[0].value, ast.Constant)) else None
-        for node in ast.walk(functions[name]):
-            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
-                continue
-            if node is docstring:
-                continue
-            for shape in ("python3", "generate_skills_lock", "--repin-source '",
-                          "--source '"):
-                assert shape not in node.value, (
-                    f"{name}, line {node.lineno}: {shape!r} in a printed string — this "
-                    "verdict is building its own remediation. Ask `remediation` for it, "
-                    "so it meets the same refusals every other verdict does.")
+        function = functions[name]
+
+        for node in ast.walk(function):
+            if isinstance(node, ast.Name):
+                assert node.id not in banned_names, (
+                    f"{name}, line {node.lineno}: references {node.id!r}, which holds "
+                    "this script's own invocation. A verdict that can name the script "
+                    "can build its own remediation beside `remediation`; ask that "
+                    "function for the line instead.")
+            if isinstance(node, ast.Attribute) and node.attr in {"argv", "executable"}:
+                assert not (isinstance(node.value, ast.Name)
+                            and node.value.id == "sys"), (
+                    f"{name}, line {node.lineno}: sys.{node.attr} is another way to "
+                    "spell the invocation. Ask `remediation` for the command.")
+
+        for node in _printed_literals(function):
+            for token in _INVOCATION_TOKENS:
+                assert token not in node.value, (
+                    f"{name}, line {node.lineno}: {token!r} in a string this function "
+                    "prints — the verdict is spelling out something to run. Ask "
+                    "`remediation`, so the line meets the same refusals every other "
+                    "verdict's does.")
+            flags = _FLAG_TOKEN.findall(node.value)
+            assert len(flags) < 2, (
+                f"{name}, line {node.lineno}: {flags} in one printed string is a "
+                "command skeleton, not prose about a flag. Ask `remediation` for the "
+                "whole line.")
+
+        for call in _print_calls(function):
+            for arg in call.args:
+                nodes = list(_outside_remediation(arg))
+                if not any(isinstance(node, ast.Attribute) and node.attr == "command"
+                           for node in nodes):
+                    continue
+                beside = [node.value for node in nodes
+                          if isinstance(node, ast.Constant)
+                          and isinstance(node.value, str) and node.value.strip()]
+                assert not beside, (
+                    f"{name}, line {call.lineno}: {beside} printed alongside the "
+                    "command `remediation` decided. The answer goes out verbatim; a "
+                    "verdict that can add to it has taken the decision back.")
 
 
 def _drifted_plain(tmp_path):
