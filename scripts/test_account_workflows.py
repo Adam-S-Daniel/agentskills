@@ -632,9 +632,17 @@ def _splice(block):
     second copy of the shipped `case` with nothing keeping it in step with the
     first, and a stale fixture is a test asserting a shape the workflow no
     longer has - green, and about nothing. Built here, every block is the real
-    body with one thing changed, and `_ARMS_OK["control"]` runs the full
-    status assertion over `_ARMS_BASE` itself, so a fixture that drifts from
-    the step reds with the drift message rather than passing.
+    body with one thing changed.
+
+    DRIFT BETWEEN `_ARMS_BASE` AND THE STEP FAILS IN TWO DIFFERENT PLACES, and
+    it is worth knowing which one you are looking at. Drift that moves an
+    anchor - a reworded `::warning::`, a renamed status, a moved terminator -
+    trips `_arm` at IMPORT and pytest reports a collection error; `_arm` says
+    which anchor and which file. Drift that moves no anchor is caught by
+    `_ARMS_OK["control"]`, which runs the full status assertion over
+    `_ARMS_BASE` itself and reds with the vocabulary message. Neither of them
+    passes quietly, and only the second one carries the drift message - which
+    this paragraph used to promise for both.
 
     The rest of the body is kept because the test under test reads it - the
     `drift=$(` line it pins the constant read to sits above the `case`, and
@@ -690,7 +698,27 @@ _QUIET = '  fresh|unavailable|"$drift")'
 
 
 def _arm(old, new, count=1):
-    assert _ARMS_BASE.count(old) == count, old
+    """One `_ARMS_BASE` substitution, with its anchor asserted first.
+
+    THIS RUNS AT IMPORT, so its failure is the whole module's failure and
+    pytest reports it as a collection error rather than as a test. That is the
+    right severity - every fixture below is built from `_ARMS_BASE`, so an
+    anchor that has moved means none of them are the step any more - but it
+    puts the burden on the message: a collection error naming a bare string is
+    the failure mode `_splice`'s docstring condemns, and this assert used to
+    be exactly that.
+    """
+    found = _ARMS_BASE.count(old)
+    assert found == count, (
+        f"a fixture anchors on a piece of `_ARMS_BASE` that appears {found} "
+        f"time(s) rather than {count}. `_ARMS_BASE` is the audit step's "
+        f"`case` reduced to its arms, so this is what a wording or vocabulary "
+        f"change in .github/workflows/account-skill-zips.yml looks like from "
+        f"here: nothing below is the shipped block any more, and the whole "
+        f"file fails to import rather than one test failing. Re-sync "
+        f"`_ARMS_BASE` with the step, then re-point the anchor. The anchor "
+        f"was: {old!r}"
+    )
     return _ARMS_BASE.replace(old, new, count)
 
 
@@ -2428,6 +2456,25 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"as the fixture block, so the spliced body holds two of them"
         )
         self._bash_n(tmp_path, spliced, name)
+
+    def test_a_fixture_anchor_that_drifted_names_the_workflow(self):
+        """`_arm`'s assert is the file's import, so its message is load-bearing.
+
+        `_splice`'s docstring argues at length that a harness failing "with a
+        bare `ValueError` naming a string" is unacceptable because it says
+        nothing about the workflow - and `_arm`'s own anchor assert was that
+        exact failure, reached by dropping a status from `_ARMS_BASE`. A collection error is the loudest failure this file has
+        and it was the least informative one.
+        """
+        with pytest.raises(AssertionError) as caught:
+            _arm("a line the shipped `case` block does not contain", "x")
+        message = str(caught.value)
+        assert "_ARMS_BASE" in message, message
+        assert "account-skill-zips.yml" in message, (
+            f"the anchor assert does not say which file drifted, so a "
+            f"collection error sends the reader to the fixture rather than "
+            f"to the step: {message}"
+        )
 
     # WHICH FIXTURE CATCHES WHICH REJECTED MODEL. `_shell_scan`'s docstring
     # names these pairings; this is where they are measured rather than
