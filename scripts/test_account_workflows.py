@@ -3660,8 +3660,24 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # escapes inside the step's own `>> "$GITHUB_OUTPUT"` redirect, and
         # pytest-windows runs this file too.
         env = {**os.environ, "GITHUB_OUTPUT": str(out).replace("\\", "/")}
-        # The verdict arrives as an ARGUMENT rather than baked into the script,
-        # so the empty case is delivered as an actual empty string.
+        # The verdict arrives through the ENVIRONMENT rather than baked into
+        # the script, so the empty case is delivered as an actual empty string
+        # and a multi-line one keeps its newline. It used to arrive as `$1`,
+        # for the same fidelity reason, and that is the third thing in this
+        # file the Windows command line has eaten: `list2cmdline` hands
+        # `bash.exe` a raw command line that MSYS2 re-parses by its own rules,
+        # which drop a whitespace-only argument and cut a value at its first
+        # newline. Measured on pytest-windows: the whitespace case died at
+        # `line 5: $1: unbound variable` under `set -u`, and the
+        # `reported-failure\njunk` case reached the step as plain
+        # `reported-failure`, so it was salvaged where it should have degraded
+        # to `unavailable`. An environment block is not a command line and is
+        # not re-parsed, so both survive.
+        #
+        # `set -u` still tells unset from set-but-empty, which is the
+        # distinction the empty case exists to exercise -- the harness always
+        # exports the variable, so an unbound error would be a harness bug
+        # rather than a verdict of empty.
         #
         # cwd IS THE REPO ROOT BECAUSE THAT IS WHERE THE RUNNER STANDS. The
         # tail reads the drift predicate out of scripts/account_zip_selection.py
@@ -3678,18 +3694,18 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         # the flag that decides whether an unguarded failure aborts the step,
         # so a command that fails soft here would abort there and this suite
         # would report the opposite of what the runner does.
-        # `verdict` is $1 of the SCRIPT, so it is passed straight after the
-        # path - there is no `-c` placeholder $0 to absorb an argument.
         script = _script(
             tmp_path,
             f"set -uo pipefail\nharness_ok={harness_ok}\n"
-            f"results_ok={results_ok}\npip_ok={pip_ok}\nverdict=$1\n"
+            f"results_ok={results_ok}\npip_ok={pip_ok}\n"
+            'verdict="$VERDICT_UNDER_TEST"\n'
             + self._tail(),
             name="tail.sh",
         )
         proc = subprocess.run(
-            [bash, "-e", script, verdict],
-            capture_output=True, text=True, env=env, cwd=str(REPO),
+            [bash, "-e", script],
+            capture_output=True, text=True,
+            env={**env, "VERDICT_UNDER_TEST": verdict}, cwd=str(REPO),
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout, out.read_text(encoding="utf-8")
