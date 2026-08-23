@@ -1975,8 +1975,12 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     # which is one simple command in shell grammar and so passed every
     # "is it a list" test beside it; `^echo .*>> "$GITHUB_OUTPUT"$` admitted
     # `echo hi > /proc/nope/zz >> "$GITHUB_OUTPUT"`, which aborts the step
-    # for a reason the bullet describing it does not cover. All three were
-    # measured silent end to end, spliced into the real body.
+    # for a reason the bullet describing it does not cover. A fifth round
+    # found the last one hiding inside the LOOKUP rather than beside it: a
+    # strip of a leading `{`, which admitted `{echo "eval-results checked
+    # out"` and `{:` - `{X` with no blank is one word, so bash reads it as a
+    # command NAME and exits 127. All four were measured silent end to end,
+    # spliced into the real body.
     #
     # SO A COMMAND IS CARVED OUT ONLY IF IT IS BYTE-EQUAL TO AN ENTRY BELOW,
     # after `_normalise`. There is no pattern left to widen, which retires
@@ -2021,8 +2025,16 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
          'an `echo` to stdout - a `::warning::` annotation'),
         ('pip_ok=yes',
          'a bare assignment - no command runs, so nothing can fail'),
-        ('pip_ok=no',
-         'a bare assignment, inside the `{ }` the pip guard falls to'),
+        ('{ pip_ok=no',
+         'a bare assignment - no command runs, so nothing can fail. On '
+         'the list WITH the brace group\'s `{`, because that is the text '
+         '`_top_level` hands over: it splits the pip guard\'s `|| { '
+         'pip_ok=no; ...; }` at the `;` without knowing about braces. '
+         'What errexit does to the commands inside such a group is '
+         'measured rather than assumed - `set -uo pipefail` plus `bash '
+         '-e` on `false || { mkdir -p /proc/nope/child; echo inner; }` '
+         'exits 1 with `inner` never printed - so each of them is '
+         'subject to the rule in its own right'),
         ('echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"',
          'an `echo` to stdout - a `::warning::` annotation'),
         ('verdict=""',
@@ -2134,22 +2146,24 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     def _carved_out(self, command):
         """True when `command` is one of the deliberately-unguarded commands.
 
-        A LOOKUP, NOT A JUDGEMENT. Everything this used to decide - is the
-        name really `echo`, is this one command or a list, does the redirect
-        go where the carve-out means - is decided by the text being the text.
+        A LOOKUP, NOT A JUDGEMENT, and `_normalise` is the whole of the
+        transformation. Everything this used to decide - is the name really
+        `echo`, is this one command or a list, does the redirect go where the
+        carve-out means, is that leading `{` punctuation - is decided by the
+        text being the text.
 
-        The leading `{` of a brace group comes off first because it is the
-        group's punctuation and not part of the command: the step writes
-        `|| { pip_ok=no; ... ; }`, and `_top_level` splits at that `;`
-        without knowing about braces, so the first piece arrives as
-        `{ pip_ok=no`. What errexit does to the commands inside such a group
-        is measured rather than assumed - `set -uo pipefail` plus `bash -e`
-        on `false || { mkdir -p /proc/nope/child; echo inner; }` exits 1 with
-        `inner` never printed - so each of them is subject to the rule and
-        `pip_ok=no` is on the list in its own right.
+        THE LAST THING THIS DECIDED WAS THE BRACE, and it is the reason there
+        is nothing left to decide. It used to strip a leading `{` before the
+        lookup, on the reasoning that the brace is a brace group's
+        punctuation rather than part of a command. That is true of `{ ` and
+        false of `{`: the reserved word requires a following blank, so `{echo`
+        is one WORD and bash looks for a command called `{echo`. The strip
+        exempted it anyway - measured, `{echo "eval-results checked out"`
+        spliced above the `case` left this guard silent while `bash -e` on
+        the command alone exited 127 with `{echo: command not found`, and
+        `{:` did the same. So the brace stays in the text: `{ pip_ok=no` is
+        on the list exactly as `_top_level` hands it over.
         """
-        if command.startswith("{"):
-            command = command[1:].strip()
         return self._normalise(command) in self._unguarded()
 
     @staticmethod
@@ -2763,111 +2777,87 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"a `||` list, or explain it in the carve-out list above."
             )
 
-    _NOT_A_SIMPLE_ECHO = (
-        "echo hi | grep -q zzz",
-        "echofail --now",
+    # SHAPES THE CARVE-OUT LIST MUST NOT ADMIT, one row per recogniser a
+    # round of review found widening it. They were two tables and two tests
+    # with byte-identical bodies - one for the `echo` branch, one for the
+    # assignment branch - and the third defect landed in neither, because it
+    # was in the LOOKUP both branches went through rather than in a branch.
+    # One table is the shape that has somewhere to put the next one.
+    #
+    # EVERY ROW IS A COMMAND BASH ABORTS THE STEP ON, and each is run under
+    # `bash -e` below before it is spliced, so what makes it dangerous is
+    # measured here rather than argued. A row that stopped aborting would
+    # otherwise keep passing while proving nothing.
+    _NOT_CARVED_OUT = (
+        # `^echo` read the first four letters as the name.
+        ("a-pipeline-headed-by-echo", "echo hi | grep -q zzz"),
+        ("a-command-whose-name-starts-with-echo", "echofail --now"),
+        # `^NAME=` was anchored at the start and said nothing about what
+        # follows, so a list headed by an assignment matched it whole. A
+        # pipeline takes the status of what it ends with and an `&` list
+        # takes the status of what follows the `&`, so neither is the bare
+        # assignment the carve-out list describes.
+        ("a-pipeline-headed-by-an-assignment",
+         "harness_ok=yes | mkdir -p /proc/nope/child"),
+        ("an-and-list-headed-by-an-assignment",
+         "harness_ok=yes & mkdir -p /proc/nope/child"),
+        # And the strip of a leading `{`, which is why this is one table.
+        # The reserved word `{` requires a following blank; with none, `{X`
+        # is a single word and bash goes looking for a command called `{X`.
+        ("a-carve-out-glued-to-a-brace",
+         '{echo "eval-results checked out"'),
+        ("a-no-op-glued-to-a-brace", "{:"),
     )
 
-    def test_the_echo_carve_out_admits_only_a_simple_echo(
-            self, monkeypatch, tmp_path):
-        """The shapes `command.startswith("echo")` let through.
+    @pytest.mark.parametrize("shape,command", _NOT_CARVED_OUT,
+                             ids=[name for name, _ in _NOT_CARVED_OUT])
+    def test_a_shape_the_carve_out_list_must_not_admit_is_named_by_the_guard(
+            self, monkeypatch, tmp_path, shape, command):
+        """Each recogniser that widened this list, kept closed by measurement.
 
         A carve-out too broad certifies the shipped file while holding
-        nothing, which the list above says in its own first sentence. A
-        prefix match is exactly that: it admitted an entire PIPELINE headed
-        by `echo`, whose exit status is the LAST command's, and it admitted
-        any command whose name merely begins with those four letters.
+        nothing, which the list above says in its own first sentence. Every
+        row here was once exempt: three of them silently, end to end, spliced
+        into the real body.
 
-        Each is run under `bash -e` first, so what makes it dangerous is
-        measured here rather than argued - both abort before the next line,
-        which is what a bare `mkdir` does and what the whole rule exists to
-        stop. Then each is spliced into the step and the guard has to name
-        it.
+        Three questions per row, in order, because the last one is worth
+        nothing without the first two. Does bash really abort on it - or the
+        row proves nothing about the carve-out. Is the spliced body still
+        valid bash - or what the guard says is about the fixture. Then: does
+        the guard red, and does it red NAMING THIS COMMAND rather than some
+        other line it happened to trip over.
+
+        One row per test rather than a loop, so a row that reds says which
+        row in its own id - and so no row is ever spliced into a body that
+        already carries another one.
         """
         bash = require_bash()
-        # Every body built BEFORE anything is monkeypatched, or the second
-        # one would be built from a step that already carries the first.
-        armed_bodies = {c: self._with_lines_before_the_case([c])
-                        for c in self._NOT_A_SIMPLE_ECHO}
-        for command, armed in armed_bodies.items():
-            script = f"set -uo pipefail\n{command}\necho reached\n"
-            proc = subprocess.run(
-                [bash, "-e", _script(tmp_path, script, name="carve.sh")],
-                capture_output=True, text=True)
-            assert proc.returncode != 0 and "reached" not in proc.stdout, (
-                f"`{command}` no longer aborts under `bash -e`, so this case "
-                f"proves nothing about the carve-out: {proc.returncode}, "
-                f"{proc.stdout!r}"
-            )
-            syntax = subprocess.run(
-                [bash, "-n", _script(tmp_path, armed, name="carve-body.sh")],
-                capture_output=True, text=True)
-            assert syntax.returncode == 0, (
-                f"the body carrying `{command}` is not valid bash, so what "
-                f"the guard says about it is about the fixture:"
-                f"\n{syntax.stderr}"
-            )
-            monkeypatch.setitem(globals(), "_audit_body", lambda b=armed: b)
-            with pytest.raises(AssertionError) as caught:
-                self.\
-                    test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
-            assert command in str(caught.value), (
-                f"the guard reded on a step carrying `{command}`, but about "
-                f"something else: {caught.value}"
-            )
-
-    _NOT_A_SIMPLE_ASSIGNMENT = (
-        "harness_ok=yes | mkdir -p /proc/nope/child",
-        "harness_ok=yes & mkdir -p /proc/nope/child",
-    )
-
-    def test_the_assignment_carve_out_admits_only_a_simple_assignment(
-            self, monkeypatch, tmp_path):
-        """`_headed_by`'s lesson, applied to the branch beside it.
-
-        `_ASSIGNMENT` is anchored at the start and says nothing about what
-        follows, so `harness_ok=yes | mkdir ...` matched it whole and the
-        carve-out admitted the pipeline on the strength of its first word -
-        the same defect the `echo` branch had, in the same method, left
-        standing when that one was fixed. A pipeline takes the status of what
-        it ends with and an `&` list takes the status of what follows the
-        `&`, so neither is the assignment the carve-out list describes.
-
-        Run under `bash -e` first, so what makes each dangerous is measured
-        rather than argued, then spliced into the step so the guard has to
-        name it.
-        """
-        bash = require_bash()
-        # Every body built BEFORE anything is monkeypatched, or the second
-        # one would be built from a step that already carries the first.
-        armed_bodies = {c: self._with_lines_before_the_case([c])
-                        for c in self._NOT_A_SIMPLE_ASSIGNMENT}
-        for command, armed in armed_bodies.items():
-            script = f"set -uo pipefail\n{command}\necho reached\n"
-            proc = subprocess.run(
-                [bash, "-e", _script(tmp_path, script, name="assign.sh")],
-                capture_output=True, text=True)
-            assert proc.returncode != 0 and "reached" not in proc.stdout, (
-                f"`{command}` no longer aborts under `bash -e`, so this case "
-                f"proves nothing about the carve-out: {proc.returncode}, "
-                f"{proc.stdout!r}"
-            )
-            syntax = subprocess.run(
-                [bash, "-n", _script(tmp_path, armed, name="assign-body.sh")],
-                capture_output=True, text=True)
-            assert syntax.returncode == 0, (
-                f"the body carrying `{command}` is not valid bash, so what "
-                f"the guard says about it is about the fixture:"
-                f"\n{syntax.stderr}"
-            )
-            monkeypatch.setitem(globals(), "_audit_body", lambda b=armed: b)
-            with pytest.raises(AssertionError) as caught:
-                self.\
-                    test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
-            assert command in str(caught.value), (
-                f"the guard reded on a step carrying `{command}`, but about "
-                f"something else: {caught.value}"
-            )
+        armed = self._with_lines_before_the_case([command])
+        script = f"set -uo pipefail\n{command}\necho reached\n"
+        proc = subprocess.run(
+            [bash, "-e", _script(tmp_path, script, name="carve.sh")],
+            capture_output=True, text=True)
+        assert proc.returncode != 0 and "reached" not in proc.stdout, (
+            f"`{command}` no longer aborts under `bash -e`, so this case "
+            f"proves nothing about the carve-out ({shape}): "
+            f"{proc.returncode}, {proc.stdout!r}"
+        )
+        syntax = subprocess.run(
+            [bash, "-n", _script(tmp_path, armed, name="carve-body.sh")],
+            capture_output=True, text=True)
+        assert syntax.returncode == 0, (
+            f"the body carrying `{command}` is not valid bash, so what "
+            f"the guard says about it is about the fixture:"
+            f"\n{syntax.stderr}"
+        )
+        monkeypatch.setitem(globals(), "_audit_body", lambda b=armed: b)
+        with pytest.raises(AssertionError) as caught:
+            self.\
+                test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+        assert command in str(caught.value), (
+            f"the guard reded on a step carrying `{command}` ({shape}), but "
+            f"about something else: {caught.value}"
+        )
 
     # WHAT THE WORKFLOW'S OWN COMMENT TELLS A READER ABOUT THIS LIST, and a
     # command each claim says is NOT carved out. The sentence that used to
@@ -2950,12 +2940,6 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         found = {self._normalise(command)
                  for _, command, bucket in self._classified()
                  if bucket == "carved-out"}
-        # The brace group's `{` comes off in `_carved_out` before the lookup,
-        # so a command that arrives as `{ pip_ok=no` is on the list as
-        # `pip_ok=no` and has to be compared the same way here.
-        found |= {self._normalise(command[1:])
-                  for _, command, bucket in self._classified()
-                  if bucket == "carved-out" and command.startswith("{")}
         seen = set()
         for text, why in self._DELIBERATELY_UNGUARDED:
             entry = self._normalise(text)
