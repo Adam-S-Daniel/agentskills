@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Collection, Optional, Tuple
+from typing import Collection, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -4414,7 +4414,8 @@ def test_no_refusal_sends_a_reader_to_a_plain_generate_that_drops_sources(
 
 
 def _follow_the_plain_generate(reason: str, primary: Path, out: Path,
-                               placeholder: str = "") -> subprocess.CompletedProcess:
+                               placeholder: str = "",
+                               extra: Sequence[str] = ()) -> subprocess.CompletedProcess:
     """Run the plain generate a refusal describes, taking its --source flags verbatim.
 
     `--registry / --ref / --bundles` come off the lock because the message
@@ -4423,6 +4424,11 @@ def _follow_the_plain_generate(reason: str, primary: Path, out: Path,
     lock stays federated. A `<sha>` placeholder stands for the one commit only
     the reader knows — the pin the refusal declined to trust — so the caller
     supplies it.
+
+    `extra` is for the other half the message states as a RULE rather than a
+    value: a `--source-repo` for a source whose clone is not the default
+    sibling. Passing it is the caller acting on that sentence, so a test can
+    measure the run with it and without.
     """
     lock = json.loads(out.read_text(encoding="utf-8"))
     flags = []
@@ -4431,7 +4437,67 @@ def _follow_the_plain_generate(reason: str, primary: Path, out: Path,
     return run_generator(
         "--repo", str(primary), "--registry", lock["registry"],
         "--ref", _head(primary), "--bundles", ",".join(lock["bundles"]),
-        *flags, "-o", str(out))
+        *flags, *extra, "-o", str(out))
+
+
+def test_the_plain_generate_a_refusal_names_says_where_its_clones_are_read_from(tmp_path):
+    """The `--source` list is only half of a runnable plain generate.
+
+    Every `--source` is read from a local checkout, looked for at the sibling
+    `../<repo-name>` of whatever `--repo` the generate is given. The clause
+    named the sources and not that rule, so on the fleet bumper's own layout —
+    a federated clone that is NOT the sibling — following the sentence
+    verbatim exited 1 at "no checkout at ...", the same way the printed
+    commands used to before this round derived their addressing.
+
+    The matrix cannot see this: its property only runs lines beginning
+    `python3 `, and this advice is prose inside a headline.
+
+    Both halves are executed here rather than asserted. The plain generate the
+    refusal describes, taken verbatim, still fails on this layout without the
+    flag the sentence now names — which is what makes the sentence
+    load-bearing rather than decorative — and succeeds with it, leaving the
+    lock federated.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    # A branch where a commit sha belongs: `repin_primary_blocker` refuses every
+    # re-pin of this lock, so the verdict falls through to the plain-generate
+    # advice this test is about instead of printing a command.
+    document["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    source = document["sources"][0]
+    checkout = url2pathname(urlparse(source["registry"]).path)
+
+    verdict = run_generator(
+        "--check-current", "--repo", str(primary), "-o", str(out),
+        "--source-repo", f"{source['registry']}={checkout}")
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert not _printed_commands(verdict.stdout), verdict.stdout
+    assert not _printed_templates(verdict.stdout), verdict.stdout
+    reasons = [line.split("would refuse one: ", 1)[1]
+               for line in verdict.stdout.splitlines() if "would refuse one: " in line]
+    assert reasons, verdict.stdout
+    for reason in reasons:
+        assert "plain generate" in reason, reason
+        assert "--source-repo '<bundles>=<path>'" in reason, reason
+
+    # FOLLOWED VERBATIM, both ways round. `_follow_the_plain_generate` takes the
+    # `--source` flags out of the message and nothing else.
+    rebuilt = tmp_path / "rebuilt.lock"
+    shutil.copyfile(out, rebuilt)
+    without = _follow_the_plain_generate(reasons[0], primary, rebuilt)
+    assert without.returncode == 1, without.stdout + without.stderr
+    assert "no checkout at" in without.stdout + without.stderr, without.stderr
+
+    # The one flag the sentence names, spelled the way it names it.
+    withflag = _follow_the_plain_generate(
+        reasons[0], primary, rebuilt,
+        extra=["--source-repo", f"{','.join(source['bundles'])}={checkout}"])
+    assert withflag.returncode == 0, withflag.stdout + withflag.stderr
+    after = json.loads(rebuilt.read_text(encoding="utf-8"))
+    assert [entry["registry"] for entry in after.get("sources", [])] == [
+        source["registry"]], after
 
 
 def test_following_the_primary_refusal_literally_keeps_the_lock_federated(tmp_path):
