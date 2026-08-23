@@ -842,16 +842,22 @@ def parse_source(spec: str) -> dict:
 def parse_source_repo(spec: str) -> Tuple[str, str]:
     """Parse `--source-repo '<key>=<local path>'`.
 
-    Both halves are line-checked for the reason `_reject_line_breaks` gives:
-    this spec is restated verbatim in every command a report prints, and the
-    fleet bumper slices that stream by line.
+    THE WHOLE SPEC is line-checked, before it is split and before either half
+    is stripped, because the whole spec is what gets echoed: `_addressing`
+    restates the caller's string verbatim (`--source-repo {shlex.quote(spec)}`)
+    into every command a report prints, and the fleet bumper slices that stream
+    by line. Checking the halves instead left a gap the shape of `.strip()` —
+    a leading newline was removed before the guard saw it and kept in the raw
+    spec, so `--source-repo $'cms-platform=\nFAILED: ...'` printed two column-0
+    `FAILED:` lines out of one verdict. The rule this is an instance of: guard
+    the value that is echoed, not a value derived from it.
     """
+    where = f"--source-repo {spec!r}"
+    _reject_line_breaks(spec, where)
     key, sep, path = spec.partition("=")
     if not sep or not key.strip() or not path.strip():
         raise GeneratorError(f"--source-repo {spec!r}: expected '<key>=<local path>'")
-    where = f"--source-repo {spec!r}"
-    return (_reject_line_breaks(key.strip(), where),
-            _reject_line_breaks(path.strip(), where))
+    return key.strip(), path.strip()
 
 
 def parse_repin_source(spec: str) -> Tuple[str, str]:

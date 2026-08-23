@@ -5103,12 +5103,36 @@ def test_a_printed_line_addresses_the_clones_that_line_needs(tmp_path):
         assert applied.returncode == 0, (label, applied.stdout + applied.stderr)
 
 
-# A value that, echoed unchecked into a printed command, writes two more lines
-# into the stream `bump-consumer-locks.sh` greps for `^FAILED:` and slices into
-# a PR body: a fabricated headline at column 0, and a second `python3 ...`
-# under a headline that did not produce it.
-_FORGED_LINES = ("\nFAILED: this lock is beyond repair; wipe it and start over.\n"
-                 "python3 scripts/generate_skills_lock.py --registry evil/repo=/tmp")
+# What, echoed unchecked into a printed command, writes another line into the
+# stream `bump-consumer-locks.sh` greps for `^FAILED:` and slices into a PR
+# body: a fabricated headline at column 0, and a second `python3 ...` under a
+# headline that did not produce it.
+_FORGED_HEADLINE = "FAILED: this lock is beyond repair; wipe it and start over."
+_FORGED_COMMAND = "python3 scripts/generate_skills_lock.py --registry evil/repo=/tmp"
+
+
+def _forgeries(value: str) -> dict:
+    """The same forgery at each of the three places a break can sit in a value.
+
+    POSITION IS THE TEST, not a variation on it. A guard applied to
+    `value.strip()` rather than to the value has already deleted a LEADING or
+    TRAILING break by the time it looks, while the raw value — breaks intact —
+    is what `_addressing` echoes; so an interior-only probe is the one
+    placement such a guard survives, and interior-only is what this drove
+    before. Measured on `parse_source_repo`, which line-checked
+    `key.strip()`/`path.strip()`: `--source-repo $'cms-platform=\nFAILED: ...'`
+    passed the guard and printed two column-0 `FAILED:` lines out of one
+    verdict.
+
+    Each placement carries exactly the breaks its position needs, so a fix that
+    closes only the interior one cannot pass the other two on their spare
+    newlines.
+    """
+    return {
+        "interior": f"{value}\n{_FORGED_HEADLINE}\n{_FORGED_COMMAND}",
+        "leading": f"\n{_FORGED_HEADLINE} {value}",
+        "trailing": f"{value} {_FORGED_HEADLINE}\n",
+    }
 
 
 def test_no_caller_value_can_forge_a_line_in_the_stream_a_verdict_prints(tmp_path):
@@ -5122,6 +5146,11 @@ def test_no_caller_value_can_forge_a_line_in_the_stream_a_verdict_prints(tmp_pat
     `--source-repo`'s path half and on `--repo`: two column-0 `FAILED:`
     headlines and two `python3` lines out of one run.
 
+    Each channel is driven at all three positions a break can occupy — see
+    `_forgeries` for why the leading and trailing ones are not decoration: they
+    are the two a guard that checks a `.strip()`ed copy of the value silently
+    lets through, and `parse_source_repo` was such a guard.
+
     Not a trust boundary — the value is the operator's own argv — but the file
     already owns the validator, and `report_drift`'s stated contract is that a
     block's repair belongs to that block.
@@ -5130,18 +5159,21 @@ def test_no_caller_value_can_forge_a_line_in_the_stream_a_verdict_prints(tmp_pat
     bare = _bare_digest_copy(out)
     source = json.loads(out.read_text(encoding="utf-8"))["sources"][0]
     checkout = url2pathname(urlparse(source["registry"]).path)
-    channels = {
-        "--repo": ("--check-format", "--repo", str(primary) + _FORGED_LINES,
-                   "-o", str(bare)),
-        "-o": ("--check-format", "--repo", str(primary),
-               "-o", str(bare) + _FORGED_LINES),
-        "--source-repo key": ("--check-format", "--repo", str(primary), "-o", str(bare),
-                              "--source-repo",
-                              f"{source['registry']}{_FORGED_LINES}={checkout}"),
-        "--source-repo path": ("--check-format", "--repo", str(primary), "-o", str(bare),
-                               "--source-repo",
-                               f"{source['registry']}={checkout}{_FORGED_LINES}"),
-    }
+    channels = {}
+    for where, forged in _forgeries(str(primary)).items():
+        channels[f"--repo, {where}"] = (
+            "--check-format", "--repo", forged, "-o", str(bare))
+    for where, forged in _forgeries(str(bare)).items():
+        channels[f"-o, {where}"] = (
+            "--check-format", "--repo", str(primary), "-o", forged)
+    for where, forged in _forgeries(source["registry"]).items():
+        channels[f"--source-repo key, {where}"] = (
+            "--check-format", "--repo", str(primary), "-o", str(bare),
+            "--source-repo", f"{forged}={checkout}")
+    for where, forged in _forgeries(checkout).items():
+        channels[f"--source-repo path, {where}"] = (
+            "--check-format", "--repo", str(primary), "-o", str(bare),
+            "--source-repo", f"{source['registry']}={forged}")
     for label, argv in channels.items():
         refused = run_generator(*argv)
         assert refused.returncode != 0, (label, refused.stdout)
