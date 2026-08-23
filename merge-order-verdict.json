@@ -1,0 +1,153 @@
+{
+ "consumerLocks": [
+  {
+   "repo": "Adam-S-Daniel/_agent-guidance",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob b1fa5623, one of 8 byte-identical standard locks. adam only, no sources, all digests sha256:-prefixed. Read via mcp__github__ (session connector). In the bumper's scope despite not being in skills_bootstrap.repos - the bumper deliberately keeps the self repo."
+  },
+  {
+   "repo": "Adam-S-Daniel/agentskills-private",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob b1fa5623, byte-identical to _agent-guidance. Read via mcp__github__."
+  },
+  {
+   "repo": "Adam-S-Daniel/claude-memory-map",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob b1fa5623. Read via the org connector mcp__b26ebb34 (session connector denied: repo not in its 7-repo allowlist)."
+  },
+  {
+   "repo": "Adam-S-Daniel/cms-platform",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob b1fa5623. Read via mcp__github__. repos.yml still calls this lock 'pending cms-platform#275' - that PR has merged and the comment is stale."
+  },
+  {
+   "repo": "Adam-S-Daniel/fastmail-actions",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob b1fa5623. Read via org connector mcp__b26ebb34."
+  },
+  {
+   "repo": "Adam-S-Daniel/GHA-bench",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob b1fa5623. Read via org connector mcp__b26ebb34."
+  },
+  {
+   "repo": "Adam-S-Daniel/wsl-automation",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob b1fa5623. Read via org connector mcp__b26ebb34."
+  },
+  {
+   "repo": "Adam-S-Daniel/repo-settings",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob b1fa5623. Read via mcp__github__."
+  },
+  {
+   "repo": "Adam-S-Daniel/adamdaniel.ai",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob 040602df. Federated: one cms-platform source at 633b8656 (40-hex), layout skills. No self-federation, no duplicate registry, 1 source (cap is 8), all digests sha256:-prefixed. Independently confirms the parent's finding. Read via mcp__github__."
+  },
+  {
+   "repo": "jodidaniel/jodidaniel.com",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "Blob 040602df - byte-identical to adamdaniel.ai, confirming the parent's claim. Read via org connector mcp__b26ebb34."
+  },
+  {
+   "repo": "jodidaniel/scratch-claude-002",
+   "hasLock": true,
+   "primaryRefIsSha": true,
+   "sourceRefsAllSha": true,
+   "trippedRefusals": [],
+   "notes": "THE ONE ODD LOCK, and it is still clean. Blob ab097175: pinned at an OLDER ref (94cdcc81) and all 8 digests are BARE hex with no sha256: prefix - the malformed shape repos.yml describes. digest_format_offenders returns 8, so the OLD bumper's existing --check-format gate fires and drives a --repin --ref 94cdcc81 (shape repair, pin held). Tested end-to-end in a harness scenario reproducing exactly this shape (valid sha pin + bare digests): old generator 2 proposed 0 failed, new generator 2 proposed 0 failed - identical. No new refusal touches it. repos.yml calls this lock 'pending scratch-claude-002#15'; that is stale, it is committed."
+  },
+  {
+   "repo": "Adam-S-Daniel/skills-evals",
+   "hasLock": false,
+   "trippedRefusals": [],
+   "notes": "No skills.lock. Repo readable by BOTH connectors; the 404 is file-level, not repo-level. Deliberately out (it runs the propagation probes)."
+  },
+  {
+   "repo": "Adam-S-Daniel/scratch-claude-001",
+   "hasLock": false,
+   "trippedRefusals": [],
+   "notes": "No skills.lock on its default branch (claude/setup-github-pages-ZCksi). Repo readable by the org connector; file-level 404. Deliberately out (live E1 experiment)."
+  },
+  {
+   "repo": "Adam-S-Daniel/scratch-jules-001",
+   "hasLock": false,
+   "trippedRefusals": [],
+   "notes": "No skills.lock. Repo readable by the org connector; file-level 404."
+  },
+  {
+   "repo": "jodidaniel/squarespacetemp",
+   "hasLock": false,
+   "trippedRefusals": [],
+   "notes": "No skills.lock. Repo readable by the org connector; file-level 404."
+  },
+  {
+   "repo": "Adam-S-Daniel/4A",
+   "hasLock": false,
+   "trippedRefusals": [],
+   "notes": "UNVERIFIED - not a confirmed absence. Private. The org connector mcp__b26ebb34 returned a REPO-LEVEL 404 (GET /repos/Adam-S-Daniel/4A), and the session connector mcp__github__ refuses it outright (not among its 7 allowed repos). Neither credential can see it, so I cannot say whether it carries a lock. It IS in the bumper's scope (non-fork, non-archived, not in repos.yml exclude). Dormant since 2026-03, so a lock is unlikely but unproven."
+  },
+  {
+   "repo": "Adam-S-Daniel/jc",
+   "hasLock": false,
+   "trippedRefusals": [],
+   "notes": "UNVERIFIED - same as 4A. Private; repo-level 404 from mcp__b26ebb34, outside mcp__github__'s allowlist. In the bumper's scope. Dormant since 2024-10."
+  },
+  {
+   "repo": "Adam-S-Daniel/rss-inator",
+   "hasLock": false,
+   "trippedRefusals": [],
+   "notes": "UNVERIFIED - same as 4A. Private; repo-level 404 from mcp__b26ebb34, outside mcp__github__'s allowlist. In the bumper's scope. Dormant since 2026-03."
+  }
+ ],
+ "saferOrder": "_agent-guidance FIRST (branch claude/ultracode-workflow-testing-r31h75, the bumper), THEN agentskills (branch ag58-generator, the generator).\n\nBoth orders are survivable on today's fleet, but only one is survivable BY DESIGN, and that is the discriminator.\n\nBumper-first is covered by code written for it. I verified the degraded mode myself rather than taking it on report: new bumper x old generator on the realistic fleet gives 0 merged, 3 proposed, 3 skipped, 0 failed, exit 0 - identical proposals to old x old - and it announces the degradation loudly and specifically, with two up-front ::warning:: lines naming the two missing flags ('--check-current --only <REGISTRY>' and '--repin --repin-source <REGISTRY>@') plus a per-repo warning on each federated consumer saying its federated pins are carried through unverified. Nothing is silently wrong and nothing goes red. The final both-new state then gives 4 proposed, 0 failed - the extra proposal being the federated advance the scoped flags unlock. Every intermediate state of this order is a state someone wrote and tested a degradation path for.\n\nGenerator-first is survivable only by accident of today's lock inventory. Its safety rests entirely on the fact that no live lock pins anything at a branch name - which I confirmed for all 11 locks I could read, but which is a property of data, not of code. The new generator's own docstring calls the branch-pin shape 'rare and not unreachable' and names a hand-edited lock as the route in. One hand-edit, one botched merge-conflict resolution, or one lock in the three repos neither credential can see, and the nightly goes red across the fleet for as long as the window stays open. Bumper-first has no equivalent data dependency.\n\nThe failure mode of generator-first is at least the good kind, which is why the salvage stands rather than collapses: scenario C under the old bumper x new generator gives BUMP_EXIT=1, 0 proposed, 2 failed, with the generator's full diagnostic quoted in the log. No PR is created on that path, so there is no silently-wrong pull request and no bad merge - it is loud red, the outcome the question asked me to distinguish from silence. If external constraints force generator-first, it is recoverable; it is just uninsured.",
+ "confidence": "High on the mechanics and on both orders' measured behaviour - I re-ran A, C, the both-new and degraded combinations myself against the current branch tips, proved the old bumper really invokes the generator (12 logged invocations, 3 of them --repin) and really consumes its exit code (a forced non-zero flipped 3 proposed to 3 failed and BUMP_EXIT to 1), and traced the red all the way to the workflow step; medium on completeness of Part 1's reachability sweep, bounded by three private dormant repos (4A, jc, rss-inator) that returned repo-level 404s from the org connector and sit outside the session connector's 7-repo allowlist, so I could not rule out a lock in them.",
+ "salvageStands": true,
+ "disagreements": [
+  "THE TASK'S PREMISE ABOUT THE BUMPER'S POPULATION IS WRONG, and it under-counts by roughly double. I was told to read skills_bootstrap.repos for 'the repos the bumper actually visits'. It is not that list. scripts/bump-consumer-locks.sh discovers repos with `gh repo list <owner> --no-archived --source` and filters on `.exclude` ALONE (lines 843-877); it never reads skills_bootstrap.repos. repos.yml says so itself, in a comment written specifically to stop this inference: 'This list governs HOOK DELIVERY only... bump-consumer-locks.sh never reads it.' The real population is every non-fork non-archived repo in Adam-S-Daniel + jodidaniel minus the 3 excluded civic-* repos minus the registry = 18 repos, against the 10 in skills_bootstrap.repos. I audited all 18. Had I followed the brief literally I would have skipped _agent-guidance (which the bumper deliberately keeps, unlike sync.sh), skills-evals, scratch-claude-001, scratch-jules-001, squarespacetemp, and all three unreadable private repos.",
+  "'AN UPPERCASE 40-HEX SHA' IS NOT ONE OF THE NEW REFUSALS. The brief listed it; the code does not implement it. `_COMMIT_SHA_RE = re.compile(r'[0-9a-fA-F]{40}')` is deliberately case-INSENSITIVE, so an uppercase primary ref passes both repin_primary_blocker and repin_unproven_sources_blocker. Measured, not just read: I seeded a consumer with an uppercased sha pin and ran the old bumper against both generators - 2 proposed, 0 failed, identical. Uppercase only matters in a DIGEST, where _LOCK_DIGEST_RE is lowercase-only, and that routes to the pre-existing --check-format repair path rather than to any refusal.",
+  "REPOS.YML IS SUBSTANTIALLY STALE ON WHICH REPOS CARRY A LOCK, which matters because it is the document an operator would use to scope exactly this question. It states 'As of 2026-08-19 only adamdaniel.ai and jodidaniel.com carry a committed skills.lock; the other eight have an open companion PR.' Eleven repos carry one today - the eight named as pending have all landed theirs (cms-platform#275, scratch-claude-002#15, etc. have merged), plus _agent-guidance's own. Anyone scoping the blast radius from that comment would check 2 locks instead of 11.",
+  "THE PREVIOUS AGENT'S SNAPSHOTS ARE STALE AGAINST BOTH BRANCH TIPS, so its numbers were measured on code that has since moved. mo/snap/gen-new/generate_skills_lock.py differs from ag58-generator by 81 diff lines (it predates `_reject_line_breaks`, a further new refusal on control characters in caller-supplied --repo/--source-repo/-o paths), and mo/guid-new/scripts/bump-consumer-locks.sh differs from the bumper branch by 33 lines. mo/snap/gen-old and the old bumper are byte-identical to main, so the A and C results were not invalidated - I re-ran both against current tips and they reproduce exactly - but the snapshots should not be reused as-is for any further round.",
+  "NEW FINDING THE PREVIOUS AGENT DID NOT REPORT, and it is NOT an ordering discriminator - it arrives with the generator in EITHER order, so it needs fixing rather than sequencing around. The new generator's `_addressing` now prints full addressing in its remediation line, and the bumper quotes that verdict verbatim into every bump PR body. The result is that each PR body's remediation line carries the bump runner's own absolute filesystem path: `python3 scripts/generate_skills_lock.py --repin --repo /home/runner/work/_agent-guidance/_agent-guidance/registries/agentskills -o skills.lock`. I observed this in old-bumper x new-generator AND in the final both-new state. It directly falsifies a claim the new bumper's own source makes a few lines away - 'a PR body carries no path from the machine that ran the bump - the quoted remediation line uses the same device for --repo' - because the placeholder device covers only lines the BUMPER composes, not the generator verdict it quotes. Not a data-exposure incident (a GitHub-hosted runner workspace path is generic, no PII), but it hands every consumer's reviewer a copy-pasteable command that cannot run on their machine, on every bump PR, every night."
+ ],
+ "remedies": [
+  "Land _agent-guidance's bumper branch first and let one nightly run complete before merging ag58-generator. That single run is the cheap proof: the two up-front ::warning:: lines naming the missing scoped flags should appear, the summary should read 0 failed, and the proposal count should match the previous night's. If it does, the generator merge is unobserved by anything except the flags becoming available.",
+  "Before merging the generator in EITHER order, close the three-repo blind spot. 4A, jc and rss-inator are in the bumper's scope and invisible to both GitHub credentials available to me. Either confirm from a credential that can see them that none carries a skills.lock, or - cheaper and durable - add them to repos.yml's `exclude:` on the same dormancy reasoning already written there for them, which removes them from the bumper's population entirely and makes the question moot.",
+  "Fix the runner-path leak in the PR body before or with the generator merge, since it lands in both orders. Either have `_addressing` emit a placeholder for --repo/--source-repo the way the bumper already does for its own composed lines, or have the bumper sanitise the quoted verdict. Whichever side takes it, correct the now-false comment in bump-consumer-locks.sh claiming a PR body carries no path from the bump machine.",
+  "If generator-first is forced anyway, buy the missing insurance with a pre-merge sweep rather than trusting today's inventory: run `--check-format` and a dry `--repin` of the new generator against all 11 live locks (I have them at /tmp/claude-0/-home-user-agentskills/0ad08fc2-e344-5f69-99ba-9468ecf58a91/scratchpad/mo2/locks/, and the blocker probe at .../mo2/probe_locks.py re-runs every lock-decidable refusal in seconds), and re-run it on the morning of the merge in case a lock was hand-edited in between. Keep the window to a day or two - the exposure is proportional to how long the old bumper sits over the new generator.",
+  "Correct repos.yml's skills_bootstrap block: eleven repos now carry a committed lock, not two, and the per-entry 'pending <repo>#<n> - inert until that merges' notes are stale for cms-platform, scratch-claude-002, claude-memory-map, fastmail-actions, GHA-bench, wsl-automation, repo-settings and agentskills-private. That file is what the next person will scope a blast radius from - it under-reports this one by 9 repos.",
+  "Consider adding a regression test that pins the one behaviour change deliberately, so it is a decision rather than a surprise: a lock pinning its primary or a source at a branch name used to get a pull request and now turns the nightly red. That is defensible (the generator's reasoning about an unverifiable clone is sound), but it is currently only recorded in scratch measurements. A test in the generator's suite asserting exit 1 with that message makes the choice durable.",
+  "Do not reuse mo/snap for further rounds - both new-side snapshots have drifted from their branch tips. Re-archive from the live refs; my fresh archives are at .../mo2/gen-main, .../mo2/gen-new, .../mo2/oldguid, .../mo2/newguid, and the harness invocations that reproduce A, C, the bad-shape/uppercase probes and both degraded combinations are in .../mo2/A, /C, /D, /B-oldgen and /B-newgen."
+ ]
+}
