@@ -19,6 +19,7 @@ two of them flipped from pass to fail when that directory existed. It passed
 only because this repo happens not to have one.
 """
 
+import ast
 import json
 import re
 import shutil
@@ -26,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Tuple
+from typing import NamedTuple, Tuple
 
 import pytest
 
@@ -123,6 +124,118 @@ def write_lock(path: Path, store: Path, *names: str, registry: str = REGISTRY_SL
         "registry": registry, "ref": "a" * 40, "bundles": [bundle], "skills": skills,
     }, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# reading the module instead of listing its sentences
+#
+# Two invariants below are quantified over "every sentence that says X". A test
+# that spells out which sentences those are is a test of the author's grep, and
+# round 5's did exactly that: a commit claiming to have gated EVERY
+# what-the-next-run-does sentence shipped with four ungated ones, because the
+# quantifier was prose and nothing enumerated it. So the set is derived from
+# `check_provenance.py` itself — every call that builds a per-directory or
+# store-wide finding — and a new one is in the set the moment it is written.
+# ---------------------------------------------------------------------------
+
+class FindingSite(NamedTuple):
+    """One `Finding(...)` / `_observed(...)` call in the module under test.
+
+    `universe` is every string that call can put in front of a reader: the
+    detail expression's own source, plus the module constants and the local
+    variables it interpolates. Resolved textually and deliberately over-wide —
+    a name assigned twice contributes both — because the failure being guarded
+    against is a sentence nobody noticed, and a false positive here costs one
+    `when_the_hook_runs` while a false negative costs the whole invariant.
+
+    `guards` is the source of the `if`/`elif` tests this call sits UNDER, on the
+    true side only: a branch reached through an `orelse` did not pass that test,
+    so quoting it as a guard would be backwards.
+    """
+    function: str
+    lineno: int
+    detail: str
+    universe: str
+    guards: str
+
+
+def _module_constants(tree, source):
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name):
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError):
+                continue
+            if isinstance(value, str):
+                out[node.targets[0].id] = value
+    return out
+
+
+def _finding_sites():
+    """Every finding-building call in `check_provenance.py`, with its context."""
+    source = Path(prov.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    constants = _module_constants(tree, source)
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    def guards_of(node, stop):
+        out = []
+        current = node
+        while current is not stop and current in parents:
+            parent = parents[current]
+            if isinstance(parent, ast.If) and any(
+                    current is item or _contains(item, current)
+                    for item in parent.body):
+                out.append(ast.get_source_segment(source, parent.test) or "")
+            current = parent
+        return "\n".join(out)
+
+    sites = []
+    for function in [n for n in ast.walk(tree)
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        locals_ = {}
+        for node in ast.walk(function):
+            target = None
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name):
+                target = node.targets[0].id
+            elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                target = node.target.id
+            if target:
+                locals_.setdefault(target, []).append(
+                    ast.get_source_segment(source, node.value) or "")
+        for call in ast.walk(function):
+            if not isinstance(call, ast.Call):
+                continue
+            name = call.func.id if isinstance(call.func, ast.Name) else None
+            if name not in ("Finding", "_observed") or not call.args:
+                continue
+            detail = ast.get_source_segment(source, call.args[-1]) or ""
+            universe = [detail]
+            for referenced in sorted({n.id for n in ast.walk(call.args[-1])
+                                      if isinstance(n, ast.Name)}):
+                if referenced in constants:
+                    universe.append(constants[referenced])
+                for assigned in locals_.get(referenced, ()):
+                    universe.append(assigned)
+                    for word in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", assigned):
+                        if word in constants:
+                            universe.append(constants[word])
+            sites.append(FindingSite(function.name, call.lineno, detail,
+                                     "\n".join(universe),
+                                     guards_of(call, function)))
+    assert sites, "no finding call sites found — the parse is not reading the module"
+    return sites
+
+
+def _contains(root, node) -> bool:
+    return root is node or any(_contains(child, node)
+                               for child in ast.iter_child_nodes(root))
 
 
 @pytest.fixture(autouse=True)
@@ -1526,6 +1639,212 @@ def test_a_lock_the_hook_refuses_outright_reds_naming_the_real_cause(
     # is offered for a lock nothing was read out of.
     assert "[missing]" not in text, text
     assert "skill(s) declared" not in text, text
+
+
+# ---------------------------------------------------------------------------
+# the whole ladder, not its second rung
+#
+# `may_replace` is one question of several the install loop asks, and the ones
+# below it end in `rm -rf`. Every test here is driven through `_run_hook`,
+# because that is the only thing that shows what the store looks like AFTER the
+# rungs the extracted function cannot see: round 5's model of `may_replace`
+# alone passed its own tests and was wrong end to end in both directions.
+# ---------------------------------------------------------------------------
+
+def _installed(tmp_path, skills: dict = None):
+    """A clean hook install of the fixture registry, and where everything is.
+
+    Returns (suite, registry root, project, home, store, lock path) after one
+    forced run that installed every locked skill and wrote the record.
+    """
+    suite = _suite()
+    root = tmp_path / "registry"
+    sha = suite.make_registry(root, skills or {"adam/alpha": suite.SKILL_A,
+                                               "adam/beta": suite.SKILL_B})
+    project = tmp_path / "project"
+    lock_path = suite.make_project(project, root, sha)
+    home = tmp_path / "home"
+    proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert suite._verdict(proc).startswith("skills: 2/2 "), suite._verdict(proc)
+    return suite, root, project, home, home / ".claude" / "skills", lock_path
+
+
+def _forget(store: Path, name: str) -> None:
+    """Drop one row from the install record, leaving the bytes untouched.
+
+    The doctor's own `untracked` text lists the cause: "the hook installed it
+    and then rewrote the record after failing to read one, which forgets what
+    came before". So this needs no hand-edited lock — the digest on disk is
+    still exactly the one the lock names, which is `may_replace`'s middle clause
+    and the state round 5 called healthy.
+    """
+    path = store / prov.RECORD_NAME
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["installed"] = [entry for entry in data["installed"]
+                         if entry["name"] != name]
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def test_a_project_collision_is_reported_as_bytes_the_next_run_deletes(
+        tmp_path, capsys):
+    """Round-5 defect 1, direction one: exit 0 over a directory about to go.
+
+    `may_replace` says yes here and the doctor used to stop there, printing
+    `bytes-are-the-locked-ones` — "delivery is unaffected and nothing here needs
+    deciding". The collision guard sits BELOW that gate and `rm -rf`s the
+    directory so the repo-owned copy wins. Both halves are measured: the report
+    the reader gets, and then the real hook's next run on the same store.
+    """
+    suite, root, project, home, store, lock_path = _installed(tmp_path)
+    _forget(store, "alpha")
+    make_skill(project / ".claude" / "skills", "alpha", body="the project's\n")
+
+    code, out = run(store, lock_path, capsys, project_dir=project)
+    text = flat(out)
+    assert "[deleted-by-the-collision-guard] alpha" in text, text
+    assert "bytes-are-the-locked-ones" not in text, text
+    assert "delivery is unaffected" not in text, text
+    # A note, not a finding: repo-owned winning is the design, and the reader is
+    # told the bytes go away rather than asked to decide anything.
+    assert code == 0, text
+
+    proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    verdict = suite._verdict(proc)
+    assert "collision" in verdict and "repo-owned wins" in verdict, verdict
+    assert not (store / "alpha").exists(), verdict
+
+
+def test_two_lock_rows_on_one_destination_are_reported_as_a_deletion(
+        tmp_path, capsys):
+    """Round-5 defect 1, direction two: the dup guard, also below the gate.
+
+    A hand-placed copy of exactly the registry's bytes satisfies `may_replace`'s
+    middle clause, so the old model said the hook would overwrite it and all was
+    well. The lock's two rows fold onto one flat destination, the reader stamps
+    both `dup`, and the loop removes the directory and installs neither.
+    """
+    suite = _suite()
+    project = suite._duplicate_basename_project(tmp_path)
+    lock_path = project / "skills.lock"
+    home = tmp_path / "home"
+    store = home / ".claude" / "skills"
+    store.mkdir(parents=True)
+    shutil.copytree(tmp_path / "registry" / "plugins" / "adam" / "skills" / "alpha",
+                    store / "alpha")
+    assert prov.digest_skill_dir(store / "alpha") in \
+        prov.read_lock(lock_path).digests["alpha"], "fixture is not the locked bytes"
+
+    code, out = run(store, lock_path, capsys, project_dir=project)
+    text = flat(out)
+    assert "[deleted-by-the-dup-guard] alpha" in text, text
+    assert "bytes-are-the-locked-ones" not in text, text
+    assert "delivery is unaffected" not in text, text
+    # A finding: no row can deliver this name at all until somebody renames one.
+    assert code == 1, text
+
+    proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    verdict = suite._verdict(proc)
+    assert "share a destination name" in verdict, verdict
+    assert not (store / "alpha").exists(), verdict
+
+
+def test_a_project_skills_dir_that_cannot_be_listed_is_not_read_as_empty(
+        tmp_path, capsys):
+    """The collision rung with no answer, which used to round to the benign one.
+
+    `skill_names` swallowed every OSError into the empty set, so an unlistable
+    `.claude/skills` said "the project ships nothing" — the reading under which
+    the ladder hands back `bytes-are-the-locked-ones` and the report says
+    delivery is unaffected. A plain FILE where the directory belongs is how this
+    is reproduced deterministically: the suite runs as root in CI, where a chmod
+    is not a refusal, and `iterdir` on a file raises NotADirectoryError anywhere.
+    """
+    suite, root, project, home, store, lock_path = _installed(tmp_path)
+    (project / ".claude").mkdir(exist_ok=True)
+    (project / ".claude" / "skills").write_text("not a directory\n",
+                                                encoding="utf-8")
+
+    assert prov.readable_skill_names(project / ".claude" / "skills") is None
+    code, out = run(store, lock_path, capsys, project_dir=project)
+    text = flat(out)
+    assert "[collision-guard-unmeasured] alpha" in text, text
+    assert "[collision-guard-unmeasured] beta" in text, text
+    assert "delivery is unaffected" not in text, text
+    assert code == 1, text
+
+
+def test_an_absent_project_skills_dir_is_measured_and_not_unmeasured(tmp_path):
+    """The negative control for the test above, and the common case.
+
+    Almost no project has a `.claude/skills`, and reporting every one of them as
+    unmeasured would be the same defect pointing the other way — a finding on
+    every healthy machine. FileNotFoundError is the one OSError that IS an
+    answer: a project with no such directory ships no skill of any name.
+    """
+    assert prov.readable_skill_names(tmp_path / "nothing" / "here") == set()
+
+
+@pytest.mark.parametrize("fate", prov.FATES)
+def test_every_fate_on_the_ladder_is_one_the_hook_can_reach(fate, tmp_path):
+    """`FATES` is a closed set and each member is produced, so none is decorative.
+
+    A constant nothing returns is a comment wearing a variable's clothes: it
+    reads as a modelled state and asserts nothing. This walks the ladder with the
+    inputs each rung needs and collects what comes back.
+    """
+    lock = prov.Lock(prov.PRESENT, {"alpha"}, set(),
+                     digests={"alpha": frozenset({"a" * 64})},
+                     duplicates=frozenset({"dup"}))
+    dupped = lock._replace(names={"alpha", "dup"},
+                           digests={"alpha": frozenset({"a" * 64}),
+                                    "dup": frozenset({"a" * 64})})
+    reached = {
+        prov.hook_fate(prov.Lock(prov.REJECTED, set(), set(), "why"), "alpha",
+                       replaceable=True, repo_owned=set()),
+        prov.hook_fate(lock, "alpha", replaceable=False, repo_owned=set()),
+        prov.hook_fate(dupped, "dup", replaceable=True, repo_owned=set()),
+        prov.hook_fate(lock, "alpha", replaceable=True, repo_owned={"alpha"}),
+        prov.hook_fate(lock, "alpha", replaceable=True, repo_owned=None),
+        prov.hook_fate(lock, "alpha", replaceable=True, repo_owned=set()),
+    }
+    assert reached == set(prov.FATES)
+    assert fate in reached
+
+
+def test_a_directory_the_ladder_cannot_place_raises_instead_of_defaulting():
+    """The one thing a total ladder must not do is answer anyway.
+
+    A default arm would mean "no rung objected", which is exactly the reading
+    that was wrong — the rungs nobody had asked were the ones that delete. So
+    the two inputs with no fate raise, and the message names the directory.
+    """
+    present = prov.Lock(prov.PRESENT, {"alpha"}, set(),
+                        digests={"alpha": frozenset({"a" * 64})})
+    with pytest.raises(ValueError, match="stray"):
+        prov.hook_fate(present, "stray", replaceable=True, repo_owned=set())
+    with pytest.raises(ValueError, match="alpha"):
+        prov.hook_fate(prov.Lock(prov.ABSENT, {"alpha"}, set()), "alpha",
+                       replaceable=True, repo_owned=set())
+
+
+def test_only_a_still_delivering_fate_may_say_delivery_is_unaffected():
+    """The sentence, bound to the ladder's answer rather than to a habit.
+
+    Derived from the module: every `Finding`/`_observed` call site whose text
+    can carry the phrase is found by parsing `check_provenance.py`, and each one
+    has to sit under a branch that tested the fate against `STILL_DELIVERS`. A
+    new benign note that quotes the phrase from somewhere else in the ladder is
+    what this reds on — which is how round 5's defect arrived.
+    """
+    claim = "delivery is unaffected"
+    sites = _finding_sites()
+    carrying = [site for site in sites if claim in site.universe]
+    assert carrying, f"no call site can say {claim!r} any more; retire this test"
+    for site in carrying:
+        assert "STILL_DELIVERS" in site.guards, (
+            f"{site.function}:{site.lineno} can say {claim!r} without the "
+            f"ladder having answered {prov.STILL_DELIVERS} first")
 
 
 def test_the_doctor_reads_the_record_the_hook_actually_writes(tmp_path):
