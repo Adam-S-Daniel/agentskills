@@ -2428,6 +2428,309 @@ def test_repin_still_accepts_source_repo_which_is_not_the_locks_identity(federat
     assert "cms-platform/deploy" in json.loads(out.read_text(encoding="utf-8"))["skills"]
 
 
+# --------------------------------------------------------------------------
+# --repin-source: the ONE way a federated pin advances
+#
+# Inheritance stays the default and stays the only thing that carries a
+# source's ref forward — `test_repin_on_a_federated_lock_preserves_every_source_verbatim`
+# is the standing proof and is deliberately untouched by any of this. What was
+# missing was any way to advance ONE named source without reaching for
+# `--source`, which REPLACES the inherited array and de-federates the lock. So
+# this flag merges by registry key and can express nothing else.
+# --------------------------------------------------------------------------
+
+def _repin_source_lock(federated_two, out: Path) -> dict:
+    assert _federated_two_lock(out, federated_two).returncode == 0
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def _source_named(lock: dict, registry: str) -> dict:
+    return next(source for source in lock["sources"] if source["registry"] == registry)
+
+
+def test_repin_source_advances_only_the_named_source(federated_two, tmp_path):
+    """The merge-not-replace property, and the whole reason for the flag.
+
+    BOTH siblings move, so an implementation that re-resolved every source to
+    HEAD — or that replaced the array with the one source named — produces a
+    different answer from one that merged a single key. The un-named source is
+    compared as a whole dict rather than on `ref` alone: bundles and layout are
+    the lock's identity and a re-pin must not restate them either.
+    """
+    primary, _, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    before = _repin_source_lock(federated_two, out)
+
+    _move_head(extra)
+    advanced = _move_head(other)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{other.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert [source["registry"] for source in after["sources"]] == \
+           [source["registry"] for source in before["sources"]]
+    assert _source_named(after, other.resolve().as_uri())["ref"] == advanced
+    assert _source_named(after, extra.resolve().as_uri()) == \
+           _source_named(before, extra.resolve().as_uri())
+
+
+def test_repin_source_with_an_empty_ref_advances_to_that_sources_head(
+        federated, tmp_path):
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    advanced = _move_head(extra)
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["sources"][0]["ref"] == advanced != extra_sha
+    # A resolved sha, never the literal HEAD: a source has no `generated_from`
+    # to record a resolution in, so an unresolved ref there is the one unpinned
+    # half of a lock whose entire purpose is pinning.
+    assert re.fullmatch(r"[0-9a-f]{40}", after["sources"][0]["ref"])
+
+
+def test_repin_source_with_an_explicit_ref_pins_exactly_that(federated, tmp_path):
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    middle = _move_head(extra, "middle")
+    _move_head(extra, "newest")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@{middle}",
+                         "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] == middle
+
+
+def test_repin_source_can_pin_a_source_backward(federated, tmp_path):
+    """Nothing here enforces that a new pin is NEWER, deliberately.
+
+    Putting a federated source back on a known-good commit after a bad bump is
+    the same legitimate operation `--repin --ref` already is for the primary.
+    """
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _move_head(extra)
+    forward = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{extra.resolve().as_uri()}@",
+                            "-o", str(out))
+    assert forward.returncode == 0, forward.stdout + forward.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] != extra_sha
+
+    back = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@{extra_sha}",
+                         "-o", str(out))
+    assert back.returncode == 0, back.stdout + back.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] == extra_sha
+
+
+def test_repin_source_redigests_the_advanced_sources_skills(federated, tmp_path):
+    """A pin that moved without its digests moving is an attestation over bytes
+    nobody recomputed — the exact thing the lock exists to make impossible."""
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = json.loads(out.read_text(encoding="utf-8"))
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\ndeploy v2\n")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "deploy v2")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["skills"]["cms-platform/deploy"] != before["skills"]["cms-platform/deploy"]
+    assert after["skills"]["cms-platform/deploy"] == gsl.LOCK_DIGEST_PREFIX + \
+        gsl.digest_skill_dir(extra / "skills" / "deploy")
+    assert after["skills"]["adam/alpha"] == before["skills"]["adam/alpha"]
+
+
+def test_repin_source_leaves_the_primary_ref_alone_when_only_a_source_is_named(
+        federated, tmp_path):
+    """Advancing a source is not a primary content advance.
+
+    The fleet bumper's federated-only night is exactly this invocation — the
+    primary held at the ref it already pins, one source moved — so the two
+    halves have to be independently settable in one run.
+    """
+    primary, primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _move_head(primary)
+    advanced = _move_head(extra)
+
+    proc = run_generator("--repo", str(primary), "--repin", "--ref", primary_sha,
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["ref"] == primary_sha
+    assert after["sources"][0]["ref"] == advanced
+
+
+def test_repin_source_refuses_a_registry_the_lock_does_not_federate(
+        federated, tmp_path):
+    """ADDING a source changes what the lock means; that is a plain generate."""
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", "owner/never-heard-of-it@", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "not a source this lock federates" in proc.stderr
+    assert extra.resolve().as_uri() in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_source_refuses_the_primary_registry(federated, tmp_path):
+    primary, _, _extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{primary.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "PRIMARY registry" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_source_refuses_the_same_registry_twice(federated, tmp_path):
+    """Two pins for one source is not a last-one-wins precedence question."""
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+    newest = _move_head(extra)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@{extra_sha}",
+                         "--repin-source", f"{extra.resolve().as_uri()}@{newest}",
+                         "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "twice" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_source_without_repin_is_an_argparse_error(federated, tmp_path):
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary),
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert "--repin-source" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_source_on_a_plain_generate_is_refused_before_anything_is_written(
+        federated, tmp_path):
+    """The counterexample the argparse guard exists for.
+
+    A plain generate with `--source` populates `extras` from the command line,
+    so a merge step guarded on `--repin-source` alone would rewrite a source's
+    ref on a WRITE path that never inherited anything — at exit 0, under an
+    ordinary `Wrote ...` line.
+    """
+    primary, primary_sha, extra, extra_sha = federated
+    out = tmp_path / "never-written.lock"
+
+    proc = run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert not out.exists()
+
+
+def test_repin_source_is_not_in_the_refused_identity_flags(federated, tmp_path):
+    """The flag written to close the de-federation trap must not be folded into it.
+
+    `--registry` / `--bundles` / `--source` are refused alongside `--repin`
+    because each REPLACES part of the inherited identity. `--repin-source`
+    merges by key and replaces nothing, so tidying it into that list would make
+    the only way to advance a federated pin an error alongside the only flag it
+    means anything with.
+    """
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    _move_head(extra)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "--repin inherits the lock's identity" not in proc.stderr
+
+
+def test_repin_source_honours_source_repo_for_an_out_of_tree_clone(
+        federated, tmp_path):
+    """Where a source's checkout lives is a property of the MACHINE.
+
+    Resolving an empty ref needs that lookup, which is why the merge runs after
+    `--source-repo` has been parsed rather than beside the inherited array.
+    """
+    primary, primary_sha, extra, _extra_sha = federated
+    relocated = tmp_path / "elsewhere" / "cms-platform"
+    relocated.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(extra), str(relocated))
+
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={relocated.resolve().as_uri()}@{_head(relocated)}:skills",
+        "--source-repo", f"cms-platform={relocated}", "-o", str(out)).returncode == 0
+
+    advanced = _move_head(relocated)
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{relocated.resolve().as_uri()}@",
+                         "--source-repo", f"cms-platform={relocated}", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] == advanced
+
+
+def test_repin_source_with_a_missing_checkout_leaves_the_lock_untouched(
+        federated, tmp_path):
+    """A re-pin that cannot read the new content must write nothing at all.
+
+    A half-applied merge would record a pin whose digests were never
+    recomputed, which is the one failure mode the lock is a lock to prevent.
+    """
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    shutil.move(str(extra), str(tmp_path / "moved-away"))
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "no checkout at" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
 def test_repin_refuses_a_lock_whose_bundle_name_escapes_the_pinned_tree(registry, tmp_path):
     """The inherited bundle list reaches a filesystem path, and now a WRITE.
 
