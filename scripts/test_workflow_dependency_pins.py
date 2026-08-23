@@ -62,8 +62,9 @@ does the same thing inside a bash step, since `python3 - <<PY` hands its body
 to the interpreter on stdin. So the effective `shell:` is resolved before
 anything is tokenised, a body in another language is reported rather than
 parsed, and heredoc bodies are lifted out of the shell text and looked at as
-what they are. Both heredocs these workflows actually use sit in bodies that
-also run real commands, so lifting them out has to leave those readable.
+what they are. All three heredocs these workflows use sit in bodies that also
+run real commands, and one of those bodies runs a real install, so lifting a
+heredoc out has to leave the shell around it readable.
 
 `-r requirements-dev.txt` NAMES A RELATIVE PATH, and pip resolves it against
 the step's directory rather than against this repo's root. `working-directory:`
@@ -232,9 +233,10 @@ REQUIREMENT_OPTIONS = frozenset({"-r", "--requirement"})
 # `PIP_CONSTRAINT` is `-c`, `PIP_INDEX_URL` is `-i`, `PIP_EXTRA_INDEX_URL`,
 # `PIP_FIND_LINKS` and `PIP_PRE` are the rest of the families the whitelist
 # rejects — set one and the install reads requirements-dev.txt and resolves
-# somewhere else. Measured with the pip on this machine:
+# somewhere else. Measured here with pip 24.0:
 # `PIP_CONSTRAINT=/nonexistent/nope.txt python3 -m pip install -r /dev/null`
-# fails on the constraints path it was never passed.
+# answers `ERROR: Could not open requirements file: [Errno 2] No such file or
+# directory: '/nonexistent/nope.txt'` — a path no command line named.
 #
 # The allowed set is DERIVED from the option whitelist rather than written
 # again, so the two cannot drift: an option that cannot change a version has
@@ -1243,10 +1245,10 @@ def test_an_install_inside_a_heredoc_is_reported(body):
 
 
 def test_a_heredoc_that_names_no_install_leaves_the_shell_around_it_readable():
-    """Both heredocs in this repo's workflows sit in a body that also runs a
-    real install — account-skill-zips.yml pipes a Python program into `python3
-    -` two lines after `pip install -r requirements-dev.txt`. Lifting the
-    heredoc out must not take that install with it."""
+    """account-skill-zips.yml's `pick` job pipes a Python program into
+    `python3 -` from the same body that runs `pip install --quiet -r
+    requirements-dev.txt`. Lifting the heredoc out must not take that install
+    with it."""
     found, unplaceable = scan_shell_body(
         "python3 -m pip install -r requirements-dev.txt\n"
         "verdict=$(python3 - <<'PY'\n"
