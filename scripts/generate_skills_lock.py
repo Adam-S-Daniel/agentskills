@@ -1892,6 +1892,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # first — and `test_check_current_names_both_when_primary_and_source_both_drift`
                 # and `test_every_failed_line_is_followed_by_its_own_remediation_command`
                 # are what say so out loud.
+                # Whether the primary's own block is about to tell the reader
+                # to advance it decides whether the federated blocks below hold
+                # its pin. See the --ref anchor there.
+                primary_drifted = any(entry["is_primary"] for entry, _ in drifted)
                 for source, differences in drifted:
                     if source["is_primary"]:
                         print(f"FAILED: the bundle has moved on since {ref}, which {output} "
@@ -1916,8 +1920,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                               "added or changed there reaches an ephemeral surface. Advance "
                               "that source's pin (after committing the content in that "
                               "registry) with:")
+                        # --ref is part of the command, not decoration, and
+                        # this is the same defect #108 fixed for
+                        # --check-format's line: --repin deliberately does not
+                        # inherit `ref`, so a command printed without one falls
+                        # through to resolve_ref(repo, "HEAD") and advances the
+                        # PRIMARY pin — a content advance this verdict just
+                        # said had not happened, arriving as a side effect of a
+                        # source-only repair. Measured by the verifier on a
+                        # fixture where only the source drifted: the printed
+                        # command took the lock's primary ref from 60f17465 to
+                        # the clone's HEAD 4bd46e75, at exit 0. The fleet
+                        # bumper quotes these lines into a PR body as the
+                        # command that produced the diff beneath it, which is
+                        # only honest if running it produces that diff and no
+                        # other.
+                        #
+                        # Dropped when the primary drifted too, because its own
+                        # block above is then telling the reader to advance it:
+                        # anchoring here would hand them two lines that
+                        # contradict each other, and one bare
+                        # `--repin --repin-source` is what advances both.
+                        anchor = "" if primary_drifted else f"--ref {ref} "
                         print("  python3 scripts/generate_skills_lock.py --repin "
-                              f"--repin-source '{source['registry']}@'")
+                              f"{anchor}--repin-source '{source['registry']}@'")
                     for line in differences:
                         print(f"  - {line}")
                 status = 1

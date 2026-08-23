@@ -15,6 +15,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import socket
 import subprocess
@@ -690,8 +691,12 @@ def test_check_current_failure_attributes_a_federated_drift_to_its_own_registry(
         federated, tmp_path):
     """A drift in another registry is reported as that registry's, entirely.
 
-    The primary's sha appears nowhere, because the primary did not move and
-    nothing about it is the answer to why this run is red.
+    The primary's sha is absent from everything that ATTRIBUTES the drift — the
+    headline and the difference lines — because the primary did not move and
+    nothing about it is the answer to why this run is red. It appears in the
+    remediation alone, as `--ref`, where its job is the opposite one: holding
+    the pin that did not move while the source's advances. See
+    `test_the_federated_remediation_holds_the_primary_pin_when_only_a_source_drifted`.
     """
     primary, primary_sha, extra, extra_sha = federated
     out = tmp_path / "skills.lock"
@@ -701,14 +706,92 @@ def test_check_current_failure_attributes_a_federated_drift_to_its_own_registry(
 
     proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert primary_sha not in proc.stdout
     lines = proc.stdout.splitlines()
     headlines = [line for line in lines if line.startswith("FAILED:")]
     assert len(headlines) == 1, proc.stdout
     assert headlines[0].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles have moved")
     assert extra_sha in headlines[0]
+    assert primary_sha not in headlines[0]
     remediation = lines[lines.index(headlines[0]) + 1]
     assert remediation.strip() == (
+        "python3 scripts/generate_skills_lock.py --repin "
+        f"--ref {primary_sha} --repin-source '{extra.resolve().as_uri()}@'")
+    difference_lines = [line for line in lines if line.strip().startswith("- ")]
+    assert difference_lines and all(primary_sha not in line for line in difference_lines)
+
+
+def _source_drifted(extra: Path, message: str = "the source really moved") -> str:
+    """Commit a real content change in a federated source. Returns its new sha."""
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", message)
+    return _head(extra)
+
+
+def test_the_federated_remediation_holds_the_primary_pin_when_only_a_source_drifted(
+        federated, tmp_path):
+    """The printed command, RUN VERBATIM, must do what the verdict said.
+
+    agentskills #108 fixed this exact class for `--check-format`: `--repin`
+    deliberately does not inherit `ref`, so a remediation printed without one
+    falls through to `resolve_ref(repo, "HEAD")` and advances the pin the
+    verdict just said had not moved. The fleet bumper quotes these lines into a
+    PR body as the command that produced the diff beneath it, so a source-only
+    repair that also bumps the primary is unreviewed content arriving under a
+    verdict that never mentioned it.
+
+    The primary's clone is deliberately AHEAD of the pin here, which is the
+    ordinary state of a checkout, and the difference between a latent bug and a
+    live one.
+    """
+    primary, primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    assert _move_head(primary) != primary_sha
+    advanced = _source_drifted(extra)
+
+    verdict = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    lines = verdict.stdout.splitlines()
+    assert lines[0].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles"), verdict.stdout
+    remediation = lines[1].strip()
+    assert remediation == (
+        "python3 scripts/generate_skills_lock.py --repin "
+        f"--ref {primary_sha} --repin-source '{extra.resolve().as_uri()}@'")
+
+    # Parsed with shlex rather than re-spelled, so what runs is the string a
+    # reader would paste. --repo/-o only say where this fixture lives.
+    applied = run_generator(*shlex.split(remediation)[2:],
+                            "--repo", str(primary), "-o", str(out))
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert lock["ref"] == primary_sha, "the source-only repair advanced the primary pin"
+    assert lock["sources"][0]["ref"] == advanced
+
+
+def test_the_federated_remediation_drops_the_anchor_when_the_primary_drifted_too(
+        federated, tmp_path):
+    """Holding the pin is right for a source-only repair and wrong here.
+
+    When the primary drifted as well its own block says to advance it, so an
+    anchored federated line would tell the reader to hold the very pin the
+    block above told them to move. One bare `--repin --repin-source` advances
+    both, which is what both verdicts together are asking for.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    _source_drifted(extra)
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    headlines = [index for index, line in enumerate(lines) if line.startswith("FAILED:")]
+    assert len(headlines) == 2, proc.stdout
+    assert lines[headlines[1] + 1].strip() == (
         "python3 scripts/generate_skills_lock.py --repin "
         f"--repin-source '{extra.resolve().as_uri()}@'")
 
