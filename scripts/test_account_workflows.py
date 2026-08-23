@@ -56,17 +56,53 @@ def echoed(body):
 _COMMENT_OPENS_AFTER = " \t\n;&|("
 
 
+# THE `)` SHAPES `_WordParens` TELLS APART, each beside the script that runs
+# it. The class named these in prose and claimed every one was executed in a
+# real bash; two of them - a function definition's parameter list and `>( )` -
+# had no script, and nothing in this file could notice. So the enumeration
+# lives here instead of in the prose, and
+# test_every_opener_this_file_models_is_executed_by_the_table holds that each
+# name below is in `_COMMENT_OPENER_SCRIPTS` and that the table's own answer
+# is the one recorded here.
+#
+# Second field: does this `)` END A WORD - so that a `#` straight after it
+# opens a comment?
+_PAREN_SHAPES = {
+    "a `case` pattern terminator": ("after-a-case-pattern-paren", True),
+    "a subshell or group close": ("after-a-subshell-close", True),
+    "an arithmetic `(( ))` close": ("after-an-arithmetic-command-close", True),
+    "a function definition's parameter list":
+        ("after-a-function-definitions-parameter-list", True),
+    "a command substitution `$( )`":
+        ("after-a-command-substitution-close", False),
+    "an input process substitution `<( )`":
+        ("after-a-process-substitution-close", False),
+    "an output process substitution `>( )`":
+        ("after-an-output-process-substitution-close", False),
+}
+
+# Where an unquoted WORD ends. Everything else - including `=`, `{`, `}`, `[`
+# and `$` - is a word character here, so `case=1` and `escape` cannot be read
+# as the keyword `case` or `esac`.
+_WORD_BREAK = " \t\n;&|()<>"
+
+# Words after which the NEXT word is still in command position, which is
+# where `case` and `esac` are keywords rather than ordinary words.
+_KEEPS_COMMAND_POSITION = frozenset({
+    "!", "{", "}", "then", "do", "else", "elif", "time",
+})
+
+
 class _WordParens:
     """Which `)` end a WORD and which end a COMMAND, tracked as a scan walks.
 
     A `#` opens a comment only where a word begins, so whether the `)` before
     it delimits is what decides whether the rest of the line is code or prose
-    - and `)` does both jobs in bash. As an OPERATOR - a `case` pattern
-    terminator, a subshell or group close, an arithmetic `))`, a function
-    definition's parameter list - it ends a word, and the `#` after it opens a
-    comment. As the close of a COMMAND SUBSTITUTION `$( )`, or of a process
-    substitution `<( )` / `>( )`, it sits inside a word, so the `#` after it is
-    ordinary text and the line goes on being code.
+    - and `)` does both jobs in bash. As an OPERATOR it ends a word and the
+    `#` after it opens a comment; as the close of a SUBSTITUTION it sits
+    inside a word, so the `#` after it is ordinary text and the line goes on
+    being code. `_PAREN_SHAPES` above enumerates both groups and names the
+    script that runs each one.
 
     BOTH DIRECTIONS COST SOMETHING AND THEY ARE NOT THE SAME COST. Treating
     every `)` as an operator invents a comment where bash sees data, which
@@ -76,23 +112,77 @@ class _WordParens:
     an arm whose pattern the scanner cannot find, or as a block with no
     catch-all, on shell that runs exactly as it always did.
 
-    Neither direction is asserted in this comment. Every shape named above is
-    executed in a real bash by
-    test_bash_opens_a_comment_only_after_a_paren_that_ends_a_word, and the
-    test beside it requires this class to have reached the same answer.
+    Neither direction is asserted in this comment.
+    test_bash_opens_a_comment_only_after_a_paren_that_ends_a_word runs each
+    script in a real bash, and the test beside it requires this class to have
+    reached the same answer.
 
-    The stack holds one flag per open paren - True when that paren opened a
+    THE STACK HOLDS ONE FLAG PER OPEN PAREN - True when that paren opened a
     word - so `$((1+2))#y`, whose inner `(` is a group and whose outer one is
-    a substitution, comes out as a word. A `)` with an EMPTY stack is an
-    operator, which is the `case` pattern terminator: its `(` is optional and
-    the shipped step omits it.
+    a substitution, comes out as a word.
+
+    A `case` PATTERN TERMINATOR IS NOT A CLOSE AT ALL, and it is the one `)`
+    that must not touch the stack. Its `(` is optional and the shipped step
+    omits it, so popping for it consumes some OTHER construct's flag: inside
+    a command substitution it ate the `$(`, and the substitution's real `)`
+    then read as an operator, so `x=$(case y in y) echo hi ;; esac)#` opened a
+    comment in both scanners and in no bash. That is the expensive direction
+    named above - code deleted from the scan - so the class tracks open `case`
+    statements rather than inferring one from an empty stack.
+
+    WHAT IT DOES NOT MODEL. `case` and `esac` are recognised as WORDS in
+    command position, the same latitude `_CASE_TOKEN` already takes, so a
+    literal unquoted `case` used as a command name would open a context that
+    only a matching `in` can arm. `esac` reached through a variable, or a
+    `case` word built by expansion, is outside the model - as it is for every
+    other scanner in this file.
     """
 
-    __slots__ = ("_stack", "_last_close_in_word")
+    __slots__ = ("_stack", "_last_close_in_word", "_cases", "_word",
+                 "_word_cmd", "_cmd")
 
     def __init__(self):
         self._stack = []
         self._last_close_in_word = False
+        # One entry per open `case`: [paren depth it opened at, state]. State
+        # is "in" while the `case WORD in` head is being read, "pattern" while
+        # a pattern is, "body" inside an arm.
+        self._cases = []
+        self._word = ""
+        self._word_cmd = True
+        self._cmd = True
+
+    def _end_word(self):
+        word, self._word = self._word, ""
+        if not word:
+            return
+        if word == "case" and self._word_cmd:
+            self._cases.append([len(self._stack), "in"])
+        elif self._cases and self._cases[-1][0] == len(self._stack):
+            if word == "in" and self._cases[-1][1] == "in":
+                self._cases[-1][1] = "pattern"
+            elif word == "esac" and self._word_cmd:
+                self._cases.pop()
+        self._cmd = word in _KEEPS_COMMAND_POSITION
+
+    def _awaiting_a_pattern(self):
+        return bool(self._cases) and self._cases[-1] == [
+            len(self._stack), "pattern"]
+
+    def _pattern_ended(self):
+        self._cases[-1][1] = "body"
+        self._last_close_in_word = False
+        self._cmd = True
+
+    def end_of_line(self):
+        """The caller reached a newline that this scan was never fed.
+
+        `code()` hands `_uncomment` one line at a time with the newlines
+        already taken off, so without this a word at the end of one line
+        would go on being read into the first word of the next.
+        """
+        self._end_word()
+        self._cmd = True
 
     def saw(self, s, i, in_a_word):
         """Feed the character at `s[i]`.
@@ -101,16 +191,50 @@ class _WordParens:
         is data rather than punctuation.
         """
         ch = s[i]
-        if ch == "(":
-            if not in_a_word:
-                self._stack.append(i > 0 and s[i - 1] in "$<>")
-        elif ch == ")":
-            if in_a_word:
+        if in_a_word:
+            # Quoting takes a keyword's keyword-ness away - `"case"` in
+            # command position is a command name - so a quoted character ends
+            # whatever word was being read and starts nothing.
+            self._word = ""
+            self._cmd = False
+            if ch == ")":
                 self._last_close_in_word = True
-            elif self._stack:
+            return
+        if ch not in _WORD_BREAK:
+            if not self._word:
+                self._word_cmd = self._cmd
+            self._word += ch
+            return
+        self._end_word()
+        if ch == "(":
+            self._stack.append(i > 0 and s[i - 1] in "$<>")
+            self._cmd = True
+        elif ch == ")":
+            if self._awaiting_a_pattern():
+                self._pattern_ended()
+                return
+            if self._stack:
                 self._last_close_in_word = self._stack.pop()
+                # A `case` left unclosed inside the paren just popped cannot
+                # go on matching depths outside it.
+                while self._cases and self._cases[-1][0] > len(self._stack):
+                    self._cases.pop()
+                if self._awaiting_a_pattern():
+                    # The optional `(` form: `(pattern)`. The `(` was pushed,
+                    # this `)` closed it, and the arm body starts here.
+                    self._pattern_ended()
+                    return
             else:
                 self._last_close_in_word = False
+            self._cmd = False
+        elif ch in ";&|\n":
+            if (ch == ";" and s[i + 1:i + 2] in (";", "&")
+                    and self._cases
+                    and self._cases[-1][0] == len(self._stack)):
+                # `;;`, `;&` and `;;&` all end an arm; the next word is a
+                # pattern again.
+                self._cases[-1][1] = "pattern"
+            self._cmd = True
 
     def opens_comment(self, s, i):
         """Would a `#` at `s[i]` begin a word, and so open a comment?"""
@@ -171,10 +295,12 @@ def _uncomment(line, parens=None):
         elif ch in "'\"":
             quote = ch
         elif ch == "#" and parens.opens_comment(line, i):
+            parens.end_of_line()
             return line[:i].rstrip()
         else:
             parens.saw(line, i, False)
         i += 1
+    parens.end_of_line()
     return line
 
 
@@ -436,6 +562,7 @@ def _model_per_line_quotes(body):
         ch = body[i]
         if ch == "\n":
             quote = None
+            parens.saw(body, i, False)
             i += 1
             continue
         if ch == "\\" and quote != "'":
@@ -1235,6 +1362,26 @@ _COMMENT_OPENER_SCRIPTS = [
      "x=$( (echo hi) )#; echo LOUD\necho DONE\n", False),
     ("after-a-process-substitution-close",
      ": <(echo ps)#; echo LOUD\necho DONE\n", False),
+    ("after-an-output-process-substitution-close",
+     ": >(cat /dev/null)#; echo LOUD\necho DONE\n", False),
+    ("after-a-function-definitions-parameter-list",
+     "foo()#; echo LOUD\n{ echo in-foo; }\necho DONE\n", True),
+    # A `case` PATTERN INSIDE ANOTHER CONSTRUCT, which is where the two roles
+    # of `)` collide. The pattern's `)` closes nothing - its `(` is optional
+    # and omitted here - so a scanner that pops for it spends the enclosing
+    # construct's stack entry, and the enclosing `)` then reads as an
+    # operator. All three of these are one character apart in what the `#`
+    # follows and two of them answer the opposite way.
+    ("after-a-substitution-that-closes-a-case",
+     "x=$(case y in y) echo hi ;; esac)#; echo LOUD\necho DONE\n", False),
+    ("after-a-multi-line-substitution-that-closes-a-case",
+     "x=$(\ncase y in\n  y) echo hi ;;\nesac\n)#; echo LOUD\necho DONE\n",
+     False),
+    ("after-a-subshell-that-closes-a-case",
+     "(case y in y) echo hi ;; esac)#; echo LOUD\necho DONE\n", True),
+    ("after-a-substitution-closing-a-case-inside-a-loop",
+     "x=$(for i in 1; do case $i in 1) echo hi;; esac; done)#; echo LOUD\n"
+     "echo DONE\n", False),
 ]
 
 
@@ -1340,6 +1487,20 @@ class TestWhereAHashOpensAComment:
             "two answers holds half of it - which is the half this file "
             "shipped before #120's second review"
         )
+        table = {name: opens for name, _, opens in _COMMENT_OPENER_SCRIPTS}
+        for shape, (fixture, ends_a_word) in _PAREN_SHAPES.items():
+            assert fixture in table, (
+                f"`_PAREN_SHAPES` says {shape} is run by `{fixture}`, and no "
+                f"script above is called that. A `)` shape this file models "
+                f"with no script is one decided by argument - which is how "
+                f"the class docstring came to name six shapes and execute "
+                f"four."
+            )
+            assert table[fixture] == ends_a_word, (
+                f"`_PAREN_SHAPES` and `{fixture}` disagree about whether {shape} "
+                f"ends a word, so one of the two is describing a different "
+                f"script"
+            )
 
 
 class TestRecordAccountUpload:
