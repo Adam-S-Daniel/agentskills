@@ -11,18 +11,23 @@ than no test suite. `_run_hook` is the only way these tests launch it, and it
 refuses to run without an explicit tmp home.
 """
 
+import ast
 import json
 import os
 import re
 import select
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Collection, Optional, Sequence, Tuple
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pytest
 
@@ -109,6 +114,22 @@ def run_generator(*args: str, cwd: Path = None,
     )
 
 
+def _run_printed(command: str) -> subprocess.CompletedProcess:
+    """Run a remediation line EXACTLY as printed, adding no flag of its own.
+
+    The two leading tokens are the only substitution: a printed command names
+    `python3 scripts/generate_skills_lock.py`, which is the path a reader
+    standing in the registry would type, and a fixture's registry is not this
+    checkout. Everything after them — including the `--repo` and `-o` that say
+    which lock and which clone — has to come from the command itself, because
+    that is the whole property under test. A helper that re-added them would
+    make an incomplete command look complete.
+    """
+    tokens = shlex.split(command)
+    assert tokens[:1] == ["python3"] and tokens[1].endswith("generate_skills_lock.py"), command
+    return run_generator(*tokens[2:])
+
+
 def _registry_shipping_the_generator(root: Path, skills: dict,
                                      layout: str = gsl.DEFAULT_LAYOUT) -> str:
     """A fixture registry that also carries `scripts/generate_skills_lock.py`.
@@ -128,6 +149,8 @@ def _registry_shipping_the_generator(root: Path, skills: dict,
 
 SKILL_A = {"SKILL.md": "---\nname: alpha\n---\nalpha body\n", "notes.md": "a\n"}
 SKILL_B = {"SKILL.md": "---\nname: beta\n---\nbeta body\n"}
+SKILL_C = {"SKILL.md": "---\nname: gamma\n---\ngamma body\n"}
+SKILL_D = {"SKILL.md": "---\nname: delta\n---\ndelta body\n"}
 # A skill directory built to make two independently written digest
 # implementations disagree if they differ at all: a nested directory, an EMPTY
 # file, CRLF line endings, a non-ASCII filename, and a file with no trailing
@@ -416,6 +439,44 @@ def federated(tmp_path):
     return primary, primary_sha, extra, extra_sha
 
 
+@pytest.fixture
+def federated_two(tmp_path):
+    """A primary registry plus TWO sibling registries.
+
+    One source cannot tell "advanced the source I named" from "advanced every
+    source", and it cannot tell "scoped the question" from "asked it and got
+    lucky". Both properties need a source that is deliberately left alone.
+
+    The three BUNDLE names and the three skill BASENAMES are all distinct, and
+    that is load-bearing rather than tidy: a shared bundle is a hard error in
+    `plan_sources` and a shared basename is a hard error in
+    `_reject_basename_collisions`, so either collision would fail the run
+    before it could demonstrate anything about scoping or about merging.
+
+    Both siblings are named so the default `../<repo-name>` checkout lookup
+    finds them, the same way the single-source `federated` fixture is.
+    """
+    primary = tmp_path / "registry"
+    primary_sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    other = tmp_path / "other-platform"
+    other_sha = make_registry(other, {"other/publish": SKILL_C}, layout="skills")
+    return primary, primary_sha, extra, extra_sha, other, other_sha
+
+
+def _federated_two_lock(out: Path, federated_two,
+                        *extra_args: str) -> subprocess.CompletedProcess:
+    primary, primary_sha, extra, extra_sha, other, other_sha = federated_two
+    return run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--source", f"other={other.resolve().as_uri()}@{other_sha}:skills",
+        "-o", str(out), *extra_args,
+    )
+
+
 def _federated_lock(out: Path, federated, *extra_args: str) -> subprocess.CompletedProcess:
     primary, primary_sha, extra, extra_sha = federated
     return run_generator(
@@ -605,7 +666,7 @@ def test_check_inherits_the_locks_sources(federated, tmp_path):
 
 
 def test_check_current_reports_a_change_in_a_federated_source(federated, tmp_path):
-    primary, _, extra, extra_sha = federated
+    primary, primary_sha, extra, extra_sha = federated
     out = tmp_path / "skills.lock"
     assert _federated_lock(out, federated).returncode == 0
 
@@ -617,6 +678,14 @@ def test_check_current_reports_a_change_in_a_federated_source(federated, tmp_pat
     assert "changed" in proc.stdout
     # Named with ITS ref, not the primary's, so the message says what to re-pin.
     assert extra_sha in proc.stdout
+    # ...and the HEADLINE says so, not only a detail line under it. While the
+    # headline named the primary's ref, a reader (and a fleet bumper) was told
+    # to re-pin the half that had not moved.
+    headline = next(line for line in proc.stdout.splitlines() if line.startswith("FAILED:"))
+    assert extra.resolve().as_uri() in headline
+    assert extra_sha in headline
+    assert primary_sha not in headline
+    assert "--repin-source" in proc.stdout
 
 
 def test_check_current_ignores_a_build_artefact_in_a_federated_source(federated, tmp_path):
@@ -637,6 +706,642 @@ def test_check_current_ignores_a_build_artefact_in_a_federated_source(federated,
 
     proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_check_current_failure_attributes_a_federated_drift_to_its_own_registry(
+        federated, tmp_path):
+    """A drift in another registry is reported as that registry's, entirely.
+
+    The primary's sha is absent from everything that ATTRIBUTES the drift — the
+    headline and the difference lines — because the primary did not move and
+    nothing about it is the answer to why this run is red. It appears in the
+    remediation alone, as `--ref`, where its job is the opposite one: holding
+    the pin that did not move while the source's advances. See
+    `test_the_federated_remediation_holds_the_primary_pin_when_only_a_source_drifted`.
+    """
+    primary, primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    headlines = [line for line in lines if line.startswith("FAILED:")]
+    assert len(headlines) == 1, proc.stdout
+    assert headlines[0].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles have moved")
+    assert extra_sha in headlines[0]
+    assert primary_sha not in headlines[0]
+    remediation = lines[lines.index(headlines[0]) + 1]
+    assert remediation.strip() == (
+        "python3 scripts/generate_skills_lock.py --repin "
+        f"--ref {primary_sha} --repin-source '{extra.resolve().as_uri()}@'"
+        + _addressing(primary, out))
+    difference_lines = [line for line in lines if line.strip().startswith("- ")]
+    assert difference_lines and all(primary_sha not in line for line in difference_lines)
+
+
+
+def _rmtree(path: Path) -> None:
+    """`shutil.rmtree`, but able to remove a git object store on Windows.
+
+    Git writes loose objects and packs read-only. POSIX only consults the
+    DIRECTORY's write bit to unlink, so `shutil.rmtree` never notices; Windows
+    consults the FILE's, and refuses with `PermissionError: [WinError 5]`.
+    Three tests here delete a clone whole, so all three failed there while
+    passing on Linux -- the harness's portability, not the generator's.
+
+    The handler clears the read-only attribute and retries once; anything it
+    cannot clear re-raises, so a real permission problem is still a failure.
+    """
+    def _clear_readonly(func, target, _exc):
+        os.chmod(target, 0o700)
+        func(target)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly)
+    else:  # pragma: no cover - the pinned CI interpreters are all >= 3.12
+        shutil.rmtree(path, onerror=lambda f, t, _e: _clear_readonly(f, t, None))
+
+
+def _addressing(primary: Path, out: Path) -> str:
+    """The `--repo` / `-o` a printed command must carry to reach this fixture.
+
+    Not decoration and not a test convenience: a remediation that omits them
+    names a DIFFERENT lock and a different clone. On a consumer lock — every
+    lock the fleet bumper touches — following such a line either fails outright
+    or regenerates this repo's own `skills.lock` instead. So the assertions
+    below spell them out, and `_run_printed` runs what was printed rather than
+    re-adding them.
+
+    Quoted with `shlex.quote`, the same call the generator uses, rather than
+    interpolated raw. A retyped expectation is the defect this branch spent a
+    round closing elsewhere, and it bites here on Windows: a path holding a
+    drive letter and separators is quoted by the code and was not quoted here,
+    so five assertions compared a bare path against a quoted one and failed on
+    a difference that is not about addressing at all.
+    """
+    return f" --repo {shlex.quote(str(primary))} -o {shlex.quote(str(out))}"
+
+
+def _source_drifted(extra: Path, message: str = "the source really moved") -> str:
+    """Commit a real content change in a federated source. Returns its new sha."""
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", message)
+    return _head(extra)
+
+
+def test_the_federated_remediation_holds_the_primary_pin_when_only_a_source_drifted(
+        federated, tmp_path):
+    """The printed command, RUN VERBATIM, must do what the verdict said.
+
+    agentskills #108 fixed this exact class for `--check-format`: `--repin`
+    deliberately does not inherit `ref`, so a remediation printed without one
+    falls through to `resolve_ref(repo, "HEAD")` and advances the pin the
+    verdict just said had not moved. The fleet bumper quotes these lines into a
+    PR body as the command that produced the diff beneath it, so a source-only
+    repair that also bumps the primary is unreviewed content arriving under a
+    verdict that never mentioned it.
+
+    The primary's clone is deliberately AHEAD of the pin here, which is the
+    ordinary state of a checkout, and the difference between a latent bug and a
+    live one.
+    """
+    primary, primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    assert _move_head(primary) != primary_sha
+    advanced = _source_drifted(extra)
+
+    verdict = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    lines = verdict.stdout.splitlines()
+    assert lines[0].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles"), verdict.stdout
+    remediation = lines[1].strip()
+    assert remediation == (
+        "python3 scripts/generate_skills_lock.py --repin "
+        f"--ref {primary_sha} --repin-source '{extra.resolve().as_uri()}@'"
+        + _addressing(primary, out))
+
+    applied = _run_printed(remediation)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert lock["ref"] == primary_sha, "the source-only repair advanced the primary pin"
+    assert lock["sources"][0]["ref"] == advanced
+
+
+def test_the_federated_remediation_drops_the_anchor_when_the_primary_drifted_too(
+        federated, tmp_path):
+    """Holding the pin is right for a source-only repair and wrong here.
+
+    When the primary drifted as well its own block says to advance it, so an
+    anchored federated line would tell the reader to hold the very pin the
+    block above told them to move. One bare `--repin --repin-source` advances
+    both, which is what both verdicts together are asking for.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    _source_drifted(extra)
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    headlines = [index for index, line in enumerate(lines) if line.startswith("FAILED:")]
+    assert len(headlines) == 2, proc.stdout
+    assert lines[headlines[1] + 1].strip() == (
+        "python3 scripts/generate_skills_lock.py --repin "
+        f"--repin-source '{extra.resolve().as_uri()}@'" + _addressing(primary, out))
+
+
+def test_check_current_names_both_when_primary_and_source_both_drift(
+        federated, tmp_path):
+    """Two drifts are two verdicts, and the primary's comes first.
+
+    Order is the cross-repo contract's second fact: the fleet bumper slices
+    from the FIRST `^FAILED:` into a PR body, with a path substitution that
+    names the primary lock alone.
+    """
+    primary, primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    headlines = [line for line in proc.stdout.splitlines() if line.startswith("FAILED:")]
+    assert len(headlines) == 2, proc.stdout
+    assert headlines[0] == (
+        f"FAILED: the bundle has moved on since {primary_sha}, which {out} still pins — "
+        "nothing added or changed since then reaches an ephemeral surface. Re-pin it "
+        "(after committing the content) with:")
+    assert headlines[1].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles")
+    assert "adam/alpha" in proc.stdout and "cms-platform/deploy" in proc.stdout
+
+
+def test_every_failed_line_is_followed_by_its_own_remediation_command(
+        federated_two, tmp_path):
+    """Adjacency in the stream the loop prints, which is where it is true.
+
+    A headline-then-note-then-command shape would break this the moment a
+    second block existed, and a reader scanning for "what do I type" would find
+    the wrong line under the wrong registry.
+
+    This is deliberately NOT a claim about the fleet bumper's 20-line cap. The
+    two are different measurements and the comment at the report loop used to
+    conflate them; `test_the_bumper_cap_can_cut_a_later_headline_from_its_command`
+    is the one that slices.
+    """
+    primary, _, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+    _write(other / "skills" / "publish" / "SKILL.md", "---\nname: publish\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    headlines = [index for index, line in enumerate(lines) if line.startswith("FAILED:")]
+    assert len(headlines) == 3, proc.stdout
+    for index in headlines:
+        assert lines[index + 1].strip().startswith(
+            "python3 scripts/generate_skills_lock.py --repin"), lines[index:index + 2]
+
+
+# The fleet bumper's PR-body slice, reproduced rather than described:
+# `sed -n '/^FAILED:/,$p' | head -20` in bump-consumer-locks.sh. Asserting
+# against the raw stdout measures something no reviewer reads.
+_BUMPER_CAP = 20
+
+
+def _bumper_slice(stdout: str, cap: int = _BUMPER_CAP) -> list:
+    lines = stdout.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("FAILED:"))
+    return lines[start:start + cap]
+
+
+def _drift_the_primary_by(primary: Path, count: int) -> None:
+    """`count` new skills in the working tree — one `added:` difference each."""
+    for index in range(count):
+        _write(primary / "plugins" / "adam" / "skills" / f"extra{index:02d}" / "SKILL.md",
+               f"---\nname: extra{index:02d}\n---\nbody\n")
+
+
+# 5 fixed lines in the primary's block (headline, remediation, three note
+# lines) + this many differences puts the FIRST federated headline on the last
+# line the cap keeps. Named rather than inlined because if the block's fixed
+# size ever changes both tests below go red together, which is the signal that
+# the arithmetic in the report loop's comment needs redoing.
+_DIFFERENCES_THAT_FILL_THE_CAP = _BUMPER_CAP - 5 - 1
+
+
+def test_the_bumper_cap_always_keeps_the_primary_headline_with_its_command(
+        federated, tmp_path):
+    """The one truncation property this report really does guarantee.
+
+    Fact (2) — the primary's block comes first — is what gives it: its headline
+    is line 1 of the slice and its remediation line 2, whatever else drifted.
+    That block is the one the bumper's path substitution names, and it is the
+    only pair any cap above two lines cannot split.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _drift_the_primary_by(primary, _DIFFERENCES_THAT_FILL_THE_CAP)
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    sliced = _bumper_slice(proc.stdout)
+    assert sliced[0].startswith("FAILED: the bundle has moved on since ")
+    assert sliced[1].strip() == ("python3 scripts/generate_skills_lock.py --repin"
+                                 + _addressing(primary, out))
+
+
+def test_the_bumper_cap_can_cut_a_later_headline_from_its_command(
+        federated, tmp_path):
+    """The counterexample to the absolute the report loop used to assert.
+
+    It claimed a truncation "can never separate a headline from the command
+    that fixes it". With the primary's block filling the cap, the first
+    federated headline is the LAST line kept and its remediation is the first
+    line dropped — so the PR body a reviewer reads ends on a failure naming a
+    registry, with no command under it.
+
+    Pinned as a measurement, not as a wish: this test going red means the
+    report's shape changed, and the comment that now states the cap is unsafe
+    for a later block has to be re-derived rather than left standing.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _drift_the_primary_by(primary, _DIFFERENCES_THAT_FILL_THE_CAP)
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    sliced = _bumper_slice(proc.stdout)
+
+    assert len(sliced) == _BUMPER_CAP
+    assert sliced[-1].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles have moved")
+    # Its remediation exists — adjacency holds in the stream — and is exactly
+    # the line the cap drops.
+    first_cut = lines[lines.index(sliced[-1]) + 1]
+    assert first_cut.strip().startswith("python3 scripts/generate_skills_lock.py --repin")
+
+
+# A SCOPED source block is 2 fixed lines (headline + remediation) + one line
+# per difference, with no note lines and no primary block above it — so the
+# count that orphans the NEXT block's headline differs from the unscoped one.
+# Named for the same reason: if a block's fixed size changes, this goes red
+# beside its unscoped sibling and the report loop's arithmetic is re-derived.
+_SCOPED_DIFFERENCES_THAT_FILL_THE_CAP = _BUMPER_CAP - 2 - 1
+
+
+def test_the_bumper_cap_can_cut_a_scoped_headline_from_its_command(
+        federated_two, tmp_path):
+    """The bumper's OTHER slice, which the fix for the first one denied existed.
+
+    _agent-guidance's bump-consumer-locks.sh caps two streams from this report,
+    not one. Besides the unscoped `check_out` it builds `fed_check_out` by
+    CONCATENATING one `--check-current --only <registry>` block per drifted
+    source and slices that with the same `head -20`. This reproduces that
+    concatenation rather than describing it.
+
+    Two things the unscoped tests cannot show: the stream carries no primary
+    block at all, so "the primary's pair survives any cap" is about a block
+    that is not there; and a source block's smaller fixed size means a
+    different number of differences orphans the next headline.
+
+    Pinned as a measurement. Making a later block's pair unsplittable is a fine
+    thing to do — it is what the ambiguous-source headline already does — but
+    it cannot be ASSERTED while this test still passes.
+    """
+    primary, _primary_sha, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    for index in range(_SCOPED_DIFFERENCES_THAT_FILL_THE_CAP):
+        _write(extra / "skills" / f"added{index:02d}" / "SKILL.md",
+               f"---\nname: added{index:02d}\n---\nbody\n")
+    _write(other / "skills" / "publish" / "SKILL.md", "---\nname: publish\n---\nedited\n")
+
+    blocks = []
+    for source in json.loads(out.read_text(encoding="utf-8"))["sources"]:
+        scoped = run_generator("--repo", str(primary), "--check-current",
+                               "--only", source["registry"], "-o", str(out))
+        assert scoped.returncode == 1, scoped.stdout + scoped.stderr
+        blocks.append(scoped.stdout.rstrip("\n"))
+    stream = "\n".join(blocks) + "\n"
+
+    lines = stream.splitlines()
+    sliced = _bumper_slice(stream)
+    assert len(sliced) == _BUMPER_CAP, stream
+    assert sliced[-1].startswith(
+        f"FAILED: {other.resolve().as_uri()}'s bundles have moved"), stream
+    first_cut = lines[lines.index(sliced[-1]) + 1]
+    assert first_cut.strip().startswith(
+        "python3 scripts/generate_skills_lock.py --repin"), stream
+    # No primary block anywhere in it: a scoped run selects the named source
+    # alone, so the one pair the cap cannot split here belongs to a source.
+    assert "FAILED: the bundle has moved on since" not in stream, stream
+
+
+def test_check_current_verdict_still_starts_with_FAILED_at_column_zero(
+        federated, tmp_path):
+    """The contract's first fact, asserted for a federated block too.
+
+    _agent-guidance's bump-consumer-locks.sh branches on `grep -q '^FAILED:'`
+    and routes anything else to a path that reports without rewriting. A
+    verdict indented by two spaces is not a softer message there — it is a
+    consumer lock that silently stops being maintained.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+    federated_drift = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert federated_drift.returncode == 1
+    assert federated_drift.stdout.startswith("FAILED: ")
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", SKILL_B["SKILL.md"])
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    primary_drift = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert primary_drift.returncode == 1
+    assert primary_drift.stdout.startswith("FAILED: ")
+
+
+# --------------------------------------------------------------------------
+# --check-current --only: drift attribution by QUESTION, not by answer
+#
+# A caller that wants to know whether the FEDERATED half of a lock has moved
+# cannot read that off a full-lock verdict: one combined `FAILED:` is printed
+# whether the primary drifted, a source drifted, or both. Measured before this
+# flag existed, on a lock with two sources both sitting exactly at their pins
+# and only the primary edited: exit 1, one `FAILED:` line, zero federated
+# differences. A gate keyed on that verdict advances every federated pin on
+# every ordinary night. `--only` makes the scope a property of the question.
+# --------------------------------------------------------------------------
+
+def test_check_current_only_scopes_the_question_to_one_federated_source(
+        federated_two, tmp_path):
+    """The regression this flag exists for: a PRIMARY-only drift is not federated drift.
+
+    Unscoped this lock is red, and it is red for a reason that has nothing to
+    do with either source. Asked about a source specifically, each one answers
+    green, because each one really is sitting at its pin.
+    """
+    primary, _, _extra, _extra_sha, _other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+    sources = json.loads(out.read_text(encoding="utf-8"))["sources"]
+
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nalpha body, edited\n")
+
+    combined = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert combined.returncode == 1, combined.stdout + combined.stderr
+
+    for source in sources:
+        scoped = run_generator("--repo", str(primary), "--check-current",
+                               "--only", source["registry"], "-o", str(out))
+        assert scoped.returncode == 0, (source["registry"], scoped.stdout, scoped.stderr)
+        assert "FAILED:" not in scoped.stdout
+
+
+def test_check_current_only_on_the_primary_ignores_a_drifted_source(
+        federated_two, tmp_path):
+    """The mirror. Scoped to the primary, another registry's drift is not this
+    question's answer."""
+    primary, _, extra, _extra_sha, _other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    combined = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert combined.returncode == 1, combined.stdout + combined.stderr
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", primary.resolve().as_uri(), "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+
+
+def test_check_current_only_refuses_a_registry_the_lock_does_not_plan(
+        federated, tmp_path):
+    """And names what it DOES plan: the lock's own strings are the key, so an
+    OWNER/REPO lock does not match an https:// URL for the same repository, and
+    a caller has to be able to see that from the one line it gets."""
+    primary, _, extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    proc = run_generator("--repo", str(primary), "--check-current",
+                         "--only", "owner/nowhere", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "FAILED:" not in proc.stdout    # not drift — the question could not be asked
+    assert "ERROR:" in proc.stderr
+    assert primary.resolve().as_uri() in proc.stderr
+    assert extra.resolve().as_uri() in proc.stderr
+
+
+def test_check_current_only_refuses_a_registry_that_is_both_primary_and_source(
+        tmp_path):
+    """Nothing else refuses this shape: plan_sources rejects a BUNDLE claimed
+    twice and says nothing about one registry standing as both halves.
+
+    The source here omits `layout`, so it inherits DEFAULT_LAYOUT — the
+    primary's own. The refusal used to tell the reader their two entries
+    "carry different bundles and different layouts" and then say "Fix the
+    lock", which is a message asserting something false about the lock in front
+    of them. Only the bundles are forced apart, by plan_sources' uniqueness
+    check; the layouts here are identical and so are the refs.
+    """
+    primary = tmp_path / "registry"
+    primary_sha = make_registry(primary, {"adam/alpha": SKILL_A, "extras/beta": SKILL_B})
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"extras={primary.resolve().as_uri()}@{primary_sha}",
+        "--source-repo", f"extras={primary}", "-o", str(out)).returncode == 0
+
+    proc = run_generator("--repo", str(primary), "--check-current",
+                         "--only", primary.resolve().as_uri(),
+                         "--source-repo", f"extras={primary}", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "FAILED:" not in proc.stdout
+    assert "BOTH" in proc.stderr
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert lock["sources"][0]["layout"] == gsl.DEFAULT_LAYOUT
+    assert "different layouts" not in proc.stderr, proc.stderr
+
+
+def test_check_current_only_without_check_current_is_an_argparse_error(
+        federated, tmp_path):
+    primary, _, _extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), "--only", primary.resolve().as_uri(),
+                         "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert "--only" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+# `--only "$REG"` with an unset REG is the ordinary route in a shell caller,
+# which is what the fleet bumper is — so the empty string is not a hypothetical
+# input, it is the failure mode of the intended one.
+_EMPTY_ONLY_SHAPES = [
+    pytest.param([], id="a plain generate"),
+    pytest.param(["--check"], id="--check"),
+    pytest.param(["--check-format"], id="--check-format"),
+]
+assert _EMPTY_ONLY_SHAPES, "an empty parametrize list SKIPS at exit 0"
+
+
+@pytest.mark.parametrize("other_flags", _EMPTY_ONLY_SHAPES)
+def test_only_with_an_empty_value_is_refused_rather_than_silently_ignored(
+        federated, tmp_path, other_flags):
+    """An unset shell variable must not degrade into a different command.
+
+    Both guards tested `args.only` for TRUTH, and the empty string is falsy, so
+    `--only ''` slipped past them and the run continued unscoped. On a plain
+    generate that is a data-loss path, not a cosmetic one: the run writes a
+    lock from the command line alone, which DE-FEDERATES the lock and replaces
+    its registry with DEFAULT_REGISTRY, at exit 0, with `--check` green
+    afterwards. On `--check` it answers the unscoped question while the caller
+    believes it was scoped.
+    """
+    primary, _, _extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), *other_flags, "--only", "",
+                         "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "--only" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+    assert "sources" in json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_check_current_only_alongside_check_or_check_format_is_an_argparse_error(
+        federated, tmp_path):
+    """`status` is already the worst verdict across the verify flags, so a run
+    with one of them scoped and the others not has an exit code that answers no
+    question anybody asked."""
+    primary, _, _extra, _ = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    for other_flag in ("--check", "--check-format"):
+        proc = run_generator("--repo", str(primary), "--check-current", other_flag,
+                             "--only", primary.resolve().as_uri(), "-o", str(out))
+        assert proc.returncode == 2, (other_flag, proc.stdout, proc.stderr)
+        assert "usage:" in proc.stderr
+        assert "--only" in proc.stderr
+
+
+def test_check_current_only_does_not_need_an_unrelated_sources_checkout(
+        federated_two, tmp_path):
+    """This is what pins filtering BEFORE plan_sources rather than after it.
+
+    plan_sources raises on the first `no checkout at ...` it meets, so a filter
+    applied to its output would let one absent sibling clone decide a question
+    asked about a different registry entirely.
+    """
+    primary, _, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    shutil.move(str(other), str(tmp_path / "moved-away"))
+
+    combined = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert combined.returncode != 0
+    assert "no checkout at" in combined.stderr
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", extra.resolve().as_uri(), "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+
+
+def test_check_current_only_ok_line_names_the_scoped_sources_ref(
+        federated, tmp_path):
+    """The OK line names the ref this run actually read, not the primary's."""
+    primary, primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", extra.resolve().as_uri(), "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+    assert scoped.stdout == f"OK: the working tree still matches {extra_sha} (1 skills).\n"
+
+    unscoped = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert unscoped.returncode == 0, unscoped.stdout + unscoped.stderr
+    assert unscoped.stdout == f"OK: the working tree still matches {primary_sha} (2 skills).\n"
+
+
+def test_the_scoped_ok_line_names_the_resolved_ref_not_the_locks_raw_string(
+        federated, tmp_path):
+    """The OK line and the FAILED headline must name the same thing.
+
+    `validate_ref` accepts a branch name in a source's `ref`, so a hand-edited
+    or hand-written lock can carry one. Everything that READS that source
+    resolves it first — plan_sources does, and the drift verdict prints the
+    resolved sha — so an OK line reading the raw lock string reported a ref
+    that no part of the run had looked at, and named it differently from the
+    way the failing path names the very same source.
+    """
+    primary, _primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["sources"][0]["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", extra.resolve().as_uri(), "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+    assert scoped.stdout == f"OK: the working tree still matches {extra_sha} (1 skills).\n"
+
+
+def test_the_scoped_ok_line_names_every_ref_the_run_read(tmp_path):
+    """One line, one ref — unless the scope really did read two.
+
+    `_select_sources` returns EVERY entry matching the registry, so a lock that
+    federates one registry twice is scoped to both and two pins are read. The
+    line used to name `selected[0]` and call it "the" ref, which is a
+    one-of-two the reader has no way to detect.
+    """
+    primary, _extra, uri, out = _lock_federating_one_registry_twice(tmp_path)
+    refs = [source["ref"] for source in json.loads(out.read_text(encoding="utf-8"))["sources"]]
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", uri, "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+    assert scoped.stdout == (
+        f"OK: the working tree still matches {', '.join(refs)} (2 skills).\n")
 
 
 # --------------------------------------------------------------------------
@@ -1025,7 +1730,7 @@ def test_check_current_flags_a_skill_removed_from_the_working_tree(registry, tmp
     out = tmp_path / "skills.lock"
     _lock_for(root, out)
 
-    shutil.rmtree(root / "plugins" / "adam" / "skills" / "beta")
+    _rmtree(root / "plugins" / "adam" / "skills" / "beta")
 
     proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
     assert proc.returncode == 1, proc.stdout + proc.stderr
@@ -1066,6 +1771,11 @@ def test_check_current_failure_names_the_re_pin_command(registry, tmp_path):
     proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
     assert proc.returncode == 1
     assert "scripts/generate_skills_lock.py --repin" in proc.stdout
+    # The substring above is satisfied by a `--repin --repin-source 'X@'` line
+    # too, so without this the test is a green light wired to nothing: a bug
+    # that printed the federated remediation for a PRIMARY drift would keep it
+    # passing, and following that line advances the wrong pin.
+    assert "--repin-source" not in proc.stdout
 
 
 def test_check_current_failure_names_the_merge_cause(registry, tmp_path):
@@ -1330,6 +2040,12 @@ def test_check_format_fails_a_mixed_lock_and_names_only_the_bare_ones(registry, 
     assert "adam/beta" not in proc.stdout
 
 
+def _without_commands(stdout: str) -> str:
+    """The verdict with its remediation lines removed."""
+    return "\n".join(line for line in stdout.splitlines()
+                     if not line.strip().startswith("python3 "))
+
+
 def _suggested_command(stdout: str) -> str:
     """The one line of a --check-format failure a reader is meant to RUN.
 
@@ -1398,6 +2114,35 @@ def test_check_format_suggests_a_repin_pinned_to_the_locks_own_ref(registry, tmp
     assert drifted["skills"] != before
 
 
+def test_the_cross_repo_anchor_comment_names_its_counterpart_block(tmp_path):
+    """A cross-repo contract that names only a FILE degrades into a search.
+
+    This one is two halves that must move together: the `--ref` this report
+    prints, and `repin_ref_args=(--ref "$old_ref")` on the fleet bumper's
+    format branch. Nothing compares the two copies automatically, so the only
+    thing holding them together is each side naming the other precisely enough
+    to be found. The bumper's half names this docstring and quotes the
+    paragraph it expects to find; this half named the script and stopped there,
+    which is how the bumper ended up still asking for an edit that had already
+    been made, with nothing over here pointing at the request.
+    """
+    def unwrapped(text: str) -> str:
+        # Comment prose wraps, so a quoted phrase is split across lines. Compare
+        # against the unwrapped text rather than letting a line break decide
+        # whether a pointer counts as present.
+        return " ".join(line.strip().lstrip("#").strip() for line in text.splitlines())
+
+    source = GENERATOR.read_text(encoding="utf-8")
+    block = unwrapped(source[source.index("THE COUNTERPART BLOCK"):][:1400])
+    assert "scripts/bump-consumer-locks.sh" in block
+    assert "A SIBLING SITE MOVES WITH THIS" in block
+    assert "One consequence to expect rather than re-discover" in block
+    # The paragraph the bumper still expects to find here is genuinely gone —
+    # its only occurrence is the quotation above, which is what makes that
+    # block stale rather than merely duplicated.
+    assert unwrapped(source).count("One consequence to expect rather than re-discover") == 1
+
+
 def test_check_format_will_not_echo_a_hand_edited_ref_into_the_command(registry,
                                                                       tmp_path):
     """That line is copy-pasteable, and the fleet bumper slices it into a PR body.
@@ -1405,8 +2150,15 @@ def test_check_format_will_not_echo_a_hand_edited_ref_into_the_command(registry,
     The document arrives as found on disk, so `ref` is arbitrary text until
     something checks it. A shell metacharacter reaching a reader's terminal
     through a report ABOUT a malformed lock would be the report becoming the
-    vulnerability. `_REF_RE` is the guard; the placeholder is the fallback, and
-    the run still names the real problem.
+    vulnerability.
+
+    The guard used to be a charset test (`_REF_RE`) plus a placeholder to fall
+    back to. It is now `repin_primary_blocker`, asked through `remediation`
+    like every other refusal: a `ref` that is not a 40-hex commit sha is a lock
+    no `--repin` will repair, so there is no command to print and the reason
+    goes in the headline. Strictly stronger — the placeholder line could not be
+    RUN, and a remediation a reader must edit first is the same defect in a
+    politer voice.
     """
     root, _ = registry
     out = tmp_path / "skills.lock"
@@ -1417,9 +2169,12 @@ def test_check_format_will_not_echo_a_hand_edited_ref_into_the_command(registry,
 
     proc = run_generator("--check-format", "-o", str(out))
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert hostile not in proc.stdout + proc.stderr
-    command = _suggested_command(proc.stdout)
-    assert "--ref <the commit this lock pins>" in command, command
+    assert not _printed_commands(proc.stdout), proc.stdout
+    assert hostile not in _without_commands(proc.stdout).replace(repr(hostile), "")
+    # Named in the refusal, and only there: `repr` renders it single-quoted, so
+    # even the sentence carries it inert, and no line of this report is one a
+    # reader is invited to paste.
+    assert f"at {hostile!r}, which is not a commit sha" in proc.stdout, proc.stdout
     assert "lowercase hex" in proc.stdout    # still the verdict it came to give
 
 
@@ -1430,24 +2185,29 @@ def test_check_format_will_not_echo_a_hand_edited_ref_into_the_command(registry,
 # the total count moved. A module-level assert is a collection ERROR instead,
 # the same self-proving discipline `_unlabel` uses on the fixture it edits.
 # "-o" is the case a charset guard alone lets through: it is legal in
-# `_REF_RE`, so before the dash check it was echoed straight into the command
-# as `--ref -o --repo ...`, where the ref stops being a value and becomes an
-# OPTION. That fails loudly (argparse exit 2) rather than silently, but a
-# remediation line that cannot run is still a remediation line that does not
-# do what the sentence above it promises.
+# `_REF_RE`, so while `_suggested_repin_ref` was the guard it was echoed
+# straight into the command as `--ref -o --repo ...`, where the ref stops being
+# a value and becomes an OPTION. `_REF_RE` is not the guard any more —
+# `repin_primary_blocker` is, through `remediation`, and it refuses anything
+# that is not a 40-hex sha — so the shell hazard is closed by the same rule
+# that closes the "printed a command --repin would refuse" one, rather than by
+# a second charset check beside it. The list stays because it is the set of
+# `ref` values a merge or a hand edit really leaves behind.
 _UNUSABLE_REFS = [None, 7, "", "  ", "a" * 40 + " --repo /elsewhere", "-o"]
 assert len(_UNUSABLE_REFS) == 6
 
 
 @pytest.mark.parametrize("ref_value", _UNUSABLE_REFS)
-def test_check_format_falls_back_to_a_placeholder_ref_rather_than_omitting_it(
+def test_check_format_prints_no_command_for_a_lock_with_no_usable_ref(
         registry, tmp_path, ref_value):
     """A lock with no usable `ref` is the state a bad merge resolution leaves.
 
-    Omitting the flag would silently restore the defect this pair exists to
-    close, so the fallback is a PLACEHOLDER the reader must fill in, plus a
-    line saying why. `--repin` refuses such a lock anyway, and saying so here
-    is cheaper than discovering it one failed command later.
+    This used to print the command with a `<the commit this lock pins>`
+    placeholder and a line explaining it. Both are gone, because `--repin`
+    refuses such a lock outright and a line that cannot be run as printed is
+    the very thing the "print it only if you would run it" rule forbids. What
+    the reader gets instead is the refusal itself, in the headline, where no
+    truncation can separate it from the verdict it belongs to.
     """
     root, _ = registry
     out = tmp_path / "skills.lock"
@@ -1457,8 +2217,11 @@ def test_check_format_falls_back_to_a_placeholder_ref_rather_than_omitting_it(
 
     proc = run_generator("--check-format", "-o", str(out))
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "--ref <the commit this lock pins>" in _suggested_command(proc.stdout)
-    assert "no usable 'ref'" in proc.stdout
+    assert not _printed_commands(proc.stdout), proc.stdout
+    failed = [line for line in proc.stdout.splitlines() if line.startswith("FAILED:")]
+    assert len(failed) == 1, proc.stdout
+    assert "would refuse one: " in failed[0], failed[0]
+    assert "lowercase hex" in failed[0], failed[0]
 
 
 # --------------------------------------------------------------------------
@@ -1573,7 +2336,25 @@ def test_check_format_ignores_repo_entirely(registry, tmp_path):
     for repo_arg in clones:
         other_run = run_generator("--check-format", "--repo", repo_arg, "-o", str(out))
         assert other_run.returncode == baseline.returncode, repo_arg
-        assert other_run.stdout == baseline.stdout, repo_arg
+        # The VERDICT is what must not move: the FAILED line, the offender
+        # names, the count. The remediation is allowed to differ, and must —
+        # it echoes back the `--repo` this run was given, because a re-pin
+        # needs a clone and the caller is the only one who knows where it is.
+        # `--repo /no-such-clone` still produces this same verdict, which is
+        # the property the flag actually promises: it is not READ here.
+        assert _without_commands(other_run.stdout) == _without_commands(baseline.stdout), \
+            repo_arg
+        printed = _printed_commands(other_run.stdout)
+        assert len(printed) == 1, other_run.stdout
+        # REPO_ROOT is what the command defaults to, so naming it would be
+        # noise; anything else has to be said or the line addresses the wrong
+        # clone.
+        expected = ("" if Path(repo_arg).resolve() == REPO_ROOT
+                    else f"--repo {shlex.quote(str(repo_arg))}")
+        assert expected in printed[0], (repo_arg, printed[0])
+        if not expected:
+            assert "--repo" not in printed[0], printed[0]
+
     # Same reason as above: an empty tuple here agrees with everything.
     assert len(clones) == 3
 
@@ -1840,6 +2621,59 @@ def _base_repo_with_a_committed_lock(tmp_path: Path) -> Path:
 def _merge(root: Path, branch: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root), "merge", "--no-edit", branch],
                           capture_output=True, text=True)
+
+
+def test_the_stale_remediation_restates_the_whole_identity_it_would_otherwise_default(
+        tmp_path):
+    """--check's line is the only plain generate this file prints. Run it.
+
+    A plain generate takes its WHOLE identity from the command line — `--repin`
+    is what inherits — so a remediation naming only `--ref` and `--source`
+    silently re-points the lock at DEFAULT_REGISTRY, narrows it to
+    DEFAULT_BUNDLES, and drops every other bundle's skills, at exit 0, with
+    `--check` green afterwards for having done so. `repin_inherit_blocker`'s
+    docstring names that hazard in as many words; this line was the one place
+    in the file instructing a reader to walk into it.
+
+    Measured before the fix on a lock at `Acme/private-registry`, bundles
+    `['custom']`, one federated source: running the printed line took the
+    registry to `Adam-S-Daniel/agentskills`, the bundles to `['adam']`, and
+    lost `custom/alpha`.
+
+    Every field is checked, not only `registry`: a test that watched one of
+    them would go green against a line that restated that one alone. `-o` and
+    `--repo` are part of it too — without them the command names a different
+    lock and a different clone, which for a consumer lock is the same defect
+    wearing the fleet bumper's clothes.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"custom/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", "Acme/private-registry", "--ref", sha,
+        "--bundles", "custom",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "-o", str(out)).returncode == 0
+    before = json.loads(out.read_text(encoding="utf-8"))
+    assert before["registry"] != gsl.DEFAULT_REGISTRY
+    assert before["bundles"] != list(gsl.DEFAULT_BUNDLES)
+
+    # Stale by a hand edit rather than a content change, so what the command
+    # must reproduce is exactly the document already on disk.
+    stale = dict(before, skills={k: v for k, v in list(before["skills"].items())[1:]})
+    out.write_text(json.dumps(stale, indent=2) + "\n", encoding="utf-8")
+
+    verdict = run_generator("--repo", str(primary), "--check", "-o", str(out))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    commands = _printed_commands(verdict.stdout)
+    assert len(commands) == 1, verdict.stdout
+
+    applied = _run_printed(commands[0])
+    assert applied.returncode == 0, (commands[0], applied.stdout + applied.stderr)
+    assert json.loads(out.read_text(encoding="utf-8")) == before, commands[0]
+    assert run_generator("--repo", str(primary), "--check", "-o", str(out)).returncode == 0
 
 
 def test_a_merge_can_leave_the_lock_stale_with_no_conflict(tmp_path):
@@ -2220,6 +3054,2899 @@ def test_repin_still_accepts_source_repo_which_is_not_the_locks_identity(federat
                          "--source-repo", f"cms-platform={relocated}", "-o", str(out))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "cms-platform/deploy" in json.loads(out.read_text(encoding="utf-8"))["skills"]
+
+
+# --------------------------------------------------------------------------
+# --repin-source: the ONE way a federated pin advances
+#
+# Inheritance stays the default and stays the only thing that carries a
+# source's ref forward — `test_repin_on_a_federated_lock_preserves_every_source_verbatim`
+# is the standing proof and is deliberately untouched by any of this. What was
+# missing was any way to advance ONE named source without reaching for
+# `--source`, which REPLACES the inherited array and de-federates the lock. So
+# this flag merges by registry key and can express nothing else.
+# --------------------------------------------------------------------------
+
+def _repin_source_lock(federated_two, out: Path) -> dict:
+    assert _federated_two_lock(out, federated_two).returncode == 0
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def _source_named(lock: dict, registry: str) -> dict:
+    return next(source for source in lock["sources"] if source["registry"] == registry)
+
+
+def test_repin_source_advances_only_the_named_source(federated_two, tmp_path):
+    """The merge-not-replace property, and the whole reason for the flag.
+
+    BOTH siblings move, so an implementation that re-resolved every source to
+    HEAD — or that replaced the array with the one source named — produces a
+    different answer from one that merged a single key. The un-named source is
+    compared as a whole dict rather than on `ref` alone: bundles and layout are
+    the lock's identity and a re-pin must not restate them either.
+    """
+    primary, _, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    before = _repin_source_lock(federated_two, out)
+
+    _move_head(extra)
+    advanced = _move_head(other)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{other.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert [source["registry"] for source in after["sources"]] == \
+           [source["registry"] for source in before["sources"]]
+    assert _source_named(after, other.resolve().as_uri())["ref"] == advanced
+    assert _source_named(after, extra.resolve().as_uri()) == \
+           _source_named(before, extra.resolve().as_uri())
+
+
+def test_repin_source_with_an_empty_ref_advances_to_that_sources_head(
+        federated, tmp_path):
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    advanced = _move_head(extra)
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["sources"][0]["ref"] == advanced != extra_sha
+    # A resolved sha, never the literal HEAD: a source has no `generated_from`
+    # to record a resolution in, so an unresolved ref there is the one unpinned
+    # half of a lock whose entire purpose is pinning.
+    assert re.fullmatch(r"[0-9a-f]{40}", after["sources"][0]["ref"])
+
+
+def test_repin_source_with_an_explicit_ref_pins_exactly_that(federated, tmp_path):
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    middle = _move_head(extra, "middle")
+    _move_head(extra, "newest")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@{middle}",
+                         "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] == middle
+
+
+def test_repin_source_can_pin_a_source_backward(federated, tmp_path):
+    """Nothing here enforces that a new pin is NEWER, deliberately.
+
+    Putting a federated source back on a known-good commit after a bad bump is
+    the same legitimate operation `--repin --ref` already is for the primary.
+    """
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _move_head(extra)
+    forward = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{extra.resolve().as_uri()}@",
+                            "-o", str(out))
+    assert forward.returncode == 0, forward.stdout + forward.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] != extra_sha
+
+    back = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@{extra_sha}",
+                         "-o", str(out))
+    assert back.returncode == 0, back.stdout + back.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] == extra_sha
+
+
+def test_repin_source_redigests_the_advanced_sources_skills(federated, tmp_path):
+    """A pin that moved without its digests moving is an attestation over bytes
+    nobody recomputed — the exact thing the lock exists to make impossible."""
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = json.loads(out.read_text(encoding="utf-8"))
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\ndeploy v2\n")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "deploy v2")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["skills"]["cms-platform/deploy"] != before["skills"]["cms-platform/deploy"]
+    assert after["skills"]["cms-platform/deploy"] == gsl.LOCK_DIGEST_PREFIX + \
+        gsl.digest_skill_dir(extra / "skills" / "deploy")
+    assert after["skills"]["adam/alpha"] == before["skills"]["adam/alpha"]
+
+
+def test_repin_source_leaves_the_primary_ref_alone_when_only_a_source_is_named(
+        federated, tmp_path):
+    """Advancing a source is not a primary content advance.
+
+    The fleet bumper's federated-only night is exactly this invocation — the
+    primary held at the ref it already pins, one source moved — so the two
+    halves have to be independently settable in one run.
+    """
+    primary, primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _move_head(primary)
+    advanced = _move_head(extra)
+
+    proc = run_generator("--repo", str(primary), "--repin", "--ref", primary_sha,
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["ref"] == primary_sha
+    assert after["sources"][0]["ref"] == advanced
+
+
+def test_an_unnamed_source_pinned_at_a_branch_refuses_the_whole_repin(
+        federated_two, tmp_path):
+    """The limit round 3 documented, closed rather than restated.
+
+    `_apply_repin_sources` genuinely does not touch a source it was not given,
+    but plan_sources resolves every source's ref before build_lock writes it —
+    so a lock carrying a BRANCH name there (which `validate_ref` accepts) had
+    that source re-pinned to whatever the sibling clone was sitting on, by a
+    re-pin aimed at a different registry entirely, with no identity probe
+    anywhere on that path. Measured before the refusal, with the unnamed
+    source's clone replaced by a wholly unrelated repository: the impostor's
+    HEAD was written under that registry's name at exit 0.
+
+    A branch name proves no identity wherever it sits, so the refusal is scoped
+    to the invocation rather than to the registry the spec names —
+    `repin_unproven_sources_blocker`.
+    """
+    primary, _, extra, _extra_sha, other, other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    document = json.loads(out.read_text(encoding="utf-8"))
+    _source_named(document, other.resolve().as_uri())["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    before = out.read_text(encoding="utf-8")
+
+    # A DIFFERENT repository at the unnamed source's sibling path. Its `main`
+    # resolves; it has nothing to do with the registry the lock names.
+    _rmtree(other)
+    impostor_sha = make_registry(other, {"other/publish": SKILL_A}, layout="skills")
+    assert impostor_sha != other_sha
+
+    for spec in ([], ["--repin-source", f"{extra.resolve().as_uri()}@"]):
+        proc = run_generator("--repo", str(primary), "--repin", *spec, "-o", str(out))
+        assert proc.returncode == 1, (spec, proc.stdout + proc.stderr)
+        assert "not a commit sha" in proc.stderr, proc.stderr
+        assert out.read_text(encoding="utf-8") == before
+        assert impostor_sha not in out.read_text(encoding="utf-8")
+
+
+def test_an_unnamed_source_with_an_uppercase_pin_comes_back_lowercase(tmp_path):
+    """The one way `--repin-source` does NOT return an unnamed source verbatim.
+
+    `_apply_repin_sources` promises to move no pin the caller did not name, and
+    its docstring used to add that for a 40-hex sha "by-reference and
+    byte-identical are the same thing". 23caaf3 made that false one commit
+    later by widening `_COMMIT_SHA_RE` to accept an uppercase sha: such a pin
+    is now READ, and plan_sources re-resolves every inherited source ref, so
+    `resolve_ref`'s lowercase is what reaches disk.
+
+    Wanted, not tolerated — the hook's `fetch_source` branches on
+    `^[0-9a-f]{40}$`, so an uppercase pin is a lock it cannot fetch — which is
+    why this is a test of the normalisation rather than a fix to the code. It
+    exists so the docstring's remaining claim is one a reader can check.
+    """
+    primary, out = _two_sources(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    named, unnamed = document["sources"][0], document["sources"][1]
+    unnamed["ref"] = unnamed["ref"].upper()
+    assert unnamed["ref"] != unnamed["ref"].lower()
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    applied = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{named['registry']}@", "-o", str(out))
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = {source["registry"]: source["ref"]
+             for source in json.loads(out.read_text(encoding="utf-8"))["sources"]}
+    assert after[unnamed["registry"]] == unnamed["ref"].lower()
+
+
+def test_repin_source_refuses_a_registry_the_lock_does_not_federate(
+        federated, tmp_path):
+    """ADDING a source changes what the lock means; that is a plain generate."""
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", "owner/never-heard-of-it@", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "not a source this lock federates" in proc.stderr
+    assert extra.resolve().as_uri() in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_source_refuses_the_primary_registry(federated, tmp_path):
+    primary, _, _extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{primary.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "PRIMARY registry" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_source_refuses_the_same_registry_twice(federated, tmp_path):
+    """Two pins for one source is not a last-one-wins precedence question."""
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+    newest = _move_head(extra)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@{extra_sha}",
+                         "--repin-source", f"{extra.resolve().as_uri()}@{newest}",
+                         "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "twice" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_source_without_repin_is_an_argparse_error(federated, tmp_path):
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(primary),
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert "--repin-source" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_repin_source_on_a_plain_generate_is_refused_before_anything_is_written(
+        federated, tmp_path):
+    """The counterexample the argparse guard exists for.
+
+    A plain generate with `--source` populates `extras` from the command line,
+    so a merge step guarded on `--repin-source` alone would rewrite a source's
+    ref on a WRITE path that never inherited anything — at exit 0, under an
+    ordinary `Wrote ...` line.
+    """
+    primary, primary_sha, extra, extra_sha = federated
+    out = tmp_path / "never-written.lock"
+
+    proc = run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "usage:" in proc.stderr
+    assert not out.exists()
+
+
+def test_repin_source_is_not_in_the_refused_identity_flags(federated, tmp_path):
+    """The flag written to close the de-federation trap must not be folded into it.
+
+    `--registry` / `--bundles` / `--source` are refused alongside `--repin`
+    because each REPLACES part of the inherited identity. `--repin-source`
+    merges by key and replaces nothing, so tidying it into that list would make
+    the only way to advance a federated pin an error alongside the only flag it
+    means anything with.
+    """
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    _move_head(extra)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "--repin inherits the lock's identity" not in proc.stderr
+
+
+def test_repin_source_honours_source_repo_for_an_out_of_tree_clone(
+        federated, tmp_path):
+    """Where a source's checkout lives is a property of the MACHINE.
+
+    Resolving an empty ref needs that lookup, which is why the merge runs after
+    `--source-repo` has been parsed rather than beside the inherited array.
+    """
+    primary, primary_sha, extra, _extra_sha = federated
+    relocated = tmp_path / "elsewhere" / "cms-platform"
+    relocated.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(extra), str(relocated))
+
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={relocated.resolve().as_uri()}@{_head(relocated)}:skills",
+        "--source-repo", f"cms-platform={relocated}", "-o", str(out)).returncode == 0
+
+    advanced = _move_head(relocated)
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{relocated.resolve().as_uri()}@",
+                         "--source-repo", f"cms-platform={relocated}", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] == advanced
+
+
+def _lock_federating_one_registry_twice(tmp_path) -> tuple:
+    """A lock whose `sources` names ONE registry twice, with independent pins.
+
+    Representable and `--check`-green: plan_sources' uniqueness check is keyed
+    on BUNDLE, and these two entries claim different bundles, read different
+    layouts and pin different commits. Two layouts are what keep the skill
+    BASENAMES distinct as well, which `_reject_basename_collisions` requires.
+    """
+    primary = tmp_path / "registry"
+    primary_sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    first = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    _write(extra / "other" / "publish" / "SKILL.md", SKILL_C["SKILL.md"])
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "a second bundle, one commit later")
+    second = _head(extra)
+    assert first != second
+
+    out = tmp_path / "skills.lock"
+    uri = extra.resolve().as_uri()
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", primary_sha, "--bundles", "adam",
+        "--source", f"cms-platform={uri}@{first}:skills",
+        "--source", f"other={uri}@{second}:{{bundle}}",
+        "-o", str(out)).returncode == 0
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert [source["ref"] for source in lock["sources"]] == [first, second]
+    return primary, extra, uri, out
+
+
+def test_repin_source_refuses_a_registry_the_lock_federates_twice(tmp_path):
+    """One spec, one source — or no re-pin at all.
+
+    Merging by registry key over a lock that federates that registry TWICE
+    advances both entries, so a caller naming one moves a pin nobody asked
+    about, at exit 0, with its digests rewritten to the new content. The module
+    docstring says this flag advances ONE source; this refusal is what makes
+    that sentence true rather than usually true. It is the same answer
+    `_select_sources` already gives to the analogous ambiguity on the read-only
+    path ("scoping to it has two answers, so it gets none").
+    """
+    primary, extra, uri, out = _lock_federating_one_registry_twice(tmp_path)
+    before = out.read_text(encoding="utf-8")
+    _move_head(extra)
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{uri}@", "-o", str(out))
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "twice" in proc.stderr, proc.stderr
+    # Both bundles named, so the reader can see WHICH two entries collide.
+    assert "cms-platform" in proc.stderr and "other" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_check_current_prints_no_repin_command_the_flag_would_refuse(tmp_path):
+    """A drift report must not name a repair the same program rejects.
+
+    The federated remediation printed `--repin-source '<registry>@'` for every
+    drifted source without asking whether that spec is one this generator
+    accepts. On a lock federating one registry twice it is not — the refusal
+    above rejects it — so the printed line came back at exit 1 and the reader
+    was left with a drifted lock and no route the tool itself would take. The
+    fleet bumper reaches the same wall from the other side: it builds
+    `--repin-source "$reg@"` from its own per-registry drift list.
+
+    So the block says what is wrong instead of what to type, and says it in the
+    headline, where no truncation can separate the two.
+    """
+    primary, extra, uri, out = _lock_federating_one_registry_twice(tmp_path)
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert proc.stdout.startswith(f"FAILED: {uri}'s bundles have moved on since ")
+    assert not [line for line in proc.stdout.splitlines()
+                if line.strip().startswith("python3 ")], proc.stdout
+    # The two escapes the refusal names are the two the reader is given.
+    assert "give that registry a single 'sources' entry" in proc.stdout
+    assert "restate the whole array with a plain generate" in proc.stdout
+
+
+def test_repin_source_refuses_a_checkout_that_is_not_the_source_it_names(
+        federated, tmp_path):
+    """The identity probe the primary's --repin has, applied per source.
+
+    A sibling directory of the right NAME is not proof of the right
+    repository: a fork, or a same-named repo under another owner, sits at
+    `../cms-platform` just as happily. Every source this flag does not name is
+    still probed by accident downstream — plan_sources resolves its inherited
+    pin in that clone and fails there — but the named source's pin is REPLACED
+    before plan_sources sees it, so the wrong clone's HEAD is written under the
+    right registry's name at exit 0. The commit the lock already pins is the
+    probe, exactly as it is for the primary.
+
+    Which is proof only while the pin IS a commit: `main^{commit}` resolves in
+    any clone with a main branch, so the probe passes an impostor for a
+    branch-name pin and `repin_source_blocker` refuses that shape before this
+    check is reached. `test_repin_source_refuses_a_source_pinned_at_a_branch`
+    is the other half and neither covers the other.
+    """
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    # A DIFFERENT repository at the same sibling path, so the default
+    # `../<repo-name>` lookup finds it and the lock's registry string still
+    # matches. Its HEAD resolves; the commit the lock pins does not exist.
+    _rmtree(extra)
+    decoy_sha = make_registry(extra, {"cms-platform/deploy": SKILL_C}, layout="skills")
+    assert decoy_sha != extra_sha
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert extra_sha in proc.stderr, proc.stderr
+    assert "is not that registry" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+    assert decoy_sha not in out.read_text(encoding="utf-8")
+
+
+def test_repin_source_refuses_a_source_pinned_at_a_branch(federated, tmp_path):
+    """A branch name is not a pin, so it cannot be the identity probe either.
+
+    The probe asks git whether the checkout contains the commit the lock pins.
+    `main^{commit}` resolves in ANY clone with a main branch, so for a
+    branch-name pin the probe is a formality every impostor passes — and this
+    is the shape the generator's own docstrings establish as representable
+    (`validate_ref` accepts it; a source carrying one is re-resolved).
+
+    Measured before the refusal: with the sibling replaced by a wholly
+    different repository that also has `main`, this same command exited 0 and
+    wrote the impostor's HEAD under the named registry — the identity hole the
+    probe was added to close, surviving for one lock shape.
+    """
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["sources"][0]["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    before = out.read_text(encoding="utf-8")
+
+    # A DIFFERENT repository at the same sibling path. Its `main` resolves; it
+    # has nothing whatever to do with the registry the lock names.
+    _rmtree(extra)
+    impostor_sha = make_registry(extra, {"cms-platform/deploy": SKILL_C}, layout="skills")
+    assert impostor_sha != extra_sha
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "not a commit sha" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+    assert impostor_sha not in out.read_text(encoding="utf-8")
+
+
+def test_repin_refuses_a_primary_pinned_at_a_branch(registry, tmp_path):
+    """The same rule on the primary, where no hand edit is needed to get there.
+
+    `--ref main` is written to the lock verbatim, so this shape comes out of a
+    supported invocation. --repin's own identity probe then asks whether
+    `--repo` contains the pinned "commit" — which any clone with a main branch
+    answers yes to, impostor or not.
+    """
+    root, _sha = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "--registry", "Acme/registry",
+                         "--ref", "main", "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["ref"] == "main"
+    before = out.read_text(encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "not a commit sha" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+# --------------------------------------------------------------------------
+# one predicate per refusal, read by the report AND by the flag
+#
+# The defect class these hold shut: a condition that makes a command refuse is
+# checked on the APPLY path but not on the REPORT path (or the other way
+# round), so --check-current recommends a command the same generator then
+# rejects at exit 1 — leaving a drifted lock with no route the tool accepts.
+# Three rounds of fixing one instance at a time re-opened it three times, so
+# what is measured here is the property over every lock shape rather than over
+# the shape whose report happened to be read.
+# --------------------------------------------------------------------------
+
+def _primary_drifted(primary: Path) -> str:
+    """Commit a real content change in the primary bundle. Returns its new sha."""
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "the primary really moved")
+    return _head(primary)
+
+
+# The two ends of the re-pin path, by name. These four guards plus
+# `plan_sources` are what REFUSE; `remediation` is what RECOMMENDS — the one
+# function every report path in the generator asks, so the report side of this
+# gate is a single name rather than one per verdict.
+_REPIN_APPLY_PATH = ("_repin_inherit_guard", "_repin_primary_guard",
+                     "_apply_repin_sources", "plan_sources", "_repin_shrink_guard")
+_REPIN_REPORT_PATH = ("remediation",)
+
+# The three verdicts that tell a reader what to type, as of this line. Named
+# only so the derivation below can assert it has not lost one to a rename —
+# `_report_paths` is what the gate actually scans, and it is derived.
+_KNOWN_REPORT_PATHS = ("report_drift", "report_digest_format", "main")
+
+
+def _report_paths(functions: dict) -> list:
+    """Every function that WRITES TO THE PRINTED STREAM — derived, never listed.
+
+    A written-down list is a list someone has to remember to widen, and the
+    gate is only as total as the set it scans: a fourth verdict added beside
+    these three and not added here would go unscanned, which is the same shape
+    of hole the substring blacklist was. PRINTING is what makes a function a
+    verdict that tells a reader what to type, so that is what selects it —
+    where "printing" is `_print_calls`' two routes and not the single name
+    `print`, and where the functions it chooses from are `_module_functions`'
+    whole tree and not the module's top level.
+    """
+    names = [name for name, node in functions.items() if _print_calls(node)]
+    for expected in _KNOWN_REPORT_PATHS:
+        assert expected in names, (
+            f"{expected} no longer prints, so the derivation has lost a verdict it "
+            "used to scan. Check what renamed it rather than dropping the name.")
+    return names
+
+
+def _module_functions() -> dict:
+    """Every function defined in the module, at ANY nesting, by its dotted path.
+
+    `tree.body` filtered to `ast.FunctionDef` was three written-down node
+    shapes wearing a derivation's clothes, and each of the three reached the
+    printed stream with a self-built invocation and was scanned by nothing: a
+    module-level `async def`, a `def` inside a module-level `try:`, and a
+    method on a module-level class. Measured, each appended to the generator
+    on its own and the file restored byte-for-byte after: the gate stayed
+    green for all three.
+
+    A module-level function keeps its BARE name, so every name the other
+    checks resolve — the `*_blocker` predicates, `_REPIN_APPLY_PATH`,
+    `_KNOWN_REPORT_PATHS` — still finds its node. Anything nested is keyed by
+    its dotted path, which is also what a failure message has to say for the
+    reader to find it.
+    """
+    found = {}
+
+    def collect(body, prefix):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = prefix + node.name
+                if not isinstance(node, ast.ClassDef):
+                    found[name] = node
+                collect(node.body, name + ".")
+                continue
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                block = getattr(node, field, None)
+                if isinstance(block, list):
+                    collect(block, prefix)
+
+    collect(ast.parse(GENERATOR.read_text(encoding="utf-8")).body, "")
+    return found
+
+
+def _calls_by_name(node: ast.AST) -> set:
+    return {call.func.id for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)}
+
+
+def _guarded_raises(statements, guards, found) -> None:
+    """Every `raise` under `statements`, paired with the `if` tests above it."""
+    for statement in statements:
+        if isinstance(statement, ast.If):
+            _guarded_raises(statement.body, guards + [statement.test], found)
+            _guarded_raises(statement.orelse, guards, found)
+            continue
+        if isinstance(statement, ast.Raise):
+            found.append((statement, list(guards)))
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(statement, field, None)
+            if isinstance(block, list):
+                _guarded_raises(block, guards, found)
+
+
+def _consults_the_filesystem(test: ast.AST) -> bool:
+    """Does this `if` decide on something outside the lock — git, or a path?"""
+    for call in ast.walk(test):
+        if not isinstance(call, ast.Call):
+            continue
+        if isinstance(call.func, ast.Name) and call.func.id == "_git":
+            return True
+        if isinstance(call.func, ast.Attribute) and call.func.attr in {"is_dir", "exists"}:
+            return True
+    return False
+
+
+def test_every_refusal_a_repin_can_give_is_one_both_paths_read():
+    """The structural half of the class fix, read off the module's own AST.
+
+    Behavioural tests catch a report that recommends a refused command for the
+    lock shapes somebody thought to write down; three rounds of that missed
+    three shapes. This one catches the EDIT: a refusal added to the apply path
+    and nowhere else cannot pass, because the only place a lock-decidable
+    refusal may live is a `*_blocker` predicate and every `*_blocker` must be
+    called from both ends of the path.
+
+    The one exemption is a refusal that decides on something the lock does not
+    contain — the clone in front of this process, probed with `_git` or
+    `Path.is_dir`. A report cannot foresee those and must not be asked to, so
+    they are identified by what their `if` consults rather than by a list a
+    later editor would have to remember to update.
+    """
+    functions = _module_functions()
+    blockers = sorted(name for name in functions if name.endswith("_blocker"))
+    assert blockers, "no *_blocker predicates found — has the naming changed?"
+
+    for name in _REPIN_APPLY_PATH + _REPIN_REPORT_PATH:
+        assert name in functions, name
+
+    apply_calls = set().union(*(_calls_by_name(functions[name])
+                                for name in _REPIN_APPLY_PATH))
+    report_calls = set().union(*(_calls_by_name(functions[name])
+                                 for name in _REPIN_REPORT_PATH))
+    for blocker in blockers:
+        assert blocker in apply_calls, (
+            f"{blocker} is never consulted by {' or '.join(_REPIN_APPLY_PATH)} — "
+            "a refusal nothing refuses")
+        assert blocker in report_calls, (
+            f"{blocker} is never consulted by {' or '.join(_REPIN_REPORT_PATH)} — "
+            "the report can recommend a command this refuses")
+
+    for name in _REPIN_APPLY_PATH:
+        function = functions[name]
+        # Any expression CONTAINING a blocker call, not just a bare call: the
+        # apply path composes them (`a_blocker(...) or b_blocker(...)`) to fix
+        # the order the report reads them in, and a check that only saw a bare
+        # call would call that composition an unsourced refusal.
+        from_a_blocker = {
+            target.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Assign) and any(
+                isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id in blockers for call in ast.walk(node.value))
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        found = []
+        _guarded_raises(function.body, [], found)
+        for statement, guards in found:
+            exception = statement.exc
+            if not (isinstance(exception, ast.Call)
+                    and isinstance(exception.func, ast.Name)
+                    and exception.func.id == "GeneratorError"):
+                continue
+            names_in_guards = {node.id for test in guards
+                               for node in ast.walk(test) if isinstance(node, ast.Name)}
+            if names_in_guards & from_a_blocker:
+                continue
+            if any(_consults_the_filesystem(test) for test in guards):
+                continue
+            raise AssertionError(
+                f"{name}, line {statement.lineno}: this refusal is decidable from the "
+                "lock alone but does not come from a *_blocker, so the report that "
+                "recommends a re-pin cannot see it. Move the sentence into a blocker "
+                "both ends read.")
+
+    for blocker in blockers:
+        assert not [node for node in ast.walk(functions[blocker])
+                    if isinstance(node, ast.Raise)], (
+            f"{blocker} raises; a predicate two callers share must RETURN its "
+            "reason so each can frame it")
+
+
+# What makes a printed line a COMMAND rather than prose: it names something to
+# run. Every other fragment — `--repin`, a ref, a quoted spec — is inert text
+# without it, which is why these two tokens and not a list of flags are what
+# the report paths may not spell.
+_INVOCATION_TOKENS = ("python", ".py")
+
+# A flag as it appears in a command line: at the start of a token. Counted,
+# not banned — a verdict says "No --repin-source command is printed for it",
+# which is prose ABOUT a flag, while two flags in one literal is a command
+# skeleton with the invocation left to be filled in.
+_FLAG_TOKEN = re.compile(r"(?:^|\s)(--?[a-z][a-z0-9-]*)")
+
+
+# The callables a printed expression may reach, beyond this module's own
+# functions. Every one is here because its RESULT SHAPE is closed against this
+# script's own name — they count, order, re-type, or hand back a piece of a
+# value that has already been placed; none of them can conjure a new string.
+# A name that is not here is a RED, never a pass, so widening this is a
+# deliberate act with a reason attached rather than a silent gap.
+_SAFE_CALLS = frozenset({
+    "len", "type", "sorted", "any", "all", "enumerate",   # count / order / re-type
+    "dict", "set", "list", "str", "int",                  # re-type
+    "Path",                                               # a path out of its arguments
+})
+# Methods, judged the same way: each returns a piece of, or a re-shaping of,
+# its receiver. `read_text` and `loads` bring in the LOCK's own bytes, which is
+# the data every verdict reports on — data a lock happens to carry is not this
+# file writing itself a command.
+_SAFE_METHODS = frozenset({
+    "join", "fromkeys", "get", "items", "values", "keys",
+    "strip", "splitlines", "read_text", "loads",
+})
+# Every way to reach a module-level name without writing it down. Banned
+# outright in a report path, because the names themselves are banned and a
+# lookup by string would be the way around that.
+_DYNAMIC_LOOKUPS = frozenset({
+    "globals", "locals", "vars", "getattr", "eval", "exec", "compile",
+    "__import__",
+})
+# The two attribute names that spell the running script, in ANY spelling of
+# the object they hang off — `sys.argv`, `os.sys.argv`, a rebound alias.
+_INVOCATION_ATTRS = frozenset({"argv", "executable"})
+
+# What a placed expression turned out to be.
+_BLANK = "whitespace"          # a literal with nothing but spaces in it
+_TEXT = "text"                 # prose, or data read off the lock
+_CARRIER = "a reason"          # `remediation`'s refusal sentence
+_COMMAND = "the command"       # `remediation`'s line — printed verbatim or not at all
+
+
+class _Unplaceable(AssertionError):
+    """An expression the analysis has no rule for. Always a failure."""
+
+
+def _spells_the_invocation(value) -> bool:
+    """Does this module-level VALUE hold the script's name, at any depth?
+
+    Strings and plain containers of strings only. A module object's `repr`
+    carries its own `.py` file path, so scanning those would ban `json` and
+    tell nobody anything.
+    """
+    if isinstance(value, str):
+        return any(token in value for token in _INVOCATION_TOKENS)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_spells_the_invocation(item) for item in value)
+    if isinstance(value, dict):
+        return any(_spells_the_invocation(item)
+                   for pair in value.items() for item in pair)
+    return False
+
+
+def _module_command_names() -> set:
+    """Module-level names whose value spells a way to invoke this script.
+
+    Read off the imported module rather than listed here, so `_SCRIPT` under
+    any other name — a rename, a second one added beside it — is covered the
+    moment it exists rather than when someone remembers to widen a list.
+    `__file__` lands in this set for free, which is right: it is the other
+    module-level route to the script's own name. Containers count too: a dict
+    or tuple of command strings is the same name-holding constant with one
+    more subscript in front of it.
+    """
+    banned = {name for name in dir(gsl)
+              if _spells_the_invocation(getattr(gsl, name))}
+    assert "_SCRIPT" in banned, (
+        "the module no longer has a name holding the script's invocation — this "
+        "check has nothing to key on and must be rewritten, not deleted")
+    return banned
+
+
+# The two spellings of "put this text on the stream a reader reads". `print`
+# is the one this file uses; a `.write` on a stream is the same act under
+# another name, and matching only the first left an existing report path free
+# to emit `sys.stdout.write(f"  {_SCRIPT} --repin ...")` unplaced — measured,
+# gate green. Both are PLACED rather than banned, so the channel stays usable
+# and the property travels with it.
+_STREAM_WRITES = frozenset({"write", "writelines"})
+
+
+def _print_calls(function) -> list:
+    return [node for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and ((isinstance(node.func, ast.Name) and node.func.id == "print")
+                 or (isinstance(node.func, ast.Attribute)
+                     and node.func.attr in _STREAM_WRITES))]
+
+
+def _docstring_constants(function: ast.FunctionDef) -> set:
+    """Every bare string STATEMENT under `function` — docstrings and comments-as-prose.
+
+    They cannot reach `print`, so the reasoning in them stays exempt from the
+    literal rules and can go on quoting the commands it is about.
+    """
+    found = set()
+    for node in ast.walk(function):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for statement in block:
+                if (isinstance(statement, ast.Expr)
+                        and isinstance(statement.value, ast.Constant)
+                        and isinstance(statement.value.value, str)):
+                    found.add(id(statement.value))
+    return found
+
+
+def _names_the_invocation(function: ast.FunctionDef, banned: set):
+    """Why this function can name the script itself — or None. No calls followed."""
+    exempt = _docstring_constants(function)
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and node.id in banned:
+            return f"names {node.id!r}"
+        if isinstance(node, ast.Attribute) and node.attr in _INVOCATION_ATTRS:
+            return f"reads .{node.attr}"
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _DYNAMIC_LOOKUPS):
+            return f"calls {node.func.id}(), which reaches any module-level name"
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in exempt
+                and any(token in node.value for token in _INVOCATION_TOKENS)):
+            return f"has a literal spelling it: {node.value.strip()[:40]!r}"
+    return None
+
+
+def _invocation_capable(functions: dict, banned: set) -> dict:
+    """Every module function that can produce this script's own invocation.
+
+    Transitive over calls, so a helper that names `_SCRIPT` taints everything
+    that calls it. DERIVED, which is the point: round 5's escape was a
+    module-level `_repin_line` builder, and no list anyone writes down
+    contains a function that does not exist yet.
+
+    A COMMAND SKELETON with no script name in it — two flags in a literal — is
+    deliberately NOT capability. It is only dangerous joined to the
+    invocation, and every route to the invocation is closed separately; making
+    it capability here marks every refusal message in the file (they are prose
+    about flags) and buys nothing.
+    """
+    capable = {}
+    for name, function in functions.items():
+        why = _names_the_invocation(function, banned)
+        if why:
+            capable[name] = why
+    widened = True
+    while widened:
+        widened = False
+        for name, function in functions.items():
+            if name in capable:
+                continue
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id in capable and node.func.id != name):
+                    capable[name] = (f"calls {node.func.id}(), which "
+                                     f"{capable[node.func.id]}")
+                    widened = True
+                    break
+    return capable
+
+
+class _Placer:
+    """Places every expression that can reach a `print` in one report path.
+
+    A whitelist BY CONSTRUCTION: `place` handles a fixed set of node shapes and
+    raises `_Unplaceable` on everything else, naming the expression. There is
+    no fall-through that means "probably fine" — an expression the analysis
+    cannot account for is a red, which is what makes the set closed rather
+    than merely long.
+    """
+
+    def __init__(self, function: ast.FunctionDef, name: str,
+                 functions: dict, banned: set, capable: dict):
+        self.function = function
+        self.name = name
+        self.functions = functions
+        self.banned = banned
+        self.capable = capable
+
+    # -- the walk -----------------------------------------------------------
+
+    def reject(self, node, why):
+        raise _Unplaceable(
+            f"{self.name}, line {getattr(node, 'lineno', '?')}: "
+            f"{ast.unparse(node)[:140]!r} — {why}")
+
+    def combine(self, kinds, node):
+        """One expression built from several placed parts."""
+        if _COMMAND in kinds:
+            for kind in kinds:
+                if kind not in (_COMMAND, _BLANK):
+                    self.reject(node, (
+                        f"{kind} printed alongside the command `remediation` "
+                        "decided. The answer goes out verbatim; a verdict that "
+                        "can add to it has taken the decision back"))
+            return _COMMAND
+        if _CARRIER in kinds:
+            return _CARRIER
+        return _BLANK if kinds and set(kinds) == {_BLANK} else _TEXT
+
+    def place(self, node, seen=()):
+        if isinstance(node, ast.Constant):
+            return self.place_constant(node)
+        if isinstance(node, ast.JoinedStr):
+            return self.combine([self.place(v, seen) for v in node.values], node)
+        if isinstance(node, ast.FormattedValue):
+            if node.format_spec is not None:
+                self.place(node.format_spec, seen)
+            return self.place(node.value, seen)
+        if isinstance(node, ast.BinOp):
+            if not isinstance(node.op, (ast.Add, ast.Sub)):
+                self.reject(node, f"{type(node.op).__name__} on a printed value")
+            return self.combine([self.place(node.left, seen),
+                                 self.place(node.right, seen)], node)
+        if isinstance(node, ast.BoolOp):
+            return self.combine([self.place(v, seen) for v in node.values], node)
+        if isinstance(node, ast.IfExp):
+            return self.combine([self.place(node.body, seen),
+                                 self.place(node.orelse, seen)], node)
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return self.combine([self.place(e, seen) for e in node.elts], node)
+        if isinstance(node, ast.Dict):
+            kinds = []
+            for key, value in zip(node.keys, node.values):
+                if key is not None:
+                    kinds.append(self.place(key, seen))
+                kinds.append(self.place(value, seen))
+            return self.combine(kinds, node)
+        if isinstance(node, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
+            for generator in node.generators:
+                self.place(generator.iter, seen)
+            return self.combine([self.place(node.elt, seen)], node)
+        if isinstance(node, ast.Starred):
+            return self.place(node.value, seen)
+        if isinstance(node, ast.Subscript):
+            # The INDEX is placed for its own validity and then dropped: it
+            # selects, it is not printed. What comes out is a piece of what
+            # went in, so the subscript carries its receiver's kind — `x[:]`
+            # on the command is still the command.
+            if isinstance(node.slice, ast.Slice):
+                for part in (node.slice.lower, node.slice.upper, node.slice.step):
+                    if part is not None:
+                        self.place(part, seen)
+            else:
+                self.place(node.slice, seen)
+            return self.place(node.value, seen)
+        if isinstance(node, ast.Attribute):
+            return self.place_attribute(node, seen)
+        if isinstance(node, ast.Call):
+            return self.place_call(node, seen)
+        if isinstance(node, ast.Name):
+            return self.place_name(node, seen)
+        self.reject(node, f"a printed {type(node).__name__} the analysis has no rule for")
+
+    # -- the leaves ---------------------------------------------------------
+
+    def place_constant(self, node):
+        if not isinstance(node.value, str):
+            return _TEXT
+        for token in _INVOCATION_TOKENS:
+            if token in node.value:
+                self.reject(node, (
+                    f"{token!r} in a string this function prints — the verdict is "
+                    "spelling out something to run. Ask `remediation`, so the line "
+                    "meets the same refusals every other verdict's does"))
+        flags = _FLAG_TOKEN.findall(node.value)
+        if len(flags) >= 2:
+            self.reject(node, (
+                f"{flags} in one printed string is a command skeleton, not prose "
+                "about a flag. Ask `remediation` for the whole line"))
+        return _BLANK if not node.value.strip() else _TEXT
+
+    def place_attribute(self, node, seen):
+        if node.attr in _INVOCATION_ATTRS:
+            self.reject(node, f"sys.{node.attr} is another way to spell the invocation")
+        if node.attr in ("command", "reason"):
+            if self.place(node.value, seen) == _CARRIER:
+                return _COMMAND if node.attr == "command" else _CARRIER
+            self.reject(node, f".{node.attr} on something that is not `remediation`'s answer")
+        if node.attr == "__name__":
+            return self.place(node.value, seen)
+        if self.is_parsed_args(node.value):
+            # argparse fills a namespace with the options this parser DECLARES,
+            # and `argv[0]` is not one of them — so this is caller input, the
+            # same kind of value as the lock's own fields, and not a route to
+            # the script's name.
+            return _TEXT
+        self.reject(node, "an attribute the analysis has no rule for")
+
+    def is_parsed_args(self, node):
+        if not isinstance(node, ast.Name):
+            return False
+        bound, is_parameter = self.bindings(node.id)
+        return bool(bound) and not is_parameter and all(
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "parse_args" for value, _ in bound)
+
+    def place_call(self, node, seen):
+        """A call CARRIES the kinds it was built from; it does not launder them.
+
+        Every callable reachable here is in the set for one stated reason —
+        `_SAFE_CALLS` and `_SAFE_METHODS` "count, order, re-type, or hand back
+        a piece of a value that has already been placed". A thing that hands
+        back a piece of its input hands back its input's KIND, so returning a
+        flat `_TEXT` contradicted the very property that let the callable in:
+        `str(answer.command)` and `answer.command[:]` both put the verbatim
+        answer back into circulation as ordinary prose, and
+        `f"  {str(answer.command)} --ref HEAD"` then appended a second `--ref`
+        that argparse resolves last-wins — the "format repair that silently
+        re-attests the lock over a different tree" the ref anchor exists to
+        prevent, printed by a report path the gate called clean.
+        """
+        kinds = [self.place(argument, seen) for argument in node.args]
+        kinds += [self.place(keyword.value, seen) for keyword in node.keywords]
+        function = node.func
+        if isinstance(function, ast.Attribute):
+            if function.attr not in _SAFE_METHODS:
+                self.reject(node, f".{function.attr}() is not in the closed set of "
+                                  "methods a verdict may print")
+            return self.combine(kinds + [self.place(function.value, seen)], node)
+        if not isinstance(function, ast.Name):
+            self.reject(node, "a call on something that is not a plain name")
+        if function.id == "remediation":
+            # The one call whose result is not built from its arguments: it
+            # DECIDES, and what it decided is what `.command` / `.reason` then
+            # name. Its arguments are placed above for their own validity.
+            return _CARRIER
+        if function.id in self.functions:
+            if function.id in self.capable:
+                self.reject(node, (
+                    f"{function.id}() can spell this script's invocation — it "
+                    f"{self.capable[function.id]}. Ask `remediation` for the line"))
+            return self.combine(kinds, node)
+        if function.id in _SAFE_CALLS:
+            return self.combine(kinds, node)
+        self.reject(node, f"{function.id}() is not in the closed set of callables "
+                          "a verdict may print")
+
+    def place_name(self, node, seen):
+        name = node.id
+        if name in self.banned:
+            self.reject(node, (
+                f"{name!r} holds this script's own invocation. A verdict that can "
+                "name the script can build its own remediation beside "
+                "`remediation`; ask that function for the line instead"))
+        if name in seen:                       # a name defined in terms of itself
+            return _TEXT
+        bound, is_parameter = self.bindings(name)
+        if bound:
+            return self.combine(
+                [self.place(value, seen + (name,)) if how == "direct"
+                 else self.element_kind(value, seen + (name,))
+                 for value, how in bound], node)
+        if is_parameter:
+            # Supplied by `main`, which is itself scanned — and no name in any
+            # report path may hold the invocation, so nothing a report path
+            # could hand another one carries it.
+            return _TEXT
+        if hasattr(gsl, name):
+            return _TEXT
+        if name in _SAFE_CALLS:
+            return _TEXT
+        self.reject(node, f"{name!r} is not a name the analysis can place")
+
+    def element_kind(self, iterable, seen):
+        """A loop variable: placed through what it iterates over."""
+        kind = self.place(iterable, seen)
+        return _TEXT if kind is _BLANK else kind
+
+    def bindings(self, name):
+        """Every expression `name` can be bound to in this function, and how."""
+        arguments = self.function.args
+        parameters = [a.arg for a in (list(arguments.posonlyargs) + list(arguments.args)
+                                      + list(arguments.kwonlyargs))]
+        for extra in (arguments.vararg, arguments.kwarg):
+            if extra is not None:
+                parameters.append(extra.arg)
+        found = []
+        for node in ast.walk(self.function):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    found += [(node.value, "direct")] * _binds(target, name)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                if node.value is not None:
+                    found += [(node.value, "direct")] * _binds(node.target, name)
+            elif isinstance(node, ast.NamedExpr):
+                found += [(node.value, "direct")] * _binds(node.target, name)
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                found += [(node.iter, "element")] * _binds(node.target, name)
+            elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                found += [(node.context_expr, "direct")] * _binds(node.optional_vars, name)
+        return found, name in parameters
+
+
+def _binds(target, name: str) -> int:
+    """How many times this assignment target binds `name`."""
+    if isinstance(target, ast.Name):
+        return 1 if target.id == name else 0
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return sum(_binds(element, name) for element in target.elts)
+    if isinstance(target, ast.Starred):
+        return _binds(target.value, name)
+    return 0
+
+
+# A report path built around `remediation`, with one printed line left to fill
+# in. `answer` is the carrier, so `answer.command` is the verbatim answer and
+# anything printed beside it is the defect the choke point exists to prevent.
+_REPORT_PATH_TEMPLATE = textwrap.dedent("""
+    def report_made_up(existing, output, repo):
+        answer = remediation("format", existing=existing, output=output, repo=repo)
+        {printed}
+""")
+
+
+def _place_one_report_path(printed: str) -> None:
+    """The gate's own placement, run over one hand-written report path."""
+    functions = _module_functions()
+    banned = _module_command_names()
+    capable = _invocation_capable(functions, banned)
+    body = _REPORT_PATH_TEMPLATE.format(printed=printed.replace("\n", "\n    "))
+    function = ast.parse(body).body[0]
+    _place_prints(function, "report_made_up", functions, banned, capable)
+
+
+# Each of these puts `remediation`'s verbatim answer back into the printed line
+# with something appended, through a construction whose result the analysis
+# used to call ordinary text. The last two are the damaging ones: a second
+# `--ref` is resolved last-wins by argparse, so it is a format repair that
+# silently re-attests the lock over a different tree — the thing the ref anchor
+# exists to prevent.
+_RELAUNDERED = {
+    "str() around it": 'print(f"  {str(answer.command)} --repin-source \'evil@\'")',
+    "a whole-value slice": 'print(f"  {answer.command[:]} --repin-source \'evil@\'")',
+    "a one-element list, indexed": 'print(f"  {[answer.command][0]} --repin-source \'evil@\'")',
+    "a dict holding it": 'print(f"  {dict(a=answer.command)} --repin-source \'evil@\'")',
+    "join() over it": 'print("  " + "".join([answer.command, " --repin-source \'evil@\'"]))',
+    "strip() on it": 'print(f"  {answer.command.strip()} --repin-source \'evil@\'")',
+    "a duplicate --ref, via str()": 'print(f"  {str(answer.command)} --ref HEAD")',
+    "a duplicate --ref, via a slice": 'print(f"  {answer.command[:]} --ref HEAD")',
+}
+
+# What must still place clean, so a red above is the construction under test and
+# not the analysis having lost the ability to place anything at all.
+_STILL_PLACEABLE = {
+    "the answer, verbatim": 'print(f"  {answer.command}")',
+    "the answer through a local": 'line = answer.command\nprint(f"  {line}")',
+    "the reason, framed in prose": 'print(f"FAILED: {answer.reason} Then re-run.")',
+    "a count, re-typed": 'print(f"  {str(len(existing))} fields read")',
+    "prose about one flag": 'print("  no --repin-source line is printed for it")',
+}
+
+
+def test_the_placer_keeps_the_command_a_command():
+    """A placement carries the kind of what it was built from — pinned directly.
+
+    The gate reads the generator as it stands, so all it can ever say is "the
+    file is clean today"; what it cannot say is which EDITS it would catch.
+    This drives the same placement over hand-written report paths, so the
+    property lives in the suite rather than in a probe somebody ran once.
+
+    THE PROPERTY. `_SAFE_CALLS` and `_SAFE_METHODS` are in the closed set
+    because each "counts, orders, re-types, or hands back a piece of a value
+    that has already been placed" — and a thing that hands back a piece of its
+    input hands back its input's KIND. A call, a subscript and a dict each
+    returned a flat `_TEXT` instead, which contradicted the very property that
+    admitted the callable and laundered `remediation`'s verbatim answer into
+    ordinary prose that anything could be appended to. Measured on the
+    generator before the fix, restored byte-for-byte between each case:
+    `print(f"  {str(answer.command)} --ref HEAD")` in `report_digest_format`
+    left the gate green.
+    """
+    for label, printed in _STILL_PLACEABLE.items():
+        _place_one_report_path(printed)      # raises _Unplaceable if it cannot
+    for label, printed in _RELAUNDERED.items():
+        with pytest.raises(_Unplaceable, match="the command"):
+            _place_one_report_path(printed)
+
+
+# A citation this repo cannot resolve because the test really is somewhere
+# else. Each entry says where, and each is a deliberate cross-repo pointer the
+# prose introduces AS one ("THERE:") rather than a name that went stale. The
+# CHECK is derived — every `test_*` token in every non-test source — and this
+# is only the set of answers that live outside the repo.
+_TESTS_IN_ANOTHER_REPO = {
+    # _agent-guidance's scripts/bump-consumer-locks.sh test suite; named by
+    # `report_digest_format`'s docstring as the far end of a contract this
+    # repo cannot run.
+    "test_bump_format_gate_empty_skills",
+}
+
+
+def _cited_test_names(path: Path) -> set:
+    return set(re.findall(r"\btest_[a-z0-9_]+", path.read_text(encoding="utf-8")))
+
+
+def test_every_test_this_repo_cites_by_name_exists():
+    """A pointer to nowhere is a comment asserting what a reader cannot check.
+
+    This file's comments carry a lot of "X pins that" and "Y binds the two",
+    and the value of every one of them is that the reader can go and read Y.
+    A renamed test leaves the sentence looking exactly as authoritative as it
+    was and pointing at nothing, and nothing else in the suite notices.
+    24bb05d added a docstring citing a test whose name ends
+    "and_still_addresses_its_own_line" and, in the same commit, a test whose
+    name ends "even_to_address_its_own_line". Two more were already stale at
+    the merge base: both copies of a citation ending
+    "inline_digest_matches_the_generators", in the generator and in the
+    bootstrap hook, whose real name is
+    `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill`.
+
+    Names are never wrapped across lines in a citation this scans, for the
+    reason this test exists: a wrapped name is not greppable, and this reads
+    the halves as two names neither of which is defined.
+
+    Scanned over every non-test source this repo tracks, so a citation in the
+    hook counts the same as one in the generator. A name resolves if some
+    tracked module defines it as a function OR is a test module of that name
+    (`scripts/account_zip_selection.py` names its own test file).
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.py", "*.sh"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout.split()
+    defined = set(_TESTS_IN_ANOTHER_REPO)
+    for name in tracked:
+        path = REPO_ROOT / name
+        if path.suffix == ".py":
+            defined.add(path.stem)
+            # Indentation allowed: a test defined as a method on a class is
+            # cited by its bare name just like a top-level one.
+            defined |= set(re.findall(r"^\s*def (test_[a-z0-9_]+)",
+                                      path.read_text(encoding="utf-8"), re.M))
+    assert "test_every_test_this_repo_cites_by_name_exists" in defined, (
+        "the scan found no test names at all, so it would pass on anything")
+
+    dangling = {}
+    for name in tracked:
+        path = REPO_ROOT / name
+        if path.name.startswith("test_"):
+            continue
+        for cited in sorted(_cited_test_names(path) - defined):
+            dangling.setdefault(cited, []).append(name)
+    assert not dangling, (
+        "these comments name a test that does not exist — rename the citation to "
+        "the test that took its place, or add it to _TESTS_IN_ANOTHER_REPO with "
+        "the repo it lives in: "
+        + "; ".join(f"{cited} (cited in {', '.join(where)})"
+                    for cited, where in sorted(dangling.items())))
+
+
+# The one function allowed to spell this script's own name. Everything else in
+# the module — report path, refusal predicate, helper, nested def, method —
+# must reach a runnable line by asking it.
+_THE_ONE_COMMAND_AUTHOR = "remediation"
+
+
+def test_only_remediation_can_spell_this_scripts_invocation():
+    """One choke point, asserted about the MODULE rather than about `print`.
+
+    Every gate before this one was a property of the printed stream: which
+    functions print, which expressions may sit in a printed line. That framing
+    has been wrong four times running, because the stream has more ways in than
+    anyone enumerates — a `.write` instead of a `print`, an `async def`, a
+    method on a class, a `*_blocker`'s reason string carried to `print` by
+    `remediation` itself as `.reason` and never placed at all. Each of those was
+    measured green against the placement gate.
+
+    So this asks the question one level up, where the answer does not depend on
+    how the text gets out: WHO CAN WRITE A RUNNABLE LINE AT ALL. `remediation`
+    can, because deciding the line is its whole job and every refusal is
+    composed there. Nothing else may, whatever it then does with the result —
+    print it, `.write` it, return it as a reason, hand it to a caller.
+
+    `_names_the_invocation` is the same reader `_invocation_capable` uses for
+    its roots, so "can spell it" means exactly what it means there: holds a
+    module-level name whose value carries `python` or `.py`, reads
+    `sys.argv`/`sys.executable` under any spelling, calls a dynamic lookup that
+    reaches any module-level name, or has a non-docstring literal spelling it.
+    Docstrings are exempt by construction — they cannot be printed — so the
+    reasoning in this file can go on quoting the commands it is about.
+
+    MEASURED, generator restored byte-for-byte after each and `git status
+    --short` empty: an early
+    `return ("try python3 scripts/generate_skills_lock.py --repin "
+             f"--registry evil/repo --bundles adam -o {output}")`
+    in `repin_unproven_sources_blocker` — a string both `report_drift` and
+    `report_digest_format` print inside a verdict headline — left the placement
+    gate green and fails here.
+    """
+    functions = _module_functions()
+    banned = _module_command_names()
+
+    author = functions[_THE_ONE_COMMAND_AUTHOR]
+    assert _names_the_invocation(author, banned), (
+        f"{_THE_ONE_COMMAND_AUTHOR} no longer spells this script's invocation, so "
+        "the one function allowed to build a command is not the one building it. "
+        "Find out what does, and point this at that — do not delete the check.")
+
+    offenders = {}
+    for name, function in sorted(functions.items()):
+        if name == _THE_ONE_COMMAND_AUTHOR or name.startswith(_THE_ONE_COMMAND_AUTHOR + "."):
+            continue
+        why = _names_the_invocation(function, banned)
+        if why:
+            offenders[name] = why
+    assert not offenders, (
+        "these can build this script's own invocation without asking "
+        f"`{_THE_ONE_COMMAND_AUTHOR}`, so a line they emit — printed, written, or "
+        "returned as a refusal's reason — meets none of the refusals every other "
+        "verdict's line meets: "
+        + "; ".join(f"{name} {why}" for name, why in offenders.items()))
+
+
+def _place_prints(function, name, functions, banned, capable) -> None:
+    """Place every printed expression in one function. Raises `_Unplaceable`.
+
+    Shared by the gate and by `test_the_placer_keeps_the_command_a_command`, so
+    the placement those two exercise is one code path rather than two that can
+    drift apart.
+    """
+    placer = _Placer(function, name, functions, banned, capable)
+    for call in _print_calls(function):
+        # ONE line per call, so the arguments are combined rather than
+        # placed apart: `print(answer.command, "--repin-source", spec)`
+        # writes the same line as concatenating them, and a check that
+        # looked at each argument alone would see three innocent values.
+        kinds = [placer.place(argument) for argument in call.args]
+        for keyword in call.keywords:
+            if keyword.arg in ("sep", "end", "file", "flush"):
+                continue
+            kinds.append(placer.place(keyword.value))
+        placer.combine(kinds, call)
+
+
+def test_no_report_path_writes_a_command_of_its_own():
+    """The structural half of the choke point, read off the module's own AST.
+
+    `remediation` being total is worth nothing if a verdict can still assemble
+    its own line beside it — that is exactly how four verdicts came to consult
+    four different subsets of the refusals.
+
+    THIS HAS BEEN WRITTEN TWICE THE WRONG WAY ROUND, and both times the shape
+    of the mistake was the same: a list of the ways someone had thought of.
+    First a blacklist of four substrings — patching `report_drift` to print
+    `f"  {_SCRIPT} --repin --ref {ref} --repin-source " + chr(39) + ...` left
+    it green. Then a ban-list of routes, whose docstring claimed "a report path
+    may reach the invocation by NO route" while four measured constructions
+    walked through it: a module-level FUNCTION that builds the line (a function
+    is not a `str`, so the name derivation skipped it), one local assignment
+    stripping the `.command` attribute off the print argument, `os.sys.argv[0]`
+    (the attribute ban required the base to be the NAME `sys`), and
+    `globals()["_SCRIPT"]` with the flags split across two literals.
+
+    So it is a whitelist BY CONSTRUCTION, and the totality is the mechanism
+    rather than a claim about it: every expression that can reach a `print`
+    must be PLACED in a closed set of shapes, and an expression `_Placer` has
+    no rule for raises `_Unplaceable` naming it. There is no branch that means
+    "nothing matched, so probably fine" — that branch is what a ban-list is.
+
+    What a placed expression may be:
+
+      1. A LITERAL with no invocation token in it and no second flag token — a
+         command skeleton waiting for a name is not prose about a flag.
+         Docstrings are exempt by construction: they cannot reach `print`, so
+         the reasoning stays next to the code it is about.
+      2. A NAME the analysis can account for: a local, placed through every
+         expression it is bound to (assignments, loop and comprehension
+         targets, `with`, walrus); a parameter; or a module-level name that is
+         not one of `_module_command_names`. That derivation now reads
+         CONTAINERS too — a tuple or dict of command strings is the same
+         constant with a subscript in front of it.
+      3. A CALL, but only to `remediation`, to a module function that cannot
+         name this script (derived transitively — this is what a module-level
+         line builder trips), or to one of `_SAFE_CALLS` / `_SAFE_METHODS`,
+         each of which is there because its result shape is closed against
+         this script's name.
+      4. AN F-STRING, concatenation, conditional, comprehension or container
+         built out of (1)-(3).
+
+    And what `remediation` answered goes out VERBATIM: a `.command` may be
+    printed beside nothing but whitespace, wherever it is reached from —
+    through a local, through an f-string, through a chain of both — because
+    the placement carries that fact with it rather than looking for an
+    `ast.Attribute` in the print argument.
+
+    `sys.argv` / `sys.executable` are rejected on the ATTRIBUTE NAME alone, in
+    any spelling of the object they hang off, and every dynamic lookup
+    (`globals`, `getattr`, `eval`, ...) is outside the closed call set, so
+    neither `os.sys.argv[0]` nor `globals()["_SCRIPT"]` has anywhere to land.
+    """
+    functions = _module_functions()
+    banned = _module_command_names()
+    capable = _invocation_capable(functions, banned)
+    assert "remediation" in capable, (
+        "`remediation` no longer names this script, so the one function allowed "
+        "to build a command is not the one building it. Find out what does.")
+
+    for name in _report_paths(functions):
+        _place_prints(functions[name], name, functions, banned, capable)
+
+
+def _drifted_plain(tmp_path):
+    """An ordinary lock whose primary bundle gained a commit."""
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", sha, "--bundles", "adam", "-o", str(out)).returncode == 0
+    _primary_drifted(primary)
+    return primary, out, []
+
+
+def _drifted_source_only(tmp_path):
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "-o", str(out)).returncode == 0
+    _source_drifted(extra)
+    return primary, out, []
+
+
+def _drifted_source_only_scoped(tmp_path):
+    """The same drift, asked the way the fleet bumper asks about one source."""
+    primary, out, _ = _drifted_source_only(tmp_path)
+    extra = tmp_path / "cms-platform"
+    return primary, out, ["--only", extra.resolve().as_uri()]
+
+
+def _drifted_primary_and_source(tmp_path):
+    primary, out, _ = _drifted_source_only(tmp_path)
+    _primary_drifted(primary)
+    return primary, out, []
+
+
+def _source_at_a_non_default_checkout(tmp_path):
+    """A federated source whose clone is NOT the sibling `../<repo-name>`.
+
+    The FLEET BUMPER's own layout, not an exotic one: bump-consumer-locks.sh
+    passes `--source-repo` for every registry it holds in BUMP_CHECKOUTS,
+    because it clones each one where it likes rather than beside the consumer.
+    Every other fixture here puts its source at the default sibling, so a
+    printed command that drops that flag runs anyway — which is how a whole
+    class of unrunnable commands survived a round whose central property is
+    that printed commands run verbatim.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "deep" / "elsewhere" / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert not (tmp_path / "cms-platform").exists(), "the default sibling must not exist"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--source-repo", f"{extra.resolve().as_uri()}={extra}",
+        "-o", str(out)).returncode == 0
+    _source_drifted(extra)
+    return primary, out, []
+
+
+def _primary_and_a_non_default_source_both_drifted(tmp_path):
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    _primary_drifted(primary)
+    return primary, out, []
+
+
+def _a_non_default_source_lock_gone_stale(tmp_path):
+    """The same layout, hand-edited so `--check` has a command to print.
+
+    `--check`'s remediation is the one that is not a `--repin`: a plain
+    generate restating the lock's whole identity, every `--source` included.
+    Every source it restates needs a checkout to read, so this is the cell
+    where a missing `--source-repo` costs the reader the whole document.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["skills"].pop("cms-platform/deploy")
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return primary, out, []
+
+
+def _branch_primary_drifted(tmp_path):
+    """`--ref main` is a supported invocation and writes the branch verbatim.
+
+    The drift is left UNCOMMITTED on purpose: a branch pin resolves to the tip,
+    so committing would move the pin along with the content and leave nothing
+    to report.
+    """
+    primary = tmp_path / "registry"
+    make_registry(primary, {"adam/alpha": SKILL_A})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", "main", "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["ref"] == "main"
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    return primary, out, []
+
+
+def _branch_primary_with_a_drifted_source(tmp_path):
+    """Only the SOURCE drifted — but the line that repairs it is a --repin."""
+    primary = tmp_path / "registry"
+    extra = tmp_path / "cms-platform"
+    make_registry(primary, {"adam/alpha": SKILL_A})
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", "main", "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "-o", str(out)).returncode == 0
+    _source_drifted(extra)
+    return primary, out, []
+
+
+def _one_registry_as_both_halves(tmp_path):
+    """A lock naming one registry as its primary AND as a federated source.
+
+    Representable and `--check`-green — plan_sources' uniqueness check is keyed
+    on bundle — and `_select_sources` refuses to SCOPE to such a registry, so
+    the unscoped run is the only one that reports this drift at all.
+    """
+    primary = tmp_path / "registry"
+    make_registry(primary, {"adam/alpha": SKILL_A})
+    _write(primary / "other" / "publish" / "SKILL.md", SKILL_C["SKILL.md"])
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "a second bundle in the same repo")
+    sha = _head(primary)
+    uri = primary.resolve().as_uri()
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", uri, "--ref", sha, "--bundles", "adam",
+        "--source", f"other={uri}@{sha}:{{bundle}}", "-o", str(out)).returncode == 0
+    _write(primary / "other" / "publish" / "SKILL.md", "---\nname: gamma\n---\nedited\n")
+    return primary, out, []
+
+
+def _registry_federated_twice(tmp_path):
+    primary, extra, _uri, out = _lock_federating_one_registry_twice(tmp_path)
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+    return primary, out, []
+
+
+def _two_sources(tmp_path):
+    """A primary and TWO federated sources — so a dropped one is visible.
+
+    Distinct bundle names and distinct skill basenames throughout: a shared
+    bundle is a hard error in plan_sources and a shared basename one in
+    `_reject_basename_collisions`, either of which would fail the run before it
+    could show anything about remediation.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    extra = tmp_path / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    other = tmp_path / "other-platform"
+    other_sha = make_registry(other, {"other/publish": SKILL_C}, layout="skills")
+    out = tmp_path / "skills.lock"
+    assert run_generator(
+        "--repo", str(primary), "--registry", primary.resolve().as_uri(),
+        "--ref", sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--source", f"other={other.resolve().as_uri()}@{other_sha}:skills",
+        "-o", str(out)).returncode == 0
+    return primary, out
+
+
+def _source_hand_pinned_at_a_branch(tmp_path):
+    primary, out = _two_sources(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["sources"][0]["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    # Uncommitted, for the same reason `_branch_primary_drifted` is: a branch
+    # pin follows its tip, so a committed change would not be a drift.
+    _write(tmp_path / "cms-platform" / "skills" / "deploy" / "SKILL.md",
+           "---\nname: deploy\n---\nedited again\n")
+    return primary, out, []
+
+
+def _emptied_source_bundle(tmp_path):
+    """The registry deleted a bundle's last skill — agentskills #125.
+
+    A re-pin here writes a lock that no longer installs those skills anywhere,
+    at exit 0. The fleet bumper refuses to propose it; the generator did not
+    refuse to write it.
+    """
+    primary, out = _two_sources(tmp_path)
+    extra = tmp_path / "cms-platform"
+    _rmtree(extra / "skills" / "deploy")
+    # A file that is not a skill, so the tree at the new commit is EMPTIED OF
+    # SKILLS rather than empty: `git archive` of a wholly empty tree writes
+    # zero bytes, which is its own defect and has its own test.
+    _write(extra / "README.md", "still a repository\n")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "the bundle is gone")
+    return primary, out, []
+
+
+def _emptied_source_bundle_scoped(tmp_path):
+    primary, out, _ = _emptied_source_bundle(tmp_path)
+    return primary, out, ["--only", (tmp_path / "cms-platform").resolve().as_uri()]
+
+
+def _three_sources(tmp_path):
+    """A primary and THREE federated sources, all sound. Returns (primary, out)."""
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    args = ["--repo", str(primary), "--registry", primary.resolve().as_uri(),
+            "--ref", sha, "--bundles", "adam"]
+    for name, bundle, skill in (("cms-platform", "cms-platform", SKILL_B),
+                                ("other-platform", "other", SKILL_C),
+                                ("third-platform", "third", SKILL_D)):
+        root = tmp_path / name
+        root_sha = make_registry(root, {f"{bundle}/{name}-skill": skill}, layout="skills")
+        args += ["--source", f"{bundle}={root.resolve().as_uri()}@{root_sha}:skills"]
+    out = tmp_path / "skills.lock"
+    assert run_generator(*args, "-o", str(out)).returncode == 0
+    return primary, out
+
+
+def _a_bundle_claimed_twice_asked_with_only(tmp_path):
+    """A whole-document defect, asked about a source the scope leaves sound.
+
+    `_select_sources` narrows `extras` BEFORE plan_sources sees them, so the
+    scoped run plans the primary plus ONE source and meets no conflict — it can
+    only learn of this from a predicate asked over the whole lock. Measured
+    before `repin_plan_blocker`: this printed
+    `--repin --ref <sha> --repin-source '<third>@'`, and running that line at
+    that lock exited 1 with "bundle 'cms-platform' is claimed by both ...".
+
+    The bumper's live path, not a curiosity: _agent-guidance builds its
+    federated report by concatenating one `--check-current --only <registry>`
+    block per drifted source.
+    """
+    primary, out = _three_sources(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["sources"][1]["bundles"] = document["sources"][0]["bundles"]
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    third = tmp_path / "third-platform"
+    _write(third / "skills" / "third-platform-skill" / "SKILL.md",
+           "---\nname: third\n---\nedited\n")
+    return primary, out, ["--only", third.resolve().as_uri()]
+
+
+def _more_sources_than_the_cap_asked_with_only(tmp_path):
+    """The other whole-document refusal plan_sources gives, scoped the same way."""
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    args = ["--repo", str(primary), "--registry", primary.resolve().as_uri(),
+            "--ref", sha, "--bundles", "adam"]
+    roots = []
+    for index in range(gsl.MAX_SOURCES + 1):
+        root = tmp_path / f"src{index}"
+        root_sha = make_registry(root, {f"b{index}/skill{index}": SKILL_A}, layout="skills")
+        roots.append(root)
+        args += ["--source", f"b{index}={root.resolve().as_uri()}@{root_sha}:skills"]
+    out = tmp_path / "skills.lock"
+    # Written by hand, because the generator will not WRITE an over-cap lock
+    # either — which is the point: the shape reaches a report through a merge
+    # or a hand edit, never through this script.
+    assert run_generator(*args[:-2], "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    last = roots[-1]
+    document["sources"].append({
+        "registry": last.resolve().as_uri(), "ref": _head(last),
+        "bundles": [f"b{gsl.MAX_SOURCES}"], "layout": "skills"})
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    _write(roots[0] / "skills" / "skill0" / "SKILL.md", "---\nname: skill0\n---\nedited\n")
+    return primary, out, ["--only", roots[0].resolve().as_uri()]
+
+
+def _a_skills_key_for_a_bundle_the_lock_does_not_declare(tmp_path):
+    """A merge artifact: `skills` carries a key whose bundle is not in `bundles`.
+
+    Nothing rebuilds such a key, so an unnarrowed shrink comparison calls every
+    re-pin a shrink — and the refusal it gives is a dead end no generator
+    command clears, whose sentence ("a bundle directory stopped existing at the
+    commit this would pin") a reader can check against `bundles` and find
+    false. Measured before `_movable_bundles`: `--check-current` printed a bare
+    `--repin` and running it exited 1 with exactly that sentence about `ghost`.
+    """
+    primary, out, extra_args = _drifted_plain(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["skills"]["ghost/oldskill"] = f"{gsl.LOCK_DIGEST_PREFIX}{'a' * 64}"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return primary, out, extra_args
+
+
+def _primary_bundle_gone_at_head_with_a_drifted_source(tmp_path):
+    """The one shape where `--check-current --ref <elsewhere>` is not the lock's pin.
+
+    The primary deleted its bundle's last skill in a commit AFTER the one the
+    lock pins, and a federated source drifted. Asked with `--ref <that later
+    commit>` the primary does not drift — the working tree agrees with it — so
+    only the source block is printed, and the line it prints anchors the
+    primary at a commit where the bundle is GONE. Whether the primary can move
+    under that line is therefore a comparison against the lock's own ref, not
+    "did the primary block drift"; asked the second way the report prints a
+    command the shrink guard then refuses.
+    """
+    primary, out = _two_sources(tmp_path)
+    _rmtree(primary / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha")
+    _write(primary / "README.md", "still a repository\n")
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "the primary bundle is gone")
+    _write(tmp_path / "cms-platform" / "skills" / "deploy" / "SKILL.md",
+           "---\nname: deploy\n---\nedited\n")
+    return primary, out, []
+
+
+def _hand_broken_lock(field, value=None):
+    """A really-drifted lock with one field --repin cannot inherit.
+
+    Each of these has always been refused by --repin and each was recommended
+    by --check-current anyway: the refusals lived in the readers main calls on
+    the write path and nothing on the report path knew about them.
+    """
+    def build(tmp_path):
+        primary, out, extra_args = _drifted_plain(tmp_path)
+        document = json.loads(out.read_text(encoding="utf-8"))
+        if value is None:
+            document.pop(field)
+        else:
+            document[field] = value
+        out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        return primary, out, extra_args
+    return build
+
+
+def _emptied_primary_bundle(tmp_path):
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", sha, "--bundles", "adam", "-o", str(out)).returncode == 0
+    _rmtree(primary / "plugins" / "adam" / "skills" / "alpha")
+    _write(primary / "README.md", "still a repository\n")
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "the bundle is gone")
+    return primary, out, []
+
+
+# (builder, id, does --check-current have a command it can honestly print?)
+_DRIFT_SHAPES = [
+    (_drifted_plain, "the primary moved", True),
+    (_drifted_source_only, "a source moved", True),
+    (_drifted_source_only_scoped, "a source moved, asked with --only", True),
+    (_drifted_primary_and_source, "both moved", True),
+    (_a_skills_key_for_a_bundle_the_lock_does_not_declare,
+     "the lock declares a skill for a bundle it does not list", True),
+    (_branch_primary_drifted, "the primary is pinned at a branch", False),
+    (_branch_primary_with_a_drifted_source,
+     "a source moved under a branch-pinned primary", False),
+    (_one_registry_as_both_halves,
+     "one registry is both the primary and a source", False),
+    (_registry_federated_twice, "one registry is federated twice", False),
+    (_source_hand_pinned_at_a_branch, "a source is pinned at a branch", False),
+    (_emptied_source_bundle, "a source bundle lost every skill", False),
+    (_emptied_source_bundle_scoped,
+     "a source bundle lost every skill, asked with --only", False),
+    (_hand_broken_lock("registry"), "the lock lost its 'registry'", False),
+    (_hand_broken_lock("bundles"), "the lock lost its 'bundles'", False),
+    (_hand_broken_lock("sources", {}), "the lock's 'sources' is an object", False),
+    (_emptied_primary_bundle, "the primary bundle lost every skill", False),
+    (_primary_bundle_gone_at_head_with_a_drifted_source,
+     "the primary bundle is gone at HEAD and a source drifted", False),
+    (_a_bundle_claimed_twice_asked_with_only,
+     "two sources claim one bundle, asked with --only about a third", False),
+    (_more_sources_than_the_cap_asked_with_only,
+     "more sources than the cap, asked with --only about one of them", False),
+]
+# Shapes where --check-current must print no command, but where the command it
+# declined to print would have failed for a DIFFERENT reason than the one the
+# report gives — so they belong in the "print it only if you would run it" half
+# and not in the "same sentence" half. There is one, and its two reasons are
+# both correct: the report says a bundle emptied (read off the working tree),
+# while the flag never gets that far, because build_lock materialises the empty
+# commit first and `git archive` of a tree with no entries is unreadable.
+_ALSO_UNPRINTABLE = [
+    (lambda tmp_path: _emptied_source_tree(tmp_path)[:2] + ([],),
+     "a source tree was emptied outright"),
+]
+_EVERY_SHAPE = ([pytest.param(build, printable, id=name)
+                 for build, name, printable in _DRIFT_SHAPES]
+                + [pytest.param(build, False, id=name)
+                   for build, name in _ALSO_UNPRINTABLE])
+_BLOCKED_SHAPES = [pytest.param(build, id=name)
+                   for build, name, printable in _DRIFT_SHAPES if not printable]
+
+
+def _printed_commands(stdout: str) -> list:
+    return [line.strip() for line in stdout.splitlines()
+            if line.strip().startswith("python3 ")]
+
+
+# The one `<...>` a remediation line can carry — see `_addressing`. Named as a
+# pattern rather than matched loosely, so a template this cannot COMPLETE
+# fails here instead of being run half-filled and reported as a bad command.
+_TEMPLATE_PLACEHOLDER = re.compile(r"<path to a checkout of ([^>]+)>")
+
+
+def _printed_templates(stdout: str) -> list:
+    """Every line a verdict marked as a template, with the marker stripped.
+
+    Kept apart from `_printed_commands` on purpose: a template is NOT runnable
+    as printed, and a helper that returned the two together would be the very
+    thing the marker exists to prevent — a reader (or a test) treating a line
+    with a hole in it as a command.
+    """
+    return [line.strip()[len(gsl.TEMPLATE_MARK):] for line in stdout.splitlines()
+            if line.strip().startswith(gsl.TEMPLATE_MARK)]
+
+
+def _completed(template: str, document: dict) -> str:
+    """A template with every `<...>` filled in from where this lock's clones are.
+
+    Mechanical for the same reason `_source_repo_flags` is: these fixtures'
+    registries are `file://` URIs naming the checkout itself. Completing and
+    RUNNING is what makes a template an honest answer rather than a way to
+    stop printing a command that did not work — a marker over a line nobody
+    can finish would be the same defect wearing an apology.
+    """
+    paths = {}
+    for source in document.get("sources") or []:
+        registry = source.get("registry") if isinstance(source, dict) else None
+        if isinstance(registry, str) and registry.startswith("file://"):
+            paths[registry] = url2pathname(urlparse(registry).path)
+
+    def fill(match):
+        assert match.group(1) in paths, (match.group(1), template)
+        return paths[match.group(1)]
+
+    filled = _TEMPLATE_PLACEHOLDER.sub(fill, template)
+    assert "<" not in filled, filled
+    return filled
+
+
+@pytest.mark.parametrize("build, printable", _EVERY_SHAPE)
+def test_every_command_check_current_prints_is_one_the_generator_accepts(
+        build, printable, tmp_path):
+    """The whole class as one property: print it only if you would run it.
+
+    Every command this report prints is a `--repin` — the federated
+    `--repin --ref <r> --repin-source '<reg>@'` included — so ANY refusal on
+    the re-pin path can reject any printed line, whichever block printed it.
+    Rather than re-listing which refusals apply to which block (three rounds of
+    doing that left three shapes uncovered), this runs whatever was printed,
+    exactly as printed, and requires exit 0.
+
+    The blocked shapes carry the other half: they must print no command at all
+    and say why in the headline, where no truncation can separate the reason
+    from the block it belongs to.
+    """
+    primary, out, extra_args = build(tmp_path)
+    verdict = run_generator("--repo", str(primary), "--check-current",
+                            *extra_args, "-o", str(out))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    commands = _printed_commands(verdict.stdout)
+
+    if not printable:
+        assert not commands, verdict.stdout
+        for line in verdict.stdout.splitlines():
+            if line.startswith("FAILED:"):
+                assert "would refuse one: " in line, line
+        return
+
+    assert commands, verdict.stdout
+    for command in commands:
+        # shlex, so what runs is the string a reader would paste. --repo/-o
+        # only say where this fixture lives.
+        applied = run_generator(*shlex.split(command)[2:],
+                                "--repo", str(primary), "-o", str(out))
+        assert applied.returncode == 0, (command, applied.stdout + applied.stderr)
+
+
+_SOURCE_FLAG_RE = re.compile(r"--source '([^']+)'")
+_COMMIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def _restated_registries(text: str) -> list:
+    """The registries a refusal's own `--source` flags would restate."""
+    return [spec.split("=", 1)[1].rpartition("@")[0]
+            for spec in _SOURCE_FLAG_RE.findall(text)]
+
+
+@pytest.mark.parametrize("build", _BLOCKED_SHAPES)
+def test_no_refusal_sends_a_reader_to_a_plain_generate_that_drops_sources(
+        build, tmp_path):
+    """Advice whose literal execution loses data is worse than no advice.
+
+    A plain generate takes `sources` from the COMMAND LINE ALONE, so "repair
+    the lock with a plain generate" is an instruction to de-federate it unless
+    every source is restated in the same command. Measured before this clause
+    existed, by following each refusal's own words: the source-side refusal
+    named one `--source` and a two-source lock came back with one source at
+    exit 0; the primary-side refusal named "(--registry / --ref / --bundles)"
+    and a federated lock came back with no `sources` key at all. Both exit 0,
+    both green under `--check` afterwards.
+
+    So: every refusal that mentions a plain generate must name a --source for
+    every source the lock federates, and the set is compared rather than the
+    prose.
+    """
+    primary, out, extra_args = build(tmp_path)
+    federated = [source["registry"]
+                 for source in json.loads(out.read_text(encoding="utf-8")).get("sources", [])]
+    report = run_generator("--repo", str(primary), "--check-current",
+                           *extra_args, "-o", str(out))
+    assert report.returncode == 1, report.stdout + report.stderr
+    reasons = [line.split("would refuse one: ", 1)[1]
+               for line in report.stdout.splitlines() if "would refuse one: " in line]
+    assert reasons, report.stdout
+    for reason in reasons:
+        if "plain generate" not in reason:
+            continue
+        assert _restated_registries(reason) == federated, reason
+
+
+def _follow_the_plain_generate(reason: str, primary: Path, out: Path,
+                               placeholder: str = "",
+                               extra: Sequence[str] = ()) -> subprocess.CompletedProcess:
+    """Run the plain generate a refusal describes, taking its --source flags verbatim.
+
+    `--registry / --ref / --bundles` come off the lock because the message
+    names them as flags rather than as values; the `--source` list is the part
+    the message spells out in full, and is the part that decides whether the
+    lock stays federated. A `<sha>` placeholder stands for the one commit only
+    the reader knows — the pin the refusal declined to trust — so the caller
+    supplies it.
+
+    `extra` is for the other half the message states as a RULE rather than a
+    value: a `--source-repo` for a source whose clone is not the default
+    sibling. Passing it is the caller acting on that sentence, so a test can
+    measure the run with it and without.
+    """
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    flags = []
+    for spec in _SOURCE_FLAG_RE.findall(reason):
+        flags += ["--source", spec.replace("<sha>", placeholder)]
+    return run_generator(
+        "--repo", str(primary), "--registry", lock["registry"],
+        "--ref", _head(primary), "--bundles", ",".join(lock["bundles"]),
+        *flags, *extra, "-o", str(out))
+
+
+def test_the_plain_generate_a_refusal_names_says_where_its_clones_are_read_from(tmp_path):
+    """The `--source` list is only half of a runnable plain generate.
+
+    Every `--source` is read from a local checkout, looked for at the sibling
+    `../<repo-name>` of whatever `--repo` the generate is given. The clause
+    named the sources and not that rule, so on the fleet bumper's own layout —
+    a federated clone that is NOT the sibling — following the sentence
+    verbatim exited 1 at "no checkout at ...", the same way the printed
+    commands used to before this round derived their addressing.
+
+    The matrix cannot see this: its property only runs lines beginning
+    `python3 `, and this advice is prose inside a headline.
+
+    Both halves are executed here rather than asserted. The plain generate the
+    refusal describes, taken verbatim, still fails on this layout without the
+    flag the sentence now names — which is what makes the sentence
+    load-bearing rather than decorative — and succeeds with it, leaving the
+    lock federated.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    # A branch where a commit sha belongs: `repin_primary_blocker` refuses every
+    # re-pin of this lock, so the verdict falls through to the plain-generate
+    # advice this test is about instead of printing a command.
+    document["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    source = document["sources"][0]
+    checkout = url2pathname(urlparse(source["registry"]).path)
+
+    verdict = run_generator(
+        "--check-current", "--repo", str(primary), "-o", str(out),
+        "--source-repo", f"{source['registry']}={checkout}")
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert not _printed_commands(verdict.stdout), verdict.stdout
+    assert not _printed_templates(verdict.stdout), verdict.stdout
+    reasons = [line.split("would refuse one: ", 1)[1]
+               for line in verdict.stdout.splitlines() if "would refuse one: " in line]
+    assert reasons, verdict.stdout
+    for reason in reasons:
+        assert "plain generate" in reason, reason
+        assert "--source-repo '<bundles>=<path>'" in reason, reason
+
+    # FOLLOWED VERBATIM, both ways round. `_follow_the_plain_generate` takes the
+    # `--source` flags out of the message and nothing else.
+    rebuilt = tmp_path / "rebuilt.lock"
+    shutil.copyfile(out, rebuilt)
+    without = _follow_the_plain_generate(reasons[0], primary, rebuilt)
+    assert without.returncode == 1, without.stdout + without.stderr
+    assert "no checkout at" in without.stdout + without.stderr, without.stderr
+
+    # The one flag the sentence names, spelled the way it names it.
+    withflag = _follow_the_plain_generate(
+        reasons[0], primary, rebuilt,
+        extra=["--source-repo", f"{','.join(source['bundles'])}={checkout}"])
+    assert withflag.returncode == 0, withflag.stdout + withflag.stderr
+    after = json.loads(rebuilt.read_text(encoding="utf-8"))
+    assert [entry["registry"] for entry in after.get("sources", [])] == [
+        source["registry"]], after
+
+
+def test_following_the_primary_refusal_literally_keeps_the_lock_federated(tmp_path):
+    """The primary-side half of the clause above, executed rather than asserted."""
+    primary, out, _ = _branch_primary_with_a_drifted_source(tmp_path)
+    before = [source["registry"]
+              for source in json.loads(out.read_text(encoding="utf-8"))["sources"]]
+
+    refusal = run_generator("--repo", str(primary), "--repin", "-o", str(out))
+    assert refusal.returncode == 1, refusal.stdout + refusal.stderr
+
+    applied = _follow_the_plain_generate(refusal.stderr, primary, out)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert [source["registry"] for source in after.get("sources", [])] == before
+    assert _COMMIT_SHA.fullmatch(after["ref"]), after["ref"]
+
+
+def test_following_the_source_refusal_literally_keeps_the_other_source(tmp_path):
+    """And the source-side half, on a lock with a second source to lose."""
+    primary, out, _ = _source_hand_pinned_at_a_branch(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    before = [source["registry"] for source in document["sources"]]
+    assert len(before) == 2
+    blocked = document["sources"][0]["registry"]
+
+    refusal = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{blocked}@", "-o", str(out))
+    assert refusal.returncode == 1, refusal.stdout + refusal.stderr
+
+    # The commit the refusal would not guess: the one the branch-pinned source
+    # is really sitting on, which only the reader can supply.
+    applied = _follow_the_plain_generate(
+        refusal.stderr, primary, out, _head(tmp_path / "cms-platform"))
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert [source["registry"] for source in after.get("sources", [])] == before
+    for source in after["sources"]:
+        assert _COMMIT_SHA.fullmatch(source["ref"]), source
+
+
+def _blocked_headlines(stdout: str) -> list:
+    """(registry or None for the primary block, the reason given) per block."""
+    blocks = []
+    for line in stdout.splitlines():
+        if not line.startswith("FAILED:") or "would refuse one: " not in line:
+            continue
+        reason = line.split("would refuse one: ", 1)[1]
+        if line.startswith("FAILED: the bundle has moved on"):
+            blocks.append((None, reason))
+        else:
+            blocks.append((line[len("FAILED: "):].split("'s bundles have moved")[0],
+                           reason))
+    return blocks
+
+
+@pytest.mark.parametrize("build", _BLOCKED_SHAPES)
+def test_the_report_and_the_refusal_give_the_same_reason(build, tmp_path):
+    """One sentence, one source of it — the `*_blocker` predicates.
+
+    Two copies of "why a re-pin cannot be used here" is how a report and a flag
+    come to disagree, and this pair disagreeing is not cosmetic: the report is
+    where a reader learns the repair and the flag is what accepts it. So the
+    command each blocked block DECLINED to print is rebuilt in the shape that
+    block prints (bare `--repin` for the primary, `--repin --repin-source
+    '<registry>@'` for a source), run, and required to fail with the very
+    sentence the reader was given.
+
+    Compared as strings rather than by re-describing both, and over every shape
+    the report refuses rather than the one the predicate was born for.
+    """
+    primary, out, extra_args = build(tmp_path)
+    before = out.read_text(encoding="utf-8")
+
+    report = run_generator("--repo", str(primary), "--check-current",
+                           *extra_args, "-o", str(out))
+    assert report.returncode == 1, report.stdout + report.stderr
+    blocks = _blocked_headlines(report.stdout)
+    assert blocks, report.stdout
+
+    for registry, reason in blocks:
+        # The `--ref` anchor the printable form carries is left off: it names
+        # which primary pin to hold, and every refusal here is decided before
+        # any pin is written.
+        spec = [] if registry is None else ["--repin-source", f"{registry}@"]
+        refusal = run_generator("--repo", str(primary), "--repin", *spec, "-o", str(out))
+        assert refusal.returncode == 1, (registry, refusal.stdout + refusal.stderr)
+        assert reason in refusal.stderr, (reason, refusal.stderr)
+        assert out.read_text(encoding="utf-8") == before, "a refused re-pin still wrote"
+
+
+def test_the_report_quotes_the_refusal_the_flag_reaches_first(tmp_path):
+    """A lock tripping TWO re-pin refusals must be told about the FIRST one.
+
+    `remediation` composes the blockers in the order the apply path meets them
+    — that is what makes "the sentence quoted is the sentence the flag says"
+    more than a hope. Plan and source were swapped against that order: main
+    applies `--repin-source` (`_apply_repin_sources`) before `build_lock`
+    reaches `plan_sources`, while the report asked plan first.
+
+    Measured on the lock below, which is over the cap AND federates one
+    registry twice: the report said "'sources' lists 9 entries; at most 8 are
+    allowed" while the flag said "this lock federates that registry twice", so
+    a reader was sent to fix the wrong field first. No command is printed
+    either way, so nothing recommended was refused — the cost is the reader,
+    and a docstring sentence anyone can check and find false.
+
+    The existing same-reason test cannot cover this: it rebuilds the declined
+    command for shapes that trip exactly one blocker, so a disagreement about
+    WHICH of two applies has nowhere to show up there.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    args = ["--repo", str(primary), "--registry", primary.resolve().as_uri(),
+            "--ref", sha, "--bundles", "adam"]
+    roots = []
+    for index in range(gsl.MAX_SOURCES):
+        root = tmp_path / f"src{index}"
+        root_sha = make_registry(root, {f"b{index}/skill{index}": SKILL_A}, layout="skills")
+        roots.append(root)
+        args += ["--source", f"b{index}={root.resolve().as_uri()}@{root_sha}:skills"]
+    out = tmp_path / "skills.lock"
+    assert run_generator(*args, "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    # One entry too many, repeating source[0]'s registry under another bundle:
+    # both refusals from one lock. Hand-written because the generator will not
+    # write an over-cap lock either — such a shape arrives by merge or edit.
+    document["sources"].append({
+        "registry": roots[0].resolve().as_uri(), "ref": _head(roots[0]),
+        "bundles": [f"b{gsl.MAX_SOURCES}"], "layout": "skills"})
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    extras = [gsl.normalize_source(raw, f"sources[{index}]")
+              for index, raw in enumerate(document["sources"])]
+    named = extras[0]["registry"]
+    answer = gsl.remediation("source", existing=document, output=out, repo=primary,
+                             registry=document["registry"], extras=extras,
+                             ref=document["ref"], source_registry=named)
+    assert answer.command is None, answer.command
+
+    refusal = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{named}@", "-o", str(out))
+    assert refusal.returncode == 1, refusal.stdout + refusal.stderr
+    assert answer.reason in refusal.stderr, (answer.reason, refusal.stderr)
+
+
+# The two sentences that told a reader --check-format's read-set and got it
+# wrong. Both were true when written and made false by 36dfb87, which routed
+# this flag's remediation through `remediation`; neither is reachable by any
+# behavioural test, which is why they are named here as text.
+_RETIRED_CHECK_FORMAT_CLAIMS = ("no `registry`, no `sources`", "READ here")
+
+
+def test_check_format_reads_the_lock_and_its_addressing_and_no_clone(tmp_path):
+    """What `--check-format` actually reads, measured — and the prose about it.
+
+    The flag's calling convention is that it touches NO clone: the fleet
+    bumper runs it per consumer lock before it has cloned any registry. That
+    half is still true and is measured below against a `--repo` that does not
+    exist. What stopped being true is "reads `skills` and `ref` alone": its
+    remediation is `remediation`'s now, so the verdict depends on `registry`,
+    `bundles` and `sources` — the fields a `--repin` inherits — and on this
+    run's `--repo` and `--source-repo`, which the printed line restates.
+
+    Both the docstring and the argparse help still asserted the old read-set,
+    and a cross-repo contract is the wrong place for a sentence a reader can
+    check and find false. The prose half of this test is a text check because
+    prose is what regressed; the behavioural half is what the prose now says.
+    """
+    primary, out = _two_sources(tmp_path)
+    bare = _bare_digest_copy(out)
+
+    # NO CLONE. --repo at a path that does not exist, and the verdict lands
+    # anyway — so not one git call, and the flag stays answerable before the
+    # bumper has cloned anything.
+    nowhere = tmp_path / "no-such-clone"
+    assert not nowhere.exists()
+    verdict = run_generator("--check-format", "--repo", str(nowhere), "-o", str(bare))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert verdict.stdout.startswith("FAILED:"), verdict.stdout
+    printed = _printed_commands(verdict.stdout)
+    assert len(printed) == 1, verdict.stdout
+    # --repo READ: the line it prints names the clone this run was given.
+    assert f"--repo {shlex.quote(str(nowhere))}" in printed[0], printed[0]
+
+    # --source-repo READ, the same way.
+    where = tmp_path / "cms-platform"
+    spec = f"{where.resolve().as_uri()}={where}"
+    located = run_generator("--check-format", "--repo", str(primary),
+                            "--source-repo", spec, "-o", str(bare))
+    assert located.returncode == 1, located.stdout + located.stderr
+    assert f"--source-repo {shlex.quote(spec)}" in _printed_commands(located.stdout)[0]
+
+    # The lock's IDENTITY read: break one field and the flag stops offering a
+    # command, giving the refusal a --repin of that lock would give instead.
+    for field, value in (("registry", None), ("bundles", None), ("sources", {})):
+        document = json.loads(bare.read_text(encoding="utf-8"))
+        if value is None:
+            document.pop(field)
+        else:
+            document[field] = value
+        broken = tmp_path / f"broken-{field}.lock"
+        broken.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        answer = run_generator("--check-format", "--repo", str(primary),
+                               "-o", str(broken))
+        assert answer.returncode == 1, (field, answer.stdout + answer.stderr)
+        assert answer.stdout.startswith("FAILED:"), (field, answer.stdout)
+        assert not _printed_commands(answer.stdout), (field, answer.stdout)
+        assert "would refuse one: " in answer.stdout, (field, answer.stdout)
+        assert f"'{field}'" in answer.stdout, (field, answer.stdout)
+
+    source = GENERATOR.read_text(encoding="utf-8")
+    for claim in _RETIRED_CHECK_FORMAT_CLAIMS:
+        assert claim not in source, (
+            f"{claim!r} is back in generate_skills_lock.py. The measurements above "
+            "are what --check-format reads; a sentence saying otherwise is a "
+            "cross-repo contract that lies to the caller reading it.")
+
+
+def test_check_format_reads_exactly_the_lock_fields_its_help_names(tmp_path):
+    """The enumeration in the cross-repo help, measured field by field.
+
+    `--check-format`'s argparse help tells a caller in another repo which lock
+    fields the flag reads beyond the digests it judges. af0090e introduced that
+    list and left `ref` out of it — on a flag whose entire printed line is
+    `--repin --ref <that field>`. A list of what something reads, with one read
+    field missing, is the same checkable-and-false shape as any other stale
+    comment, and the help is the copy a caller who cannot read this file will
+    believe.
+
+    READ is defined operationally, so the test measures rather than restates:
+    a field is read when REMOVING it or REPLACING it with another well-formed
+    value changes what the verdict prints. Both, because one alone misses
+    fields — a different-but-valid `registry` produces byte-identical output
+    while dropping it produces a refusal, and the reverse holds for `ref`.
+
+    On the federated non-default layout, because that is the only one where
+    `sources` reaches the printed line at all: with every clone at its default
+    sibling, dropping `sources` changes nothing, and the fixture would quietly
+    stop measuring the field it was added for.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    document = json.loads(_bare_digest_copy(out).read_text(encoding="utf-8"))
+
+    def ask(mutated, name):
+        lock = tmp_path / f"read-set-{name}.lock"
+        lock.write_text(json.dumps(mutated, indent=2) + "\n", encoding="utf-8")
+        verdict = run_generator("--check-format", "--repo", str(primary),
+                                "-o", str(lock))
+        # The lock's own path is in every line; normalised out so a differing
+        # FILENAME cannot read as a differing answer.
+        return verdict.stdout.replace(str(lock), "<lock>")
+
+    # Well formed and not what the lock says, one per field. `skills` is
+    # excluded: it is the thing being judged, not a read beyond it.
+    replacements = {
+        "ref": "0" * 39 + "1",
+        "registry": (tmp_path / "some-other-registry").resolve().as_uri(),
+        "bundles": ["adam", "another"],
+        "sources": [],
+        "generated_from": {"changed": True},
+    }
+    baseline = ask(document, "baseline")
+    assert baseline.startswith("FAILED:"), baseline
+
+    read = set()
+    for field in document:
+        if field == "skills":
+            continue
+        assert field in replacements, (
+            f"the lock grew a {field!r} field; give it a well-formed replacement "
+            "here so this measures it rather than skipping it")
+        without = {key: value for key, value in document.items() if key != field}
+        instead = {**document, field: replacements[field]}
+        if (ask(without, f"{field}-removed") != baseline
+                or ask(instead, f"{field}-replaced") != baseline):
+            read.add(field)
+
+    assert read == set(gsl.CHECK_FORMAT_LOCK_READS), (
+        "--check-format's help enumerates the lock fields it reads beyond the "
+        f"digests. It names {sorted(gsl.CHECK_FORMAT_LOCK_READS)} and it measurably "
+        f"reads {sorted(read)}. A cross-repo caller reads that list and cannot "
+        "check it; fix CHECK_FORMAT_LOCK_READS, not this assertion.")
+
+
+def _ask_without_addressing(primary: Path, lock: Path, *flags: str):
+    """One verdict, asked with no `--source-repo` — the form its caller uses.
+
+    `--check-format`'s caller is the fleet bumper's PRE-CLONE call, which
+    passes neither `--repo` nor `--source-repo` (measured in _agent-guidance's
+    scripts/bump-consumer-locks.sh at 4c505e3: `python3 "$GENERATOR"
+    --check-format -o "$lock_file"`). `--check-current --only <the primary
+    registry>` reads no source at all, so its caller has no path to one to
+    pass. `--repo` is kept here only because a fixture registry is not this
+    checkout.
+    """
+    return run_generator(*flags, "--repo", str(primary), "-o", str(lock))
+
+
+def test_a_printed_line_addresses_the_clones_that_line_needs(tmp_path):
+    """Addressing is a property of the LINE, not of the flags this run got.
+
+    Every line these verdicts print is a rebuild of the WHOLE document, so it
+    needs a checkout for every source THAT DOCUMENT federates. Restating this
+    run's own `--source-repo` specs answered a different question, and left
+    unanswered exactly the two invocations that legitimately pass none:
+    `--check-format`, whose convention is a pre-clone call, and
+    `--check-current --only <the primary registry>`, where `_select_sources`
+    drops the sources before anything is read. Both printed a bare `--repin`
+    that exits 1 at "no checkout at <the default sibling>" on the fleet
+    bumper's own layout. Measured in both directions here.
+
+    The control half is the reason this cannot be fixed by templating every
+    federated line: on the ORDINARY layout the same two questions must print a
+    plain, runnable command with no placeholder and no marker, because the
+    default sibling is where the clone actually is. The answer comes from this
+    machine, not from a rule about layouts.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    _primary_drifted(primary)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    unlocated = document["sources"][0]["registry"]
+    asks = (("--check-format", _bare_digest_copy(out), ("--check-format",)),
+            ("--check-current --only <primary>", out,
+             ("--check-current", "--only", document["registry"])))
+
+    for label, lock, flags in asks:
+        verdict = _ask_without_addressing(primary, lock, *flags)
+        assert verdict.returncode == 1, (label, verdict.stdout + verdict.stderr)
+        # No line claiming to be runnable, because none of them is.
+        assert not _printed_commands(verdict.stdout), (label, verdict.stdout)
+        templates = _printed_templates(verdict.stdout)
+        assert len(templates) == 1, (label, verdict.stdout)
+        assert unlocated in templates[0], (label, templates[0])
+        applied = _run_printed(_completed(templates[0], document))
+        assert applied.returncode == 0, (label, applied.stdout + applied.stderr)
+
+    # THE CONTROL: the same two questions, the same two verdicts, a layout
+    # whose source IS the default sibling.
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    sibling_primary, sibling_out, _ = _drifted_source_only(ordinary)
+    _primary_drifted(sibling_primary)
+    sibling_doc = json.loads(sibling_out.read_text(encoding="utf-8"))
+    for label, lock, flags in (
+            ("--check-format", _bare_digest_copy(sibling_out), ("--check-format",)),
+            ("--check-current --only <primary>", sibling_out,
+             ("--check-current", "--only", sibling_doc["registry"]))):
+        verdict = _ask_without_addressing(sibling_primary, lock, *flags)
+        assert verdict.returncode == 1, (label, verdict.stdout + verdict.stderr)
+        assert not _printed_templates(verdict.stdout), (label, verdict.stdout)
+        printed = _printed_commands(verdict.stdout)
+        assert len(printed) == 1, (label, verdict.stdout)
+        assert "--source-repo" not in printed[0], (label, printed[0])
+        applied = _run_printed(printed[0])
+        assert applied.returncode == 0, (label, applied.stdout + applied.stderr)
+
+
+# What, echoed unchecked into a printed command, writes another line into the
+# stream `bump-consumer-locks.sh` greps for `^FAILED:` and slices into a PR
+# body: a fabricated headline at column 0, and a second `python3 ...` under a
+# headline that did not produce it.
+_FORGED_HEADLINE = "FAILED: this lock is beyond repair; wipe it and start over."
+_FORGED_COMMAND = "python3 scripts/generate_skills_lock.py --registry evil/repo=/tmp"
+
+
+def _forgeries(value: str) -> dict:
+    """The same forgery at each of the three places a break can sit in a value.
+
+    POSITION IS THE TEST, not a variation on it. A guard applied to
+    `value.strip()` rather than to the value has already deleted a LEADING or
+    TRAILING break by the time it looks, while the raw value — breaks intact —
+    is what `_addressing` echoes; so an interior-only probe is the one
+    placement such a guard survives, and interior-only is what this drove
+    before. Measured on `parse_source_repo`, which line-checked
+    `key.strip()`/`path.strip()`: `--source-repo $'cms-platform=\nFAILED: ...'`
+    passed the guard and printed two column-0 `FAILED:` lines out of one
+    verdict.
+
+    Each placement carries exactly the breaks its position needs, so a fix that
+    closes only the interior one cannot pass the other two on their spare
+    newlines.
+    """
+    return {
+        "interior": f"{value}\n{_FORGED_HEADLINE}\n{_FORGED_COMMAND}",
+        "leading": f"\n{_FORGED_HEADLINE} {value}",
+        "trailing": f"{value} {_FORGED_HEADLINE}\n",
+    }
+
+
+def test_no_caller_value_can_forge_a_line_in_the_stream_a_verdict_prints(tmp_path):
+    """Every value `_addressing` echoes is line-checked at the boundary.
+
+    `--repo`, `-o` and both halves of `--source-repo` are restated verbatim in
+    the command a verdict prints. `shlex.quote` is not a guard against a
+    newline — it preserves one inside single quotes — so an operator value
+    carrying one splits the "command" across lines and can put a `FAILED:` at
+    column 0 that no verdict wrote. Measured before this check, on
+    `--source-repo`'s path half and on `--repo`: two column-0 `FAILED:`
+    headlines and two `python3` lines out of one run.
+
+    Each channel is driven at all three positions a break can occupy — see
+    `_forgeries` for why the leading and trailing ones are not decoration: they
+    are the two a guard that checks a `.strip()`ed copy of the value silently
+    lets through, and `parse_source_repo` was such a guard.
+
+    Not a trust boundary — the value is the operator's own argv — but the file
+    already owns the validator, and `report_drift`'s stated contract is that a
+    block's repair belongs to that block.
+    """
+    primary, out = _two_sources(tmp_path)
+    bare = _bare_digest_copy(out)
+    source = json.loads(out.read_text(encoding="utf-8"))["sources"][0]
+    checkout = url2pathname(urlparse(source["registry"]).path)
+    channels = {}
+    for where, forged in _forgeries(str(primary)).items():
+        channels[f"--repo, {where}"] = (
+            "--check-format", "--repo", forged, "-o", str(bare))
+    for where, forged in _forgeries(str(bare)).items():
+        channels[f"-o, {where}"] = (
+            "--check-format", "--repo", str(primary), "-o", forged)
+    for where, forged in _forgeries(source["registry"]).items():
+        channels[f"--source-repo key, {where}"] = (
+            "--check-format", "--repo", str(primary), "-o", str(bare),
+            "--source-repo", f"{forged}={checkout}")
+    for where, forged in _forgeries(checkout).items():
+        channels[f"--source-repo path, {where}"] = (
+            "--check-format", "--repo", str(primary), "-o", str(bare),
+            "--source-repo", f"{source['registry']}={forged}")
+    for label, argv in channels.items():
+        refused = run_generator(*argv)
+        assert refused.returncode != 0, (label, refused.stdout)
+        assert "must not contain control characters" in refused.stderr, (
+            label, refused.stderr)
+        assert not [line for line in refused.stdout.splitlines()
+                    if line.startswith("FAILED:")], (label, refused.stdout)
+        assert not _printed_commands(refused.stdout), (label, refused.stdout)
+        assert not _printed_templates(refused.stdout), (label, refused.stdout)
+
+    # THE CONTROL, and the reason this is not simply `_reject_control`: a local
+    # path may hold a SPACE, and that guard rejects one. A layout built
+    # entirely out of spaced directories still generates, still verifies, and
+    # still prints a command that runs.
+    spaced = tmp_path / "a dir with spaces"
+    spaced.mkdir()
+    roomy = spaced / "registry"
+    sha = make_registry(roomy, {"adam/alpha": SKILL_A})
+    extra = spaced / "not the sibling" / "cms-platform"
+    extra_sha = make_registry(extra, {"cms-platform/deploy": SKILL_B}, layout="skills")
+    lock = spaced / "skills.lock"
+    spec = f"{extra.resolve().as_uri()}={extra}"
+    assert run_generator(
+        "--repo", str(roomy), "--registry", roomy.resolve().as_uri(),
+        "--ref", sha, "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@{extra_sha}:skills",
+        "--source-repo", spec, "-o", str(lock)).returncode == 0
+    _source_drifted(extra)
+    verdict = run_generator("--check-current", "--repo", str(roomy),
+                            "--source-repo", spec, "-o", str(lock))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    printed = _printed_commands(verdict.stdout)
+    assert len(printed) == 1, verdict.stdout
+    applied = _run_printed(printed[0])
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+
+
+def test_the_addressing_moves_with_the_machine_and_the_verdict_does_not(tmp_path):
+    """One lock, one invocation, three states of the default sibling.
+
+    `_addressing` asks a filesystem question, so the printed half of a verdict
+    is machine-dependent BY DESIGN — "where will this line find its clones" is
+    a question about this machine, and a run beside a checkout rightly prints
+    a shorter line than the same run without one. `_addressing`'s docstring
+    used to claim the opposite ("answers the same either way"), which is the
+    kind of sentence a reader checks; this is what it can check it against.
+
+    What must NOT move is the verdict: the digests judged, the headline, the
+    exit code, all decided off the lock's own bytes. And what must hold in
+    every state is the contract the derivation exists for — the printed line
+    is a runnable command, or visibly a template, never a command that fails.
+
+    The middle state is why `_is_a_checkout` asks for git's own marker rather
+    than for a directory. Measured with the old `is_dir` probe: an unrelated
+    EMPTY `cms-platform/` beside the primary flipped the answer from a template
+    to a bare `--repin`, and running that verbatim exited 1 with "cannot
+    resolve ref ... fatal: not a git repository" — a printed line that was
+    neither runnable nor visibly a template.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    bare = _bare_digest_copy(out)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    sibling = Path(primary).resolve().parent / "cms-platform"
+    real = url2pathname(urlparse(document["sources"][0]["registry"]).path)
+    assert not sibling.exists(), sibling
+
+    def ask():
+        return run_generator("--check-format", "--repo", str(primary), "-o", str(bare))
+
+    def headline(verdict):
+        return verdict.stdout.splitlines()[0]
+
+    answers = {}
+    for state in ("no sibling", "an empty sibling", "the clone at the sibling"):
+        if state == "an empty sibling":
+            sibling.mkdir()
+        if state == "the clone at the sibling":
+            _rmtree(sibling)
+            shutil.copytree(real, sibling)
+        verdict = ask()
+        assert verdict.returncode == 1, (state, verdict.stdout + verdict.stderr)
+        assert headline(verdict).startswith("FAILED:"), (state, verdict.stdout)
+
+        commands = _printed_commands(verdict.stdout)
+        templates = _printed_templates(verdict.stdout)
+        assert len(commands) + len(templates) == 1, (state, verdict.stdout)
+        if commands:
+            # Printed as a command, so it must BE one.
+            applied = _run_printed(commands[0])
+            assert applied.returncode == 0, (state, applied.stdout + applied.stderr)
+            _bare_digest_copy(out)                 # put the failing lock back
+        answers[state] = (verdict.returncode, headline(verdict),
+                          "template" if templates else "command")
+
+    verdicts = {(code, line) for code, line, _ in answers.values()}
+    assert len(verdicts) == 1, answers          # the verdict half does not move
+    assert answers["no sibling"][2] == "template", answers
+    assert answers["an empty sibling"][2] == "template", answers
+    assert answers["the clone at the sibling"][2] == "command", answers
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the shim is an extension-less #!/bin/sh file and PATH is set to it "
+           "alone; Windows CreateProcess cannot execute one, so the run dies "
+           "with WinError 2 before reaching the branch under test and the "
+           "marker records nothing. Same class as _path_farm's guard below. "
+           "The invariant itself is POSIX-shaped and the Linux job covers it.")
+def test_check_format_asks_no_git_even_to_address_its_own_line(tmp_path):
+    """The flag locates a checkout without opening one.
+
+    Its calling convention is TOUCHES NO CLONE — the bumper asks it per
+    consumer lock before it has cloned any registry — and deriving the
+    addressing of its printed line added the one filesystem question it asks:
+    is the default sibling a directory. That opens no checkout, reads no file
+    and spawns no process, which is what makes it compatible with the
+    convention; this is what holds the distinction rather than asserting it.
+
+    `git` on PATH is a shim that records the call and fails, so a single git
+    call would both leave the marker and break the run.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    bare = _bare_digest_copy(out)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    marker = tmp_path / "git-was-spawned"
+    (shim / "git").write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> {shlex.quote(str(marker))}\n'
+        "exit 97\n",
+        encoding="utf-8")
+    (shim / "git").chmod(0o755)
+    env = {**os.environ, "PATH": str(shim)}
+
+    def ask(*flags, lock):
+        return subprocess.run(
+            [sys.executable, str(GENERATOR), *flags,
+             "--repo", str(primary), "-o", str(lock)],
+            capture_output=True, text=True, env=env)
+
+    verdict = ask("--check-format", lock=bare)
+    assert not marker.exists(), (
+        marker.read_text(encoding="utf-8"), verdict.stdout + verdict.stderr)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert verdict.stdout.startswith("FAILED:"), verdict.stdout
+    assert len(_printed_templates(verdict.stdout)) == 1, verdict.stdout
+
+    # NEGATIVE CONTROL, so "no marker" cannot mean "the shim never worked":
+    # --check must read a tree, and the same env trips it. Addressed, because
+    # an unaddressed --check on this layout stops at "no checkout at ..."
+    # before it reaches git — which would leave the marker empty for a reason
+    # that says nothing about the shim.
+    source = json.loads(out.read_text(encoding="utf-8"))["sources"][0]
+    control = ask("--check", "--source-repo",
+                  f"{source['registry']}={url2pathname(urlparse(source['registry']).path)}",
+                  lock=out)
+    assert marker.exists(), control.stdout + control.stderr
+    assert control.returncode != 0, control.stdout
+
+
+def test_one_sources_emptied_bundle_does_not_suppress_anothers_remediation(tmp_path):
+    """A block's refusal must be about the command that block prints.
+
+    `--repin --ref <the lock's ref> --repin-source '<srcB>@'` holds every other
+    pin at the sha the lock records, so srcA's bundles cannot move under it —
+    and a re-pin that cannot move them cannot empty them. Asking one shrink
+    question for the whole report suppressed srcB's line anyway, stranding a
+    federated bump behind an unrelated registry's problem with no route the
+    tool offers, and printing srcA's sentence under srcB's headline.
+
+    Both halves are measured: srcA's block still refuses (the guard is not
+    merely switched off), and the line srcB's block prints is RUN and required
+    to advance srcB while leaving srcA's skills where they were.
+    """
+    primary, out = _two_sources(tmp_path)
+    before = json.loads(out.read_text(encoding="utf-8"))
+    src_a, src_b = tmp_path / "cms-platform", tmp_path / "other-platform"
+    _rmtree(src_a / "skills" / "deploy")
+    _write(src_a / "README.md", "still a repository\n")
+    _git(src_a, "add", "-A")
+    _git(src_a, "commit", "-q", "-m", "the bundle is gone")
+    _write(src_b / "skills" / "publish" / "SKILL.md", "---\nname: publish\n---\nedited\n")
+
+    verdict = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    blocks = dict(_blocked_headlines(verdict.stdout))
+    assert list(blocks) == [src_a.resolve().as_uri()], verdict.stdout
+    assert "with no skills at all" in blocks[src_a.resolve().as_uri()]
+
+    commands = _printed_commands(verdict.stdout)
+    assert len(commands) == 1, verdict.stdout
+    assert src_b.resolve().as_uri() in commands[0], commands[0]
+    applied = run_generator(*shlex.split(commands[0])[2:],
+                            "--repo", str(primary), "-o", str(out))
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["skills"].keys() == before["skills"].keys(), "a skill was lost"
+    pins = {source["registry"]: source["ref"] for source in after["sources"]}
+    was = {source["registry"]: source["ref"] for source in before["sources"]}
+    assert pins[src_a.resolve().as_uri()] == was[src_a.resolve().as_uri()]
+    assert pins[src_b.resolve().as_uri()] == was[src_b.resolve().as_uri()], \
+        "srcB's working-tree edit is uncommitted, so its pin has nowhere new to go"
+
+
+def _emptied_source_tree(tmp_path):
+    """A source registry with NOTHING at its new commit, not even a README."""
+    primary, out = _two_sources(tmp_path)
+    extra = tmp_path / "cms-platform"
+    _rmtree(extra / "skills")
+    _git(extra, "add", "-A")
+    _git(extra, "commit", "-q", "-m", "everything is gone")
+    return primary, out, extra
+
+
+@pytest.mark.parametrize("repin", [
+    pytest.param(True, id="--repin --repin-source"),
+    pytest.param(False, id="a plain generate pinning that commit"),
+])
+def test_an_empty_tree_at_a_pinned_ref_is_an_error_not_a_traceback(repin, tmp_path):
+    """agentskills #125: the one unusable input that escaped as a stack trace.
+
+    `git archive` of a commit whose tree has no entries does NOT emit nothing:
+    it writes its `pax_global_header` plus the usual padding — measured, 10240
+    bytes beginning `pax_global_header\0` — and python's tarfile refuses that
+    stream, because a pax global header must be followed by a member header
+    (`ReadError('end of file header')`). That escaped `materialize` as a
+    traceback naming internal line numbers.
+
+    Every other unusable input in this module is a GeneratorError, and the
+    shape matters beyond tidiness: _agent-guidance's bumper classifies this
+    tool's runs by `^FAILED:` at column 0 plus the exit code, and a traceback
+    is neither of those.
+
+    Both routes that READ the empty commit are covered, and `--check-current`
+    is not one of them: it materialises the ref the lock still PINS, which has
+    content, and reads the working tree with `collect_skills` rather than
+    through git. What it does instead is refuse to print a command, because a
+    bundle with no skills left is `repin_shrink_blocker`'s answer —
+    `_emptied_source_tree` is one of the blocked shapes above.
+    """
+    primary, out, extra = _emptied_source_tree(tmp_path)
+    uri = extra.resolve().as_uri()
+    if repin:
+        flags = ["--repin", "--repin-source", f"{uri}@"]
+    else:
+        lock = json.loads(out.read_text(encoding="utf-8"))
+        flags = ["--registry", lock["registry"], "--ref", lock["ref"],
+                 "--bundles", ",".join(lock["bundles"]),
+                 "--source", f"cms-platform={uri}@{_head(extra)}:skills"]
+
+    proc = run_generator("--repo", str(primary), *flags, "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "tarfile" not in proc.stderr, proc.stderr
+    assert proc.stderr.startswith("ERROR: "), proc.stderr
+    assert "has no files in it at all" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("build, emptied, federated", [
+    pytest.param(_emptied_primary_bundle, "adam", False, id="a bare --repin"),
+    pytest.param(_emptied_source_bundle, "cms-platform", True,
+                 id="--repin --repin-source"),
+])
+def test_a_repin_that_would_empty_a_bundle_is_refused(
+        build, emptied, federated, tmp_path):
+    """agentskills #125: the fleet bumper refusing this was never cover.
+
+    Measured on this branch before the guard, and identically for both forms:
+    a registry that deleted a bundle's last skill re-pinned at exit 0, "Wrote
+    ...", and the skills were simply gone from the lock — after which --check
+    is green for having dropped them, and no ephemeral session installs them
+    again. bump-consumer-locks.sh refuses to PROPOSE that, which covers the
+    scheduled fan-out and nothing else: a hand re-pin, or any consumer whose
+    re-pin is not the bumper's, got the silent version. #58 makes a second
+    registry's content move on a schedule, which is what makes it routine.
+    """
+    primary, out, _ = build(tmp_path)
+    before = out.read_text(encoding="utf-8")
+    # The two forms need different fixtures because they advance different
+    # pins: a bare --repin re-resolves the primary's ref, while a source's sha
+    # pin re-resolves to itself and only --repin-source moves it.
+    flags = (["--repin-source", f"{(tmp_path / 'cms-platform').resolve().as_uri()}@"]
+             if federated else [])
+
+    proc = run_generator("--repo", str(primary), "--repin", *flags, "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"bundle(s) {emptied} with no skills at all" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_a_repin_that_only_removes_some_skills_is_still_allowed(tmp_path):
+    """The guard is a bundle that EMPTIED, not a lock that got smaller.
+
+    Deleting one of a bundle's skills is an ordinary registry change and an
+    ordinary re-pin; refusing it would make the guard something a caller learns
+    to route around. Deliberately the same line
+    `_agent-guidance`'s `skills_shrink_reason` draws.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A, "adam/beta": SKILL_B})
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(primary), "--registry", primary.resolve().as_uri(),
+                         "--ref", sha, "--bundles", "adam", "-o", str(out)).returncode == 0
+    _rmtree(primary / "plugins" / "adam" / "skills" / "beta")
+    _git(primary, "add", "-A")
+    _git(primary, "commit", "-q", "-m", "one skill retired")
+
+    proc = run_generator("--repo", str(primary), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert sorted(json.loads(out.read_text(encoding="utf-8"))["skills"]) == ["adam/alpha"]
+
+
+def test_an_uppercase_commit_sha_is_treated_as_the_commit_sha_it_is(registry, tmp_path):
+    """A refusal a reader can check and find false is worse than no refusal.
+
+    `_COMMIT_SHA_RE` was lowercase-only, so a lock pinned at a 40-hex sha in
+    uppercase — which git resolves; `git cat-file -e <UPPER>^{commit}` exits 0,
+    measured — was refused with "which is not a commit sha", and then sent to
+    the repair advice beside it. Accepting it also normalises the lock, because
+    the re-pin writes `resolve_ref`'s lowercase output back, and the bootstrap
+    hook's `fetch_source` branches on `^[0-9a-f]{40}$` and would try to clone
+    `--branch <UPPER>` for one it was left holding.
+    """
+    root, sha = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "--registry", "Acme/registry",
+                         "--ref", sha, "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["ref"] = sha.upper()
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["ref"] == sha
+
+
+def test_a_blocked_source_headline_does_not_name_two_pins_for_one_source(tmp_path):
+    """One sentence, one answer to "what does this lock pin for that source".
+
+    `source` in the report loop is PLANNED, so its ref is resolved; the reason
+    printed beside it may be about a lock that records a branch name. The
+    headline said "moved on since <resolved sha>, which <lock> still pins for
+    it" and then, one clause later, "this lock pins that source at 'main'".
+    """
+    primary, out, _ = _source_hand_pinned_at_a_branch(tmp_path)
+    resolved = _head(tmp_path / "cms-platform")
+
+    report = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert report.returncode == 1, report.stdout + report.stderr
+    headline = next(line for line in report.stdout.splitlines()
+                    if line.startswith("FAILED:"))
+    assert resolved in headline, headline
+    assert f"{resolved}, which {out} still pins for it" not in headline, headline
+    assert "resolves to" in headline, headline
+
+
+def test_a_source_ref_is_resolved_before_it_is_written_and_a_primarys_is_not(
+        federated, tmp_path):
+    """The asymmetry the two refusals above are worded around, pinned.
+
+    Both comments state how a non-sha pin REACHES a lock — hand-written for a
+    source, `--ref <branch>` for the primary — and that difference is exactly
+    the kind of claim that rots silently. If either half changes, this goes red
+    and the prose has to be re-derived rather than left standing.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    proc = run_generator(
+        "--repo", str(primary), "--registry", "Acme/registry",
+        "--ref", "main", "--bundles", "adam",
+        "--source", f"cms-platform={extra.resolve().as_uri()}@main:skills",
+        "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    document = json.loads(out.read_text(encoding="utf-8"))
+    assert document["ref"] == "main"
+    assert re.fullmatch(r"[0-9a-f]{40}", document["sources"][0]["ref"]), document["sources"]
+
+
+def test_repin_source_with_a_missing_checkout_leaves_the_lock_untouched(
+        federated, tmp_path):
+    """A re-pin that cannot read the new content must write nothing at all.
+
+    A half-applied merge would record a pin whose digests were never
+    recomputed, which is the one failure mode the lock is a lock to prevent.
+    """
+    primary, _, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    shutil.move(str(extra), str(tmp_path / "moved-away"))
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "no checkout at" in proc.stderr
+    assert out.read_text(encoding="utf-8") == before
 
 
 def test_repin_refuses_a_lock_whose_bundle_name_escapes_the_pinned_tree(registry, tmp_path):
@@ -5000,3 +8727,466 @@ def test_another_repos_lock_does_not_reap_this_ones_skills(tmp_path):
         "alpha": one.resolve().as_uri(),
         "beta": two.resolve().as_uri(),
     }
+
+# --------------------------------------------------------------------------
+# the matrix: every report path against every refusal
+# --------------------------------------------------------------------------
+
+def _derived_reasons() -> dict:
+    """{reason id -> its longest string literal}, read off the module's AST.
+
+    DERIVED, never hand-listed, so a refusal added to a predicate cannot skip
+    the matrix below: it appears here the moment it is written, and the
+    coverage assertion goes red until a fixture reaches it. Every
+    lock-decidable refusal already has to live in a `*_blocker` — that is
+    `test_every_refusal_a_repin_can_give_is_one_both_paths_read` — so
+    enumerating those predicates' non-None returns enumerates the reasons.
+
+    The longest literal is the fingerprint because a reason is an f-string: the
+    interpolated halves differ per lock, the literal spans do not.
+    """
+    tree = ast.parse(GENERATOR.read_text(encoding="utf-8"))
+    reasons = {}
+    for function in tree.body:
+        if not (isinstance(function, ast.FunctionDef)
+                and function.name.endswith("_blocker")):
+            continue
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            if isinstance(node.value, ast.Constant) and node.value.value is None:
+                continue
+            literals = [child.value for child in ast.walk(node.value)
+                        if isinstance(child, ast.Constant)
+                        and isinstance(child.value, str)]
+            assert literals, f"{function.name}:{node.lineno} returns no literal text"
+            reasons[f"{function.name}:{node.lineno}"] = max(literals, key=len)
+    return reasons
+
+
+# The one reason no caller can reach, because an earlier blocker always answers
+# first. Kept as a predicate's contract rather than deleted — see
+# repin_source_blocker's own note about being total — and PROVEN subsumed by
+# test_the_subsumed_reason_really_is_answered_by_an_earlier_blocker rather than
+# waived, so this cannot become the drawer a new reason is swept into. Keyed by
+# a fragment of the reason, because line numbers move and this must not.
+_SUBSUMED_REASON = "proves the checkout this would re-pin from is that registry at all"
+_SUBSUMES_IT = "repin_unproven_sources_blocker"
+
+
+def _reason_ids(text: str, reasons: dict) -> set:
+    return {name for name, literal in reasons.items() if literal in text}
+
+
+def _subsumed_ids(reasons: dict) -> set:
+    return {name for name, literal in reasons.items() if _SUBSUMED_REASON in literal}
+
+
+_IDENTITY_FIELDS = ("registry", "bundles", "sources")
+
+
+def _matrix_lock_identity(out: Path, ignoring: Collection = ()) -> dict:
+    """What no remediation may change: who this lock is and what it declares.
+
+    Refs are left out deliberately — advancing one is what a re-pin is FOR.
+    Everything else is identity: the registry it describes, the bundles it
+    installs, and the federated array with each entry's bundles and layout. All
+    three, not `registry` alone: a check watching one field goes green against
+    a line that restates that one and loses the rest, which is most of the way
+    to the defect it exists to catch.
+
+    `ignoring` names the fields the verdict ITSELF said were wrong. `--check`
+    on a lock that lost `bundles` reports exactly that and its repair restores
+    the field, so holding the missing value would be requiring the repair not
+    to repair. A field the verdict did not name has no such licence — and in
+    the defect this test was written for, `--check` flagged a missing SKILL and
+    its line silently took `registry` and `bundles` with it.
+    """
+    document = json.loads(out.read_text(encoding="utf-8"))
+    identity = {
+        "registry": document.get("registry"),
+        "bundles": document.get("bundles"),
+        "sources": [(source.get("registry"), source.get("bundles"),
+                     source.get("layout"))
+                    for source in document.get("sources", [])],
+    }
+    return {key: value for key, value in identity.items() if key not in ignoring}
+
+
+def _fields_the_verdict_flagged(stdout: str) -> set:
+    """Which identity fields a `--check` verdict named in its difference lines."""
+    return {field for field in _IDENTITY_FIELDS
+            if any(line.strip().startswith(f"- {field}: ")
+                   for line in stdout.splitlines())}
+
+
+def _bare_digest_copy(out: Path, name: str = "bare.lock") -> Path:
+    """The same lock with its digests unlabelled — --check-format's failing input.
+
+    Without it that flag is OK on every fixture here, since the generator wrote
+    those digests, and its column of the matrix would assert nothing at all.
+    That column is not optional: --check-format is the fleet bumper's WRITE
+    trigger, and it is the path that sat outside this property longest.
+    """
+    copy = out.parent / name
+    document = json.loads(out.read_text(encoding="utf-8"))
+    skills = document.get("skills")
+    if isinstance(skills, dict):
+        document["skills"] = {
+            key: (value.split(":", 1)[1]
+                  if isinstance(value, str) and ":" in value else value)
+            for key, value in skills.items()}
+    copy.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return copy
+
+
+def _source_repo_flags(primary: Path, document: dict) -> list:
+    """`--source-repo` for every source whose checkout is not the default sibling.
+
+    DERIVED from the lock rather than declared beside each fixture, so a shape
+    that puts a registry anywhere but `../<repo-name>` is covered the moment it
+    is added rather than when someone remembers to widen a list. These
+    fixtures' registries are `file://` URIs naming the checkout itself, which
+    is what makes the derivation possible; a shape whose registry is an
+    `OWNER/REPO` string contributes nothing and needs none.
+    """
+    flags = []
+    sources = document.get("sources")
+    for source in sources if isinstance(sources, list) else []:
+        registry = source.get("registry") if isinstance(source, dict) else None
+        if not isinstance(registry, str) or not registry.startswith("file://"):
+            continue
+        path = Path(url2pathname(urlparse(registry).path))
+        name = registry.rstrip("/").rsplit("/", 1)[-1]
+        if path != primary.resolve().parent / name:
+            flags += ["--source-repo", f"{registry}={path}"]
+    return flags
+
+
+def _report_invocations(primary: Path, out: Path) -> list:
+    """Every way this file reports on one lock: (label, argv).
+
+    All four verdicts, and `--check-current` once per registry the lock names.
+    Scoped and unscoped are different questions asked of different `extras`,
+    and the scoped one is what three rounds of this defect class escaped
+    through — `_select_sources` narrows the array before anything downstream
+    sees it, so a whole-document refusal is invisible there unless a predicate
+    asked over the whole document says so.
+    """
+    document = json.loads(out.read_text(encoding="utf-8"))
+    # TWO FORMS, because a cell asked in a form its caller cannot produce
+    # measures nothing about that caller. `addressed` is what a caller holding
+    # the clones passes; `unaddressed` is what a caller that has none does —
+    # and that is not an exotic case, it is the fleet bumper's own pre-clone
+    # `--check-format` (measured in _agent-guidance's
+    # scripts/bump-consumer-locks.sh at 4c505e3: `python3 "$GENERATOR"
+    # --check-format -o "$lock_file"`, no --repo and no --source-repo) and any
+    # `--only` scope that reads no source. Asking `--check-format` with the
+    # post-clone flags attached is what hid a whole column of unrunnable
+    # commands for a round: the flag was never asked the way it is called.
+    unaddressed = ["--repo", str(primary), "-o", str(out)]
+    addressed = ["--repo", str(primary),
+                 *_source_repo_flags(primary, document), "-o", str(out)]
+    calls = [("--check", ["--check", *addressed]),
+             ("--check-current", ["--check-current", *addressed])]
+    sources = document.get("sources")
+    registries = [document.get("registry")] + (
+        [source.get("registry") for source in sources]
+        if isinstance(sources, list) else [])
+    for name in dict.fromkeys(r for r in registries if isinstance(r, str) and r):
+        calls.append((f"--check-current --only {name}",
+                      ["--check-current", "--only", name, *addressed]))
+        # The same scope with nothing handed to it. A scope that needs a
+        # source checkout stops at "no checkout at ..." and the cell asserts
+        # nothing, which is correct — the caller cannot ask that question
+        # unaddressed either. A scope that needs none ANSWERS, and its line
+        # still rebuilds the whole document: that is the cell where the round
+        # that derived addressing found `--only <the primary registry>`
+        # printing a `--repin` nobody could run.
+        calls.append((f"--check-current --only {name} (unaddressed)",
+                      ["--check-current", "--only", name, *unaddressed]))
+        # The PRODUCT of `--only` and `--ref`, which main allows together (its
+        # only guards are that `--only` needs `--check-current` and excludes
+        # `--check` / `--check-format`). Emitting each alone left their
+        # intersection uncovered and a defect lived exactly there: a scoped run
+        # READS one registry's tree, while an off-pin `--ref` makes the
+        # primary's bundles movable, so the shrink question got asked about
+        # content this run never looked at.
+        calls.append((f"--check-current --only {name} --ref HEAD",
+                      ["--check-current", "--only", name,
+                       "--ref", _head(primary), *addressed]))
+    # `--check-current --ref <somewhere else>` asks the same verdict about a
+    # DIFFERENT primary commit, and the line it prints anchors to that commit
+    # rather than to the lock's own pin — so whether the primary can move under
+    # it is a comparison, not "did the primary block drift". Included because
+    # that is where the report and the shrink guard would otherwise part
+    # company, and no other cell reaches it.
+    calls.append(("--check-current --ref HEAD",
+                  ["--check-current", "--ref", _head(primary), *addressed]))
+    # BOTH forms of the one flag whose documented caller passes nothing: the
+    # unaddressed one because that is how it is really called, the addressed
+    # one because a reader at a terminal may hold the clones and the two must
+    # both answer.
+    calls.append(("--check-format", ["--check-format", *unaddressed]))
+    calls.append(("--check-format (addressed)", ["--check-format", *addressed]))
+    return calls
+
+
+def _assert_matrix_cell(label: str, proc, out: Path, reasons: dict) -> set:
+    """The whole property, on one (report path, lock) cell. Returns what it saw.
+
+    Either a block prints a line that RUNS and costs the lock nothing, or it
+    prints none and carries its reason inside its own headline, where the fleet
+    bumper's 20-line slice cannot separate the two.
+
+    A TEMPLATE is a line too, and it is held to the same standard rather than
+    excused from it: its `<...>` are filled in from where this fixture's clones
+    really are and the result is RUN. A marker that let a line stop being
+    runnable would be the defect it was introduced to close, wearing an
+    apology — so nothing here is string-matched, everything printed is
+    executed.
+    """
+    lines = proc.stdout.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("FAILED:"):
+            continue
+        following = (lines[index + 1:index + 2] or [""])[0].strip()
+        answered = (following.startswith("python3 ")
+                    or following.startswith(gsl.TEMPLATE_MARK))
+        assert answered or "would refuse one: " in line, (label, line)
+
+    flagged = _fields_the_verdict_flagged(proc.stdout)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    before = _matrix_lock_identity(out, flagged)
+    for command in (_printed_commands(proc.stdout)
+                    + [_completed(template, document)
+                       for template in _printed_templates(proc.stdout)]):
+        applied = _run_printed(command)
+        assert applied.returncode == 0, (label, command,
+                                         applied.stdout + applied.stderr)
+        assert _matrix_lock_identity(out, flagged) == before, (label, command)
+    return _reason_ids(proc.stdout + proc.stderr, reasons)
+
+
+_MATRIX_SHAPES = [(build, name) for build, name, _ in _DRIFT_SHAPES] + [
+    (_hand_broken_lock("ref"), "the lock lost its 'ref'"),
+    (_hand_broken_lock("bundles", ["adam", "not a bundle name!"]),
+     "a 'bundles' entry is not a plausible name"),
+    # The LAYOUT column, not another lock-shape column: every shape above puts
+    # its source at the default sibling `../<repo-name>`, so a printed command
+    # that omits `--source-repo` runs there regardless and the property this
+    # matrix exists for is measured on the one machine layout that cannot
+    # expose it. These three carry a source the sibling lookup does not find.
+    (_source_at_a_non_default_checkout,
+     "a source moved, at a checkout that is not the default sibling"),
+    (_primary_and_a_non_default_source_both_drifted,
+     "both moved, the source at a checkout that is not the default sibling"),
+    (_a_non_default_source_lock_gone_stale,
+     "the lock is stale, its source at a checkout that is not the default sibling"),
+]
+# Stated, because an empty or shortened list is the edit that turns the whole
+# matrix green against a generator it no longer exercises.
+assert len(_MATRIX_SHAPES) == 24
+
+
+@pytest.mark.parametrize("build, shape", [pytest.param(build, name, id=name)
+                                          for build, name in _MATRIX_SHAPES])
+def test_every_report_path_against_every_refusal(build, shape, tmp_path):
+    """The matrix. Every verdict this file prints x every lock shape.
+
+    Four rounds closed this class one pair at a time — a verdict and a refusal
+    that disagreed — and each round re-opened it where the pair had not been
+    enumerated: a whole-document refusal invisible to a SCOPED
+    `--check-current`; two callers asking the shrink predicate different
+    questions; a `--check` line that re-pointed the lock at DEFAULT_REGISTRY;
+    a `--check-format` line nobody re-read when the refusal set grew.
+
+    Pairs are what kept failing, so this asserts the PRODUCT. `remediation` is
+    what makes the product finite — one function decides both halves for every
+    verdict — and this is what proves that function total:
+
+      * every printed command is RUN, exactly as printed, and must exit 0 and
+        leave `registry`, `bundles` and the `sources` array's identity where
+        they were. Running it is the point: three rounds of reasoning that a
+        command *would* work is what this replaces.
+      * every FAILED block that prints no command must carry its reason inside
+        the headline.
+      * the reasons are DERIVED from the module's AST, and
+        `test_the_matrix_covers_every_refusal_the_code_can_give` requires each
+        one to be produced by some fixture here — so a reason cannot be added
+        to a predicate without a lock shape that reaches it.
+
+    Each cell gets its own copy of the lock, because running a remediation
+    writes one; a cell that inherited the previous cell's repaired lock would
+    be measuring a document no verdict had complained about.
+    """
+    primary, out, _scoped = build(tmp_path)
+    reasons = _derived_reasons()
+    seen = set()
+    for index, (label, argv) in enumerate(_report_invocations(primary, out)):
+        cell = tmp_path / f"cell{index}.lock"
+        shutil.copyfile(_bare_digest_copy(out, f"bare{index}.lock")
+                        if label == "--check-format" else out, cell)
+        proc = run_generator(*[str(cell) if arg == str(out) else arg for arg in argv])
+        seen |= _assert_matrix_cell(label, proc, cell, reasons)
+    assert seen <= set(reasons)
+    (tmp_path.parent / f"observed-{abs(hash(shape))}.json").write_text(
+        json.dumps(sorted(seen)), encoding="utf-8")
+
+
+@pytest.mark.parametrize("build, shape", [pytest.param(build, name, id=name)
+                                          for build, name in _MATRIX_SHAPES])
+def test_a_ref_a_scoped_question_never_reads_cannot_change_its_answer(
+        build, shape, tmp_path):
+    """`--check-current --only <source>` must answer the same with any `--ref`.
+
+    `--ref` names a commit of the PRIMARY, and `_select_sources` drops the
+    primary before anything is materialised — so on a source-scoped run that
+    flag changes nothing the verdict looked at. Two runs differing only in it
+    must therefore be byte-identical, exit code included.
+
+    The matrix above cannot catch a violation on its own: its property is "a
+    printed command runs, or the headline carries its reason", and a refusal
+    invented out of content the run never read satisfies the second half. This
+    is the other half — that a scoped verdict does not acquire an answer from a
+    commit outside its own question. Measured before the fix, on `both moved`
+    and on `the primary bundle is gone at HEAD and a source drifted`: the plain
+    scoped run printed `--repin --ref <lock ref> --repin-source '<src>@'`
+    (which runs at exit 0), while the same run with `--ref HEAD` printed no
+    command and blamed a shrink in `adam`, a bundle it had not read and which
+    exists at every commit involved.
+    """
+    primary, out, _scoped = build(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    sources = document.get("sources")
+    if not isinstance(sources, list):
+        pytest.skip("no federated source to scope to")
+    names = [source.get("registry") for source in sources
+             if isinstance(source.get("registry"), str) and source.get("registry")
+             and source.get("registry") != document.get("registry")]
+    if not names:
+        pytest.skip("no federated source to scope to")
+    common = ["--repo", str(primary),
+              *_source_repo_flags(primary, document), "-o", str(out)]
+    for name in dict.fromkeys(names):
+        plain = run_generator("--check-current", "--only", name, *common)
+        elsewhere = run_generator("--check-current", "--only", name,
+                                  "--ref", _head(primary), *common)
+        assert (elsewhere.returncode, elsewhere.stdout, elsewhere.stderr) == (
+            plain.returncode, plain.stdout, plain.stderr), (shape, name)
+
+
+def _observe_every_reason(tmp_path_factory, reasons: dict) -> set:
+    """Run every matrix shape past the two verdicts that can quote any reason.
+
+    The unscoped `--check-current` reaches every refusal a report gives (a
+    whole-document one arrives on stderr when plan_sources cannot even plan the
+    lock), and `--check-format` reaches the ones only a lock-shape defect
+    produces. That is the whole reason set minus the two `repin_source_blocker`
+    sentences about a spec the CALLER typed, which no report ever asks for and
+    which `_sweep_the_apply_path` supplies.
+
+    Self-contained rather than reading what the parametrized matrix observed:
+    a coverage assertion that depends on other tests having run first is green
+    whenever they are deselected, which is the shape of a gate wired to
+    nothing.
+    """
+    observed = set()
+    for build, name in _MATRIX_SHAPES:
+        tmp_path = tmp_path_factory.mktemp("cover")
+        primary, out, _scoped = build(tmp_path)
+        located = _source_repo_flags(
+            primary, json.loads(out.read_text(encoding="utf-8")))
+        observed |= _reason_ids(
+            _joined(run_generator("--repo", str(primary), *located,
+                                  "--check-current", "-o", str(out))), reasons)
+        bare = _bare_digest_copy(out)
+        observed |= _reason_ids(
+            _joined(run_generator("--repo", str(primary), *located,
+                                  "--check-format", "-o", str(bare))), reasons)
+    return observed
+
+
+def _joined(proc) -> str:
+    return proc.stdout + proc.stderr
+
+
+def _sweep_the_apply_path(tmp_path, reasons: dict) -> set:
+    """The two `repin_source_blocker` reasons no report can ask for.
+
+    Both are about a spec the caller typed — the primary's own name, and a
+    registry the lock does not federate — and `report_drift` only ever asks
+    about a source it has just planned, so neither can reach a verdict. They
+    are still refusals this generator gives, so the coverage assertion has to
+    see them, and the flag itself is the only caller that produces them.
+    """
+    primary, out = _two_sources(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    observed = set()
+    for spec in (f"{document['registry']}@", "no-such/registry@"):
+        refusal = run_generator("--repo", str(primary), "--repin",
+                                "--repin-source", spec, "-o", str(out))
+        assert refusal.returncode == 1, (spec, refusal.stdout + refusal.stderr)
+        observed |= _reason_ids(refusal.stderr, reasons)
+    return observed
+
+
+def test_the_matrix_covers_every_refusal_the_code_can_give(tmp_path, tmp_path_factory):
+    """Nothing in `_derived_reasons` may go unproduced.
+
+    This is what makes the matrix total rather than a long list of cases: the
+    reasons come from the AST, so adding one to a predicate turns this red
+    until a `_MATRIX_SHAPES` fixture reaches it. The only exemption is a reason
+    an earlier blocker always answers first, and it is not a waiver — the
+    subsumption is measured in the next test, on the very lock that would trip
+    it.
+
+    Fingerprints are required to be distinct AND non-nesting first: two reasons
+    sharing one, or one containing another, would let a fixture that reaches
+    neither report both as covered.
+    """
+    reasons = _derived_reasons()
+    assert len(reasons) >= 15, reasons
+    for name, literal in reasons.items():
+        others = [other for key, other in reasons.items() if key != name]
+        assert not any(literal in other for other in others), (
+            f"{name}'s fingerprint is a substring of another reason's — the "
+            "coverage assertion below cannot tell the two apart")
+
+    observed = (_observe_every_reason(tmp_path_factory, reasons)
+                | _sweep_the_apply_path(tmp_path, reasons))
+    missing = set(reasons) - observed - _subsumed_ids(reasons)
+    assert not missing, (
+        f"no fixture in _MATRIX_SHAPES produces {sorted(missing)}. Add one — or, if "
+        "an earlier blocker always answers first, name it in _SUBSUMED_REASON and "
+        "prove that in test_the_subsumed_reason_really_is_answered_by_an_earlier_blocker.")
+
+
+def test_the_subsumed_reason_really_is_answered_by_an_earlier_blocker(tmp_path):
+    """The exemption above, re-measured rather than inherited.
+
+    A branch-pinned SOURCE trips two predicates: `repin_source_blocker` names
+    it per-registry, and `repin_unproven_sources_blocker` refuses the whole
+    invocation. The second is composed first on both paths, so the first's
+    sentence reaches nobody. If that order ever changes this goes red and the
+    reason has to rejoin the matrix — which is the difference between an
+    exemption and a hole.
+    """
+    primary, out, _ = _source_hand_pinned_at_a_branch(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    extras = [gsl.normalize_source(raw, f"sources[{index}]")
+              for index, raw in enumerate(document["sources"])]
+    blocked = extras[0]["registry"]
+    reasons = _derived_reasons()
+
+    on_its_own = gsl.repin_source_blocker(extras, blocked, document["registry"])
+    assert on_its_own, "the subsumed reason no longer fires on its own input"
+    assert _reason_ids(on_its_own, reasons) == _subsumed_ids(reasons), on_its_own
+
+    answer = gsl.remediation("source", existing=document, output=out, repo=primary,
+                             registry=document["registry"], extras=extras,
+                             ref=document["ref"], source_registry=blocked)
+    assert answer.command is None
+    covering = _reason_ids(answer.reason, reasons)
+    assert covering and all(name.startswith(_SUBSUMES_IT + ":") for name in covering), \
+        answer.reason

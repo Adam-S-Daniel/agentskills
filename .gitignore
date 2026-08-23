@@ -11,3 +11,10 @@ pytest-cache*
 # Written by the account-skill-zips pick step; also lands here when that
 # step is simulated locally.
 drift.json
+
+# Git worktrees the Claude Code workflow harness creates for isolated
+# subagents. Transient and LOCKED while an agent holds one, so a stop hook
+# that sees them reports untracked files and advises committing them - which
+# would pull two entire in-flight agent checkouts into the repo. See
+# AGENTS.md, "A working subagent OWNS the tree".
+.claude/worktrees/
