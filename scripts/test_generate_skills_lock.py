@@ -1181,6 +1181,48 @@ def test_check_current_only_ok_line_names_the_scoped_sources_ref(
     assert unscoped.stdout == f"OK: the working tree still matches {primary_sha} (2 skills).\n"
 
 
+def test_the_scoped_ok_line_names_the_resolved_ref_not_the_locks_raw_string(
+        federated, tmp_path):
+    """The OK line and the FAILED headline must name the same thing.
+
+    `validate_ref` accepts a branch name in a source's `ref`, so a hand-edited
+    or hand-written lock can carry one. Everything that READS that source
+    resolves it first — plan_sources does, and the drift verdict prints the
+    resolved sha — so an OK line reading the raw lock string reported a ref
+    that no part of the run had looked at, and named it differently from the
+    way the failing path names the very same source.
+    """
+    primary, _primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["sources"][0]["ref"] = "main"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", extra.resolve().as_uri(), "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+    assert scoped.stdout == f"OK: the working tree still matches {extra_sha} (1 skills).\n"
+
+
+def test_the_scoped_ok_line_names_every_ref_the_run_read(tmp_path):
+    """One line, one ref — unless the scope really did read two.
+
+    `_select_sources` returns EVERY entry matching the registry, so a lock that
+    federates one registry twice is scoped to both and two pins are read. The
+    line used to name `selected[0]` and call it "the" ref, which is a
+    one-of-two the reader has no way to detect.
+    """
+    primary, _extra, uri, out = _lock_federating_one_registry_twice(tmp_path)
+    refs = [source["ref"] for source in json.loads(out.read_text(encoding="utf-8"))["sources"]]
+
+    scoped = run_generator("--repo", str(primary), "--check-current",
+                           "--only", uri, "-o", str(out))
+    assert scoped.returncode == 0, scoped.stdout + scoped.stderr
+    assert scoped.stdout == (
+        f"OK: the working tree still matches {', '.join(refs)} (2 skills).\n")
+
+
 # --------------------------------------------------------------------------
 # the two validators must accept the same set
 #
