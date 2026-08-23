@@ -4,8 +4,8 @@
 # it existed the same pins were restated inline in the `pip install` lines of
 # .github/workflows/, so nothing outside a workflow could install what CI
 # installs and nothing required any two of those lines to agree: at b81f6f1
-# some named different subsets of the set, and others were byte-identical
-# copies of each other. scripts/test_workflow_dependency_pins.py now asserts
+# some named different subsets of the set, and others restated the identical
+# set. scripts/test_workflow_dependency_pins.py now asserts
 # that every `pip install` in every workflow and composite action under
 # .github/ installs THIS FILE, names no package of its own, and passes no
 # option that could resolve to a different version — which is what keeps the
