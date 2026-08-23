@@ -1595,7 +1595,8 @@ def digest_format_offenders(skills: Dict[str, str]) -> List[str]:
     return offenders
 
 
-def report_digest_format(document: dict, output: Path, repo: Path) -> int:
+def report_digest_format(document: dict, output: Path, repo: Path,
+                         source_repos: Sequence[str] = ()) -> int:
     """Print --check-format's verdict for one lock and return its exit status.
 
     Reads `skills`, and `ref` only to name it in the remediation command below
@@ -1691,7 +1692,8 @@ def report_digest_format(document: dict, output: Path, repo: Path) -> int:
                 "way out — not a hand edit, which would paste a label onto a value "
                 "nobody recomputed and turn the lock into an attestation over "
                 "unverified bytes")
-    answer = remediation("format", existing=document, output=output, repo=repo)
+    answer = remediation("format", existing=document, output=output, repo=repo,
+                         source_repos=source_repos)
     # `--ref` is part of the command, not decoration. `--repin` deliberately
     # does NOT inherit `ref` (advancing it is the whole operation), so a
     # remediation printed without one falls through to `resolve_ref(repo,
@@ -2098,8 +2100,8 @@ REMEDIATION_KINDS = ("stale", "format", "primary", "source")
 _SCRIPT = f"python3 scripts/{Path(__file__).name}"
 
 
-def _addressing(output: Path, repo: Path) -> str:
-    """The flags a printed command needs to reach the same lock and clone.
+def _addressing(output: Path, repo: Path, source_repos: Sequence[str] = ()) -> str:
+    """The flags a printed command needs to reach the same lock and clones.
 
     Omitted when they are the defaults this script would pick anyway, so this
     repo's own remediation lines stay the short ones people already know. A
@@ -2107,10 +2109,28 @@ def _addressing(output: Path, repo: Path) -> str:
     resolves its output to DEFAULT_LOCK (see `main`), which is not the lock the
     verdict was about — so following it either fails or rewrites this repo's own
     lock instead of theirs.
+
+    `source_repos` is this run's own `--source-repo` specs, restated verbatim.
+    Every command a report prints rebuilds the whole document, sources
+    included, and a federated source is read from a git checkout that
+    `source_checkout` looks for at the sibling `../<repo-name>` unless told
+    otherwise. So on any machine whose clones are not laid out that way — the
+    fleet bumper's, which passes one of these per registry in BUMP_CHECKOUTS —
+    a line without them exits 1 with "no checkout at ...", naming the flag it
+    was not given. That flag is deliberately legal alongside `--repin` (see
+    main's `overriding` list) precisely because a federated re-pin needs it
+    there; a report that recommends the re-pin and drops it is recommending a
+    command this same run has already proved does not work here.
+
+    Restated as the caller typed them rather than as the parsed override map:
+    the key half is a registry, a bundle list or one bundle name, and picking
+    one back out would be this file deciding which spelling the caller meant.
     """
     flags = ""
     if repo.resolve() != REPO_ROOT:
         flags += f" --repo {shlex.quote(str(repo))}"
+    for spec in source_repos:
+        flags += f" --source-repo {shlex.quote(spec)}"
     if output.resolve() != DEFAULT_LOCK:
         flags += f" -o {shlex.quote(str(output))}"
     return flags
@@ -2148,6 +2168,7 @@ def remediation(
     working: Optional[Mapping[str, str]] = None,
     primary_drifted: bool = False,
     primary_read: bool = True,
+    source_repos: Sequence[str] = (),
 ) -> Remediation:
     """THE one place a remediation command is decided, for every report path.
 
@@ -2196,7 +2217,7 @@ def remediation(
     run asking has not looked at.
     """
     assert kind in REMEDIATION_KINDS, kind
-    addressing = _addressing(output, repo)
+    addressing = _addressing(output, repo, source_repos)
 
     if kind == "stale":
         # The one remediation that is NOT a --repin: --check's verdict is
@@ -2311,6 +2332,7 @@ def report_drift(
     repo: Path,
     working: Mapping[str, str],
     primary_read: bool,
+    source_repos: Sequence[str],
 ) -> None:
     """Print one FAILED block per drifted source, with its repair or its reason.
 
@@ -2423,7 +2445,8 @@ def report_drift(
             existing=existing, output=output, repo=repo, registry=registry,
             extras=extras, ref=ref, working=working,
             source_registry=None if source["is_primary"] else source["registry"],
-            primary_drifted=primary_drifted, primary_read=primary_read)
+            primary_drifted=primary_drifted, primary_read=primary_read,
+            source_repos=source_repos)
         if source["is_primary"]:
             headline = (f"the bundle has moved on since {ref}, which {output} "
                         "still pins — nothing added or changed since then reaches "
@@ -2647,6 +2670,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     repo = Path(args.repo) if args.repo else REPO_ROOT
     output = Path(args.output) if args.output else DEFAULT_LOCK
+    # Parsed HERE, above --check-format's early return, although only the paths
+    # below the return consult the map: every verdict now restates these specs
+    # in the command it prints (see `_addressing`), and a malformed one echoed
+    # into a line a reader is told to run is a line that exits 2 on argparse.
+    # Pure string work — no clone is touched — so --check-format's "reads the
+    # file alone, not one git call" is untouched by moving it up.
+    overrides = dict(parse_source_repo(spec) for spec in args.source_repo or [])
 
     verifying = args.check or args.check_current or args.check_format
     # --repin joins the verify modes in reading the lock's identity back out of
@@ -2682,7 +2712,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # compose the way --check and --check-current always have.
     format_status = 0
     if args.check_format:
-        format_status = report_digest_format(existing, output, repo)
+        format_status = report_digest_format(existing, output, repo,
+                                             args.source_repo or [])
         if not (args.check or args.check_current):
             return format_status
     # Inherited by every mode that reads the lock at all, verify and re-pin
@@ -2733,7 +2764,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # A verify mode inherits it for the opposite reason — see the docstring:
     # --check asks whether the lock is faithful to the ref it PINS.
     ref = args.ref or (existing.get("ref") if verifying else None) or resolve_ref(repo, "HEAD")
-    overrides = dict(parse_source_repo(spec) for spec in args.source_repo or [])
     if args.repin:
         # Every reason this refuses is in `repin_primary_blocker` or in the
         # clone probe beside it — see `_repin_primary_guard`. After `extras`,
@@ -2768,7 +2798,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 print(f"FAILED: {output} is stale — regenerate it with:")
                 print("  " + remediation("stale", existing=existing, output=output,
-                                         repo=repo, document=document).command)
+                                         repo=repo, document=document,
+                                         source_repos=args.source_repo or []).command)
                 for line in _differences(
                     json.loads(on_disk) if on_disk.strip() else {}, document
                 ):
@@ -2803,7 +2834,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 report_drift(drifted, ref=ref, output=output, existing=existing,
                              extras=extras, registry=registry, repo=repo,
-                             working=working, primary_read=include_primary)
+                             working=working, primary_read=include_primary,
+                             source_repos=args.source_repo or [])
                 status = 1
         return status
 
