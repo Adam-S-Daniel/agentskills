@@ -694,10 +694,25 @@ def _arm(old, new, count=1):
     return _ARMS_BASE.replace(old, new, count)
 
 
-# EVERY ONE OF THESE IS VALID BASH THAT SAYS EXACTLY WHAT THE SHIPPED BLOCK
-# SAYS, and the test below proves that with `bash -n` before it asserts
-# anything - so a typo in a fixture reds as a typo rather than masquerading as
-# a helper bug.
+# EVERY ONE OF THESE IS VALID BASH, and the test below proves that with
+# `bash -n` before it asserts anything - so a typo in a fixture reds as a typo
+# rather than masquerading as a helper bug.
+#
+# AND EVERY ONE OF THEM MAKES THE STEP ANSWER AS THE CONTROL DOES, except the
+# ones `_ARMS_THAT_CHANGE_WHAT_THE_STEP_DOES` names. That used to be written
+# here as "says exactly what the shipped block says" with nothing behind it
+# but `bash -n`, and it was false for the two terminator fixtures: `;;&` on
+# the quiet arm goes on to match `*)`, so `fresh` - the happy path the whole
+# block exists to keep silent - annotated. A fixture free to change behaviour
+# is a fixture that can certify a real behaviour change as invisible, which is
+# the one thing this set must not do.
+#
+# WHAT "ANSWER" MEANS IS THE DECISION, NOT THE TEXT: how many annotations the
+# tail raises and what it writes to $GITHUB_OUTPUT. Several shapes here edit
+# the warning wording on purpose, and `_ARMS_BASE` is already shorter than the
+# shipped step, so comparing text would assert the opposite of what the set is
+# for. test_a_reformat_leaves_the_step_answering_as_it_did runs the comparison
+# over every status crossed with both values of `results_ok`.
 #
 # MANY OF THEM RED on a scanner that reads the block as TEXT rather than as
 # code, and that is the whole case for this set existing. No count here:
@@ -755,7 +770,7 @@ _ARMS_OK = [
     # line of its own" - reds this one, which is why nesting is COUNTED.
     ("nested-case-one-line-last-arm",
      _arm(_CATCHALL,
-          '    case "$results_ok" in yes) echo "::warning::unknown" ;; esac ;;')),
+          '    case "$results_ok" in *) echo "::warning::unknown" ;; esac ;;')),
     ("nested-case-multiline",
      _arm('    fi ;;', '    fi\n    case "$results_ok" in\n'
           '      yes) : ;;\n      *) : ;;\n    esac ;;')),
@@ -1367,6 +1382,23 @@ class TestAccountSkillZips:
         actual upload uses. The payload comes from `--prepare --zip-dir`.
         """
         assert any("--zip-dir" in body for body in runs(load(ZIPS)))
+
+
+@pytest.fixture(scope="session")
+def control_answers(tmp_path_factory):
+    """`_ARMS_BASE`'s own answers, computed once for the whole session.
+
+    test_a_reformat_leaves_the_step_answering_as_it_did compares every fixture
+    against this, and the control does not depend on the fixture - so
+    recomputing it per parametrization spawns a bash per verdict per shape and
+    doubles the cost of the slowest test in this file for no extra coverage.
+
+    `pytest.MonkeyPatch.context()` rather than the `monkeypatch` fixture,
+    which is function-scoped and cannot be requested from here.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        return TestTheAuditStepAnnouncesEveryDegradedVerdict()._decisions(
+            tmp_path_factory.mktemp("control"), mp, _ARMS_BASE)
 
 
 class TestTheAuditStepAnnouncesEveryDegradedVerdict:
@@ -2226,18 +2258,108 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"scanner says about it is about the fixture:\n{proc.stderr}"
         )
 
+    # THE FIXTURES THAT DELIBERATELY CHANGE WHAT THE BLOCK DOES, and there
+    # is no way to write them so they do not. `;;&` goes on testing patterns
+    # after a match and `;&` runs the next arm's body, so an arm with any arm
+    # after it cannot carry either terminator and still behave like `;;`. On
+    # the LAST arm they would behave like `;;` and stop discriminating: a
+    # scanner blind to `;&` reads a block whose only `;&` is the last
+    # terminator perfectly well, and reds only when the arm below it gets
+    # swallowed. They are held for what the SCANNER must do with them rather
+    # than for what the shell does, and naming them here is what keeps the
+    # certificate the rest of the set carries off them.
+    _ARMS_THAT_CHANGE_WHAT_THE_STEP_DOES = {
+        "continue-testing-terminator",
+        "fallthrough-terminator",
+    }
+
+    # Every status the module knows, the one it uses for "could not ask", and
+    # one it has never heard of - which is the arm most of these fixtures move
+    # around.
+    _DECISION_VERDICTS = (
+        sorted(sel.KNOWN_STATUSES | {sel.UNAVAILABLE}) + ["brand-new"]
+    )
+
+    def _decisions(self, tmp_path, monkeypatch, block):
+        """What the step ANSWERS, for every verdict crossed with `results_ok`.
+
+        A dict rather than a diff, so a failure names the verdict that moved.
+        Each run gets its own directory because the step APPENDS to
+        $GITHUB_OUTPUT, and a shared one would compare a growing file.
+        """
+        body = _splice(block)
+        monkeypatch.setattr(type(self), "_body", lambda self: body)
+        answers = {}
+        for verdict in self._DECISION_VERDICTS:
+            for results_ok in ("yes", "no"):
+                run_dir = tmp_path / f"{verdict}-{results_ok}".replace("/", "_")
+                run_dir.mkdir(parents=True, exist_ok=True)
+                log, written = self._run(run_dir, verdict,
+                                         results_ok=results_ok)
+                answers[(verdict, results_ok)] = (
+                    log.count("::warning::"), written)
+        return answers
+
+    @pytest.mark.parametrize("name, block", _ARMS_OK,
+                             ids=[n for n, _ in _ARMS_OK])
+    def test_a_reformat_leaves_the_step_answering_as_it_did(
+            self, tmp_path, monkeypatch, control_answers, name, block):
+        """The certificate `_ARMS_OK` carries, EXECUTED rather than asserted
+        in its banner.
+
+        `bash -n` was the only gate this set had, and `bash -n` cannot see a
+        behaviour change. So the banner's "says exactly what the shipped block
+        says" was free to be false, and was: `;;&` on the quiet arm made
+        `fresh` annotate, which is precisely the failure the shipped block is
+        written to avoid. A fixture that changes what the step does, sitting in
+        a set whose whole job is to certify that a scanner may ignore
+        everything in it, is how a real behaviour change gets certified as
+        invisible.
+
+        BOTH DIRECTIONS, because a list of exceptions rots the same way a
+        count does. A fixture named in `_ARMS_THAT_CHANGE_WHAT_THE_STEP_DOES`
+        must actually diverge, or the exemption is covering nothing and the
+        next reader trusts it.
+
+        WHAT THIS DOES NOT HOLD, so nobody reads more into it: the warning
+        TEXT, which several shapes edit on purpose, and any output that is not
+        an annotation. Two blocks that swapped the bodies of two arms would
+        agree here. What it holds is the pair a run page shows - how many
+        annotations were raised and what status went downstream.
+        """
+        actual = self._decisions(tmp_path / "fixture", monkeypatch, block)
+        control = control_answers
+        if name in self._ARMS_THAT_CHANGE_WHAT_THE_STEP_DOES:
+            assert actual != control, (
+                f"`{name}` is exempted from this certificate as a fixture "
+                f"that changes what the step does, and it no longer does. "
+                f"Take it out of `_ARMS_THAT_CHANGE_WHAT_THE_STEP_DOES` - an "
+                f"exemption covering nothing is read as covering something."
+            )
+            return
+        moved = {k: (control[k], actual[k]) for k in control
+                 if control[k] != actual[k]}
+        assert not moved, (
+            f"the `{name}` fixture is certified as a reformat this file "
+            f"cannot see, and it changes what the step ANSWERS. (verdict, "
+            f"results_ok) -> (control, fixture), as (annotations, "
+            f"$GITHUB_OUTPUT): {moved}"
+        )
+
     @pytest.mark.parametrize("name, block", _ARMS_OK,
                              ids=[n for n, _ in _ARMS_OK])
     def test_a_reformat_bash_cannot_see_does_not_red_this_test(
             self, tmp_path, monkeypatch, name, block):
         """A REFORMAT MUST NOT READ AS A CROSS-REPO VOCABULARY DRIFT.
 
-        Every block here is bash-identical to the shipped one: the same
-        arms, the same patterns, the same quoted expansion. Many of them red
-        on a scanner that reads the block as TEXT, and the message it reds
-        with says the `case` and account_zip_selection.py disagree about which
-        statuses exist - which sends the reader to diff two files over a
-        wrapped line.
+        Every block here has the same arms, the same patterns and the same
+        quoted expansion as the shipped one, and - bar the terminator shapes
+        named in `_ARMS_THAT_CHANGE_WHAT_THE_STEP_DOES` - makes the step
+        answer identically; test_a_reformat_leaves_the_step_answering_as_it_did
+        is what holds that half. Many of them red on a scanner that reads the
+        block as TEXT, and the message it reds with says the `case` and
+        account_zip_selection.py disagree about which statuses exist - which
+        sends the reader to diff two files over a wrapped line.
 
         The `bash -n` gate first, so a broken fixture cannot masquerade as a
         broken helper.
