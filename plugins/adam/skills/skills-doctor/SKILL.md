@@ -113,6 +113,18 @@ is what separates them. A skill in `synced/manifest.json` came from the
 account; one on disk in `~/.claude/skills/` but absent from the manifest came
 from the hook or a hand copy.
 
+**One name can be in both, and there the manifest confirms the collision
+rather than resolving it.** Names reach a cloud session from the hook and the
+account store at once — measured on this registry's own sessions
+(agentskills#122). The listing shows each such name once, and nothing in it,
+on disk, or in any log says which copy the model read.
+`check_provenance.py` reports every one: a `shadowed-by-the-account-store`
+NOTE where the two copies match once CRLF is folded to LF, and a
+`shadow-copies-differ` FINDING where they do not. Treat a match as a
+measurement of the moment and not a guarantee — the two copies update on
+different clocks, and only the divergent case is a defect. Which channel wins
+when they disagree is an open question, not something the report answers.
+
 **Which of those two it is, the hook already answered.** It writes
 `~/.claude/skills/.skills-bootstrap-installed.json` — one entry per skill it
 installed, with the registry it was fetched from, the bundle, and the digest

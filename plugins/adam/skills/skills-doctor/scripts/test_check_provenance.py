@@ -2517,3 +2517,282 @@ def test_no_registry_skill_could_be_read_as_foreign():
         f"these registry skills would be reported as `foreign` by "
         f"check_provenance.py, which would withhold real findings about them: "
         f"{mismatched}")
+
+
+# ---------------------------------------------------------------------------
+# one bare name delivered by both channels (#122)
+# ---------------------------------------------------------------------------
+
+def account_copy(store: Path, name: str, body: str = "line one\nline two\n",
+                 crlf: bool = True) -> Path:
+    """A copy of `name` in the account store, CRLF by default as measured.
+
+    Written from bytes under `tmp_path` rather than read from a real
+    `~/.claude/skills/synced/` — which SKILL.md notes "cannot be seeded or
+    simulated" on a machine, and which would make this suite report on whichever
+    account happened to be logged in.
+    """
+    skill = store / prov.ACCOUNT_DIR / name
+    skill.mkdir(parents=True, exist_ok=True)
+    text = f"---\nname: {name}\n---\n{body}"
+    (skill / "SKILL.md").write_bytes(
+        text.encode("utf-8").replace(b"\n", b"\r\n") if crlf
+        else text.encode("utf-8"))
+    return skill
+
+
+def shadowed_store(tmp_path, *, crlf: bool = True) -> Tuple[Path, Path]:
+    """#122's session: three locked skills, all three shadowed by the account store."""
+    store = tmp_path / "skills"
+    store.mkdir()
+    shared = ("adam-writing-style", "finding-unknowns", "writing-adrs")
+    for name in shared:
+        skill = store / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\n---\nline one\nline two\n",
+            encoding="utf-8", newline="")
+        account_copy(store, name, crlf=crlf)
+    write_record(store, *shared)
+    return store, write_lock(tmp_path / "skills.lock", store, *shared)
+
+
+def test_the_shadowed_session_is_reported_without_being_called_broken(
+        tmp_path, capsys, ephemeral):
+    """#122's headline: the doctor called this session clean while three of its
+    locked skills had a copy it never mentioned.
+
+    Every one of the three has to be NAMED, and the exit code has to stay 0 —
+    the collision is the correct and expected state of every cloud session this
+    registry delivers into, so reddening it would train the reader to skip the
+    findings section.
+    """
+    store, lock = shadowed_store(tmp_path)
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "FINDINGS (0)" in out, out
+    for name in ("adam-writing-style", "finding-unknowns", "writing-adrs"):
+        assert f"[shadowed-by-the-account-store] {name}" in out, out
+
+
+def test_the_benign_note_says_it_is_benign_only_for_now(tmp_path, capsys,
+                                                        ephemeral):
+    """The argument is the point of the note, not the name list.
+
+    A note that said only "two copies exist" would read as trivia. #122's case
+    is that the copies agree by measurement rather than by design, and that the
+    two arms update on different clocks — which is what makes the benign state
+    temporary.
+    """
+    store, lock = shadowed_store(tmp_path)
+
+    _, out = run(store, lock, capsys)
+    flattened = flat(out)
+    assert "byte-identical once CRLF line endings are folded to LF" in flattened, out
+    assert "a property of this moment and not of the design" in flattened, out
+    assert "update on different clocks" in flattened, out
+    # It must not quietly settle the precedence question, which is #122 item 1.
+    assert "naming a winner between the two channels is a policy question" \
+        in flattened, out
+
+
+def test_two_copies_that_really_differ_are_a_finding(tmp_path, capsys,
+                                                     ephemeral):
+    """The case worth alarm: one bare name, two different sets of instructions.
+
+    This is what "edit a skill, regenerate the lock, forget to re-upload" leaves
+    behind, and it is invisible to CI — the collision only exists on a surface
+    CI never stands on.
+    """
+    store, lock = shadowed_store(tmp_path)
+    account_copy(store, "writing-adrs", body="line one\nAN OLDER LINE\n")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[shadow-copies-differ] writing-adrs" in out, out
+    assert "NOT the same content" in flat(out), out
+    # The other two are untouched by one skill having drifted.
+    assert "[shadowed-by-the-account-store] finding-unknowns" in out, out
+    assert "[shadow-copies-differ] finding-unknowns" not in out, out
+
+
+def test_a_line_ending_difference_alone_is_never_the_finding(tmp_path, capsys,
+                                                             ephemeral):
+    """The whole reason the comparison normalises.
+
+    Account copies are CRLF and the registry is LF, so an exact-digest
+    comparison marks every account copy as drifted — a signal that fires on all
+    of them and therefore says nothing about any of them. `shadowed_store`
+    already writes CRLF; this pins that the LF-vs-CRLF pair alone stays a note.
+    """
+    store, lock = shadowed_store(tmp_path)
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "shadow-copies-differ" not in out, out
+
+
+def test_identical_bytes_are_described_as_identical_bytes(tmp_path, capsys,
+                                                          ephemeral):
+    """Two copies that need no normalising must not be described as if they did.
+
+    "identical once line endings are folded" asserts a CRLF difference that is
+    not there, and a reader who checks would find the sentence wrong.
+    """
+    store, lock = shadowed_store(tmp_path, crlf=False)
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "The two copies are byte-identical, so which one wins" in flat(out), out
+    assert "folded to LF" not in flat(out), out
+
+
+def test_a_name_only_one_channel_delivers_is_not_a_shadow(tmp_path, capsys,
+                                                          ephemeral):
+    """The negative control: an account-only skill is delivery, not collision.
+
+    It already has a note of its own (`delivered-by-the-account-store`), and
+    reporting it as a shadow too would be one fact twice under two names.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    account_copy(store, "beta")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "shadowed-by-the-account-store" not in out, out
+    assert "shadow-copies-differ" not in out, out
+
+
+def test_a_copy_that_cannot_be_read_is_not_reported_as_agreeing(
+        tmp_path, capsys, ephemeral, monkeypatch):
+    """None means "not measured", and the note has to say that rather than pick.
+
+    Reporting an unmeasurable pair as identical would be a guess dressed as a
+    measurement — `digest_skill_dir`'s own rule. Reporting it as differing would
+    invent a defect. The digest is stubbed rather than the directory made
+    unreadable, because this suite runs as root in some environments and a
+    chmod-based test would silently stop testing anything there.
+    """
+    store, lock = shadowed_store(tmp_path)
+    real = prov.digest_skill_dir
+    monkeypatch.setattr(prov, "digest_skill_dir",
+                        lambda path: None if prov.ACCOUNT_DIR in Path(path).parts
+                        else real(path))
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "could NOT be compared" in flat(out), out
+    assert "unmeasured rather than confirmed" in flat(out), out
+    assert "shadow-copies-differ" not in out, out
+
+
+def test_an_unmeasurable_normalised_digest_does_not_become_a_finding(
+        tmp_path, capsys, ephemeral, monkeypatch):
+    """The second unmeasurable branch: exact digests differ, normalising fails.
+
+    Falling through to the finding here would accuse the two copies of holding
+    different instructions on the strength of a comparison that never ran.
+    """
+    store, lock = shadowed_store(tmp_path)
+    monkeypatch.setattr(prov, "digest_skill_dir_normalised", lambda path: None)
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "could not be re-compared with line endings normalised" in flat(out), out
+    assert "shadow-copies-differ" not in out, out
+
+
+def test_a_shadow_is_attributed_to_no_lock_however_many_there_are(
+        tmp_path, capsys, ephemeral):
+    """Store-wide, for the reason `store_findings` is — asserted on attribution.
+
+    The collision is a property of the two stores and of NO lock. The tempting
+    assertion is that it appears once, but that one cannot fail: `dedupe` keys on
+    (kind, subject, detail) and folds identical notes however many times they are
+    raised, so a version of this reporting moved inside the per-lock loop would
+    still print one line and the test would stay green over the regression.
+    (Measured: multiplying `shadow_noted` by the lock count changes the output
+    not at all.)
+
+    What per-lock reporting DOES change is the header, which `_whose` decorates
+    with "declared by <lock>" as soon as a note carries one and there is more
+    than one lock to choose between — claiming a lock declared something no lock
+    has an opinion about. That is checkable, so it is what this asserts.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "shared")
+    write_record(store, "shared")
+    # `make_skill`'s body verbatim: the point here is the COUNT of one note, so
+    # the pair has to land on the note branch rather than the finding branch.
+    account_copy(store, "shared", body="body\n")
+    project = tmp_path / "repos"
+    for child in ("one", "two", "three"):
+        _repo_with_lock(project, child, "shared")
+    # One lock declares a skill nobody delivered, purely so this run contains a
+    # finding that IS lock-attributed — see the control assertion below.
+    _repo_with_lock(project, "four", "shared", "undelivered")
+
+    _, out = run_autolock(store, project, capsys)
+    # `_whose`'s decoration only, which is "— declared by <path>" on a finding's
+    # own HEADER line. A bare "declared by" would also match the phrase "declared
+    # by the lock and not in the personal store" inside `not-in-the-store`'s
+    # wrapped prose, which would make the control below pass over a `_whose` that
+    # had stopped working entirely. (Measured: it did.)
+    headers = [line for line in out.splitlines() if line.lstrip().startswith("[")]
+    mine = [line for line in headers
+            if "[shadowed-by-the-account-store] shared" in line]
+    assert len(mine) == 1, out
+    assert "— declared by" not in mine[0], mine[0]
+    # The control: another finding in this same run IS lock-attributed, so the
+    # assertion above means the shadow note was excluded from attribution rather
+    # than attribution having quietly stopped happening at all.
+    assert any("— declared by" in line for line in headers), out
+
+
+def test_the_normalised_digest_folds_crlf_and_the_exact_one_does_not(tmp_path):
+    """The two digests must disagree on a CRLF pair, or normalising is a no-op.
+
+    If these ever returned the same answer, every test above would still pass
+    while the comparison had quietly stopped doing anything — the account copies
+    would read as agreeing because nothing distinguished them, not because they
+    match.
+    """
+    lf, crlf = tmp_path / "lf", tmp_path / "crlf"
+    for path, data in ((lf, b"---\nname: x\n---\nbody\n"),
+                       (crlf, b"---\r\nname: x\r\n---\r\nbody\r\n")):
+        path.mkdir()
+        (path / "SKILL.md").write_bytes(data)
+
+    assert prov.digest_skill_dir(lf) != prov.digest_skill_dir(crlf)
+    assert prov.digest_skill_dir_normalised(lf) == \
+        prov.digest_skill_dir_normalised(crlf)
+
+
+def test_the_normalised_digest_still_separates_a_real_content_change(tmp_path):
+    """Normalising must not be so eager that it hides an edit.
+
+    A comparison that returned equal for everything would turn every divergent
+    pair into a benign note — the exact failure this reporting exists to catch.
+    """
+    one, two = tmp_path / "one", tmp_path / "two"
+    for path, data in ((one, b"---\r\nname: x\r\n---\r\nbody\r\n"),
+                       (two, b"---\r\nname: x\r\n---\r\nDIFFERENT\r\n")):
+        path.mkdir()
+        (path / "SKILL.md").write_bytes(data)
+
+    assert prov.digest_skill_dir_normalised(one) is not None
+    assert prov.digest_skill_dir_normalised(one) != \
+        prov.digest_skill_dir_normalised(two)
+
+
+def test_the_normalised_digest_is_none_for_a_path_that_is_not_a_directory(tmp_path):
+    """Same contract as `digest_skill_dir`: None is "not measured"."""
+    plain = tmp_path / "file"
+    plain.write_text("x", encoding="utf-8")
+    assert prov.digest_skill_dir_normalised(plain) is None

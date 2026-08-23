@@ -45,6 +45,12 @@ LOCK_NAME = "skills.lock"
 # as an unattributed skill.
 ACCOUNT_DIR = "synced"
 
+# The one difference the two delivery channels are known to have that is not a
+# difference in content: account-store copies are CRLF, the registry is LF. Only
+# `digest_skill_dir_normalised` folds them, and only to compare two copies of one
+# skill with each other.
+CRLF, LF = b"\r\n", b"\n"
+
 # The hook's charsets, applied to the same fields on the way out of the same file.
 # An entry failing any of them is one the hook SKIPS, so it is invisible to the
 # pruner — counted and reported here rather than quietly parsed anyway.
@@ -240,6 +246,54 @@ def digest_skill_dir(path: Path) -> Optional[str]:
             entries.append((candidate.relative_to(root).as_posix(), candidate))
         manifest = "".join(
             f"{relpath}\0{hashlib.sha256(file_path.read_bytes()).hexdigest()}\n"
+            for relpath, file_path in sorted(entries, key=lambda entry: entry[0])
+        )
+    except OSError:
+        return None
+    return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+
+
+def digest_skill_dir_normalised(path: Path) -> Optional[str]:
+    """`digest_skill_dir` over bytes whose CRLF line endings are folded to LF.
+
+    For COMPARING two copies of one skill with each other, and for nothing else.
+    Never for judging a copy against a RECORDED digest: the record and the lock
+    both carry the exact-bytes digest, so normalising before comparing to one of
+    those would report edited bytes as unchanged — precisely the lie `_cause`
+    exists to avoid telling.
+
+    It is needed because the two delivery channels disagree about line endings
+    and, so far, about nothing else. Account-store copies are CRLF where the
+    registry is LF, which this skill's own account-drift procedure already works
+    around by piping both sides through `tr -d '\\r'` before diffing. Comparing
+    the exact digests instead marks every account copy as differing from every
+    personal one — a signal that fires on all of them and therefore says nothing
+    about any of them.
+
+    A deliberate near-copy of `digest_skill_dir` rather than a flag on it. That
+    function is one of three hand-written copies of the generator's algorithm,
+    held to it by `test_the_digest_matches_the_generators`, and a parameter that
+    can change what it hashes is a way for the copy to drift while the binding
+    still passes. The duplication is the cheaper risk.
+
+    Byte-level substitution, applied to every file including binary ones. That
+    is safe HERE because the answer is only ever used as "do these two
+    directories match", never as an identity for anything: a normalisation that
+    collided for two different payloads would have to collide across both
+    copies, and the exact digests are compared first anyway.
+    """
+    root = Path(path)
+    try:
+        if not root.is_dir():
+            return None
+        entries = []
+        for candidate in root.rglob("*"):
+            if not candidate.is_file():
+                continue
+            entries.append((candidate.relative_to(root).as_posix(), candidate))
+        manifest = "".join(
+            f"{relpath}\0"
+            f"{hashlib.sha256(file_path.read_bytes().replace(CRLF, LF)).hexdigest()}\n"
             for relpath, file_path in sorted(entries, key=lambda entry: entry[0])
         )
     except OSError:
@@ -1056,6 +1110,118 @@ def record_findings(record: Record, record_path: Path) -> List[Finding]:
     return findings
 
 
+def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
+                    ) -> Tuple[List[Finding], List[Finding]]:
+    """(findings, notes) for every bare name BOTH channels deliver into one session.
+
+    Three names arrive from both arms in this repo's own cloud sessions (#122):
+    the hook installs `~/.claude/skills/<name>/` from the lock, and the account
+    store carries `~/.claude/skills/synced/<name>/` from an earlier upload. Both
+    present to the session's skill listing as the same bare name, the listing
+    shows it once, and nothing in the listing, on disk, or in any log says which
+    copy the model actually read. Before this, the doctor called such a session
+    clean — three of its eight locked skills silently shadowed — which is the
+    gap #122 was filed for. Both directories were already in hand here; only the
+    comparison was missing.
+
+    ADR 0002 anticipated that account-synced skills feed the same per-session
+    listing and rejected pushing the `adam` bundle to the account on that basis.
+    What it costed was the duplicated CONTEXT. It says nothing about the same
+    NAME arriving from both arms, which is a question about which bytes get
+    read, so this reports the collision rather than resolving it: naming a
+    winner between the channels is a policy decision and is item 1 of #122, not
+    something a diagnostic settles by being convenient — the same restraint
+    `LockResult` keeps about which lock wins.
+
+    Matching copies are a NOTE and divergent ones a FINDING, and that split is
+    the whole of the judgement here. A note keeps a healthy session at exit 0,
+    which it must: the collision is today the correct and expected state of
+    every cloud session this registry delivers into, and a doctor that reddens
+    the ordinary case is one whose findings get skipped — `record_findings`'
+    argument again. Divergence is the opposite: two different sets of
+    instructions under one name, one of them silently chosen, and it is
+    actionable in a way the benign case is not.
+
+    Both texts say the benign case is a property of THIS MOMENT rather than of
+    the design, because it is. The copies update on different clocks — the
+    personal one at every session start from `skills.lock`, the account one only
+    when someone runs `sync-skills` — so "edit a skill, regenerate the lock,
+    forget to re-upload" turns the note into the finding with nothing having
+    gone wrong in between, and nothing in CI can see it: the collision exists
+    only on a surface CI never stands on.
+    """
+    findings: List[Finding] = []
+    notes: List[Finding] = []
+    for name in sorted(set(names) & set(account)):
+        mine = skills_dir / name
+        theirs = skills_dir / ACCOUNT_DIR / name
+        both = (f"delivered by BOTH channels under one bare name — {mine} and "
+                f"{theirs}. Both present to the session's skill listing as "
+                f"`{name}`, the listing shows it once, and nothing there, on "
+                f"disk or in any log says which copy the model read.")
+        clocks = ("The two copies update on different clocks: the personal one "
+                  "tracks skills.lock and is refreshed at every session start, "
+                  "the account one changes only when someone runs sync-skills "
+                  "from a machine with a browser. `--account-drift` compares the "
+                  "recorded account state against the registry and has no notion "
+                  "of a session where both copies coexist, and CI never stands "
+                  "on the surface where they do.")
+
+        exact_mine = digest_skill_dir(mine)
+        exact_theirs = digest_skill_dir(theirs)
+        if exact_mine is None or exact_theirs is None:
+            unread = " and ".join(
+                str(path) for path, value in ((mine, exact_mine), (theirs, exact_theirs))
+                if value is None)
+            notes.append(Finding(
+                "shadowed-by-the-account-store", name,
+                f"{both} The two could NOT be compared: {unread} could not be "
+                f"read, so whether they hold the same instructions is unmeasured "
+                f"rather than confirmed. {clocks}"))
+            continue
+
+        if exact_mine == exact_theirs:
+            sameness = "The two copies are byte-identical"
+        else:
+            norm_mine = digest_skill_dir_normalised(mine)
+            norm_theirs = digest_skill_dir_normalised(theirs)
+            if norm_mine is None or norm_theirs is None:
+                notes.append(Finding(
+                    "shadowed-by-the-account-store", name,
+                    f"{both} The two differ byte-for-byte and could not be "
+                    f"re-compared with line endings normalised, so whether that "
+                    f"difference is only CRLF-vs-LF is unmeasured. {clocks}"))
+                continue
+            if norm_mine != norm_theirs:
+                findings.append(Finding(
+                    "shadow-copies-differ", name,
+                    f"{both} And the two are NOT the same content: they still "
+                    f"differ once CRLF line endings are folded to LF "
+                    f"({norm_mine[:12]} here, {norm_theirs[:12]} in the account "
+                    f"store). So the model is reading one of two different sets "
+                    f"of instructions under this name and nothing records which. "
+                    f"{clocks} The usual cause is the account copy being behind — "
+                    f"a skill edited and re-locked, and never re-uploaded. "
+                    f"Compare them with the account-drift procedure in "
+                    f"skills-doctor's SKILL.md, then either re-upload or accept "
+                    f"the drift deliberately."))
+                continue
+            sameness = ("The two copies are byte-identical once CRLF line "
+                        "endings are folded to LF — the account store is CRLF "
+                        "where the registry is LF")
+
+        notes.append(Finding(
+            "shadowed-by-the-account-store", name,
+            f"{both} {sameness}, so which one wins does not change what the "
+            f"model reads TODAY. That is a property of this moment and not of "
+            f"the design. {clocks} Reported so the shadow is a measured "
+            f"condition rather than an invisible one; naming a winner between "
+            f"the two channels is a policy question this does not answer. See "
+            f"docs/decisions/0002, which costed the duplicated context and not "
+            f"this collision."))
+    return findings, notes
+
+
 def store_findings(store_state: str, skills_dir: Path) -> List[Finding]:
     """What the personal store's own state costs.
 
@@ -1499,16 +1665,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             lock_path, lock, rows, tagged,
             [note._replace(lock=str(lock_path)) for note in notes]))
 
+    # Store-wide, like `store_findings` and for its reason: the collision is a
+    # property of the two stores, not of any lock, so raising it per lock would
+    # report one shadowed name N times in a multi-repo session.
+    shadow_raised, shadow_noted = shadow_findings(skills_dir, names, account)
+
     here, user, children = hook_wiring(project_dir)
     hook_raised, hook_noted = hook_findings(
         project_dir, here, user, children,
         any(result.lock.state == PRESENT for result in results), surface[0])
     findings = dedupe(
         hook_raised
+        + shadow_raised
         + store_findings(store_state, skills_dir)
         + record_findings(record, record_path)
         + [finding for result in results for finding in result.findings])
     notes = dedupe(hook_noted
+                   + shadow_noted
                    + foreign_notes(foreign)
                    + [note for result in results for note in result.notes])
 
