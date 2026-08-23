@@ -226,6 +226,14 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 CONTROL = re.compile(r"[\s\x00-\x1f\x7f]")
 
+# The hook's own `SOURCE_FIELDS` and `MAX_SOURCES`, mirrored because a lock
+# breaking either is one the hook refuses OUTRIGHT and this file has to know
+# that before it judges a store against it. Copies, so
+# `test_the_source_limits_are_the_hooks_own` reads both out of
+# `.claude/hooks/skills-bootstrap.sh` and fails when they drift.
+SOURCE_FIELDS = ("registry", "ref", "bundles", "layout")
+MAX_SOURCES = 8
+
 # Two directories written by the same `cp -R` loop land within one copy loop of
 # each other; anything beyond this is a different event. Only ever used for the
 # fallback, where the answer is labelled inference regardless of the gap.
@@ -1251,11 +1259,20 @@ def read_lock(path: Path) -> Lock:
     unclaimed bundle. A lock failing two of them is refused for the first,
     exactly as the hook exits on the first.
 
-    Still a SUBSET, and deliberately: `ref`, `layout`, the `sources` cap and a
-    source's unknown keys are refusals this does not model, so a lock carrying
-    only one of those still reads PRESENT here while the hook refuses it. Each
-    of those is a field this script never judges anything against, so modelling
-    it would add a second copy of the hook's parser without changing a sentence.
+    Still a SUBSET, and now only where the justification holds: `ref` and
+    `layout` are refusals this does not model, so a lock whose only fault is one
+    of those still reads PRESENT here while the hook refuses it. Those two are
+    fields this script never judges anything against, and modelling them means a
+    third copy of `clean_ref`/`clean_layout` that changes no sentence.
+
+    That justification used to cover `sources` as well, and it was false there:
+    `_sources` read the field to build `claims`, which is what decides `stale`
+    from `stale-out-of-scope`. Its shape checks — a non-list, the count cap, a
+    non-object entry, a source's unknown keys — are modelled here now, because
+    each is a whole-lock refusal, and skipping the entry the hook exits on left
+    the doctor reporting `2 skill(s) declared` and two `[not-in-the-store]`
+    findings over a store where every session start says DEGRADED and installs
+    nothing.
     `test_a_lock_this_rejects_is_one_the_hook_rejects_too` binds the direction
     that can lie — everything called REJECTED here is refused by the real hook —
     and the skill's known limitations carry the other.
@@ -1284,23 +1301,75 @@ def read_lock(path: Path) -> Lock:
     # sources, is an error rather than something resolved by a default.
     claims: Set[Tuple[str, str]] = set()
     owner: Dict[str, object] = {}
-    for position, (registry, bundles) in enumerate(_sources(lock)):
-        url = remote_url(registry)
-        if url is None:
+
+    def bundles_ok(bundles: object) -> bool:
+        return isinstance(bundles, list) and bool(bundles) and all(
+            isinstance(bundle, str) and NAME.fullmatch(bundle)
+            for bundle in bundles)
+
+    # The primary's registry, resolved BEFORE `sources` is looked at, because
+    # that is where the hook resolves it — a lock failing both is refused for
+    # this one.
+    primary_url = remote_url(lock.get("registry"))
+    if primary_url is None:
+        return Lock(REJECTED, set(), set(),
+                    "a source's 'registry' is not OWNER/REPO or an "
+                    "https:// / file:// URL")
+
+    # THE SHAPE OF `sources` ITSELF, which this walked past for four rounds.
+    # `_sources` did `if isinstance(extra, list)` and
+    # `for source in extra if isinstance(source, dict)`, silently dropping what
+    # the hook `sys.exit`s on — measured end to end, `sources: {}`, `[42]` and
+    # `["x"]` each gave `skills: DEGRADED — could not read …/skills.lock` and an
+    # empty store while this reported a healthy PRESENT lock and told the reader
+    # to go read a verdict that names none of it.
+    extra = lock.get("sources")
+    if extra is None:
+        extra = []
+    if not isinstance(extra, list):
+        return Lock(REJECTED, set(), set(), "'sources' must be a list")
+    if len(extra) > MAX_SOURCES:
+        return Lock(REJECTED, set(), set(),
+                    f"'sources' lists {len(extra)} entries; at most "
+                    f"{MAX_SOURCES} are allowed — every one is fetched before "
+                    f"the session starts")
+
+    if not bundles_ok(lock.get("bundles")):
+        return Lock(REJECTED, set(), set(),
+                    "'bundles' must be a non-empty list of bundle names — it "
+                    "is what says which bundles come from that registry")
+    for bundle in lock["bundles"]:
+        owner.setdefault(bundle, 0)
+        claims.add((primary_url, bundle))
+
+    for position, raw in enumerate(extra, start=1):
+        where = f"sources[{position}]"
+        if not isinstance(raw, dict):
+            return Lock(REJECTED, set(), set(), f"{where} must be an object")
+        # Unknown keys are an ERROR in the hook, not ignored: a `commit` key
+        # added believing it pins something, read by nothing, is the
+        # appears-to-say-vs-is gap the lock exists to close.
+        unknown = sorted(set(raw) - set(SOURCE_FIELDS))
+        if unknown:
             return Lock(REJECTED, set(), set(),
-                        "a source's 'registry' is not OWNER/REPO or an "
-                        "https:// / file:// URL")
-        if not isinstance(bundles, list) or not bundles or not all(
-                isinstance(bundle, str) and NAME.fullmatch(bundle)
-                for bundle in bundles):
+                        f"{where}: unknown key(s) "
+                        f"{', '.join(repr(key) for key in unknown)}; a source "
+                        f"carries exactly {', '.join(SOURCE_FIELDS)}")
+        if not bundles_ok(raw.get("bundles")):
             return Lock(REJECTED, set(), set(),
-                        "'bundles' must be a non-empty list of bundle names — it "
-                        "is what says which bundles come from that registry")
-        for bundle in bundles:
+                        f"{where}.bundles must be a non-empty list of bundle "
+                        f"names")
+        for bundle in raw["bundles"]:
             if owner.setdefault(bundle, position) != position:
                 return Lock(REJECTED, set(), set(),
                             f"bundle {bundle!r} is claimed by two sources; a "
                             f"bundle has one registry and one layout")
+        url = remote_url(raw.get("registry"))
+        if url is None:
+            return Lock(REJECTED, set(), set(),
+                        "a source's 'registry' is not OWNER/REPO or an "
+                        "https:// / file:// URL")
+        for bundle in raw["bundles"]:
             claims.add((url, bundle))
 
     # `sorted(skills)`, the hook's own iteration order, so that a lock with two
@@ -1346,16 +1415,6 @@ def read_lock(path: Path) -> Lock:
                          for name, values in digests.items()},
                 duplicates=frozenset(name for name, count in landings.items()
                                      if count > 1))
-
-
-def _sources(lock: dict) -> List[Tuple[object, object]]:
-    """(registry, bundles) for the primary and each federated source, in order."""
-    sources = [(lock.get("registry"), lock.get("bundles"))]
-    extra = lock.get("sources")
-    if isinstance(extra, list):
-        sources += [(source.get("registry"), source.get("bundles"))
-                    for source in extra if isinstance(source, dict)]
-    return sources
 
 
 def scan(skills_dir: Path) -> Tuple[str, List[str]]:
