@@ -4462,6 +4462,61 @@ def test_the_report_and_the_refusal_give_the_same_reason(build, tmp_path):
         assert out.read_text(encoding="utf-8") == before, "a refused re-pin still wrote"
 
 
+def test_the_report_quotes_the_refusal_the_flag_reaches_first(tmp_path):
+    """A lock tripping TWO re-pin refusals must be told about the FIRST one.
+
+    `remediation` composes the blockers in the order the apply path meets them
+    — that is what makes "the sentence quoted is the sentence the flag says"
+    more than a hope. Plan and source were swapped against that order: main
+    applies `--repin-source` (`_apply_repin_sources`) before `build_lock`
+    reaches `plan_sources`, while the report asked plan first.
+
+    Measured on the lock below, which is over the cap AND federates one
+    registry twice: the report said "'sources' lists 9 entries; at most 8 are
+    allowed" while the flag said "this lock federates that registry twice", so
+    a reader was sent to fix the wrong field first. No command is printed
+    either way, so nothing recommended was refused — the cost is the reader,
+    and a docstring sentence anyone can check and find false.
+
+    The existing same-reason test cannot cover this: it rebuilds the declined
+    command for shapes that trip exactly one blocker, so a disagreement about
+    WHICH of two applies has nowhere to show up there.
+    """
+    primary = tmp_path / "registry"
+    sha = make_registry(primary, {"adam/alpha": SKILL_A})
+    args = ["--repo", str(primary), "--registry", primary.resolve().as_uri(),
+            "--ref", sha, "--bundles", "adam"]
+    roots = []
+    for index in range(gsl.MAX_SOURCES):
+        root = tmp_path / f"src{index}"
+        root_sha = make_registry(root, {f"b{index}/skill{index}": SKILL_A}, layout="skills")
+        roots.append(root)
+        args += ["--source", f"b{index}={root.resolve().as_uri()}@{root_sha}:skills"]
+    out = tmp_path / "skills.lock"
+    assert run_generator(*args, "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    # One entry too many, repeating source[0]'s registry under another bundle:
+    # both refusals from one lock. Hand-written because the generator will not
+    # write an over-cap lock either — such a shape arrives by merge or edit.
+    document["sources"].append({
+        "registry": roots[0].resolve().as_uri(), "ref": _head(roots[0]),
+        "bundles": [f"b{gsl.MAX_SOURCES}"], "layout": "skills"})
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    extras = [gsl.normalize_source(raw, f"sources[{index}]")
+              for index, raw in enumerate(document["sources"])]
+    named = extras[0]["registry"]
+    answer = gsl.remediation("source", existing=document, output=out, repo=primary,
+                             registry=document["registry"], extras=extras,
+                             ref=document["ref"], source_registry=named)
+    assert answer.command is None, answer.command
+
+    refusal = run_generator("--repo", str(primary), "--repin",
+                            "--repin-source", f"{named}@", "-o", str(out))
+    assert refusal.returncode == 1, refusal.stdout + refusal.stderr
+    assert answer.reason in refusal.stderr, (answer.reason, refusal.stderr)
+
+
 def test_one_sources_emptied_bundle_does_not_suppress_anothers_remediation(tmp_path):
     """A block's refusal must be about the command that block prints.
 

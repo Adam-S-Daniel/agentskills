@@ -2198,10 +2198,15 @@ def remediation(
     The two things a command must therefore be, which no single call site kept:
 
       * ACCEPTED. Three of the four kinds print a `--repin`, so each meets
-        every re-pin refusal — inheritance, the primary's pin, an unproven
-        source, a document that cannot be planned, the named source, and a
-        re-pin that would empty a bundle — composed here in the order the apply
-        path meets them, so the sentence quoted is the sentence the flag says.
+        every re-pin refusal, composed here in the order the apply path meets
+        them so the sentence quoted is the sentence the flag says. Each with
+        the guard it mirrors: inheritance (`_repin_inherit_guard`), the
+        primary's pin and an unproven source (`_repin_primary_guard`), the
+        named source (`_apply_repin_sources`), a document that cannot be
+        planned (`plan_sources`, inside `build_lock`), and a re-pin that would
+        empty a bundle (`_repin_shrink_guard`). The last two used to sit the
+        other way round here, and a lock tripping both quoted the wrong one —
+        `test_the_report_quotes_the_refusal_the_flag_reaches_first`.
       * COMPLETE. A plain generate takes its whole identity from the command
         line, so `stale`'s line restates `--registry`, `--bundles` and every
         `--source`; omitting them re-pointed the lock at DEFAULT_REGISTRY and
@@ -2248,8 +2253,21 @@ def remediation(
         return Remediation(reason=blocked)
     bundles = list(existing["bundles"])
     blocked = (repin_primary_blocker(existing, extras, registry, output)
-               or repin_unproven_sources_blocker(extras, output)
-               or repin_plan_blocker(bundles, extras, registry))
+               or repin_unproven_sources_blocker(extras, output))
+    if blocked:
+        return Remediation(reason=blocked)
+
+    # The NAMED source before the document, because that is the order main
+    # meets them: `_apply_repin_sources` runs on the inherited array, and
+    # `plan_sources` only later, inside `build_lock`. Asked the other way
+    # round, a lock that is both over the cap and federating one registry
+    # twice was told to fix `sources`' length while the flag would have
+    # refused the spec — a reader sent to the wrong field first.
+    if kind == "source":
+        blocked = repin_source_blocker(extras, source_registry, registry)
+        if blocked:
+            return Remediation(reason=blocked)
+    blocked = repin_plan_blocker(bundles, extras, registry)
     if blocked:
         return Remediation(reason=blocked)
 
@@ -2268,11 +2286,6 @@ def remediation(
         # gets a reason instead of a line.
         return Remediation(
             command=f"{_SCRIPT} --repin --ref {existing['ref']}{addressing}")
-
-    if kind == "source":
-        blocked = repin_source_blocker(extras, source_registry, registry)
-        if blocked:
-            return Remediation(reason=blocked)
 
     # --ref is part of the source command, not decoration: --repin deliberately
     # does not inherit `ref`, so a source-only repair printed without one falls
