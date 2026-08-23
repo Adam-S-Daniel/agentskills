@@ -1965,47 +1965,144 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     around it.
     """
 
-    # THE CARVE-OUT LIST. Getting it wrong is worse than having no test - too
-    # broad and it certifies the shipped file while holding nothing, too
-    # narrow and it reds on a step that is correct. Each entry is a command
-    # that cannot plausibly fail, or one this step leaves unguarded on purpose
-    # with the reason written down:
+    # THE CARVE-OUT LIST, AND IT IS EXACT TEXT RATHER THAN A PATTERN.
+    # Getting it wrong is worse than having no test - too broad and it
+    # certifies the shipped file while holding nothing, too narrow and it
+    # reds on a step that is correct. Four rounds of review each closed one
+    # pattern here and each left the next one standing, always in the same
+    # costume: a recogniser that admits more than it names. `^echo` admitted
+    # `echofail --now`; `^NAME=` admitted `FOO=bar mkdir -p ../scratch`,
+    # which is one simple command in shell grammar and so passed every
+    # "is it a list" test beside it; `^echo .*>> "$GITHUB_OUTPUT"$` admitted
+    # `echo hi > /proc/nope/zz >> "$GITHUB_OUTPUT"`, which aborts the step
+    # for a reason the bullet describing it does not cover. All three were
+    # measured silent end to end, spliced into the real body.
     #
-    #   `set -uo pipefail` - a builtin with valid options.
-    #   a bare assignment - `harness_ok=yes`, `verdict="${verdict#...}"`.
-    #     PARAMETER EXPANSION ONLY: an assignment whose right-hand side is a
-    #     `$( )` takes that command's status and can abort the step, so it is
-    #     deliberately NOT carved out. The step's own `verdict=$(python3 - ...)`
-    #     and `drift=$(...)` are guarded by their `|| ...=""`, which is what
-    #     this asymmetry exists to require.
-    #     AND A SIMPLE COMMAND, for the same reason the `echo` below is:
-    #     `_ASSIGNMENT` is anchored only at the start, so it matches the whole
-    #     of `harness_ok=yes | mkdir ...` and of `harness_ok=yes & mkdir ...`.
-    #     A pipeline takes the status of what it ends with and an `&` list
-    #     takes the status of what follows the `&` - neither is an
-    #     assignment - and both abort under `bash -e`, which
-    #     test_the_assignment_carve_out_admits_only_a_simple_assignment runs.
-    #   `:` - the no-op the quiet `case` arm is made of.
-    #   an `echo` to stdout - an `echo` to a runner's stdout essentially never
-    #     fails. THE COMMAND WORD HAS TO BE `echo` EXACTLY AND THE COMMAND
-    #     HAS TO BE A SIMPLE ONE: `_headed_by` refuses `echofail --now`,
-    #     whose name merely starts with those letters, and it refuses a
-    #     PIPELINE headed by `echo`. `echo hi | grep -q zzz` under `bash -e`
-    #     exits 1 and never reaches the next line - it aborts the step
-    #     exactly like a bare `mkdir`, and a prefix test called it safe. An
-    #     `echo` that REDIRECTS is a different command too and gets no
-    #     carve-out here; the redirect rule below is what covers it.
-    #   the `$GITHUB_OUTPUT` write - the one deliberately unguarded failable
-    #     command in the step. There is no degraded path when the runner
-    #     cannot write its own output file: aborting is the intended answer,
-    #     and test_the_output_write_is_left_unguarded_on_purpose holds that it
-    #     keeps no guard. A simple `echo` again, for the same two reasons: a
-    #     pipeline ending in that redirect is not the write this describes.
-    #   `{` and `}` - a brace group's punctuation, not a command.
+    # SO A COMMAND IS CARVED OUT ONLY IF IT IS BYTE-EQUAL TO AN ENTRY BELOW,
+    # after `_normalise`. There is no pattern left to widen, which retires
+    # the whole family rather than the three members that were found.
+    #
+    # THIS MAKES THE GUARD RED WHEN THE STEP LEGITIMATELY CHANGES, AND THAT
+    # IS THE POINT. A carve-out is a standing decision that one command may
+    # abort the step without anyone noticing; re-affirming it when the
+    # command's text changes is work a reviewer SHOULD have to do, and it is
+    # one line of paste - the failure message quotes the exact text to add.
+    # test_every_carve_out_is_a_command_the_shipped_step_still_runs holds the
+    # other direction, so an entry left behind by an edit reds too rather
+    # than sitting here reading as if it were checked.
+    #
+    # Each entry is (exact text, why it cannot fail or is unguarded on
+    # purpose).
+    _DELIBERATELY_UNGUARDED = (
+        ('set -uo pipefail',
+         'a builtin with valid options'),
+        ('harness_ok=yes',
+         'a bare assignment - no command runs, so nothing can fail'),
+        ('results_ok=yes',
+         'a bare assignment - no command runs, so nothing can fail'),
+        ('echo "skills-evals harness checked out"',
+         "an `echo` to the runner's stdout, which essentially never "
+         'fails'),
+        ('harness_ok=no',
+         'a bare assignment - no command runs, so nothing can fail'),
+        ('echo "eval-results checked out"',
+         "an `echo` to the runner's stdout, which essentially never "
+         'fails'),
+        ('results_ok=no',
+         'a bare assignment - no command runs, so nothing can fail'),
+        ('echo "no placeholder for the missing eval-results clone either; the annotation below covers it"',
+         'an `echo` to stdout - the log line the placeholder `mkdir` '
+         'falls to'),
+        ('echo "::warning::could not reach Adam-S-Daniel/skills-evals at all - neither the harness clone nor the eval-results branch came down. A GitHub outage, a rate limit, or the repo renamed or made private. The published audit could not be read, so this run used the local recording alone."',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        ('echo "::warning::could not clone the skills-evals harness, so the published audit could not be read and this run used the local recording alone."',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        ('echo "::warning::eval-results branch not present yet, so there is no published audit to read and this run used the local recording alone."',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        ('pip_ok=yes',
+         'a bare assignment - no command runs, so nothing can fail'),
+        ('pip_ok=no',
+         'a bare assignment, inside the `{ }` the pip guard falls to'),
+        ('echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        ('verdict=""',
+         'a bare assignment - the degraded value a guard sets'),
+        ('verdict="${verdict#"${verdict%%[![:space:]]*}"}"',
+         'parameter expansion only, no `$( )` - there is no command '
+         'status to take. An assignment FROM a `$( )` takes that '
+         "command's status and is not here for exactly that reason; "
+         'the step\'s two are guarded by their `|| ...=""`'),
+        ('verdict="${verdict%"${verdict##*[![:space:]]}"}"',
+         'parameter expansion only, no `$( )` - there is no command '
+         'status to take'),
+        ('verdict=unavailable',
+         'a bare assignment - the degraded value a guard sets'),
+        ('echo "no verdict, which follows from the clone failure annotated above; this run used the local recording alone"',
+         'an `echo` to stdout - the empty capture a clone failure '
+         'explains'),
+        ('echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the pyyaml install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        ('echo "::warning::could not compute the published account audit verdict - both clones and the pyyaml install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        ('echo "published account audit reads: $verdict"',
+         'an `echo` to stdout - the verdict this step read'),
+        ('drift=""',
+         'a bare assignment - the degraded value a guard sets'),
+        ('echo "::warning::the published account audit reads \'$verdict\' - the Tier-3 Routine has not published a usable result recently, so this run leaned on the local recording. Check that Routine and the eval-results branch of Adam-S-Daniel/skills-evals."',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        ('echo "::warning::the published account audit reads \'$verdict\', but the eval-results branch cloned cleanly - so propagation/.bootstrapped and propagation/account/latest.json are not where this step reads them. Either skills-evals moved where it publishes, or the marker was deleted. The audit contributed no skill names, so this run fell back to the local recording alone. Check the propagation/ tree on the eval-results branch of Adam-S-Daniel/skills-evals."',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        (':',
+         'the no-op the quiet `case` arm is made of'),
+        ('echo "::warning::the published account audit reads \'$verdict\', which is not a status this repo knows - skills-evals\' verdict vocabulary has moved under it. The audit contributed no skill names, so this run fell back to the local recording alone. Teach scripts/account_zip_selection.py the new name, and this step with it."',
+         'an `echo` to stdout - a `::warning::` annotation'),
+        ('echo "status=$verdict" >> "$GITHUB_OUTPUT"',
+         'THE ONE DELIBERATELY UNGUARDED FAILABLE COMMAND, and the '
+         'reason this list is text rather than a pattern. There is no '
+         'degraded path when the runner cannot write its own output '
+         'file: aborting is the intended answer, and '
+         'test_the_output_write_is_left_unguarded_on_purpose holds '
+         'that it keeps no guard. The pattern that used to admit it '
+         'also admitted `echo hi > <any other path> >> '
+         '"$GITHUB_OUTPUT"`, which aborts the step for a reason this '
+         'bullet does not describe'),
+    )
+
+    # A FIXTURE'S OWN BENIGN COMMANDS. The tests below splice shapes into the
+    # real step, and a spliced `echo matched` is not part of the shipped body
+    # - listing it above would be a lie about what the step runs, and leaving
+    # it out makes those fixtures red about the wrong command. A test that
+    # needs one declares it here, for itself, with monkeypatch.
+    _EXTRA_UNGUARDED = ()
+
+    @staticmethod
+    def _normalise(command):
+        """One command with its runs of whitespace collapsed to one space.
+
+        DEFENDED RATHER THAN ASSUMED, because it is the only slack in an
+        otherwise byte-equal comparison. `_logical_lines` joins a
+        backslash-continued command by cutting the backslash and keeping the
+        continuation line's own indentation, so the step's `python3 -m pip
+        install --quiet pyyaml==6.0.3 || ...` arrives carrying a run of
+        spaces that exists nowhere in the source's intent; the reformat set
+        this file certifies as invisible re-indents whole blocks for the same
+        reason. Collapsing runs of whitespace is exactly the difference those
+        two make and nothing else.
+
+        What it costs: two commands that differ only in the WIDTH of a run of
+        spaces inside a quoted string normalise the same. That is the entire
+        admitted family, it changes no command's behaviour, and it is a far
+        narrower door than any of the patterns this list replaced.
+        """
+        return " ".join(command.split())
+
+    def _unguarded(self):
+        return {self._normalise(text)
+                for text, _why in self._DELIBERATELY_UNGUARDED
+                } | {self._normalise(text) for text in self._EXTRA_UNGUARDED}
+
     _STRUCTURE = re.compile(
         r"^(?:else|fi|done|do|then|esac|\{|\}|case\s+\S+\s+in)$")
-    _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-    _OUTPUT_WRITE = re.compile(r'^echo\s+.*>>\s*"\$GITHUB_OUTPUT"$')
     # The write itself, as the step writes it. A LOCATOR, not a pattern: the
     # tests that ask "did the classifier still reach the last line of the
     # step" need one command they can name, and a regex that admits a family
@@ -2034,45 +2131,26 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
          "a function definition, whose body does not run where it is written"),
     )
 
-    @staticmethod
-    def _one_command(mask):
-        """True when `mask` holds no `|`, `&` or `;` - one command, not a list.
-
-        Errexit's exemption is about a command's position in a list, so a
-        carve-out that admits a whole pipeline or `&` list on the strength of
-        its first word admits whatever that list ends with.
-        """
-        return not any(ch in mask for ch in "|&;")
-
-    def _headed_by(self, command, name):
-        """True when `command` is a SIMPLE command whose name is `name`.
-
-        Both halves are what `command.startswith(name)` got wrong. The name
-        has to be the whole first word, and the command has to be one command
-        - see `_one_command`.
-        """
-        _, mask = _shell_scan(command)
-        return self._one_command(mask) and command.split()[:1] == [name]
-
     def _carved_out(self, command):
+        """True when `command` is one of the deliberately-unguarded commands.
+
+        A LOOKUP, NOT A JUDGEMENT. Everything this used to decide - is the
+        name really `echo`, is this one command or a list, does the redirect
+        go where the carve-out means - is decided by the text being the text.
+
+        The leading `{` of a brace group comes off first because it is the
+        group's punctuation and not part of the command: the step writes
+        `|| { pip_ok=no; ... ; }`, and `_top_level` splits at that `;`
+        without knowing about braces, so the first piece arrives as
+        `{ pip_ok=no`. What errexit does to the commands inside such a group
+        is measured rather than assumed - `set -uo pipefail` plus `bash -e`
+        on `false || { mkdir -p /proc/nope/child; echo inner; }` exits 1 with
+        `inner` never printed - so each of them is subject to the rule and
+        `pip_ok=no` is on the list in its own right.
+        """
         if command.startswith("{"):
             command = command[1:].strip()
-        if command in ("", "}"):
-            return True
-        if self._STRUCTURE.match(command):
-            return True
-        if command in ("set -uo pipefail", ":"):
-            return True
-        _, mask = _shell_scan(command)
-        redirects = any(ch in mask for ch in "<>")
-        if (self._ASSIGNMENT.match(command) and self._one_command(mask)
-                and "$(" not in mask and "`" not in mask and not redirects):
-            return True
-        if not self._headed_by(command, "echo"):
-            return False
-        if not redirects:
-            return True
-        return bool(self._OUTPUT_WRITE.match(command))
+        return self._normalise(command) in self._unguarded()
 
     @staticmethod
     def _pattern_end(mask):
@@ -2426,6 +2504,9 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         bare `mkdir` beside it the guard reds and names that `mkdir`.
         """
         bash = require_bash()
+        # `echo matched` is this control's own, not the shipped step's, so it
+        # is declared here rather than added to `_DELIBERATELY_UNGUARDED`.
+        monkeypatch.setattr(type(self), "_EXTRA_UNGUARDED", ("echo matched",))
         clean = self._with_lines_before_the_case(self._HERE_STRING_LINES)
         armed = self._with_lines_before_the_case(
             self._HERE_STRING_LINES + ["mkdir -p ../scratch"])
@@ -2441,7 +2522,7 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         monkeypatch.setitem(globals(), "_audit_body", lambda: clean)
         self.test_the_classifier_reads_every_line_of_the_step()
         self.test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
-        assert any(self._OUTPUT_WRITE.match(command)
+        assert any(command == self._OUTPUT_WRITE_COMMAND
                    for _, command, _ in self._classified()), (
             "a here-string above the `case` cost the classifier the step's "
             "`$GITHUB_OUTPUT` write, so everything below it was blanked and "
@@ -2524,6 +2605,8 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             f"{self._QUOTED_OPENER_LIVE!r}."
         )
 
+        monkeypatch.setattr(type(self), "_EXTRA_UNGUARDED",
+                            (self._QUOTED_OPENER_LINE,))
         clean = self._with_lines_before_the_case([self._QUOTED_OPENER_LINE])
         armed = self._with_lines_before_the_case(
             [self._QUOTED_OPENER_LINE, "mkdir -p ../scratch"])
@@ -2673,7 +2756,7 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             _, mask = _shell_scan(command)
             if not any(ch in mask for ch in "<>"):
                 continue
-            assert self._OUTPUT_WRITE.match(command), (
+            assert command == self._OUTPUT_WRITE_COMMAND, (
                 f"line {line} of the audit step has an `echo` that redirects "
                 f"and is not the `$GITHUB_OUTPUT` write, so it can fail and "
                 f"abort the step: {command!r}. Put it in an `if` condition or "
@@ -2786,6 +2869,54 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"something else: {caught.value}"
             )
 
+    def test_every_carve_out_is_a_command_the_shipped_step_still_runs(self):
+        """The other direction, and the half an exact list cannot do without.
+
+        A list of exact text reds when the step gains a command - the failure
+        message quotes the entry to paste. Nothing in that direction notices
+        an entry the step has STOPPED running. Left alone, such an entry is a
+        standing exemption for a command nobody writes any more: it reads as
+        a decision someone checked, and the day a command with that exact
+        text comes back it is exempt before anyone looks at it. So an entry
+        is required to correspond to a command `_classified()` actually
+        found, in the `carved-out` bucket.
+
+        The reason strings are held to being non-empty here too. An entry
+        with no prose is the same standing exemption with the justification
+        left off, and #120's subject is a comment that asserts what a reader
+        cannot check - an absent reason is that with the assertion removed.
+        """
+        found = {self._normalise(command)
+                 for _, command, bucket in self._classified()
+                 if bucket == "carved-out"}
+        # The brace group's `{` comes off in `_carved_out` before the lookup,
+        # so a command that arrives as `{ pip_ok=no` is on the list as
+        # `pip_ok=no` and has to be compared the same way here.
+        found |= {self._normalise(command[1:])
+                  for _, command, bucket in self._classified()
+                  if bucket == "carved-out" and command.startswith("{")}
+        seen = set()
+        for text, why in self._DELIBERATELY_UNGUARDED:
+            entry = self._normalise(text)
+            assert entry not in seen, (
+                f"`_DELIBERATELY_UNGUARDED` lists {text!r} twice. One of "
+                f"them is dead weight a reader will read as a second, "
+                f"separately-checked decision."
+            )
+            seen.add(entry)
+            assert why.strip(), (
+                f"the carve-out {text!r} carries no reason. An exemption "
+                f"with the justification left off is the shape #120 is "
+                f"about."
+            )
+            assert entry in found, (
+                f"`_DELIBERATELY_UNGUARDED` exempts {text!r}, and the audit "
+                f"step no longer runs that command - so the entry is a "
+                f"standing exemption for text nobody wrote, waiting to "
+                f"exempt whatever comes back carrying it. Delete it, or "
+                f"update it to the command the step runs now."
+            )
+
     def test_every_command_gets_one_of_the_four_answers(self):
         """The vocabulary is closed, and closed is the whole point.
 
@@ -2808,29 +2939,38 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     # and it is not "handled": each has to be classified as the failable
     # unguarded command it is, or to RAISE naming itself. What none of them
     # may do is pass.
+    #
+    # The fourth field is the row's OWN benign commands - the scaffolding a
+    # shape needs to be written down at all, which is not part of the shipped
+    # step. `echo \\` is there to carry the backslash, not to be tested; with
+    # `_DELIBERATELY_UNGUARDED` exact text rather than an `^echo` pattern it
+    # is `bare` like anything else, so the row would red about the
+    # scaffolding and never reach the shape it exists to measure. Declaring
+    # it here keeps the row's assertion the one it was written to make.
     _UNMODELLED_CONSTRUCTS = (
         ("an-escaped-backslash-before-a-newline",
-         ["echo \\\\", "mkdir -p ../scratch"], "mkdir -p ../scratch"),
+         ["echo \\\\", "mkdir -p ../scratch"], "mkdir -p ../scratch",
+         ("echo \\\\",)),
         ("an-assignment-headed-pipeline",
-         ["harness_ok=yes | mkdir -p ../scratch"], "mkdir -p ../scratch"),
+         ["harness_ok=yes | mkdir -p ../scratch"], "mkdir -p ../scratch", ()),
         ("a-one-line-case-arm",
          ["case zzz in", "  zzz) drift=$(mkdir -p ../scratch) ;;", "esac"],
-         "mkdir -p ../scratch"),
+         "mkdir -p ../scratch", ()),
         ("a-fallthrough-case-arm",
          ["case zzz in", "  zzz) mkdir -p ../scratch ;;&", "  *) : ;;",
-          "esac"], "mkdir -p ../scratch"),
-        ("an-arithmetic-command", ["(( 0 ))"], "(( 0 ))"),
+          "esac"], "mkdir -p ../scratch", ()),
+        ("an-arithmetic-command", ["(( 0 ))"], "(( 0 ))", ()),
         ("a-double-bracket-with-a-quoted-or",
-         ['[[ "x" == "a||b" ]]'], '[[ "x" == "a||b" ]]'),
+         ['[[ "x" == "a||b" ]]'], '[[ "x" == "a||b" ]]', ()),
         ("a-background-list",
-         ["harness_ok=yes & mkdir -p ../scratch"], "mkdir -p ../scratch"),
+         ["harness_ok=yes & mkdir -p ../scratch"], "mkdir -p ../scratch", ()),
         ("a-function-definition",
-         ["zzz() { mkdir -p ../scratch; }"], "a function definition"),
+         ["zzz() { mkdir -p ../scratch; }"], "a function definition", ()),
         ("a-list-whose-last-pair-is-guarded",
          ["mkdir -p ../scratch ; echo hi || echo bye"],
-         "mkdir -p ../scratch"),
+         "mkdir -p ../scratch", ()),
         ("a-one-line-if-with-its-body",
-         ["if true; then mkdir -p ../scratch; fi"], "mkdir -p ../scratch"),
+         ["if true; then mkdir -p ../scratch; fi"], "mkdir -p ../scratch", ()),
     )
 
     def test_a_construct_this_classifier_cannot_place_is_never_a_pass(
@@ -2854,9 +2994,10 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         bash = require_bash()
         # Every body built BEFORE anything is monkeypatched, or the second
         # one would be built from a step that already carries the first.
-        armed = {name: (self._with_lines_before_the_case(lines), names)
-                 for name, lines, names in self._UNMODELLED_CONSTRUCTS}
-        for name, (body, names) in armed.items():
+        armed = {name: (self._with_lines_before_the_case(lines), names,
+                        benign)
+                 for name, lines, names, benign in self._UNMODELLED_CONSTRUCTS}
+        for name, (body, names, benign) in armed.items():
             syntax = subprocess.run(
                 [bash, "-n", _script(tmp_path, body, name="menu.sh")],
                 capture_output=True, text=True)
@@ -2865,12 +3006,77 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"guard says about it is about the fixture:\n{syntax.stderr}"
             )
             monkeypatch.setitem(globals(), "_audit_body", lambda b=body: b)
+            monkeypatch.setattr(type(self), "_EXTRA_UNGUARDED", benign)
             with pytest.raises(AssertionError) as caught:
                 self.\
                     test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
             assert names in str(caught.value), (
                 f"the guard reded on a step carrying `{name}`, but not about "
                 f"{names!r}: {caught.value}"
+            )
+
+    # THE FOUR PAYLOADS A REVIEW MEASURED PASSING SILENTLY, kept together as
+    # the round's own evidence. Each was spliced into the REAL step, was
+    # clean under `bash -n`, aborts the step under `set -uo pipefail` plus
+    # `bash -e`, and this guard said nothing about it. They are four costumes
+    # of one fault - a recogniser that admits more than it names - and the
+    # reason they sit in one table is that the next reader of this round
+    # should find all four where the round is described, not spread across
+    # the four tests that each closed one.
+    #
+    # Two of them are also held elsewhere, and deliberately twice: the `;`
+    # list by `_UNMODELLED_CONSTRUCTS`' `a-list-whose-last-pair-is-guarded`
+    # row, the quoted `<<PY` by
+    # test_a_quoted_heredoc_opener_does_not_blank_the_rest_of_the_step. Those
+    # two tests hold a mechanism; this table holds the exact bytes that were
+    # measured, which is the thing a re-run of the review compares against.
+    #
+    # `benign` is the row's own scaffolding, as in `_UNMODELLED_CONSTRUCTS`.
+    _MEASURED_SILENT_PASSES = (
+        ("an-assignment-prefix-to-an-arbitrary-command",
+         ["FOO=bar mkdir -p ../scratch"], "FOO=bar mkdir -p ../scratch", ()),
+        ("an-extra-redirect-before-the-github-output-append",
+         ['echo hi > ../scratch/zz >> "$GITHUB_OUTPUT"'],
+         'echo hi > ../scratch/zz >> "$GITHUB_OUTPUT"', ()),
+        ("a-semicolon-list-whose-last-pair-is-guarded",
+         ["mkdir -p ../scratch ; echo hi || echo bye"],
+         "mkdir -p ../scratch", ()),
+        ("a-heredoc-opener-inside-a-quoted-string",
+         ['echo "::warning::the verdict block <<PY could not be read"',
+          "mkdir -p ../scratch"], "mkdir -p ../scratch",
+         ('echo "::warning::the verdict block <<PY could not be read"',)),
+    )
+
+    def test_the_payloads_that_once_passed_silently_all_red_now(
+            self, monkeypatch, tmp_path):
+        """The round's four blocking defects, held by their measured bytes.
+
+        A fix described in a commit message is a claim; a fix held by the
+        payload that defeated it is a fact. Each row is required to be valid
+        bash - otherwise a red here would be about the fixture - and then
+        required to make this guard fail naming the command that aborts the
+        step.
+        """
+        bash = require_bash()
+        armed = {name: (self._with_lines_before_the_case(lines), names,
+                        benign)
+                 for name, lines, names, benign in self._MEASURED_SILENT_PASSES}
+        for name, (body, names, benign) in armed.items():
+            syntax = subprocess.run(
+                [bash, "-n", _script(tmp_path, body, name="payload.sh")],
+                capture_output=True, text=True)
+            assert syntax.returncode == 0, (
+                f"the body carrying `{name}` is not valid bash, so what the "
+                f"guard says about it is about the fixture:\n{syntax.stderr}"
+            )
+            monkeypatch.setitem(globals(), "_audit_body", lambda b=body: b)
+            monkeypatch.setattr(type(self), "_EXTRA_UNGUARDED", benign)
+            with pytest.raises(AssertionError) as caught:
+                self.\
+                    test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+            assert names in str(caught.value), (
+                f"the payload `{name}` no longer reds about {names!r}, so "
+                f"whatever closed it has come undone: {caught.value}"
             )
 
     _TWO_LINE_HEAD = ["if true", "then", "  :", "fi"]
@@ -2930,8 +3136,11 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"line {line} of the audit step runs a command that can fail "
                 f"and is neither in an `if` condition nor in a `||` list: "
                 f"{command!r}. Under `bash -e` that aborts the whole step - "
-                f"the fault 58cfab6 fixed. Guard it, or add it to the "
-                f"carve-out list above with the reason it cannot fail."
+                f"the fault 58cfab6 fixed. Guard it with an `if` or a `||`; "
+                f"or, if it genuinely cannot fail, add this exact entry to "
+                f"`_DELIBERATELY_UNGUARDED` with the reason it cannot:\n"
+                f"    ({self._normalise(command)!r},\n"
+                f"     'why this one cannot fail'),"
             )
 
     def test_a_command_after_the_final_or_aborts_the_step_too(self, tmp_path):
