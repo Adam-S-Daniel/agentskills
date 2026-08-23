@@ -1430,8 +1430,10 @@ def test_the_doctor_reads_the_record_the_hook_actually_writes(tmp_path):
 
     store_state, names = prov.scan(skills)
     assert store_state == prov.PRESENT
+    parsed = prov.read_lock(lock)
     rows, findings, notes = prov.classify(
-        skills, names, record, prov.read_lock(lock))
+        skills, names, record, parsed,
+        prov.assign_origins(skills, names, record, parsed.names))
     assert [(row.name, row.origin, row.integrity) for row in rows] == [
         ("alpha", prov.HOOK, prov.UNCHANGED), ("beta", prov.HOOK, prov.UNCHANGED)]
     assert findings == [], findings
@@ -2499,11 +2501,68 @@ def test_the_foreign_note_does_not_claim_no_bundle_ever_delivered_it(
     assert code == 0, out
     assert "[foreign] session-start-hook" in out, out
     assert "So no bundle here delivered it" not in flat(out), out
-    assert "nothing this script can see delivered it" in flat(out), out
+    assert "nothing this script can see delivered THIS directory" in flat(out), out
     # The two things the reclassification does NOT establish, named in the note
     # rather than left for the reader to notice.
     assert "forgets every install before that run" in flat(out), out
     assert "does not run the name-dir-mismatch check" in flat(out), out
+
+
+def test_a_foreign_directory_the_account_store_also_names_is_not_a_shadow(
+        tmp_path, capsys, ephemeral):
+    """A basename collision is not one skill arriving twice.
+
+    The shadow comparison exists for a skill the registry installs and an
+    earlier upload also delivers, and its whole remedy is "the account copy is
+    behind, re-upload it". A directory whose frontmatter declares another name
+    is not that skill's second copy: no upload could ever reconcile the pair, so
+    the FINDING it produced could never go green — permanent red beside a note
+    saying nothing here delivered the directory and there is nothing to fix.
+    One report, two sentences, opposite advice.
+
+    Reachable today rather than hypothetical: the hosted harness seeds
+    `session-start-hook/` into every session here, and Anthropic example skills
+    do reach the account store.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    seeded_skill(store, "session-start-hook", "startup-hook-skill")
+    account_copy(store, "session-start-hook")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "FINDINGS (0)" in out, out
+    assert "shadow-copies-differ" not in out, out
+    assert "[shadowed-by-the-account-store] session-start-hook" not in out, out
+    assert "[foreign] session-start-hook" in out, out
+    # Excluding it from the comparison is not licence to deny the collision:
+    # the account manifest DOES name the basename, the report prints
+    # `synced/` five lines above, and a reader can check it with one `ls`.
+    assert f"The account store does hold a {prov.ACCOUNT_DIR}/session-start-hook/" \
+        in flat(out), out
+    assert "Nor does the account manifest" not in flat(out), out
+
+
+def test_a_kind_no_observation_registers_cannot_reach_a_reader():
+    """The table is enforced, not decorative.
+
+    `OBSERVATION_ORIGINS` is the axis the matrix test enumerates. If a kind
+    could be raised without appearing in it, the matrix would be complete over a
+    table that no longer describes the code — which is the pairwise wiring this
+    replaced, one level up.
+    """
+    with pytest.raises(KeyError):
+        prov._observed("invented-kind", prov.HOOK, "alpha", "detail")
+    with pytest.raises(ValueError):
+        prov._observed("foreign", prov.HOOK, "alpha", "detail")
+    with pytest.raises(ValueError):
+        prov._observed("shadow-copies-differ", prov.FOREIGN, "alpha", "detail")
+    # And the positive control, so the three above are not passing because
+    # `_observed` refuses everything.
+    assert prov._observed("foreign", prov.FOREIGN, "alpha", "d").kind == "foreign"
 
 
 def test_a_recorded_name_disagreement_gets_no_foreign_note(tmp_path, capsys,

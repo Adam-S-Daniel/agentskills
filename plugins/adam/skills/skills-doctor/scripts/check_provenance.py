@@ -24,6 +24,16 @@ from before the corruption are forgotten and anything that left the lock during
 that window is now left alone forever. They take different actions, which is why
 this reports them as different words rather than both as "no record".
 
+THE CENTRAL PROPERTY, and the one every judgement below is measured against:
+NO ORDINARY SESSION MAY RED. Exit 1 means "a human has to decide about this".
+A state that is the correct, expected resting state of a whole class of
+sessions is a NOTE however surprising it looks — an absent record on a durable
+machine, a harness-seeded directory, one bare name arriving from both delivery
+channels, a `__pycache__` left behind by running a skill's own suite. An exit
+code that can never be green on an ordinary machine has stopped carrying
+information, and its findings are the ones a reader learns to scroll past.
+`test_no_ordinary_session_reddens` enumerates those sessions and asserts it.
+
 Reports only. It never installs, copies, deletes or repairs anything.
 """
 
@@ -36,7 +46,8 @@ import re
 import sys
 import textwrap
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import (Dict, FrozenSet, List, NamedTuple, Optional, Set,
+                    Tuple)
 
 RECORD_NAME = ".skills-bootstrap-installed.json"
 LOCK_NAME = "skills.lock"
@@ -109,6 +120,59 @@ UNCHANGED, EDITED, UNMEASURABLE = "unchanged", "edited", "unmeasurable"
 # would smuggle the over-claim back in through the column heading.
 HOOK, UNATTRIBUTED, UNKNOWN, FOREIGN = ("hook", "unattributed", "unknown",
                                         "foreign")
+
+# Every origin there is. `assign_origins` is a four-arm ladder ending in an
+# unconditional `else`, so every directory on disk leaves it carrying one of
+# these and no directory can carry two. That totality is what the observation
+# table below rests on and what the matrix test enumerates — a fifth origin
+# cannot be added without appearing in both.
+ORIGINS = (HOOK, FOREIGN, UNATTRIBUTED, UNKNOWN)
+
+# Every observation this makes about a DIRECTORY, and the origins it may be
+# raised about. Before this table each observation carried its own idea of
+# which directories it applied to, wired pair by pair at the call sites, and
+# the pairs nobody enumerated were the defects. The one that made the table:
+# a directory the report itself labelled `foreign` was still fed to the shadow
+# comparison, so an account store holding the same basename produced a
+# `shadow-copies-differ` FINDING at exit 1 beside a note saying nothing here
+# delivered the directory and there was nothing to fix.
+#
+# `shadow` therefore excludes FOREIGN, and says so here rather than at the call
+# site. That comparison's whole remedy is "the account copy is behind,
+# re-upload it", which presumes the two directories are one skill arriving
+# twice. A directory whose frontmatter declares another name is not that
+# skill's second copy, so no upload could reconcile the pair and the finding
+# could never go green — the central property inverted. `foreign_notes`
+# reports the basename collision instead.
+OBSERVATION_ORIGINS: Dict[str, FrozenSet[str]] = {
+    # What the lock expects of a directory that IS here.
+    "lock-expectation": frozenset({HOOK, UNATTRIBUTED, UNKNOWN}),
+    # The bytes against the digest the record vouches for. Only a recorded
+    # directory has one to be measured against.
+    "integrity": frozenset({HOOK}),
+    # One bare name delivered into one session by both channels.
+    "shadow": frozenset({HOOK, UNATTRIBUTED, UNKNOWN}),
+    # The frontmatter-name disagreement itself.
+    "foreign": frozenset({FOREIGN}),
+}
+
+# Which observation each per-directory kind belongs to. Two families are
+# deliberately absent, both because they have no directory and therefore no
+# origin to check against: the store-wide kinds (the record's, the lock's, the
+# store's, the hook wiring's), and the kinds about a locked name that is NOT on
+# disk (`missing`, `not-in-the-store`, `delivered-by-*`).
+OBSERVATION_KINDS: Dict[str, Tuple[str, ...]] = {
+    "lock-expectation": ("untracked", "hand-placed-over-locked",
+                         "stale-out-of-scope", "stale"),
+    "integrity": ("edited-and-locked", "unmeasurable-and-locked",
+                  "edited-and-stale", "unmeasurable-and-stale"),
+    "shadow": ("shadow-copies-differ", "shadowed-by-the-account-store"),
+    "foreign": ("foreign",),
+}
+
+OBSERVATION_OF: Dict[str, str] = {
+    kind: observation
+    for observation, kinds in OBSERVATION_KINDS.items() for kind in kinds}
 
 # Which kind of machine this is, which is what decides whether an empty personal
 # store is the correct state or a delivery failure. EPHEMERAL and DURABLE are the
@@ -199,6 +263,17 @@ class Surface(NamedTuple):
     forced: bool = False
 
 
+class Origin(NamedTuple):
+    """One directory's origin, and the measurement that chose it.
+
+    `declared` is the frontmatter name, carried only for FOREIGN so that the
+    row and the note are two views of ONE reading rather than two readings that
+    can disagree about one directory.
+    """
+    kind: str
+    declared: Optional[str] = None
+
+
 class Row(NamedTuple):
     name: str
     origin: str
@@ -235,6 +310,25 @@ class LockResult(NamedTuple):
     rows: List[Row]
     findings: List[Finding]
     notes: List[Finding]
+
+
+def _observed(kind: str, origin: str, subject: str, detail: str) -> Finding:
+    """A per-directory finding or note, checked against the observation table.
+
+    A raise and not a filter, because both failures it catches are programming
+    errors rather than states of anyone's machine: a kind nobody registered in
+    `OBSERVATION_KINDS`, or a kind raised about an origin its observation does
+    not cover. Deciding those pairs at the call sites is what let two of them
+    disagree about one directory, and a table nothing consults would drift the
+    same way — so every per-directory finding is built through here.
+    """
+    observation = OBSERVATION_OF.get(kind)
+    if observation is None:
+        raise KeyError(f"{kind!r} is not registered in OBSERVATION_KINDS")
+    if origin not in OBSERVATION_ORIGINS[observation]:
+        raise ValueError(f"{kind!r} belongs to the {observation!r} observation, "
+                         f"which is not raised about a {origin!r} directory")
+    return Finding(kind, subject, detail)
 
 
 def digest_skill_dir(path: Path) -> Optional[str]:
@@ -834,82 +928,111 @@ def foreign_names(skills_dir: Path, names: List[str]) -> Dict[str, str]:
     return found
 
 
-def reported_foreign(foreign: Dict[str, str], record: Record,
-                     locked: Set[str]) -> Dict[str, str]:
-    """The name disagreements this run is entitled to reclassify, and no others.
+def assign_origins(skills_dir: Path, names: List[str], record: Record,
+                   locked: Set[str]) -> Dict[str, Origin]:
+    """Exactly one origin for every directory on disk, decided once, store-wide.
 
-    `foreign_names` measures a property of a directory. Whether that property may
-    stand in for "no name-keyed channel here delivered it" depends on two things
-    the directory cannot say, and both gates are applied HERE — once — so the
-    row and the note can never disagree about one directory.
+    Total by construction: four arms ending in an unconditional `else`, so
+    there is no directory the ladder declines to place and none two arms can
+    claim. That is the property `OBSERVATION_ORIGINS` and the matrix test rest
+    on. It replaces an arrangement in which `classify` decided the row,
+    `reported_foreign` decided the note, and each re-applied its own subset of
+    the gates — which is how one directory came to be described two ways in one
+    report, and how two of those subsets became unreachable without anything
+    noticing.
 
-    Gate one, the record. Reclassifying withholds the `untracked` finding, and
-    the only thing that makes that honest is a record which positively does not
-    name the directory — so a record that DOES name it disqualifies the label
-    outright. That entry is the hook saying it installed this directory, which
-    is the one thing "no name-keyed channel here delivered it" denies, and the
-    row already reads `hook` next to a note claiming the record is silent.
-    With no readable record there is nothing to be silent:
-    `untracked`'s own no-record text says even "the hook installed it" cannot be
-    ruled out, and a note asserting the opposite over the top of it would be the
-    report contradicting itself. (Its silence is still not proof — a hook that
-    fails to READ a record rewrites it from scratch and forgets what came
-    before, which the same finding already lists among its causes.
-    `foreign_notes` says so rather than claiming more than the record can carry.)
+    Store-wide, and computed BEFORE any lock is judged against, because the
+    gates are questions about the whole session rather than about one
+    expectation. `locked` is the union of every readable lock's names: a name
+    ANY lock declares is a name some bundle here delivers, so the foreign
+    premise fails for it under every lock and not only under the one naming it.
 
-    Gate two, the lock. `classify` already keeps `hand-placed-over-locked` ahead
-    of the label for a locked directory, because the hook is about to replace it
-    whatever its frontmatter says — but the note was emitted store-wide with no
-    such gate, so one directory got both "it will not survive the next session
-    start" and "the hook will never remove it". Store-wide is the right SCOPE
-    for the note (see `foreign_notes`); the fix is to make the gate store-wide
-    too. A name any readable lock declares is a name some bundle here delivers,
-    so the reclassification's premise fails for it under every lock, not just
-    the one that names it.
+    The arms are the evidence, strongest first.
+
+    * No readable record: nothing is attributable at all, not even against the
+      frontmatter. `untracked`'s own no-record text says even "the hook
+      installed it" cannot be ruled out there, and a note asserting the
+      opposite over the top of it would be the report contradicting itself.
+    * The record names it in an entry the hook accepts: the hook says it
+      installed this directory. That outranks the frontmatter — a recorded
+      directory with a mistyped `name:` is the hook's, whatever the typo says.
+    * A lock declares it, so "no name-keyed channel here produced this" is
+      already false — the hook is about to overwrite the directory whatever its
+      frontmatter says. Its frontmatter agreeing with its basename lands here
+      too: there is no disagreement to measure.
+    * Otherwise its SKILL.md declares a name that is not its basename, and no
+      name-keyed channel here could have produced it: FOREIGN.
     """
-    if record.state != PRESENT:
-        return {}
-    return {name: declared for name, declared in foreign.items()
-            if name not in locked and name not in record.entries}
+    declared = foreign_names(skills_dir, names)
+    assigned: Dict[str, Origin] = {}
+    for name in names:
+        if record.state != PRESENT:
+            assigned[name] = Origin(UNKNOWN)
+        elif name in record.entries:
+            assigned[name] = Origin(HOOK)
+        elif name in locked or name not in declared:
+            assigned[name] = Origin(UNATTRIBUTED)
+        else:
+            assigned[name] = Origin(FOREIGN, declared[name])
+    return assigned
 
 
-def foreign_notes(foreign: Dict[str, str]) -> List[Finding]:
+def foreign_notes(origins: Dict[str, Origin],
+                  account: Set[str] = frozenset()) -> List[Finding]:
     """One note per directory no name-keyed channel here could have produced.
 
-    A NOTE and not a finding, for the reason `record_findings` gives about an
-    absent record: this is the correct resting state of a whole class of
-    sessions, and a doctor that calls the correct state a defect trains its
-    reader to skip the findings section. The hosted harness seeds
-    `~/.claude/skills/session-start-hook/` before the bootstrap hook runs at all
-    (#123), so leaving it an `untracked` FINDING makes exit 1 the permanent
-    resting state of every healthy session on that surface — an exit code that
-    can never be green is one that has stopped carrying information.
+    A NOTE and not a finding, for the central property: this is the correct
+    resting state of a whole class of sessions. The hosted harness seeds
+    `~/.claude/skills/session-start-hook/` before the bootstrap hook runs at
+    all (#123), so leaving it an `untracked` FINDING makes exit 1 the permanent
+    resting state of every healthy session on that surface.
 
-    Takes the set `reported_foreign` passed to `classify` and not the raw
-    reading, so the note and the origin column are two views of one decision.
+    Reads `assign_origins`' answer rather than re-deciding, so the note and the
+    origin column are two views of one decision.
+
+    `account` is passed because the account manifest is one of the three
+    name-keyed channels this rules out, and it is the one that can name the
+    BASENAME while having nothing to do with the directory. Saying "no
+    name-keyed channel names it" while the same report shows `synced/<name>`
+    is a claim a reader can falsify in one `ls`, so the clause is measured.
     """
-    return [Finding(
-        "foreign", name,
-        f"its SKILL.md declares `name: {declared}`, which is not this "
-        f"directory's basename. Every channel this script models keys on the "
-        f"basename — the lock installs to its key's last segment, the install "
-        f"record names directories, the account manifest names directories — "
-        f"and the registry's own CI refuses a skill whose frontmatter name "
-        f"disagrees with its directory (scripts/check_skills.py, kind "
-        f"name-dir-mismatch). No lock read here names it and the install record "
-        f"does not name it either, so nothing this script can see delivered it, "
-        f"and it is reported as a state rather than as something to fix: on a "
-        f"hosted surface the harness seeds directories under this HOME before "
-        f"the bootstrap hook runs, and none of those is a decision anyone here "
-        f"made. Two things this does NOT establish. WHO placed it — only that "
-        f"no name-keyed channel here names it. And that no bundle EVER "
-        f"delivered it: a hook that fails to read the record rewrites it from "
-        f"scratch, which forgets every install before that run, and a registry "
-        f"whose CI does not run the name-dir-mismatch check could have shipped "
-        f"this frontmatter. It is still always-on context, and the hook will "
-        f"not remove it, because the hook removes only what its record proves "
-        f"it installed.")
-        for name, declared in sorted(foreign.items())]
+    notes: List[Finding] = []
+    for name, origin in sorted(origins.items()):
+        if origin.kind != FOREIGN:
+            continue
+        if name in account:
+            collision = (f"The account store does hold a {ACCOUNT_DIR}/{name}/, "
+                         f"which is a skill of its own under that basename and "
+                         f"not a second copy of this directory — this one "
+                         f"declares something else. So the two are not compared "
+                         f"as one skill's two deliveries, and no re-upload could "
+                         f"reconcile them.")
+        else:
+            collision = "Nor does the account manifest."
+        notes.append(_observed(
+            "foreign", origin.kind, name,
+            f"its SKILL.md declares `name: {origin.declared}`, which is not "
+            f"this directory's basename. Every channel this script models keys "
+            f"on the basename — the lock installs to its key's last segment, "
+            f"the install record names directories, the account manifest names "
+            f"directories — and the registry's own CI refuses a skill whose "
+            f"frontmatter name disagrees with its directory "
+            f"(scripts/check_skills.py, kind name-dir-mismatch). No lock read "
+            f"here names it and the install record does not name it either. "
+            f"{collision} So "
+            f"nothing this script can see delivered THIS directory, and it is "
+            f"reported as a state rather than as something to fix: on a hosted "
+            f"surface the harness seeds directories under this HOME before the "
+            f"bootstrap hook runs, and none of those is a decision anyone here "
+            f"made. Two things this does NOT establish. WHO placed it — only "
+            f"that no name-keyed channel here names it. And that no bundle EVER "
+            f"delivered it: a hook that fails to read the record rewrites it "
+            f"from scratch, which forgets every install before that run, and a "
+            f"registry whose CI does not run the name-dir-mismatch check could "
+            f"have shipped this frontmatter. It is still always-on context, and "
+            f"the hook will not remove it, because the hook removes only what "
+            f"its record proves it installed."))
+    return notes
 
 
 def newest_mtime(directory: Path) -> Optional[float]:
@@ -948,23 +1071,32 @@ def cluster(stamped: List[Tuple[str, float]]) -> List[List[Tuple[str, float]]]:
 
 
 def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
-             account: Set[str] = frozenset(), repo_owned: Set[str] = frozenset(),
-             store_state: str = PRESENT, surface: str = DURABLE,
-             foreign: Dict[str, str] = None,
+             origins: Dict[str, Origin], account: Set[str] = frozenset(),
+             repo_owned: Set[str] = frozenset(), store_state: str = PRESENT,
+             surface: str = DURABLE,
              ) -> Tuple[List[Row], List[Finding], List[Finding]]:
     """One row per directory on disk, plus the findings and notes they imply.
 
     A finding is something a human has to decide about. A note is something the
-    next bootstrap will handle by itself — reported because "the hook is about to
-    delete this" is worth seeing, not because anything is wrong.
+    next bootstrap will handle by itself, or the correct resting state of this
+    kind of session — reported because "the hook is about to delete this" is
+    worth seeing, not because anything is wrong. The module docstring's central
+    property is what that split serves.
 
-    `surface` is what separates those two for a locked skill that is simply not
-    here. It is the same fact on both kinds of machine and the opposite verdict:
-    correct on a durable one, where the marketplace is authoritative, and a
-    delivery failure on an ephemeral one, where the hook is the only channel
-    there is. Defaults to DURABLE because that is the reading under which this
-    stays quiet, and a diagnostic should need evidence to raise a finding rather
-    than evidence to withhold one.
+    `origins` is `assign_origins`' answer and is required rather than
+    recomputed: the origin is a property of the DIRECTORY and of the whole
+    session, while this function is called once per lock, so measuring it here
+    would give one directory as many origins as the session has locks. Every
+    branch below switches on it, and the switch is exhaustive over `ORIGINS` —
+    there is no `else` that guesses.
+
+    `surface` is what separates finding from note for a locked skill that is
+    simply not here. It is the same fact on both kinds of machine and the
+    opposite verdict: correct on a durable one, where the marketplace is
+    authoritative, and a delivery failure on an ephemeral one, where the hook is
+    the only channel there is. Defaults to DURABLE because that is the reading
+    under which this stays quiet, and a diagnostic should need evidence to raise
+    a finding rather than evidence to withhold one.
 
     Every judgement of the form "this should not be here" or "this is missing"
     needs BOTH sides: the lock says what was expected, the record says who put
@@ -976,42 +1108,46 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
     are here only so that "not in the personal store" does not get reported as
     "not delivered": both of those channels satisfy a locked name without the
     hook installing anything.
-
-    `foreign` is `reported_foreign`'s reading, passed in rather than measured
-    here because both gates on it are store-wide (see `reported_foreign`) and
-    the note it carries is too (see `foreign_notes`). The two checks below can
-    only narrow it further, never widen it: a lock that names the directory is
-    about to have the hook overwrite it, and that consequence is real whatever
-    the frontmatter says, so `hand-placed-over-locked` keeps priority over the
-    label — and with no readable record there is no silence to read as evidence.
     """
     rows: List[Row] = []
     findings: List[Finding] = []
     notes: List[Finding] = []
     attributable = record.state == PRESENT
     expected = lock.state == PRESENT
-    foreign = {} if foreign is None else foreign
 
     for name in names:
-        entry = record.entries.get(name) if attributable else None
+        origin = origins[name].kind
         in_lock = name in lock.names
 
-        if entry is None:
-            if name in foreign and not in_lock and attributable:
-                # The `untracked` finding this replaces is withheld rather than
-                # softened, and that is the whole change: the finding asks the
-                # reader to account for a directory, and there is no account to
-                # give for one the surface placed. `foreign_notes` says so once,
-                # store-wide.
-                rows.append(Row(name, FOREIGN, None, None, None, in_lock))
-                continue
-            origin = UNATTRIBUTED if attributable else UNKNOWN
+        if origin == FOREIGN:
+            # The `untracked` finding this replaces is withheld rather than
+            # softened, and that is the whole of it: the finding asks the reader
+            # to account for a directory, and there is no account to give for
+            # one the surface placed. `foreign_notes` says so once, store-wide.
+            rows.append(Row(name, FOREIGN, None, None, None, in_lock))
+            continue
+
+        if origin != HOOK:
             rows.append(Row(name, origin, None, None, None, in_lock))
             if not expected:
                 continue
-            if origin == UNATTRIBUTED and not in_lock:
-                findings.append(Finding(
-                    "untracked", name,
+            if in_lock and origin == UNATTRIBUTED:
+                findings.append(_observed(
+                    "hand-placed-over-locked", origin, name,
+                    "the lock names it and the record does not name it, so "
+                    "nothing establishes it as the hook's — and it will not "
+                    "survive the next session "
+                    "start, which replaces the directory with the registry's "
+                    "copy, or removes it outright if the project ships a skill "
+                    "of the same name. Move it if you want to keep it."))
+            elif in_lock:
+                # UNKNOWN and locked. Nothing to say that the absent record has
+                # not already said store-wide: the hook will replace it, and
+                # whether anyone hand-placed it is exactly what cannot be read.
+                continue
+            elif origin == UNATTRIBUTED:
+                findings.append(_observed(
+                    "untracked", origin, name,
                     "in the skills directory, named by neither the install "
                     "record nor the lock this was judged against (the LOCK "
                     "line below says which). Nothing that lock declares would "
@@ -1031,22 +1167,13 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "when its SKILL.md declares a name other than its own "
                     "basename; this one does not, so that evidence is absent "
                     "here rather than the cause being ruled out."))
-            elif origin == UNATTRIBUTED:
-                findings.append(Finding(
-                    "hand-placed-over-locked", name,
-                    "the lock names it and the record does not name it, so "
-                    "nothing establishes it as the hook's — and it will not "
-                    "survive the next session "
-                    "start, which replaces the directory with the registry's "
-                    "copy, or removes it outright if the project ships a skill "
-                    "of the same name. Move it if you want to keep it."))
-            elif not in_lock:
+            else:
                 # Same directory, same consequence, weaker evidence: without a
                 # record nothing can say who installed it, and the hook removes
                 # only what it can show it installed. Reported anyway — staying
                 # silent here would mute the doctor exactly where it knows least.
-                findings.append(Finding(
-                    "untracked", name,
+                findings.append(_observed(
+                    "untracked", origin, name,
                     "not named by the lock, and there is no readable record to "
                     "say whether the hook installed it. Nothing will remove it "
                     "either way: the hook only removes what it can prove it put "
@@ -1056,6 +1183,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "ruled out."))
             continue
 
+        entry = record.entries[name]
         measured = digest_skill_dir(skills_dir / name)
         if measured is None:
             integrity = UNMEASURABLE
@@ -1068,36 +1196,38 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
         if not expected:
             continue
         in_scope = (entry.registry, entry.bundle) in lock.claims
-        if integrity != UNCHANGED and in_lock:
-            findings.append(Finding(
-                f"{integrity}-and-locked", name,
+        if in_lock and integrity != UNCHANGED:
+            findings.append(_observed(
+                f"{integrity}-and-locked", HOOK, name,
                 f"{_cause(integrity)} and the lock still names it. The directory "
                 f"does not survive the next session start, so any local change "
                 f"here is lost without a prompt."))
-        elif not in_lock and not in_scope:
+        elif in_lock:
+            continue
+        elif not in_scope:
             # Scope is checked BEFORE integrity, because out of scope the planner
             # short-circuits to `keep` without ever consulting the digest — so the
             # edited-and-stale verdict degrade below simply does not happen, and
             # promising it would send the reader looking for a signal the hook
             # never emits.
-            findings.append(Finding(
-                "stale-out-of-scope", name,
+            findings.append(_observed(
+                "stale-out-of-scope", HOOK, name,
                 f"left the lock, and the lock no longer declares the bundle "
                 f"{entry.bundle!r} at the registry it came from. Removal is "
                 f"scoped to what the lock claims, so nothing here will ever "
                 f"clean it up — and the hook does not mention it either, because "
                 f"it is not in scope to have an opinion."))
         elif integrity != UNCHANGED:
-            findings.append(Finding(
-                f"{integrity}-and-stale", name,
+            findings.append(_observed(
+                f"{integrity}-and-stale", HOOK, name,
                 f"{_cause(integrity)} and it has left the lock. The hook leaves "
                 f"it in place and degrades its verdict for as long as that holds "
                 f"— but what preserves it is the MISMATCH, not having left the "
                 f"lock: restore the original bytes and the next run removes it. "
                 f"Move it out of the store to keep it."))
-        elif not in_lock:
-            notes.append(Finding(
-                "stale", name,
+        else:
+            notes.append(_observed(
+                "stale", HOOK, name,
                 "left the lock, is untouched since install, and its registry and "
                 "bundle are still declared — the next bootstrap removes it. "
                 "Unless AGENTSKILLS_BUNDLE narrows that run away from its "
@@ -1253,7 +1383,8 @@ def _crlf_side(mine: Path, theirs: Path) -> str:
     return ""
 
 
-def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
+def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
+                    origins: Dict[str, Origin]
                     ) -> Tuple[List[Finding], List[Finding]]:
     """(findings, notes) for every bare name BOTH channels deliver into one session.
 
@@ -1301,6 +1432,12 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
     # finding the two "different", which a directory holding nothing next to a
     # skill unavoidably is — invents both the collision and the divergence.
     for name in sorted(set(names) & set(account) & skill_names(skills_dir)):
+        # `shadow` is not raised about every origin, and `OBSERVATION_ORIGINS`
+        # is where that is decided rather than here — see its comment for why
+        # a FOREIGN directory is not one of a skill's two deliveries and why
+        # comparing it produces a finding no upload could ever clear.
+        if origins[name].kind not in OBSERVATION_ORIGINS["shadow"]:
+            continue
         mine = skills_dir / name
         theirs = skills_dir / ACCOUNT_DIR / name
         both = (f"delivered by BOTH channels under one bare name — {mine} and "
@@ -1321,8 +1458,8 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
             unread = " and ".join(
                 str(path) for path, value in ((mine, exact_mine), (theirs, exact_theirs))
                 if value is None)
-            notes.append(Finding(
-                "shadowed-by-the-account-store", name,
+            notes.append(_observed(
+                "shadowed-by-the-account-store", origins[name].kind, name,
                 f"{both} The two could NOT be compared: {unread} could not be "
                 f"read, so whether they hold the same instructions is unmeasured "
                 f"rather than confirmed. {clocks}"))
@@ -1334,15 +1471,15 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
             norm_mine = digest_shared_payload(mine, fold=True)
             norm_theirs = digest_shared_payload(theirs, fold=True)
             if norm_mine is None or norm_theirs is None:
-                notes.append(Finding(
-                    "shadowed-by-the-account-store", name,
+                notes.append(_observed(
+                    "shadowed-by-the-account-store", origins[name].kind, name,
                     f"{both} The two differ byte-for-byte and could not be "
                     f"re-compared with line endings normalised, so whether that "
                     f"difference is only CRLF-vs-LF is unmeasured. {clocks}"))
                 continue
             if norm_mine != norm_theirs:
-                findings.append(Finding(
-                    "shadow-copies-differ", name,
+                findings.append(_observed(
+                    "shadow-copies-differ", origins[name].kind, name,
                     f"{both} And the two are NOT the same content: they still "
                     f"differ once CRLF line endings are folded to LF "
                     f"({norm_mine[:12]} here, {norm_theirs[:12]} in the account "
@@ -1357,8 +1494,8 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
             sameness = ("The two copies are byte-identical once CRLF line "
                         "endings are folded to LF" + _crlf_side(mine, theirs))
 
-        notes.append(Finding(
-            "shadowed-by-the-account-store", name,
+        notes.append(_observed(
+            "shadowed-by-the-account-store", origins[name].kind, name,
             f"{both} {sameness}, so which one wins does not change what the "
             f"model reads TODAY. That is a property of this moment and not of "
             f"the design. {clocks} Reported so the shadow is a measured "
@@ -1474,9 +1611,6 @@ def render(record: Record, record_path: Path, skills_dir: Path,
            surface: Surface = Surface(DURABLE, "", "", False)) -> str:
     """The verdict line first, then the evidence behind it."""
     rows = results[0].rows if results else []
-    hook_rows = [row for row in rows if row.origin == HOOK]
-    unattributed = [row for row in rows if row.origin == UNATTRIBUTED]
-    foreign_rows = [row for row in rows if row.origin == FOREIGN]
     declared: Set[str] = set()
     for result in results:
         declared |= result.lock.names
@@ -1486,7 +1620,7 @@ def render(record: Record, record_path: Path, skills_dir: Path,
     missing = declared - {row.name for row in rows}
     out = [
         f"provenance: {len(rows)} on disk, "
-        f"{_tally(record.state, len(rows), len(hook_rows), len(unattributed), len(foreign_rows))}, "
+        f"{_tally(record.state, rows)}, "
         f"{len(missing)} not in the store — record {record.state} — "
         f"surface {surface[0]} — "
         f"{len(findings)} finding{'' if len(findings) == 1 else 's'}",
@@ -1739,27 +1873,27 @@ def _para(text: str, indent: str = "  ") -> List[str]:
                          break_on_hyphens=False).splitlines()
 
 
-def _tally(state: str, total: int, hook: int, unattributed: int,
-           foreign: int = 0) -> str:
+def _tally(state: str, rows: List[Row]) -> str:
     """The attribution counts, or the one honest count when there are none.
 
-    Without a readable record nothing is attributable, and printing
+    Counted from the rows by origin rather than from arguments the caller
+    tallied, so the parts sum to "N on disk" by construction. Without a readable
+    record nothing is attributable and every row is UNKNOWN; printing
     "0 hook-installed, 0 unattributed" beside "3 on disk" reads as a
     contradiction — or worse, as "the store is empty".
 
-    `foreign` is subtracted from the unattributable count rather than added
-    beside it, and is counted in BOTH branches. Those rows are not
-    unattributable: the disagreement between a directory's frontmatter name and
-    its own basename is a measurement the record plays no part in, so it is
-    readable on a machine with no record at all. Leaving them inside the other
-    count would print a headline whose parts do not sum to "N on disk" — the
-    same arithmetic that makes "0 hook-installed" beside "3 on disk" unreadable,
-    which is the defect this function exists for.
+    `counts` is keyed by `ORIGINS` and indexed, not `.get`-ed: an origin the
+    tuple does not list raises here rather than being silently dropped from a
+    headline that then does not add up.
     """
-    tail = f", {foreign} foreign" if foreign else ""
+    counts = {origin: 0 for origin in ORIGINS}
+    for row in rows:
+        counts[row.origin] += 1
     if state != PRESENT:
-        return f"{total - foreign} unattributable (no readable record){tail}"
-    return f"{hook} hook-installed, {unattributed} unattributed{tail}"
+        return f"{counts[UNKNOWN]} unattributable (no readable record)"
+    tail = f", {counts[FOREIGN]} foreign" if counts[FOREIGN] else ""
+    return (f"{counts[HOOK]} hook-installed, "
+            f"{counts[UNATTRIBUTED]} unattributed{tail}")
 
 
 def _stamp(when: float) -> str:
@@ -1801,8 +1935,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # row and the note came to disagree about one directory.
     locks = [(path, read_lock(path))
              for path in discover_locks(args.lock, project_dir)]
-    foreign = reported_foreign(
-        foreign_names(skills_dir, names), record,
+    origins = assign_origins(
+        skills_dir, names, record,
         {name for _, lock in locks for name in lock.names})
 
     # One store, judged once per declared expectation. See `LockResult`: the
@@ -1810,9 +1944,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     results: List[LockResult] = []
     for lock_path, lock in locks:
         rows, findings, notes = classify(
-            skills_dir, names, record, lock, account=account,
-            repo_owned=repo_owned, store_state=store_state, surface=surface[0],
-            foreign=foreign)
+            skills_dir, names, record, lock, origins, account=account,
+            repo_owned=repo_owned, store_state=store_state, surface=surface[0])
         tagged = [finding._replace(lock=str(lock_path))
                   for finding in lock_findings(lock, lock_path) + findings]
         results.append(LockResult(
@@ -1822,7 +1955,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Store-wide, like `store_findings` and for its reason: the collision is a
     # property of the two stores, not of any lock, so raising it per lock would
     # report one shadowed name N times in a multi-repo session.
-    shadow_raised, shadow_noted = shadow_findings(skills_dir, names, account)
+    shadow_raised, shadow_noted = shadow_findings(skills_dir, names, account,
+                                                  origins)
 
     here, user, children = hook_wiring(project_dir)
     hook_raised, hook_noted = hook_findings(
@@ -1836,7 +1970,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         + [finding for result in results for finding in result.findings])
     notes = dedupe(hook_noted
                    + shadow_noted
-                   + foreign_notes(foreign)
+                   + foreign_notes(origins, account)
                    + [note for result in results for note in result.notes])
 
     stamped: List[Tuple[str, float]] = []
