@@ -228,8 +228,13 @@ def _shell_scan(body):
     inside a comment - `# skills-evals' verdict vocabulary ...`, which this
     repo's prose writes constantly - because the apostrophe opens a quote that
     never closes. Testing `#` BEFORE entering quote state, in the same pass, is
-    what handles both. All three models are measured against the fixtures in
-    `_ARMS_OK`; the ones that discriminate them are named in their own ids.
+    what handles both. ALL THREE REJECTED MODELS ARE KEPT RUNNABLE - see
+    `_model_per_line_quotes`, `_model_strip_then_mask`, `_model_mask_then_strip`
+    - and test_each_rejected_quote_model_is_caught_by_its_own_fixture runs
+    each against the `_ARMS_OK` shape named for it every time this suite does.
+    A rejection nobody can re-run is the same unasserted claim #120 is about,
+    and it is also what makes the three wrapped shapes look like duplicates to
+    the next person tidying the set.
 
     `shlex` is the obvious alternative and is wrong twice over. It REMOVES
     quotes, and `"$drift"` versus `$drift` is exactly what
@@ -302,6 +307,126 @@ def _shell_scan(body):
             for k in range(i, j):
                 text[k] = " "
                 mask[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(text), "".join(mask)
+
+
+# THE THREE QUOTE MODELS `_shell_scan` REJECTS, KEPT RUNNABLE. Its docstring
+# says each of them is wrong and names the `_ARMS_OK` shape that proves it -
+# a claim a reader cannot check by reading, and the one shape of claim #120 is
+# about. So they live here and a test runs them.
+#
+# Each is the smallest faithful version of the idea rather than a straw man:
+# same signature, same return contract, same comment-opening rule, differing
+# only in where quote state is tracked.
+
+
+def _model_per_line_quotes(body):
+    """Quote state RESET at every newline. Wrong because a `::warning::` may be
+    wrapped over two lines: the closing quote then masks the `;;` after it."""
+    text, mask = list(body), list(body)
+    quote, i, n = None, 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\n":
+            quote = None
+            i += 1
+            continue
+        if ch == "\\" and quote != "'":
+            mask[i] = " "
+            if i + 1 < n and body[i + 1] != "\n":
+                mask[i + 1] = " "
+            i += 2
+            continue
+        if quote:
+            mask[i] = " "
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            mask[i] = " "
+            quote = ch
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or body[i - 1] in _COMMENT_OPENS_AFTER):
+            j = body.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                text[k] = mask[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(text), "".join(mask)
+
+
+def _model_strip_then_mask(body):
+    """Comments stripped PER LINE first, then quotes masked over the whole
+    text. Wrong because the per-line stripper cuts a wrapped string at a `#`
+    on its continuation, taking the closing quote with it."""
+    text = "\n".join(_uncomment(l).ljust(len(l)) for l in body.split("\n"))
+    mask = list(text)
+    quote, i, n = None, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and quote != "'":
+            mask[i] = " "
+            if i + 1 < n and text[i + 1] != "\n":
+                mask[i + 1] = " "
+            i += 2
+            continue
+        if quote:
+            if ch != "\n":
+                mask[i] = " "
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            mask[i] = " "
+            quote = ch
+            i += 1
+            continue
+        i += 1
+    return text, "".join(mask)
+
+
+def _model_mask_then_strip(body):
+    """Quotes masked over the whole text FIRST, comments taken off the mask
+    afterwards. Wrong because an apostrophe inside a comment opens a quote
+    that never closes."""
+    mask = list(body)
+    quote, i, n = None, 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\" and quote != "'":
+            mask[i] = " "
+            if i + 1 < n and body[i + 1] != "\n":
+                mask[i + 1] = " "
+            i += 2
+            continue
+        if quote:
+            if ch != "\n":
+                mask[i] = " "
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            mask[i] = " "
+            quote = ch
+            i += 1
+            continue
+        i += 1
+    text, i = list(body), 0
+    while i < n:
+        if mask[i] == "#" and (i == 0 or body[i - 1] in _COMMENT_OPENS_AFTER):
+            j = body.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                text[k] = mask[k] = " "
             i = j
             continue
         i += 1
@@ -1942,6 +2067,54 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"as the fixture block, so the spliced body holds two of them"
         )
         self._bash_n(tmp_path, spliced, name)
+
+    # WHICH FIXTURE CATCHES WHICH REJECTED MODEL. `_shell_scan`'s docstring
+    # names these pairings; this is where they are measured rather than
+    # remembered. A pairing that stops holding means either the model changed
+    # or the fixture stopped discriminating, and either way the docstring is
+    # what has to be corrected.
+    _MODEL_PAIRINGS = [
+        ("per-line-quotes", _model_per_line_quotes,
+         "wrapped-warning-hash-before-the-closing-quote"),
+        ("per-line-quotes", _model_per_line_quotes,
+         "wrapped-warning-with-no-hash"),
+        ("per-line-quotes", _model_per_line_quotes,
+         "wrapped-warning-hash-with-the-quote-closing-later"),
+        ("strip-then-mask", _model_strip_then_mask,
+         "wrapped-warning-hash-before-the-closing-quote"),
+        ("mask-then-strip", _model_mask_then_strip,
+         "apostrophe-inside-a-comment"),
+    ]
+
+    @pytest.mark.parametrize(
+        "model_name, model, fixture", _MODEL_PAIRINGS,
+        ids=[f"{m}/{f}" for m, _, f in _MODEL_PAIRINGS])
+    def test_each_rejected_quote_model_is_caught_by_its_own_fixture(
+            self, monkeypatch, model_name, model, fixture):
+        """The docstring's "measured wrong" list, measured here every run.
+
+        `_shell_scan` rejects three quote models and says which `_ARMS_OK`
+        shape catches each. Nobody reading that can check it - the rejected
+        models exist only as prose in the paragraph rejecting them - which
+        makes it exactly the claim #120 is about. So the models are kept
+        runnable next to the real one and the pairing is asserted.
+
+        THIS IS WHAT MAKES THE THREE WRAPPED SHAPES UNDELETABLE FOR THE RIGHT
+        REASON. Without it they look like three near-duplicates of one
+        another, and the first person tidying the set removes two of them.
+
+        A pairing that stops holding is not a licence to delete the fixture:
+        it means the docstring is now wrong about something.
+        """
+        blocks = dict(_ARMS_OK)
+        body = _splice(blocks[fixture])
+        monkeypatch.setattr(type(self), "_body", lambda self: body)
+        # The real scanner first, so a fixture broken for some other reason
+        # cannot pass for a discriminating one.
+        self.test_the_case_block_names_every_status_the_module_knows()
+        monkeypatch.setitem(globals(), "_shell_scan", model)
+        with pytest.raises(AssertionError):
+            self.test_the_case_block_names_every_status_the_module_knows()
 
     def test_the_regression_set_did_not_shrink(self):
         """The one count in this file that a test holds, and a FLOOR.
