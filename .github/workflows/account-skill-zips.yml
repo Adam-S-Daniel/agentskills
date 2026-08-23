@@ -202,12 +202,19 @@ jobs:
         # body, blanks the Python heredoc and the comments, and reds on an
         # `echo` that redirects anywhere but the `$GITHUB_OUTPUT` write, and
         # on any command sitting outside an `if` condition and a `||` list
-        # that is not in that test's own commented carve-out list - which
-        # matches a command's NAME rather than its first four letters, and
-        # takes a pipeline as the command it ends with. It also
-        # reds if a count comes back into this paragraph, and if the
-        # `status=` write acquires the guard the sentence above says it must
-        # not have.
+        # that is not in that test's own carve-out list. That list is the
+        # EXACT TEXT of every command this step leaves unguarded on purpose,
+        # not a pattern, so nothing is exempt by resembling something: a
+        # pipeline is never carved out, an `echo` with a second redirect is
+        # never carved out, and a command with anything at all before its
+        # name is never carved out. Which means EDITING A LINE BELOW CAN RED
+        # THAT TEST even when the edit is harmless - re-quoting one of these
+        # `::warning::` strings will do it. That is deliberate: the failure
+        # message quotes the new text to paste into the list, and pasting it
+        # is a reviewer re-affirming that the command may abort this step
+        # unnoticed. It also reds if a count comes back into this paragraph,
+        # and if the `status=` write acquires the guard the sentence above
+        # says it must not have.
         run: |
           set -uo pipefail
           # ONE ANNOTATION PER DISTINCT FAULT. Not "one annotation per run":

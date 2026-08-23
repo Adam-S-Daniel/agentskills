@@ -2869,6 +2869,67 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"something else: {caught.value}"
             )
 
+    # WHAT THE WORKFLOW'S OWN COMMENT TELLS A READER ABOUT THIS LIST, and a
+    # command each claim says is NOT carved out. The sentence that used to
+    # sit there - the carve-out "matches a command's NAME rather than its
+    # first four letters, and takes a pipeline as the command it ends with" -
+    # was checkable and wrong in both halves: no pipeline is carved out at
+    # all, and after this round nothing matches a name either. It survived
+    # two rounds because nothing tied it to the code, so the replacement is
+    # tied: the sentence has to be in the workflow AND the behaviour it
+    # describes has to be the behaviour.
+    #
+    # EACH PAYLOAD ENDS IN A COMMAND THE LIST REALLY DOES EXEMPT, which is
+    # what makes it a test rather than a shape nothing would ever admit. The
+    # regression to catch is a rule that reads a pipeline as "whatever it
+    # ends with" or a command as "whatever follows its assignments" - and
+    # such a rule only exempts something when what it looks at is on the
+    # list. `true | echo done` would be refused by that rule too, so it
+    # measures nothing.
+    _WORKFLOW_CLAIMS = (
+        ("a pipeline is never carved out",
+         'true | echo "eval-results checked out"'),
+        ("an `echo` with a second redirect is never carved out",
+         'echo hi > /dev/null >> "$GITHUB_OUTPUT"'),
+        ("a command with anything at all before its name is never carved out",
+         "FOO=bar harness_ok=yes"),
+    )
+
+    def test_the_workflow_comment_describes_the_carve_out_list_it_has(self):
+        """#120's subject, in the file the round-5 report said it had fixed.
+
+        A comment must not assert what a reader cannot check. This one
+        asserts three things a reader CAN check, which is the better failure
+        mode only if something checks them - otherwise it is the worse one,
+        because a reader who verifies the claim by reading it stops there.
+        """
+        prose = " ".join(
+            line.strip().lstrip("#").strip()
+            for line in ZIPS.read_text(encoding="utf-8").splitlines()
+        )
+        prose = " ".join(prose.split())
+        # The positive half first. Without it a `_carved_out` that answered
+        # False to everything would satisfy every claim below while exempting
+        # nothing - the list would be gone and this test would not notice.
+        assert self._carved_out(self._OUTPUT_WRITE_COMMAND), (
+            f"the carve-out list no longer exempts the step's own "
+            f"`$GITHUB_OUTPUT` write, so the claims checked below are "
+            f"satisfied by a list that exempts nothing: "
+            f"{self._OUTPUT_WRITE_COMMAND!r}"
+        )
+        for sentence, command in self._WORKFLOW_CLAIMS:
+            assert sentence in prose, (
+                f"the audit step's tolerance comment no longer tells the "
+                f"reader that {sentence!r}. Either put the sentence back, or "
+                f"- if the carve-out list changed - say what it does now and "
+                f"update this table with it."
+            )
+            assert not self._carved_out(command), (
+                f"the audit step's comment tells a reader that {sentence!r}, "
+                f"and the carve-out list exempts {command!r}. The comment is "
+                f"checkable and wrong, which is #120."
+            )
+
     def test_every_carve_out_is_a_command_the_shipped_step_still_runs(self):
         """The other direction, and the half an exact list cannot do without.
 
