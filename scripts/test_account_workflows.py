@@ -170,6 +170,159 @@ def require_bash():
     return bash
 
 
+_CASE_TOKEN = re.compile(r'(?<![\w.-])(?:case|esac)(?![\w.-])|;;&|;;|;&')
+_CASE_VERDICT = re.compile(r'(?<![\w.-])case\s+"\$verdict"\s+in(?![\w.-])')
+_CASE_SKILL = re.compile(r'(?<![\w.-])case\s+"\$SKILL"')
+
+
+def _shell_scan(body):
+    """(text, mask) for a `run:` body. Both are the SAME LENGTH as `body`.
+
+    `text` is `body` with COMMENT characters blanked. `mask` is `text` with
+    QUOTED characters blanked as well. Same length in, same length out, so an
+    index found in either indexes all three - which is what lets `_tail` and
+    `_guard` go on returning slices of the raw body.
+
+    ONE WALK, ONE QUOTE MODEL, and that is the point rather than an
+    efficiency. `_uncomment` tracks quotes per LINE; anything that tracks them
+    across lines and consumes `_uncomment`'s output disagrees with it, and the
+    disagreement is not benign. Measured: wrap a `::warning::` onto two lines,
+    valid bash, and put ` #120` on the continuation before its closing quote.
+    The per-line stripper cuts at the `#`, taking the closing quote and the
+    `;;` with it; a whole-text masker then sees a string left open and reads
+    the rest of the block - including the real `esac` - as data. The shipped
+    helper passes that shape. A composed one does not, and it blames the
+    `case` block for damage done fifteen lines above it.
+
+    The two remedies that look right and were measured wrong: resetting quote
+    state at each newline reds every wrapped string, including ones with no
+    `#` at all, because the closing quote then masks the `;;` after it; and
+    masking first and stripping comments off the mask reds an apostrophe
+    inside a comment - `# skills-evals' verdict vocabulary ...`, which this
+    repo's prose writes constantly - because the apostrophe opens a quote that
+    never closes. Testing `#` BEFORE entering quote state, in the same pass, is
+    what handles both. All three models are measured against the fixtures in
+    `_ARMS_OK`; the ones that discriminate them are named in their own ids.
+
+    `shlex` is the obvious alternative and is wrong twice over. It REMOVES
+    quotes, and `"$drift"` versus `$drift` is exactly what
+    test_the_case_block_names_every_status_the_module_knows exists to assert -
+    an unquoted expansion is re-read as a pattern, so a glob in the constant
+    would silence every verdict this step annotates. And it has no notion of a
+    `case` pattern: `*[!A-Za-z0-9]*` and `''|*)` are not words to it.
+
+    WHAT IT DELIBERATELY DOES NOT MODEL, so nobody reads more into it: a
+    heredoc body is read as shell rather than as its own language, so quote
+    state carries through the Python heredoc in the audit step. Measured, by
+    splicing one line into that heredoc: a `#` comment holding an apostrophe
+    is handled, because the `#` is seen before any quote is entered; a line
+    that leaves a quote OPEN - `x = "unterminated` - swallows the rest of the
+    body, and the helper then cannot find the `case` opener at all.
+
+    THAT IS THE DIRECTION TO FAIL IN. It RAISES, with the sentence its caller
+    passed, rather than returning a plausible slice of the wrong region.
+    Extglob patterns, an `esac` reached through a variable, and a `case` whose
+    word is built by expansion are all outside the model too, and all fail the
+    same loud way. Downstream helps: every assertion built on this compares a
+    whole SET, so even one lost arm reds rather than passing quietly.
+    """
+    text = list(body)
+    mask = list(body)
+    quote = None
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\" and quote != "'":
+            mask[i] = " "
+            if i + 1 < n and body[i + 1] != "\n":
+                mask[i + 1] = " "
+            i += 2
+            continue
+        if quote:
+            if ch != "\n":
+                mask[i] = " "
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            mask[i] = " "
+            quote = ch
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or body[i - 1] in " \t\n"):
+            j = body.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                text[k] = " "
+                mask[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(text), "".join(mask)
+
+
+def _code_index(text, mask, needle, what):
+    """Index of the first `needle` that is CODE - not inside a string or a
+    comment. `what` is the sentence to fail with if there is none."""
+    i = -1
+    while True:
+        i = text.find(needle, i + 1)
+        assert i != -1, what
+        if mask[i] == needle[0]:
+            return i
+
+
+def _case_block(text, mask, opener_re, what):
+    """(opener, arm spans, closer) for ONE `case` block, read off the mask.
+
+    `esac` closes THIS block only at depth 0, so a nested `case` in an arm
+    body no longer ends it early - which is a false red today whenever the
+    nested block precedes the catch-all, and a pass by luck when it does not.
+    `esac` as a WORD, so `esacapade` in a `::warning::` does not either. All
+    three arm terminators, because bash has three: `;;` ends an arm, `;&`
+    falls through to the next arm's body, `;;&` goes on testing patterns.
+
+    The opener is matched in `text` and CONFIRMED against `mask`, because the
+    mask blanks the `"` around `$verdict` and so cannot be matched directly.
+    """
+    opener = next((m for m in opener_re.finditer(text)
+                   if mask[m.start()] == "c"), None)
+    assert opener, what
+    depth, start, spans, closer = 0, opener.end(), [], None
+    for m in _CASE_TOKEN.finditer(mask, opener.end()):
+        token = m.group(0)
+        if token == "case":
+            depth += 1
+        elif token == "esac":
+            if depth == 0:
+                closer = m
+                break
+            depth -= 1
+        elif depth == 0:
+            spans.append((start, m.start()))
+            start = m.end()
+    assert closer is not None, (
+        "a `case` this test reads has no closing `esac` outside a string and "
+        f"outside a nested `case`, so its arms would be counted as absent: "
+        f"{what}"
+    )
+    spans.append((start, closer.start()))
+    return opener, spans, closer
+
+
+def _unquote(token):
+    """One `case` pattern with a symmetric pair of surrounding quotes removed.
+
+    `"fresh"`, `'fresh'` and `fresh` are one pattern to bash. Only ever
+    applied to a LITERAL - see the caller for why an expansion keeps its
+    quotes.
+    """
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
 def load(path):
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     # PyYAML resolves a bare `on:` key to the boolean True (YAML 1.1).
@@ -182,6 +335,176 @@ def runs(workflow):
         for step in job.get("steps", []):
             if step.get("run"):
                 yield step["run"]
+
+
+def _audit_body():
+    return next(
+        s["run"] for s in load(ZIPS)["jobs"]["pick"]["steps"]
+        if s.get("id") == "audit"
+    )
+
+
+def _splice(block):
+    """The REAL audit body with its `case` block swapped for `block`.
+
+    In memory, and there are no fixture FILES on purpose:
+    `plugins/*/skills/*/tests/` is a CI glob and a fixtures directory under
+    `scripts/` would need its own salient-path entry in ci.yml.
+
+    The rest of the body is kept because the test under test reads it - the
+    `drift=$(` line it pins the constant read to sits above the `case`, and
+    `code(body)` has to see real surroundings or the assertion would be
+    passing against a fixture rather than against the step.
+    """
+    body = _audit_body()
+    lines = body.splitlines()
+    start = lines.index('case "$verdict" in')
+    end = lines.index("esac", start)
+    return "\n".join(lines[:start] + block.splitlines() + lines[end + 1:]) + "\n"
+
+
+# The shipped `case`, reduced to its four arms: the fixtures below are this
+# block with ONE thing about its formatting changed. Shorter warning text than
+# the real step's, because what is under test is the shape.
+_ARMS_BASE = '''case "$verdict" in
+  stale|missing|unreadable)
+    echo "::warning::the published account audit reads '$verdict' - liveness." ;;
+  not-yet-bootstrapped)
+    if [ "$results_ok" = yes ]; then
+      echo "::warning::the published account audit reads '$verdict', but the branch cloned cleanly."
+    fi ;;
+  fresh|unavailable|"$drift")
+    : ;;
+  *)
+    echo "::warning::the published account audit reads '$verdict', which is not a status this repo knows." ;;
+esac'''
+
+_LIVENESS = (
+    """    echo "::warning::the published account audit reads '$verdict'"""
+    """ - liveness." ;;"""
+)
+_CATCHALL = (
+    """    echo "::warning::the published account audit reads '$verdict',"""
+    """ which is not a status this repo knows." ;;"""
+)
+_QUIET = '  fresh|unavailable|"$drift")'
+
+
+def _arm(old, new, count=1):
+    assert _ARMS_BASE.count(old) == count, old
+    return _ARMS_BASE.replace(old, new, count)
+
+
+# EVERY ONE OF THESE IS VALID BASH THAT SAYS EXACTLY WHAT THE SHIPPED BLOCK
+# SAYS, and the test below proves that with `bash -n` before it asserts
+# anything - so a typo in a fixture reds as a typo rather than masquerading as
+# a helper bug.
+#
+# ELEVEN OF THEM WERE RED before the scanners started reading code instead of
+# text, which is the whole case for this set existing. The false red is the
+# expensive direction: it accuses an author of moving skills-evals' vocabulary
+# when all they did was wrap a line, and the message it accuses them with
+# points at the `case` block rather than at the reformat.
+#
+# THE SET SHRINKING IS HOW THE FALSE REDS GOT HERE, so its length is asserted
+# by test_the_regression_set_did_not_shrink. That is the one count in this
+# change that a test holds - see #120 for why an unasserted one is worse than
+# none.
+_ARMS_OK = [
+    ("control", _ARMS_BASE),
+    ("leading-paren", _arm(_QUIET, '  (fresh|unavailable|"$drift")')),
+    ("opener-shares-its-line",
+     _arm('case "$verdict" in\n  stale|missing|unreadable)',
+          'case "$verdict" in stale|missing|unreadable)')),
+    ("quoted-literals", _arm(_QUIET, '''  "fresh"|'unavailable'|"$drift")''')),
+    ("comment-containing-a-terminator",
+     _arm('  not-yet-bootstrapped)',
+          '  # the arm below used to end in ;; on its own line\n'
+          '  not-yet-bootstrapped)')),
+    ("comment-containing-esac",
+     _arm('  not-yet-bootstrapped)',
+          '  # nothing between here and the esac below reads this\n'
+          '  not-yet-bootstrapped)')),
+    ("esac-quoted-in-the-first-arm",
+     _arm(_LIVENESS, _LIVENESS.replace(
+         'liveness."', 'liveness; the esac below is unaffected."'))),
+    # Passes on the shipped helper too - but only BY POSITION, because its
+    # `esac` happens to be the last one. Held so the position dependence is
+    # covered from both sides.
+    ("esac-quoted-in-the-catch-all-arm",
+     _arm(_CATCHALL, _CATCHALL.replace(
+         'repo knows."', 'repo knows; teach the case before its esac."'))),
+    ("terminator-inside-a-quoted-body",
+     _arm(_LIVENESS, _LIVENESS.replace(
+         'liveness."', 'liveness ;; and that is data."'))),
+    ("continue-testing-terminator",
+     _arm(_QUIET + '\n    : ;;', _QUIET + '\n    : ;;&')),
+    ("fallthrough-terminator",
+     _arm(_QUIET + '\n    : ;;', _QUIET + '\n    : ;&')),
+    ("nested-case-one-line-mid-block",
+     _arm('    fi ;;',
+          '    fi\n    case "$results_ok" in yes) : ;; esac ;;')),
+    # THE ANTI-REGRESSION CASE. A closer found by anchoring - "the `esac` on a
+    # line of its own" - reds this one, which is why nesting is COUNTED.
+    ("nested-case-one-line-last-arm",
+     _arm(_CATCHALL,
+          '    case "$results_ok" in yes) echo "::warning::unknown" ;; esac ;;')),
+    ("nested-case-multiline",
+     _arm('    fi ;;', '    fi\n    case "$results_ok" in\n'
+          '      yes) : ;;\n      *) : ;;\n    esac ;;')),
+    ("esac-as-a-substring",
+     _arm(_LIVENESS, _LIVENESS.replace(
+         'liveness."', 'liveness - an esacapade of renames."'))),
+    ("trailing-comment-containing-a-terminator",
+     _arm('    : ;;', '    : ;;  # was ;; before the fallthrough experiment')),
+    ("command-substitution-in-an-arm-body",
+     _arm('    : ;;',
+          '    echo "seen at $(date -u +%Y 2>/dev/null || echo ?)" ;;')),
+    ("blank-lines-between-arms",
+     _arm('  not-yet-bootstrapped)', '\n\n  not-yet-bootstrapped)')),
+    ("no-terminator-on-the-last-arm",
+     _arm(_CATCHALL + '\nesac', _CATCHALL[:-3].rstrip() + '\nesac')),
+    # THE THREE WRAPPED SHAPES DISCRIMINATE THE THREE QUOTE MODELS `_shell_scan`
+    # rejects, and each is here for a model the others do not catch. They wrap
+    # the FIRST arm rather than the catch-all deliberately: a terminator lost
+    # in the LAST arm costs nothing, because the closing `esac` ends that span
+    # anyway, so the same fixture at the bottom of the block discriminates
+    # nothing. Measured, this placement:
+    #   #-before-the-closing-quote   reds compose-per-line-strip-then-mask
+    #                                AND reds per-line masking
+    #   no-#-at-all                  reds per-line masking alone
+    #   quote-closes-on-a-later-line reds per-line masking alone
+    ("wrapped-warning-hash-before-the-closing-quote",
+     _arm(_LIVENESS, '''    echo "::warning::the published account audit reads '$verdict' - the Tier-3
+Routine has not published a usable result recently. See #120 for the history." ;;''')),
+    ("wrapped-warning-with-no-hash",
+     _arm(_LIVENESS, '''    echo "::warning::the published account audit reads '$verdict' - the Tier-3
+Routine has not published a usable result recently. Check that Routine." ;;''')),
+    ("wrapped-warning-hash-with-the-quote-closing-later",
+     _arm(_LIVENESS, '''    echo "::warning::the published account audit reads '$verdict' - the Tier-3
+Routine has not published a usable result recently. See #120 for the history.
+Check that Routine and the eval-results branch." ;;''')),
+    # Reds masking-first-then-stripping-comments-off-the-mask, which is the
+    # other remedy that looks right: the apostrophe opens a quote that never
+    # closes. This repo's prose writes that construction constantly.
+    ("apostrophe-inside-a-comment",
+     _arm('  not-yet-bootstrapped)',
+          "  # skills-evals' verdict vocabulary is what this arm tracks\n"
+          "  not-yet-bootstrapped)")),
+]
+
+# The other direction, and the reason the set above is not just a licence to
+# accept anything: these are real divergences and they must still red.
+_ARMS_RED = [
+    ("a rogue arm the module has never heard of",
+     _arm('  *)', '  quota-exceeded)\n    : ;;\n  *)')),
+    ("the drift arm through an UNQUOTED expansion",
+     _arm(_QUIET, '  fresh|unavailable|$drift)')),
+    ("no catch-all arm at all", _arm('  *)\n' + _CATCHALL + '\n', '')),
+    ("an arm the module knows but the case does not",
+     _arm('  stale|missing|unreadable)', '  stale|missing)')),
+]
+
 
 
 class TestTheCommentStripperTheseAssertionsRestOn:
@@ -596,16 +919,22 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         Anchored on the heredoc's own `) || verdict=""` rather than on a line
         number, so the slice follows the code if it moves.
         """
-        body = next(
-            s["run"] for s in load(ZIPS)["jobs"]["pick"]["steps"]
-            if s.get("id") == "audit"
-        )
+        body = self._body()
         marker = ') || verdict=""'
-        assert marker in body, (
+        # THE SAME BOUNDARY RULE AS THE TWO SCANNERS BELOW, and this one
+        # carries the most. Every verdict test in this class executes whatever
+        # this returns, so a comment that ever quotes the marker verbatim
+        # would relocate the slice and leave those tests passing against a
+        # region that is not the step. Measured with a decoy comment spliced
+        # above the real marker: `body.index` returns a slice starting inside
+        # the comment, this returns the real tail unchanged. See
+        # test_the_tail_slice_is_not_relocated_by_a_comment.
+        text, mask = _shell_scan(body)
+        return body[_code_index(
+            text, mask, marker,
             "the empty-capture fallback changed shape; this test no longer "
-            "knows where the step's verdict handling starts"
-        )
-        return body[body.index(marker) + len(marker):]
+            "knows where the step's verdict handling starts",
+        ) + len(marker):]
 
     def _run(self, tmp_path, verdict, *, harness_ok="yes", results_ok="yes",
              pip_ok="yes"):
@@ -1047,7 +1376,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         )
 
     def _case_statuses(self):
-        """The arm patterns of the audit step's `case`, split on `;;`.
+        """The arm patterns of the audit step's `case`, read off a mask.
 
         Returns (the step body, literal statuses, variable patterns).
 
@@ -1072,40 +1401,67 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         Anything inside the block that is neither a comment nor an arm with a
         pattern is an ERROR rather than a skip, so a shape this does not
         understand cannot pass for an empty one.
+
+        WHAT THIS IS AND IS NOT: quote-aware, comment-free and
+        nesting-counted, and NOT a bash parser. It knows that a `;;`, an
+        `esac` or a `|` inside a string or a comment is data, and that an
+        `esac` inside a nested `case` closes the nested one. It does not know
+        heredocs, extglob, or an `esac` reached through a variable. Every one
+        of those fails loud - see `_shell_scan`.
         """
         body = self._body()
-        # Anchored on a LINE OF CODE, not on the first occurrence of the text.
-        # This step's comments quote its own shell heavily (the paragraph above
-        # the `case` names `$verdict` twice), and `body.index` would follow the
-        # first comment that ever quotes the opener verbatim - relocating the
-        # slice to a region with no arms in it, where every assertion below
-        # passes on an empty set.
-        opener = re.search(r'^[^\S\n]*case "\$verdict" in[^\S\n]*$', body, re.M)
-        assert opener, (
-            "the audit step's `case` opener is no longer a line of its own; "
-            "this test no longer knows which block it is reading"
+        text, mask = _shell_scan(body)
+        # THE OPENER NO LONGER HAS TO BE A LINE OF ITS OWN. That anchor
+        # existed to stop `body.index` from following a COMMENT that quotes
+        # the opener verbatim, and comments are gone by here; the mask covers
+        # the other half, a quoted occurrence. What the anchor ALSO did was
+        # reject `case "$verdict" in <first arm>)` on one line - the form
+        # record-account-upload.yml ships at both of its own guards - with
+        # "the opener is no longer a line of its own", which is a red on a
+        # reformat that changes nothing bash can see.
+        _, spans, _ = _case_block(
+            text, mask, _CASE_VERDICT,
+            "the audit step's `case \"$verdict\" in` is no longer a command "
+            "this test can find; it no longer knows which block it is reading",
         )
-        block = body[opener.end():body.index("esac", opener.end())]
         literals, variables = set(), set()
-        # All three arm terminators, because bash has three: `;;` ends an arm,
-        # `;&` falls through to the next arm's body and `;;&` goes on testing
-        # patterns. Splitting on `;;` alone would swallow the arm after a `;&`
-        # exactly the way the line scan swallowed a one-line one.
-        for chunk in re.split(r";;&|;;|;&", block):
-            code = "\n".join(
-                line for line in chunk.splitlines()
-                if not line.strip().startswith("#")
-            ).strip()
-            if not code:
+        for begin, end in spans:
+            arm, armmask = text[begin:end], mask[begin:end]
+            if not arm.strip():
                 continue
-            pattern, closer, _ = code.partition(")")
-            assert closer, (
+            # The FIRST UNQUOTED `)`, off the mask: a `)` inside a quoted arm
+            # body is not where the pattern ends.
+            cut = armmask.find(")")
+            assert cut != -1, (
                 "an arm of the audit step's `case` has no pattern this test "
-                f"can read, so its statuses were counted as absent:\n{code}"
+                f"can read, so its statuses were counted as absent:\n"
+                f"{arm.strip()}"
             )
-            for token in pattern.split("|"):
-                token = token.strip()
-                (variables if "$" in token else literals).add(token)
+            pattern, patternmask = arm[:cut], armmask[:cut]
+            bars = [k for k, ch in enumerate(patternmask) if ch == "|"]
+            prev = 0
+            for k in bars + [len(pattern)]:
+                token = pattern[prev:k].strip()
+                prev = k + 1
+                # A POSIX leading `(` is punctuation, not part of the first
+                # pattern: `(fresh|unavailable|"$drift")` names `fresh`.
+                if token.startswith("("):
+                    token = token[1:].strip()
+                # QUOTES ARE STRIPPED FROM A LITERAL AND KEPT ON AN EXPANSION,
+                # and the asymmetry is the point. `"fresh"` and `fresh` are the
+                # same pattern to bash, so the set comparison must not tell
+                # them apart; `"$drift"` and `$drift` are NOT the same pattern,
+                # and the assertion below exists to require the quoted one.
+                #
+                # WRITE THIS AS AN EXPLICIT if/else. The one-liner
+                # `(variables if "$" in token else literals).add(_unquote(token))`
+                # reads as a faithful port and unquotes `"$drift"` to `$drift`,
+                # which reds every shape including the control, with a message
+                # about the quiet arm that points nowhere near the cause.
+                if "$" in token:
+                    variables.add(token)
+                else:
+                    literals.add(_unquote(token))
         return body, literals, variables
 
     def test_the_case_block_names_every_status_the_module_knows(self):
@@ -1186,6 +1542,138 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         assert "AUDIT_DRIFT_STATUS" in read[0], (
             "the drift verdict is no longer read from the module's constant - "
             f"it is spelled a second time inside the workflow: {read[0]}"
+        )
+
+    def _bash_n(self, tmp_path, body, name):
+        """The fixture is REAL BASH, asserted before anything is read off it.
+
+        Without this a typo in a fixture below looks exactly like a helper
+        bug: the scanner reports "no closing `esac`" about a block that has no
+        closing `esac` because the fixture forgot one, and the next reader
+        goes looking for the defect in `_shell_scan`.
+        """
+        bash = require_bash()
+        path = _script(tmp_path, body, name="fixture.sh")
+        proc = subprocess.run([bash, "-n", path], capture_output=True,
+                              text=True)
+        assert proc.returncode == 0, (
+            f"the `{name}` fixture is not valid bash, so whatever the "
+            f"scanner says about it is about the fixture:\n{proc.stderr}"
+        )
+
+    @pytest.mark.parametrize("name, block", _ARMS_OK,
+                             ids=[n for n, _ in _ARMS_OK])
+    def test_a_reformat_bash_cannot_see_does_not_red_this_test(
+            self, tmp_path, monkeypatch, name, block):
+        """A REFORMAT MUST NOT READ AS A CROSS-REPO VOCABULARY DRIFT.
+
+        Every block here is bash-identical to the shipped one: the same four
+        arms, the same seven patterns, the same quoted expansion. Eleven of
+        them red on a scanner that reads the block as TEXT, and the message it
+        reds with says the `case` and account_zip_selection.py disagree about
+        which statuses exist - which sends the reader to diff two files over a
+        wrapped line.
+
+        The `bash -n` gate first, so a broken fixture cannot masquerade as a
+        broken helper.
+        """
+        body = _splice(block)
+        self._bash_n(tmp_path, body, name)
+        monkeypatch.setattr(type(self), "_body", lambda self: body)
+        self.test_the_case_block_names_every_status_the_module_knows()
+
+    @pytest.mark.parametrize("name, block", _ARMS_RED,
+                             ids=[n for n, _ in _ARMS_RED])
+    def test_the_shapes_that_must_still_red_still_red(
+            self, tmp_path, monkeypatch, name, block):
+        """The other half, without which the set above is a licence to accept.
+
+        A scanner that admits every reformat by admitting everything would
+        pass all 23 cases above and hold nothing. These four are real
+        divergences and must still fail.
+
+        The UNQUOTED `$drift` case is the sharpest of them. The helper strips
+        quotes from a LITERAL token, so this proves it does NOT strip them
+        from an expansion - and the difference is behaviour, not style: an
+        unquoted expansion is re-read as a pattern, so a glob in the module's
+        constant would silence every verdict this step exists to annotate.
+        """
+        body = _splice(block)
+        self._bash_n(tmp_path, body, name)
+        monkeypatch.setattr(type(self), "_body", lambda self: body)
+        with pytest.raises(AssertionError):
+            self.test_the_case_block_names_every_status_the_module_knows()
+
+    def test_the_regression_set_did_not_shrink(self):
+        """The one count in this change that a test holds.
+
+        #120 is about a comment that carried a number nothing asserted; it
+        read as checked and went stale on the next edit. This number is the
+        opposite shape - it is asserted here, so deleting a shape from the set
+        reds rather than passing quietly, and dropping a shape is exactly how
+        the eleven false reds got in.
+        """
+        assert len(_ARMS_OK) == 23, (
+            "a shape came out of the reformat set. Removing one is how a "
+            "scanner starts false-reding on it again; add shapes freely and "
+            "update this number, but do not take one out to make a helper "
+            "pass."
+        )
+
+    def test_a_crlf_checkout_does_not_read_as_a_vocabulary_drift(
+            self, monkeypatch):
+        """A line ending is not a rename, and must not be reported as one.
+
+        NOT IN `_ARMS_OK`, and the reason is measurable rather than stylistic:
+        `bash -n` REJECTS a CRLF body - `syntax error near unexpected token
+        $'in\\r'` - so this shape cannot sit in a set whose gate is `bash -n`
+        cleanliness. It is not a reformat anyone types either; it is what a
+        checkout can hand a scanner on a machine configured for it, and
+        pytest-windows runs this file.
+
+        The alternative red is the wrong diagnosis, which is the cost being
+        avoided: "the `case` and account_zip_selection.py disagree about which
+        statuses exist" points at two files that agree perfectly.
+        """
+        body = _splice(_ARMS_BASE).replace("\n", "\r\n")
+        monkeypatch.setattr(type(self), "_body", lambda self: body)
+        self.test_the_case_block_names_every_status_the_module_knows()
+
+    def test_the_tail_slice_is_not_relocated_by_a_comment(self, monkeypatch):
+        """`_tail()` is the slice EVERY verdict test in this class executes.
+
+        So a boundary found by text rather than by code is the worst-placed
+        instance of that defect in this file: a comment that quotes the marker
+        verbatim relocates the slice, and every test below goes on passing
+        against a region that is not the step. Green, and wired to nothing.
+
+        Measured with the decoy below spliced above the real `verdict=$(`
+        line: a `body.index` slice starts ` and then dispatches\\nverdict=$(`,
+        mid-comment; this one returns the real tail byte for byte.
+        """
+        body = _audit_body()
+        lines = body.splitlines()
+        i = next(k for k, l in enumerate(lines) if l.startswith("verdict=$("))
+        decoy = '# the heredoc ends with ) || verdict="" and then dispatches'
+        poisoned = "\n".join(lines[:i] + [decoy] + lines[i:]) + "\n"
+        pristine = self._tail()
+        assert "verdict=$(" not in pristine, (
+            "the marker no longer sits after the heredoc, so this decoy is "
+            "not testing what it says it is"
+        )
+        # The naive slice, shown relocated rather than described, so the decoy
+        # is proved to BE a decoy on the machine running this.
+        marker = ') || verdict=""'
+        naive = poisoned[poisoned.index(marker) + len(marker):]
+        assert naive != pristine, (
+            "a text search for the marker was NOT relocated by this decoy, so "
+            "the assertion below would prove nothing about the hardened one"
+        )
+        monkeypatch.setattr(type(self), "_body", lambda self: poisoned)
+        assert self._tail() == pristine, (
+            "a comment quoting the empty-capture marker moved the tail slice; "
+            "every verdict test in this class would be executing the wrong "
+            "region of the step"
         )
 
     def test_a_published_tree_that_moved_is_not_read_as_a_fresh_install(
@@ -1373,9 +1861,26 @@ class TestSkillInputIsValidatedBeforeUse:
             s["run"] for s in load(RECORD)["jobs"]["record"]["steps"]
             if s.get("name") == "Resolve the run that built the artifact"
         )
-        start = body.index('case "$SKILL"')
-        end = body.index("esac", start) + len("esac")
-        return body[start:end]
+        # THE SAME BOUNDARY RULE, because this slice is EXECUTED and a wrong
+        # boundary here fails in the direction that hides itself. A truncated
+        # slice is broken bash: it returns non-zero for EVERY input, so
+        # test_it_admits_every_real_declared_name goes red - loud - while all
+        # six refusals below PASS VACUOUSLY, proving the guard rejects
+        # `sync-skills;id` with a snippet that also rejects `sync-skills`.
+        # Anyone who "fixes" the red by trimming the admit list ships a suite
+        # that asserts nothing about the injection guard. An EMPTY slice is the
+        # opposite failure and the silent-green one: an empty snippet exits 0
+        # and admits everything.
+        #
+        # A slice of `body`, not of the scan's `text`: what is returned here is
+        # RUN, and today's snippet is preserved byte for byte.
+        text, mask = _shell_scan(body)
+        opener, _, closer = _case_block(
+            text, mask, _CASE_SKILL,
+            "the skill guard's `case \"$SKILL\"` is no longer a command this "
+            "test can find; an empty snippet exits 0 and ADMITS everything",
+        )
+        return body[opener.start():closer.end()]
 
     def _bash(self, script, value):
         bash = require_bash()
@@ -1397,6 +1902,39 @@ class TestSkillInputIsValidatedBeforeUse:
 
     def _run(self, snippet, value):
         return self._bash(snippet, value).returncode
+
+    def test_the_extracted_guard_is_the_one_that_reads_SKILL(self):
+        """The slice is the SKILL guard, and it both admits and refuses.
+
+        NOT a `bash -n` control, which is the obvious shape and a strict
+        subset of a test that already exists: a truncated slice is broken
+        bash, so it returns non-zero for every input and reds all four
+        test_it_admits_every_real_declared_name cases already. `bash -n`
+        failing therefore tells you nothing new, and `bash -n` PASSING tells
+        you nothing at all - `case "$SKILL" in *) exit 1 ;; esac` is valid
+        bash that refuses everything and sails through it.
+
+        Pairing one admit with one refusal in ONE body is what cannot be
+        defeated by trimming the admit list, which is the failure mode this
+        guards: the vacuous slice reds loudly in the admit tests and passes
+        VACUOUSLY in all six refusals, so a reader who "fixes" the red by
+        deleting admit cases ships a suite asserting nothing about injection.
+        """
+        snippet = self._guard()
+        assert snippet.count('case "$SKILL"') == 1, (
+            f"the extracted snippet is not one SKILL guard:\n{snippet}"
+        )
+        assert snippet.rstrip().endswith("esac"), (
+            f"the extracted snippet does not close its `case`:\n{snippet}"
+        )
+        assert self._run(snippet, "sync-skills") == 0, (
+            "the extracted snippet refuses a real declared name, so every "
+            "refusal test below is passing vacuously"
+        )
+        assert self._run(snippet, "sync-skills;id") != 0, (
+            "the extracted snippet admits a command separator, so it is not "
+            "the guard"
+        )
 
     @pytest.mark.parametrize("name", [
         "sync-skills", "wj-next-break", "pdf-ocr-audit",
