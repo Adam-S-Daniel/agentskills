@@ -5483,6 +5483,70 @@ def test_no_caller_value_can_forge_a_line_in_the_stream_a_verdict_prints(tmp_pat
     assert applied.returncode == 0, applied.stdout + applied.stderr
 
 
+def test_the_addressing_moves_with_the_machine_and_the_verdict_does_not(tmp_path):
+    """One lock, one invocation, three states of the default sibling.
+
+    `_addressing` asks a filesystem question, so the printed half of a verdict
+    is machine-dependent BY DESIGN — "where will this line find its clones" is
+    a question about this machine, and a run beside a checkout rightly prints
+    a shorter line than the same run without one. `_addressing`'s docstring
+    used to claim the opposite ("answers the same either way"), which is the
+    kind of sentence a reader checks; this is what it can check it against.
+
+    What must NOT move is the verdict: the digests judged, the headline, the
+    exit code, all decided off the lock's own bytes. And what must hold in
+    every state is the contract the derivation exists for — the printed line
+    is a runnable command, or visibly a template, never a command that fails.
+
+    The middle state is why `_is_a_checkout` asks for git's own marker rather
+    than for a directory. Measured with the old `is_dir` probe: an unrelated
+    EMPTY `cms-platform/` beside the primary flipped the answer from a template
+    to a bare `--repin`, and running that verbatim exited 1 with "cannot
+    resolve ref ... fatal: not a git repository" — a printed line that was
+    neither runnable nor visibly a template.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    bare = _bare_digest_copy(out)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    sibling = Path(primary).resolve().parent / "cms-platform"
+    real = url2pathname(urlparse(document["sources"][0]["registry"]).path)
+    assert not sibling.exists(), sibling
+
+    def ask():
+        return run_generator("--check-format", "--repo", str(primary), "-o", str(bare))
+
+    def headline(verdict):
+        return verdict.stdout.splitlines()[0]
+
+    answers = {}
+    for state in ("no sibling", "an empty sibling", "the clone at the sibling"):
+        if state == "an empty sibling":
+            sibling.mkdir()
+        if state == "the clone at the sibling":
+            shutil.rmtree(sibling)
+            shutil.copytree(real, sibling)
+        verdict = ask()
+        assert verdict.returncode == 1, (state, verdict.stdout + verdict.stderr)
+        assert headline(verdict).startswith("FAILED:"), (state, verdict.stdout)
+
+        commands = _printed_commands(verdict.stdout)
+        templates = _printed_templates(verdict.stdout)
+        assert len(commands) + len(templates) == 1, (state, verdict.stdout)
+        if commands:
+            # Printed as a command, so it must BE one.
+            applied = _run_printed(commands[0])
+            assert applied.returncode == 0, (state, applied.stdout + applied.stderr)
+            _bare_digest_copy(out)                 # put the failing lock back
+        answers[state] = (verdict.returncode, headline(verdict),
+                          "template" if templates else "command")
+
+    verdicts = {(code, line) for code, line, _ in answers.values()}
+    assert len(verdicts) == 1, answers          # the verdict half does not move
+    assert answers["no sibling"][2] == "template", answers
+    assert answers["an empty sibling"][2] == "template", answers
+    assert answers["the clone at the sibling"][2] == "command", answers
+
+
 def test_check_format_asks_no_git_even_to_address_its_own_line(tmp_path):
     """The flag locates a checkout without opening one.
 
