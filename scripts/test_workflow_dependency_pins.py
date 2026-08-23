@@ -40,8 +40,11 @@ install` hid it by putting a global option between `pip` and `install`. A
 recogniser that decides by matching a prefix loses to a longer prefix, every
 time. So each `run:` body is tokenised as shell and split into commands, and a
 command counts as a pip install whenever a token naming pip (`pip`, `pip3`,
-`pip3.11`, a path ending in one) is followed by the subcommand `install` —
-however many tokens sit in front of it and whatever flags sit between.
+`pip3.11`, a path ending in one, or the module of an attached `-mpip`) is
+followed by the subcommand `install` — however many tokens sit in front of it
+and whatever flags sit between. Where pip cannot be ruled out rather than
+found — a token before `install` that only resolves at job time, or a Python
+interpreter handed code mentioning pip — the command is reported instead.
 
 Parsed with `yaml`, not grepped: a `run:` body is a folded or literal scalar
 whose indentation and continuations a line scan does not see, and these
@@ -107,9 +110,15 @@ PIP_SUBCOMMANDS_THAT_INSTALL_NOTHING = frozenset({
     "uninstall", "wheel",
 })
 
+# A token naming a Python interpreter. `python -c '<code>'` is shell's blind
+# spot: the code is one quoted token, so no `install` token exists to find.
+PYTHON_INTERPRETER = re.compile(r"(?:[^\s]*/)?python[0-9]*(?:\.[0-9]+)*")
+
 # `NAME=value` in front of a command is an environment assignment, not the
 # program being run.
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# A token whose value is decided at job time, not at test time.
+UNRESOLVABLE = re.compile(r"[$`]")
 # A program name this file can read at test time. Anything holding a `$`, a
 # backtick or a glob resolves at job time to something unknown, so a command
 # running `install` under one of those cannot be placed.
@@ -269,6 +278,17 @@ def shell_commands(tokens):
         yield command
 
 
+def attached_module(token: str):
+    """The module of an attached `-m<module>`, as in `python3 -mpip install`.
+
+    Python accepts the module glued to the option, which makes `-mpip` a
+    single token with no `pip` token anywhere in the command.
+    """
+    if token.startswith("-m") and not token.startswith("--") and len(token) > 2:
+        return token[2:]
+    return None
+
+
 def command_program(tokens):
     """The program a command runs, past any `NAME=value` prefix."""
     for token in tokens:
@@ -286,7 +306,9 @@ def classify_command(tokens):
     recogniser this replaced was defeated.
     """
     for index, token in enumerate(tokens):
-        if not PIP_PROGRAM.fullmatch(token):
+        module = attached_module(token)
+        if not PIP_PROGRAM.fullmatch(token) and not (
+                module and PIP_PROGRAM.fullmatch(module)):
             continue
         rest = tokens[index + 1:]
         after_options = 0
@@ -308,12 +330,27 @@ def classify_command(tokens):
         )
     if "install" in tokens:
         program = command_program(tokens)
+        opaque = [token for token in tokens[:tokens.index("install")]
+                  if UNRESOLVABLE.search(token) and not ASSIGNMENT.match(token)]
         if program is None or not RESOLVABLE_PROGRAM.fullmatch(program):
             return "unplaceable", (
                 f"runs `install` under {program!r}, which does not resolve to "
                 f"a program name until job time, so this file cannot tell "
                 f"whether it is pip."
             )
+        if opaque:
+            return "unplaceable", (
+                f"runs `install` with {opaque} in front of it, and those "
+                f"resolve at job time, so one of them can be pip."
+            )
+    if (any(PYTHON_INTERPRETER.fullmatch(token) for token in tokens)
+            and any("pip" in token for token in tokens)):
+        return "unplaceable", (
+            "runs a Python interpreter over a token mentioning pip. "
+            "`python -c '<code>'` passes its code as one quoted token, so a "
+            "pip install inside it is not a shell command at all and nothing "
+            "here can read it. Put the install in its own `run:` line."
+        )
     return "other", None
 
 
@@ -800,3 +837,43 @@ def test_the_second_pair_of_eyes_reaches_a_composite_action_too(tmp_path):
     stray = [key for key, text in scalars(doc)
              if key not in step_run_paths(doc) and any(scan_shell_body(text))]
     assert stray == []
+
+
+MORE_WAYS_TO_HIDE_AN_INSTALL = [
+    ("python3 -mpip install pyyaml==6.0.1", "install"),
+    ("python -m'pip' install pyyaml==6.0.1", "install"),
+    ("sudo -u root $PIP install pyyaml==6.0.1", "unplaceable"),
+    ("$(which pip) install pyyaml==6.0.1", "unplaceable"),
+    ("python3 -c \"import pip; pip.main(['install', 'pyyaml==6.0.1'])\"",
+     "unplaceable"),
+]
+
+
+@pytest.mark.parametrize("body, expected", MORE_WAYS_TO_HIDE_AN_INSTALL)
+def test_an_install_the_token_walk_could_still_have_missed(body, expected):
+    """Found by attacking this file's own recogniser after it replaced the
+    anchored one. `-mpip` is valid Python and leaves no `pip` token; a wrapper
+    read from a variable leaves no resolvable program to check; and `python -c`
+    hands the whole install to the interpreter as one quoted token, where no
+    shell parser can see it."""
+    found, unplaceable = scan_shell_body(body)
+    if expected == "install":
+        assert not unplaceable and len(found) == 1, (found, unplaceable)
+        assert install_operands(found[0][1])[1] == ["pyyaml==6.0.1"]
+    else:
+        assert found == [] and len(unplaceable) == 1, (found, unplaceable)
+
+
+ORDINARY_SHELL_THAT_MUST_STAY_QUIET = [
+    "env PATH=$PATH npm install left-pad",
+    "npm install --prefix $DIR left-pad",
+    "drift=$(PYTHONPATH=scripts python3 -c 'from x import Y; print(Y)')",
+    "python3 -m pytest scripts/ -q",
+]
+
+
+@pytest.mark.parametrize("body", ORDINARY_SHELL_THAT_MUST_STAY_QUIET)
+def test_the_extra_fail_closed_rules_do_not_fire_on_ordinary_shell(body):
+    """Fail-closed only pays if it stays quiet on what these workflows do.
+    The third is account-skill-zips.yml's own shape, reduced."""
+    assert scan_shell_body(body) == ([], [])
