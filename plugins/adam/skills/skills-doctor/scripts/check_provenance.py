@@ -95,6 +95,27 @@ PAYLOAD_SCOPE = (
     "two paths above can differ over those and change nothing about what the "
     "model reads.")
 
+# What the bootstrap hook does with a directory it will not overwrite, quoted
+# into every finding that has to say what happens next. `may_replace` in
+# .claude/hooks/skills-bootstrap.sh returns true in exactly three cases —
+# nothing is there, what IS there already digests to the digest the LOCK names,
+# or the install record names it and the bytes still digest to what was
+# recorded — and refuses everything else. A refusal is not a deferral: the run
+# copies nothing, deletes nothing, and lists the name after `DEGRADED`.
+#
+# One constant rather than the same promise re-typed at four call sites, and
+# bound to the hook by `test_the_refusal_claim_is_the_hooks_own_may_replace`,
+# which extracts `may_replace` from the hook and RUNS it against each of the
+# states these findings describe. Every earlier version of these sentences said
+# the opposite — that the directory is replaced, or removed, at the next
+# session start — which is the one thing the hook is written never to do.
+HOOK_REFUSAL = (
+    "The hook does not overwrite a directory it cannot show it installed "
+    "unchanged: the next session start copies nothing here, leaves these bytes "
+    "exactly as they are, and names this directory after `DEGRADED` in the "
+    "session's `skills:` verdict as shadowed, so the locked copy is not "
+    "delivered for as long as this holds.")
+
 # The hook's charsets, applied to the same fields on the way out of the same file.
 # An entry failing any of them is one the hook SKIPS, so it is invisible to the
 # pruner — counted and reported here rather than quietly parsed anyway.
@@ -442,6 +463,40 @@ def uploaded_files(root: Path) -> Optional[List[Tuple[str, Path]]]:
     except OSError:
         return None
     return found
+
+
+def dropped_files(skill_dir: Path) -> List[str]:
+    """Relpaths in `skill_dir` that `uploaded_files` would NOT carry.
+
+    So that a finding about build artefacts can name the directory's own extra
+    files instead of the three that are usually the cause. The old sentence
+    listed "a __pycache__, a .pytest_cache, a .pyc" unconditionally, and printed
+    that list over a directory whose only extra was a node_modules/.
+
+    Empty is a real answer as well as a failure answer: the difference can be a
+    dropped file that was there at install and is not now, in which case there
+    is nothing left to name. Callers phrase around an empty list rather than
+    printing "()".
+    """
+    kept = uploaded_files(skill_dir)
+    if kept is None:
+        return []
+    keep = {relpath for relpath, _ in kept}
+    try:
+        return sorted(
+            child.relative_to(skill_dir).as_posix()
+            for child in skill_dir.rglob("*")
+            if child.is_file()
+            and child.relative_to(skill_dir).as_posix() not in keep)
+    except OSError:
+        return []
+
+
+def name_list(items: List[str], cap: int = 3) -> str:
+    """`items` as a short backticked list, capped so a finding stays readable."""
+    shown = [f"`{item}`" for item in items[:cap]]
+    rest = len(items) - len(shown)
+    return ", ".join(shown) + (f", and {rest} more" if rest > 0 else "")
 
 
 def digest_shared_payload(path: Path, fold: bool = False) -> Optional[str]:
@@ -1187,11 +1242,15 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 findings.append(_observed(
                     "hand-placed-over-locked", origin, name,
                     "the lock names it and the record does not name it, so "
-                    "nothing establishes it as the hook's — and it will not "
-                    "survive the next session "
-                    "start, which replaces the directory with the registry's "
-                    "copy, or removes it outright if the project ships a skill "
-                    "of the same name. Move it if you want to keep it."))
+                    "nothing establishes it as the hook's. " + HOOK_REFUSAL +
+                    " The single exception is bytes that already digest to "
+                    "exactly what the lock names, where overwriting could not "
+                    "change anything anyone would notice. So it is not this "
+                    "copy that is at risk, it is the locked skill's delivery — "
+                    "including the project-collision path, which the hook "
+                    "reaches only after deciding it may replace this "
+                    "directory. Move it out of the store if you want the "
+                    "bundle's copy instead."))
             elif in_lock:
                 # UNKNOWN and locked. Nothing to say that the absent record has
                 # not already said store-wide: the hook will replace it, and
@@ -1253,20 +1312,25 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
         if in_lock and integrity in (EDITED, UNMEASURABLE):
             findings.append(_observed(
                 f"{integrity}-and-locked", HOOK, name,
-                f"{_cause(integrity)} and the lock still names it. The directory "
-                f"does not survive the next session start, so any local change "
-                f"here is lost without a prompt."))
+                f"{_cause(integrity)} and the lock still names it. "
+                f"{HOOK_REFUSAL} Nothing here is lost; what stops is this "
+                f"skill's updates. Restore the bytes the record vouches for, "
+                f"or move the directory out of the store, and the next run "
+                f"installs the locked copy."))
         elif in_lock and integrity == ARTEFACTS_ONLY:
-            notes.append(_observed(
+            extra = dropped_files(skills_dir / name)
+            findings.append(_observed(
                 "artefacts-and-locked", HOOK, name,
-                "every file an upload would carry is byte-for-byte the one the "
-                "hook installed, and the only difference is files the upload "
-                "filter drops — a __pycache__, a .pytest_cache, a .pyc. The hook "
-                "digests the whole directory, so it still sees a mismatch: the "
-                "directory is replaced at the next session start and those go "
-                "with it. No instruction byte is at risk, which is why this is "
-                "a note rather than the edited-and-locked finding. Running a "
-                "test suite from inside an installed skill gets you here."))
+                f"every file an upload would carry is byte-for-byte the one "
+                f"the hook installed, and the whole difference is files the "
+                f"upload filter drops"
+                f"{' (' + name_list(extra) + ')' if extra else ''}. No "
+                f"instruction byte is at risk. The hook's digest is the WHOLE "
+                f"directory, though, so what is here matches neither the "
+                f"locked digest nor the recorded one. {HOOK_REFUSAL} Delete "
+                f"those files and the next run installs normally. Running a "
+                f"skill's own test suite from inside the installed copy gets "
+                f"you here."))
         elif in_lock:
             continue
         elif not in_scope:
@@ -1291,15 +1355,19 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 f"lock: restore the original bytes and the next run removes it. "
                 f"Move it out of the store to keep it."))
         elif integrity == ARTEFACTS_ONLY:
-            notes.append(_observed(
+            extra = dropped_files(skills_dir / name)
+            findings.append(_observed(
                 "artefacts-and-stale", HOOK, name,
-                "it has left the lock, and every file an upload would carry is "
-                "byte-for-byte the one the hook installed — but files the upload "
-                "filter drops (a __pycache__, a .pytest_cache) make the hook's "
-                "whole-directory digest differ, and the hook keeps whatever it "
-                "cannot show it installed unchanged. So the removal this would "
-                "otherwise get does not happen. Delete those and the next run "
-                "cleans it up."))
+                f"it has left the lock, and every file an upload would carry "
+                f"is byte-for-byte the one the hook installed — but files the "
+                f"upload filter drops"
+                f"{' (' + name_list(extra) + ')' if extra else ''} make the "
+                f"hook's whole-directory digest differ from the recorded one. "
+                f"The hook removes only what it can show it installed "
+                f"unchanged, so the removal this would otherwise get does not "
+                f"happen and the session's `skills:` verdict reads `DEGRADED` "
+                f"with this skill named as left in place, edited since "
+                f"install. Delete those files and the next run cleans it up."))
         else:
             notes.append(_observed(
                 "stale", HOOK, name,

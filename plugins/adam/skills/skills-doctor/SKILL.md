@@ -391,7 +391,16 @@ figure. No remediation is performed — recommend, do not do.
   different facts from the same number. One mismatch against the record is
   neither: when every file an UPLOAD would carry still matches, the difference
   is a build artefact (`__pycache__`, `.pytest_cache`) and the doctor reports
-  `artefacts-and-locked` as a NOTE. The hook still replaces the directory —
-  its digest is the whole of it — but nothing a reader wants back is at
-  stake, which is why running a skill's own suite from the installed copy no
-  longer holds the exit code at 1.
+  `artefacts-and-locked`, naming the extra files it actually found.
+- **A directory the hook will not overwrite is not a directory the hook is
+  about to delete.** `may_replace` in `.claude/hooks/skills-bootstrap.sh`
+  overwrites in three cases only — nothing is there, what is there already
+  digests to the digest the lock names, or the record names it and the bytes
+  still digest to what was recorded — and REFUSES everything else. A refusal
+  copies nothing and removes nothing: the skill is dropped from that run, the
+  bytes stay, and the name is listed after `DEGRADED … shadowed`. So the risk
+  an `edited-and-locked`, `artefacts-and-locked` or `hand-placed-over-locked`
+  finding describes is a skill that stops being delivered, never local work
+  about to be overwritten — and a build artefact left by running a skill's own
+  suite in place stalls that skill's updates until it is deleted, which is why
+  it is a finding rather than a note.

@@ -174,12 +174,14 @@ def _walk_up(relpath: str):
     This file ships inside the skill, so it legitimately runs from an installed
     copy at `~/.claude/skills/skills-doctor/scripts` where the registry's own
     `scripts/` are absent — there, skipping is right. (That run leaves a
-    `__pycache__` and a `.pytest_cache` in the installed directory. The doctor
-    reports them as an `artefacts-and-locked` NOTE and stays at exit 0; it used
-    to call the directory edited and hold the exit code at 1 forever.) Inside a registry checkout
-    it is not: the two tests that use this are the only ones binding the digest
-    and the record format to the real hook, and a skip would retire them silently
-    at exactly the moment they broke. So a checkout-shaped path FAILS instead.
+    `__pycache__` and a `.pytest_cache` in the installed directory, which the
+    bootstrap hook then refuses to overwrite; the doctor reports
+    `artefacts-and-locked` and names the files to delete, rather than calling
+    the directory edited and asking for a restore nobody can perform.) Inside a registry checkout
+    it is not: the tests that use this are the only ones binding the digest, the
+    record format and the hook's own refusal rule to the real hook, and a skip
+    would retire them silently at exactly the moment they broke. So a
+    checkout-shaped path FAILS instead.
     """
     here = Path(__file__).resolve()
     for parent in here.parents:
@@ -527,8 +529,8 @@ def test_a_skill_in_neither_the_lock_nor_the_record_is_a_finding(store, capsys):
     declares and lock B does not raises B's `untracked` — and the old wording,
     "the hook will never update it and never remove it", is then false on its
     face: lock A's judgement of the same directory is `hand-placed-over-locked`,
-    which says the next session start REPLACES it. Two findings, one directory,
-    flatly contradicting each other. Only one lock was ever observed to be in
+    which says the hook is holding that lock's delivery back over it. Two
+    findings, one directory, flatly contradicting each other. Only one lock was ever observed to be in
     play when the sentence was written, so it now says only what that one lock
     can support.
     """
@@ -552,8 +554,8 @@ def test_untracked_does_not_contradict_another_locks_verdict_on_the_same_name(
     picking one would answer ADR 0005's first open question by being convenient.
     The cost is that two locks can reach opposite conclusions about one
     directory, and until now the text did not admit it: lock A names `shared`,
-    so A reports `hand-placed-over-locked` — "will not survive the next session
-    start, which replaces the directory". Lock B does not name it, so B reported
+    so A reports `hand-placed-over-locked` — the hook is refusing to deliver A's
+    copy over it. Lock B does not name it, so B reported
     `untracked` — "the hook will never update it and never remove it". Both in
     one findings list, about one directory, in direct contradiction.
 
@@ -2441,10 +2443,11 @@ def test_a_name_disagreement_the_lock_declares_is_still_a_finding(
         tmp_path, capsys, ephemeral):
     """The lock naming it outranks the label, because the hook is about to act.
 
-    A locked directory is replaced at the next session start whatever its
-    frontmatter says, and that consequence is the user's to know about. If the
-    recogniser could suppress this, one mis-typed `name:` would silence the
-    warning that local work is about to be overwritten.
+    A locked name is one some bundle here delivers, whatever this directory's
+    frontmatter says — so the hook has an opinion about it, and the reader needs
+    to know which way the conflict went. If the recogniser could suppress this,
+    one mis-typed `name:` would silence the report that the locked skill is not
+    reaching the session.
     """
     store = tmp_path / "skills"
     store.mkdir()
@@ -2648,10 +2651,11 @@ def test_a_locked_name_disagreement_gets_no_foreign_note(tmp_path, capsys,
                                                          ephemeral):
     """One directory, two sentences that cannot both be true.
 
-    `hand-placed-over-locked` says it will not survive the next session start;
-    the `foreign` note says the hook will never remove it. The row already gave
-    the lock priority, but the note was emitted store-wide with no lock gate, so
-    a locked directory collected both.
+    `hand-placed-over-locked` says the locked copy is not being delivered while
+    this directory sits here; the `foreign` note says nothing here delivered it
+    and there is nothing to fix. The row already gave the lock priority, but the
+    note was emitted store-wide with no lock gate, so a locked directory
+    collected both.
     """
     store = tmp_path / "skills"
     store.mkdir()
@@ -2663,7 +2667,8 @@ def test_a_locked_name_disagreement_gets_no_foreign_note(tmp_path, capsys,
     assert code == 1, out
     assert "[hand-placed-over-locked] alpha" in out, out
     assert "[foreign] alpha" not in out, out
-    assert "will not survive the next session start" in flat(out), out
+    assert "the locked copy is not delivered for as long as this holds" \
+        in flat(out), out
     assert "the hook will not remove it" not in flat(out), out
 
 
@@ -3248,14 +3253,22 @@ def test_crlf_on_both_sides_is_described_as_being_on_both_sides(tmp_path, capsys
 
 def test_running_a_suite_inside_an_installed_skill_does_not_make_it_edited(
         tmp_path, capsys, ephemeral):
-    """The documented workflow that turned the doctor permanently red.
+    """A build artefact is its own state — not an edit, and not nothing.
 
     `_walk_up`'s docstring blesses running this suite from the installed copy at
     `~/.claude/skills/skills-doctor/scripts`. Doing so writes `__pycache__` and
-    `.pytest_cache` beside the scripts, the whole-directory digest stops
-    matching the record, and every later run reports `edited-and-locked` at exit
-    1 with nothing wrong and nothing to restore. Reddening an ordinary session
-    is the defect #123 exists to remove, whichever finding does it.
+    `.pytest_cache` beside the scripts and the whole-directory digest stops
+    matching the record. Calling that `edited-and-locked` is wrong twice over:
+    the instructions are untouched, and its remedy ("restore your edit") names
+    a change nobody made.
+
+    It is still a FINDING, because the hook's answer to it is a refusal. The
+    round that made it a note also gave it a note's sentence — "the directory
+    is replaced at the next session start and those go with it" — and
+    `test_the_refusal_claim_is_the_hooks_own_may_replace` measures the hook
+    doing the opposite. A skill that stops receiving updates until someone
+    deletes a cache directory is a human's decision, which is this file's own
+    definition of a finding.
     """
     store = tmp_path / "skills"
     store.mkdir()
@@ -3265,13 +3278,14 @@ def test_running_a_suite_inside_an_installed_skill_does_not_make_it_edited(
     _artefacts(store / "alpha")
 
     code, out = run(store, lock, capsys)
-    assert code == 0, out
-    assert "FINDINGS (0)" in out, out
+    assert code == 1, out
     assert "[edited-and-locked] alpha" not in out, out
     assert "[artefacts-and-locked] alpha" in out, out
-    # The consequence is still real and still stated: the hook digests the whole
-    # directory, so it replaces this one anyway.
-    assert "replaced at the next session start" in flat(out), out
+    # The extra files are NAMED, from this directory, rather than illustrated
+    # with the three artefacts that are usually the cause.
+    assert "`__pycache__/helper.cpython-311.pyc`" in flat(out), out
+    # And no sentence promises the hook will tidy them up.
+    assert "replaced at the next session start" not in flat(out), out
 
 
 def test_an_edit_beside_a_build_artefact_is_still_edited(tmp_path, capsys,
@@ -3330,12 +3344,14 @@ def test_a_filtered_file_present_at_install_is_not_read_as_an_artefact(
 
 def test_a_stale_skill_a_build_artefact_keeps_alive_says_so(tmp_path, capsys,
                                                             ephemeral):
-    """Out of the lock and preserved by a cache directory — a note, and a why.
+    """Out of the lock and preserved by a cache directory — a finding, and a why.
 
     The hook keeps what it cannot show it installed unchanged, so the artefact
     silently cancels the removal the plain `stale` note promises. Reporting it
     as plain `stale` would tell the reader the next bootstrap removes it, which
-    is exactly what will not happen.
+    is exactly what will not happen — and the hook does not stay quiet about
+    it either: it names the skill after `DEGRADED` as left in place. A note is
+    for what the next bootstrap handles by itself, so this is not one.
     """
     store = tmp_path / "skills"
     store.mkdir()
@@ -3346,10 +3362,11 @@ def test_a_stale_skill_a_build_artefact_keeps_alive_says_so(tmp_path, capsys,
     _artefacts(store / "beta")
 
     code, out = run(store, lock, capsys)
-    assert code == 0, out
+    assert code == 1, out
     assert "[artefacts-and-stale] beta" in out, out
     assert "[stale] beta" not in out, out
     assert "the removal this would otherwise get does not happen" in flat(out), out
+    assert "`__pycache__/helper.cpython-311.pyc`" in flat(out), out
 
 
 # ---------------------------------------------------------------------------
@@ -3377,17 +3394,6 @@ def _ordinary_hook_delivered_the_lock(tmp_path):
 def _ordinary_shadowed_by_the_account_store(tmp_path):
     """#122's session: every locked skill also arrives from the account store."""
     return shadowed_store(tmp_path)
-
-
-def _ordinary_suite_run_from_the_installed_copy(tmp_path):
-    """#123's class: a documented workflow left build artefacts behind."""
-    store = tmp_path / "skills"
-    store.mkdir()
-    make_skill(store, "alpha")
-    write_record(store, "alpha")
-    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
-    _artefacts(store / "alpha")
-    return store, lock
 
 
 def _ordinary_harness_seeded_a_directory(tmp_path):
@@ -3421,7 +3427,13 @@ ORDINARY_SESSIONS = (
     _ordinary_nothing_declared,
     _ordinary_hook_delivered_the_lock,
     _ordinary_shadowed_by_the_account_store,
-    _ordinary_suite_run_from_the_installed_copy,
+    # A suite run from the installed copy was in this tuple and is deliberately
+    # not any more. It is an ordinary thing to DO, which is why it was added —
+    # but the state it leaves behind is not an ordinary resting state: the hook
+    # refuses the directory, the skill stops receiving updates, and that run's
+    # `skills:` verdict is DEGRADED. Sitting here it forced exit 0, which is how
+    # a false green got written into the note that replaced the finding. Its
+    # test is `test_running_a_suite_inside_an_installed_skill_does_not_make_it_edited`.
     _ordinary_harness_seeded_a_directory,
     _ordinary_seeded_name_the_account_store_also_holds,
     _ordinary_skill_left_the_lock,
