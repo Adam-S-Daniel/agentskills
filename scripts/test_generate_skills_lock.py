@@ -21,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -3956,11 +3957,12 @@ class _Placer:
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
             return self.combine([self.place(e, seen) for e in node.elts], node)
         if isinstance(node, ast.Dict):
+            kinds = []
             for key, value in zip(node.keys, node.values):
                 if key is not None:
-                    self.place(key, seen)
-                self.place(value, seen)
-            return _TEXT
+                    kinds.append(self.place(key, seen))
+                kinds.append(self.place(value, seen))
+            return self.combine(kinds, node)
         if isinstance(node, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
             for generator in node.generators:
                 self.place(generator.iter, seen)
@@ -3968,14 +3970,17 @@ class _Placer:
         if isinstance(node, ast.Starred):
             return self.place(node.value, seen)
         if isinstance(node, ast.Subscript):
-            self.place(node.value, seen)
+            # The INDEX is placed for its own validity and then dropped: it
+            # selects, it is not printed. What comes out is a piece of what
+            # went in, so the subscript carries its receiver's kind — `x[:]`
+            # on the command is still the command.
             if isinstance(node.slice, ast.Slice):
                 for part in (node.slice.lower, node.slice.upper, node.slice.step):
                     if part is not None:
                         self.place(part, seen)
             else:
                 self.place(node.slice, seen)
-            return _TEXT
+            return self.place(node.value, seen)
         if isinstance(node, ast.Attribute):
             return self.place_attribute(node, seen)
         if isinstance(node, ast.Call):
@@ -4010,8 +4015,7 @@ class _Placer:
                 return _COMMAND if node.attr == "command" else _CARRIER
             self.reject(node, f".{node.attr} on something that is not `remediation`'s answer")
         if node.attr == "__name__":
-            self.place(node.value, seen)
-            return _TEXT
+            return self.place(node.value, seen)
         if self.is_parsed_args(node.value):
             # argparse fills a namespace with the options this parser DECLARES,
             # and `argv[0]` is not one of them — so this is caller input, the
@@ -4029,29 +4033,43 @@ class _Placer:
             and value.func.attr == "parse_args" for value, _ in bound)
 
     def place_call(self, node, seen):
-        for argument in node.args:
-            self.place(argument, seen)
-        for keyword in node.keywords:
-            self.place(keyword.value, seen)
+        """A call CARRIES the kinds it was built from; it does not launder them.
+
+        Every callable reachable here is in the set for one stated reason —
+        `_SAFE_CALLS` and `_SAFE_METHODS` "count, order, re-type, or hand back
+        a piece of a value that has already been placed". A thing that hands
+        back a piece of its input hands back its input's KIND, so returning a
+        flat `_TEXT` contradicted the very property that let the callable in:
+        `str(answer.command)` and `answer.command[:]` both put the verbatim
+        answer back into circulation as ordinary prose, and
+        `f"  {str(answer.command)} --ref HEAD"` then appended a second `--ref`
+        that argparse resolves last-wins — the "format repair that silently
+        re-attests the lock over a different tree" the ref anchor exists to
+        prevent, printed by a report path the gate called clean.
+        """
+        kinds = [self.place(argument, seen) for argument in node.args]
+        kinds += [self.place(keyword.value, seen) for keyword in node.keywords]
         function = node.func
         if isinstance(function, ast.Attribute):
             if function.attr not in _SAFE_METHODS:
                 self.reject(node, f".{function.attr}() is not in the closed set of "
                                   "methods a verdict may print")
-            self.place(function.value, seen)
-            return _TEXT
+            return self.combine(kinds + [self.place(function.value, seen)], node)
         if not isinstance(function, ast.Name):
             self.reject(node, "a call on something that is not a plain name")
         if function.id == "remediation":
+            # The one call whose result is not built from its arguments: it
+            # DECIDES, and what it decided is what `.command` / `.reason` then
+            # name. Its arguments are placed above for their own validity.
             return _CARRIER
         if function.id in self.functions:
             if function.id in self.capable:
                 self.reject(node, (
                     f"{function.id}() can spell this script's invocation — it "
                     f"{self.capable[function.id]}. Ask `remediation` for the line"))
-            return _TEXT
+            return self.combine(kinds, node)
         if function.id in _SAFE_CALLS:
-            return _TEXT
+            return self.combine(kinds, node)
         self.reject(node, f"{function.id}() is not in the closed set of callables "
                           "a verdict may print")
 
@@ -4122,6 +4140,101 @@ def _binds(target, name: str) -> int:
     return 0
 
 
+# A report path built around `remediation`, with one printed line left to fill
+# in. `answer` is the carrier, so `answer.command` is the verbatim answer and
+# anything printed beside it is the defect the choke point exists to prevent.
+_REPORT_PATH_TEMPLATE = textwrap.dedent("""
+    def report_made_up(existing, output, repo):
+        answer = remediation("format", existing=existing, output=output, repo=repo)
+        {printed}
+""")
+
+
+def _place_one_report_path(printed: str) -> None:
+    """The gate's own placement, run over one hand-written report path."""
+    functions = _module_functions()
+    banned = _module_command_names()
+    capable = _invocation_capable(functions, banned)
+    body = _REPORT_PATH_TEMPLATE.format(printed=printed.replace("\n", "\n    "))
+    function = ast.parse(body).body[0]
+    _place_prints(function, "report_made_up", functions, banned, capable)
+
+
+# Each of these puts `remediation`'s verbatim answer back into the printed line
+# with something appended, through a construction whose result the analysis
+# used to call ordinary text. The last two are the damaging ones: a second
+# `--ref` is resolved last-wins by argparse, so it is a format repair that
+# silently re-attests the lock over a different tree — the thing the ref anchor
+# exists to prevent.
+_RELAUNDERED = {
+    "str() around it": 'print(f"  {str(answer.command)} --repin-source \'evil@\'")',
+    "a whole-value slice": 'print(f"  {answer.command[:]} --repin-source \'evil@\'")',
+    "a one-element list, indexed": 'print(f"  {[answer.command][0]} --repin-source \'evil@\'")',
+    "a dict holding it": 'print(f"  {dict(a=answer.command)} --repin-source \'evil@\'")',
+    "join() over it": 'print("  " + "".join([answer.command, " --repin-source \'evil@\'"]))',
+    "strip() on it": 'print(f"  {answer.command.strip()} --repin-source \'evil@\'")',
+    "a duplicate --ref, via str()": 'print(f"  {str(answer.command)} --ref HEAD")',
+    "a duplicate --ref, via a slice": 'print(f"  {answer.command[:]} --ref HEAD")',
+}
+
+# What must still place clean, so a red above is the construction under test and
+# not the analysis having lost the ability to place anything at all.
+_STILL_PLACEABLE = {
+    "the answer, verbatim": 'print(f"  {answer.command}")',
+    "the answer through a local": 'line = answer.command\nprint(f"  {line}")',
+    "the reason, framed in prose": 'print(f"FAILED: {answer.reason} Then re-run.")',
+    "a count, re-typed": 'print(f"  {str(len(existing))} fields read")',
+    "prose about one flag": 'print("  no --repin-source line is printed for it")',
+}
+
+
+def test_the_placer_keeps_the_command_a_command():
+    """A placement carries the kind of what it was built from — pinned directly.
+
+    The gate reads the generator as it stands, so all it can ever say is "the
+    file is clean today"; what it cannot say is which EDITS it would catch.
+    This drives the same placement over hand-written report paths, so the
+    property lives in the suite rather than in a probe somebody ran once.
+
+    THE PROPERTY. `_SAFE_CALLS` and `_SAFE_METHODS` are in the closed set
+    because each "counts, orders, re-types, or hands back a piece of a value
+    that has already been placed" — and a thing that hands back a piece of its
+    input hands back its input's KIND. A call, a subscript and a dict each
+    returned a flat `_TEXT` instead, which contradicted the very property that
+    admitted the callable and laundered `remediation`'s verbatim answer into
+    ordinary prose that anything could be appended to. Measured on the
+    generator before the fix, restored byte-for-byte between each case:
+    `print(f"  {str(answer.command)} --ref HEAD")` in `report_digest_format`
+    left the gate at "1 passed".
+    """
+    for label, printed in _STILL_PLACEABLE.items():
+        _place_one_report_path(printed)      # raises _Unplaceable if it cannot
+    for label, printed in _RELAUNDERED.items():
+        with pytest.raises(_Unplaceable, match="the command"):
+            _place_one_report_path(printed)
+
+
+def _place_prints(function, name, functions, banned, capable) -> None:
+    """Place every printed expression in one function. Raises `_Unplaceable`.
+
+    Shared by the gate and by `test_the_placer_keeps_the_command_a_command`, so
+    the placement those two exercise is one code path rather than two that can
+    drift apart.
+    """
+    placer = _Placer(function, name, functions, banned, capable)
+    for call in _print_calls(function):
+        # ONE line per call, so the arguments are combined rather than
+        # placed apart: `print(answer.command, "--repin-source", spec)`
+        # writes the same line as concatenating them, and a check that
+        # looked at each argument alone would see three innocent values.
+        kinds = [placer.place(argument) for argument in call.args]
+        for keyword in call.keywords:
+            if keyword.arg in ("sep", "end", "file", "flush"):
+                continue
+            kinds.append(placer.place(keyword.value))
+        placer.combine(kinds, call)
+
+
 def test_no_report_path_writes_a_command_of_its_own():
     """The structural half of the choke point, read off the module's own AST.
 
@@ -4186,19 +4299,7 @@ def test_no_report_path_writes_a_command_of_its_own():
         "to build a command is not the one building it. Find out what does.")
 
     for name in _report_paths(functions):
-        function = functions[name]
-        placer = _Placer(function, name, functions, banned, capable)
-        for call in _print_calls(function):
-            # ONE line per call, so the arguments are combined rather than
-            # placed apart: `print(answer.command, "--repin-source", spec)`
-            # writes the same line as concatenating them, and a check that
-            # looked at each argument alone would see three innocent values.
-            kinds = [placer.place(argument) for argument in call.args]
-            for keyword in call.keywords:
-                if keyword.arg in ("sep", "end", "file", "flush"):
-                    continue
-                kinds.append(placer.place(keyword.value))
-            placer.combine(kinds, call)
+        _place_prints(functions[name], name, functions, banned, capable)
 
 
 def _drifted_plain(tmp_path):
