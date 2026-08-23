@@ -1043,7 +1043,15 @@ def test_check_current_only_refuses_a_registry_the_lock_does_not_plan(
 def test_check_current_only_refuses_a_registry_that_is_both_primary_and_source(
         tmp_path):
     """Nothing else refuses this shape: plan_sources rejects a BUNDLE claimed
-    twice and says nothing about one registry standing as both halves."""
+    twice and says nothing about one registry standing as both halves.
+
+    The source here omits `layout`, so it inherits DEFAULT_LAYOUT — the
+    primary's own. The refusal used to tell the reader their two entries
+    "carry different bundles and different layouts" and then say "Fix the
+    lock", which is a message asserting something false about the lock in front
+    of them. Only the bundles are forced apart, by plan_sources' uniqueness
+    check; the layouts here are identical and so are the refs.
+    """
     primary = tmp_path / "registry"
     primary_sha = make_registry(primary, {"adam/alpha": SKILL_A, "extras/beta": SKILL_B})
     out = tmp_path / "skills.lock"
@@ -1059,6 +1067,9 @@ def test_check_current_only_refuses_a_registry_that_is_both_primary_and_source(
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "FAILED:" not in proc.stdout
     assert "BOTH" in proc.stderr
+    lock = json.loads(out.read_text(encoding="utf-8"))
+    assert lock["sources"][0]["layout"] == gsl.DEFAULT_LAYOUT
+    assert "different layouts" not in proc.stderr, proc.stderr
 
 
 def test_check_current_only_without_check_current_is_an_argparse_error(
