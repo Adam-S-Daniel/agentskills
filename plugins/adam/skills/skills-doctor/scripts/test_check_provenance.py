@@ -273,32 +273,121 @@ NEXT_RUN_CLAIM = re.compile("|".join((
 )), re.I)
 
 
+# The list a report is built up in. Everything appended to it reaches the reader,
+# and — see `_rendered_prose_sites` — it is the one name whose own assignment
+# must not be read as context for the sentences appended to it.
+ACCUMULATOR = "out"
+
+
+def _rendered_prose_sites():
+    """Every string the report EMITS that is not a finding's detail.
+
+    The other half of the same quantifier, and the half `_finding_sites` cannot
+    see: it inspects `Finding`/`_observed` call arguments, so a section header or
+    a block of prose the renderer prints directly is outside its set by
+    construction. This walks the same module for the expressions that reach the
+    reader another way — anything appended to a report's `out` list, and every
+    `_para` call.
+
+    `detail` is the emitting statement's source PLUS the source of every local it
+    interpolates, because that is where a gate can honestly live: a header built
+    from a `handles = ... if surface.kind == EPHEMERAL else ...` above it is
+    gated, and a check that read only the `out +=` line would take the sentence
+    for absent and pass. The local's text is in `universe` for the same reason
+    pointing the other way — otherwise moving prose one line up hides it.
+
+    The ACCUMULATOR itself is the one local not resolved, and leaving it in made
+    this whole test vacuous: `out = [...]` at the top of `render` prints the
+    surface into the headline, so every `out +=` below it inherited the word
+    `surface` and counted as gated. The negative control caught it — an
+    ungated "the hook removes … at the next session start" appended to `render`
+    passed.
+
+    Derived like the other one: a header written tomorrow is in the set without
+    anybody adding it. `FindingSite` is reused so the two feed one assertion.
+    """
+    source = Path(prov.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    constants = _module_constants(tree, source)
+
+    def emits(node):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in ("append", "extend") \
+                and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id == "out":
+            return True
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) \
+                and node.target.id == ACCUMULATOR \
+                and isinstance(node.op, ast.Add):
+            return True
+        return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+            and node.func.id == "_para"
+
+    sites = []
+    for function in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        locals_ = {}
+        for node in ast.walk(function):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name):
+                locals_.setdefault(node.targets[0].id, []).append(
+                    ast.get_source_segment(source, node.value) or "")
+        for node in ast.walk(function):
+            if not emits(node):
+                continue
+            universe, gate = [], [ast.get_source_segment(source, node) or ""]
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    universe.append(sub.value)
+                elif isinstance(sub, ast.Name) and sub.id != ACCUMULATOR:
+                    if sub.id in constants:
+                        universe.append(constants[sub.id])
+                    for assigned in locals_.get(sub.id, ()):
+                        universe.append(assigned)
+                        gate.append(assigned)
+            sites.append(FindingSite(function.name, node.lineno,
+                                     "\n".join(gate), "\n".join(universe), ""))
+    assert sites, "no report-emitting sites found — the parse is not reading render"
+    return sites
+
+
 def test_every_sentence_about_the_next_run_is_gated_on_the_surface():
     """The quantifier round 5 asserted in a commit message and nothing checked.
 
     That commit said it had gated `every "what the next run does" sentence` on
-    the surface. Four were not: the shadow note's two-clocks sentence, quoted
+    the surface. Nine were not: the shadow note's two-clocks sentence, quoted
     into all four shadow branches including the benign one that is the ordinary
     #122 session, so a durable machine printed `SURFACE durable` and then told
     the reader the personal copy `is refreshed at every session start` — on a
     machine where the hook returns `skills: skipped` before it reads the lock,
     so it is refreshed at NO session start and the remedy is the marketplace.
 
-    Fixing those four and leaving the quantifier unbacked is what round 5 did.
-    So the set is DERIVED: every finding-building call in `check_provenance.py`,
-    with the module constants and locals it interpolates resolved, and any of
-    them that can say one of `NEXT_RUN_CLAIM`'s phrasings has to carry
-    `when_the_hook_runs`' answer. A new sentence is in the set the moment it is
-    written, whether or not anybody greps for it.
+    Fixing those and leaving the quantifier unbacked is what round 5 did.
+    So the set is DERIVED, from TWO readings of the module, because the first
+    round of this test still left the word unbacked for anything the renderer
+    prints outside a finding: `_finding_sites` walks `Finding`/`_observed` calls
+    with the module constants and locals they interpolate resolved, and
+    `_rendered_prose_sites` walks what the report appends to `out` and hands to
+    `_para`. The NOTES header — "expected states, or things the next bootstrap
+    handles itself" — was in neither, and printed directly above a note whose
+    own body says none of that happens here.
+
+    A sentence written tomorrow is in the set whichever way it reaches a reader,
+    whether or not anybody greps for it.
     """
-    ungated = [
-        f"{site.function}:{site.lineno} -> "
-        f"{sorted(set(NEXT_RUN_CLAIM.findall(site.universe)))}"
-        for site in _finding_sites()
-        if NEXT_RUN_CLAIM.search(site.universe)
-        and "but_here" not in site.detail
-        and "when_the_hook_runs" not in site.detail
-    ]
+    def ungated_in(sites, gates):
+        return [f"{site.function}:{site.lineno} -> "
+                f"{sorted(set(NEXT_RUN_CLAIM.findall(site.universe)))}"
+                for site in sites
+                if NEXT_RUN_CLAIM.search(site.universe)
+                and not any(gate in site.detail for gate in gates)]
+
+    # A finding's detail carries the caveat IN the sentence, so its gate is the
+    # caveat itself. A section header can be gated by being built differently on
+    # a different surface, so `surface` counts there — and `_rendered_prose_sites`
+    # is what makes that honest by pulling the local's own source into `detail`.
+    ungated = (ungated_in(_finding_sites(), ("but_here", "when_the_hook_runs"))
+               + ungated_in(_rendered_prose_sites(),
+                            ("but_here", "when_the_hook_runs", "surface")))
     assert not ungated, (
         "these say what a next run does without saying whether one happens:\n"
         + "\n".join(ungated))
@@ -4836,6 +4925,55 @@ def test_the_prune_promise_on_a_skipped_record_entry_is_gated(tmp_path, capsys):
     assert "[record-entries-skipped]" in out, out
     assert "can never remove them" in flat(out), out
     assert DURABLE_CAVEAT in flat(out), out
+
+
+def test_the_notes_header_does_not_promise_a_bootstrap_that_never_runs(
+        tmp_path, capsys):
+    """The header the derived quantifier could not see, in the report itself.
+
+    "NOTES (n) — expected states, or things the next bootstrap handles itself",
+    printed under `SURFACE durable` directly above a note whose own body says
+    none of that happens here. The two sentences contradicted each other on the
+    same screen, and the note's was the one that had been fixed.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    # A note and not a finding: the record vouches for older bytes and the lock
+    # names exactly what is on disk.
+    (store / "alpha" / "SKILL.md").write_text(
+        "---\nname: alpha\n---\nv2, applied by hand\n", encoding="utf-8")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "SURFACE  durable" in out, out
+    assert "[bytes-are-the-locked-ones] alpha" in flat(out), out
+    header = [line for line in out.splitlines() if line.startswith("NOTES (")]
+    assert header and "next bootstrap handles itself" not in header[0], header
+    assert "SURFACE block above" in header[0], header
+
+
+def test_the_notes_header_still_says_it_where_it_is_true(tmp_path, capsys,
+                                                         ephemeral):
+    """The negative control: gating it everywhere would be the same defect.
+
+    On an ephemeral surface the next bootstrap really does handle these, and a
+    header hedging about a machine that is right in front of the reader teaches
+    them to stop reading headers.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    (store / "alpha" / "SKILL.md").write_text(
+        "---\nname: alpha\n---\nv2, applied by hand\n", encoding="utf-8")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    _code, out = run(store, lock, capsys)
+    header = [line for line in out.splitlines() if line.startswith("NOTES (")]
+    assert header and "next bootstrap handles itself" in header[0], header
 
 
 # The kinds the binding test claims to cover, and the one it does not.

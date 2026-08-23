@@ -2603,10 +2603,13 @@ def render(record: Record, record_path: Path, skills_dir: Path,
             out.append(f"  {len(lock.names)} skill(s) declared across "
                        f"{len(lock.claims)} (registry, bundle) claim(s).")
         elif lock.state == REJECTED:
-            out += _para(f"rejected — the hook refuses this lock ({lock.reason}), "
-                         f"so it installs NOTHING from it. Nothing below can be "
-                         f"called stale or missing against a lock that never "
-                         f"applies. Regenerate it with "
+            # The consequence — "so it installs nothing, at every session start"
+            # — belongs to `lock-rejected` in FINDINGS, which carries the
+            # surface caveat that claim needs. This block says what the FILE is.
+            out += _para(f"rejected — {lock.reason}. That is a whole-lock "
+                         f"refusal and not a bad row, so nothing below can be "
+                         f"called stale or missing against it. See FINDINGS, "
+                         f"and regenerate it with "
                          f"scripts/generate_skills_lock.py.")
         else:
             out.append(f"  {lock.state} — nothing can be called stale or missing "
@@ -2648,8 +2651,16 @@ def render(record: Record, record_path: Path, skills_dir: Path,
         out.append("  (none)")
 
     if notes:
-        out += ["", f"NOTES ({len(notes)}) — expected states, or things the next "
-                    f"bootstrap handles itself"]
+        # The header makes the same promise the notes under it make, so it needs
+        # the same gate: on a durable machine the hook returns `skills: skipped`
+        # before it reads the lock, and the next bootstrap handles nothing. It
+        # printed `SURFACE durable` and then this, directly above a note whose
+        # own body says none of it happens here.
+        handles = ("expected states, or things the next bootstrap handles itself"
+                   if surface.kind == EPHEMERAL else
+                   "expected states, or things a bootstrap handles itself — "
+                   "whether one runs here is in the SURFACE block above")
+        out += ["", f"NOTES ({len(notes)}) — {handles}"]
         for note in notes:
             out.append(f"  [{note.kind}] {note.subject}{_whose(note, results)}")
             out += _para(note.detail, "      ")
