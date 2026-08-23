@@ -2065,7 +2065,7 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
          '-e` on `false || { mkdir -p /proc/nope/child; echo inner; }` '
          'exits 1 with `inner` never printed - so each of them is '
          'subject to the rule in its own right'),
-        ('echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"',
+        ('echo "::warning::the requirements-dev.txt install failed; unless pyyaml is already present the verdict will be unavailable"',
          'an `echo` to stdout - a `::warning::` annotation'),
         ('verdict=""',
          'a bare assignment - the degraded value a guard sets'),
@@ -2082,9 +2082,9 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         ('echo "no verdict, which follows from the clone failure annotated above; this run used the local recording alone"',
          'an `echo` to stdout - the empty capture a clone failure '
          'explains'),
-        ('echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the pyyaml install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
+        ('echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the dependency install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
          'an `echo` to stdout - a `::warning::` annotation'),
-        ('echo "::warning::could not compute the published account audit verdict - both clones and the pyyaml install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
+        ('echo "::warning::could not compute the published account audit verdict - both clones and the dependency install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
          'an `echo` to stdout - a `::warning::` annotation'),
         ('echo "published account audit reads: $verdict"',
          'an `echo` to stdout - the verdict this step read'),

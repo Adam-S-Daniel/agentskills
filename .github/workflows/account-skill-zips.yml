@@ -410,7 +410,7 @@ jobs:
             elif [ "$pip_ok" = no ]; then
               echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the dependency install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
             else
-              echo "::warning::could not compute the published account audit verdict - both clones and the pyyaml install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
+              echo "::warning::could not compute the published account audit verdict - both clones and the dependency install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."
             fi
           fi
           echo "published account audit reads: $verdict"
