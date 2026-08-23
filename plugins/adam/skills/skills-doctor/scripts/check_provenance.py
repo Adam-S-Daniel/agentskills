@@ -238,9 +238,21 @@ class Entry(NamedTuple):
 
 
 class Record(NamedTuple):
+    """The hook's install record, as much of it as the hook itself would use.
+
+    `skipped_names` is the names on entries the shape check REJECTED, and it is
+    carried because `entries` alone cannot tell "the record is silent about this
+    directory" from "the record names it in an entry the hook throws away". The
+    file on disk still holds the name in the second case, so a report that says
+    the record does not name it is falsifiable by opening the record the same
+    report is already complaining about with `record-entries-skipped`. Only
+    entries whose `name` is a string can contribute one; there is nothing to
+    carry otherwise, and `skipped` counts those too.
+    """
     state: str
     entries: Dict[str, Entry]
     skipped: int
+    skipped_names: Set[str] = frozenset()
 
 
 class Lock(NamedTuple):
@@ -738,13 +750,16 @@ def read_record(path: Path) -> Record:
 
     entries: Dict[str, Entry] = {}
     skipped = 0
+    skipped_names: Set[str] = set()
     for raw in record["installed"]:
         entry = _entry(raw)
         if entry is None:
             skipped += 1
+            if isinstance(raw, dict) and isinstance(raw.get("name"), str):
+                skipped_names.add(raw["name"])
             continue
         entries[entry.name] = entry
-    return Record(PRESENT, entries, skipped)
+    return Record(PRESENT, entries, skipped, skipped_names)
 
 
 def _entry(raw: object) -> Optional[Entry]:
@@ -956,10 +971,13 @@ def assign_origins(skills_dir: Path, names: List[str], record: Record,
     * The record names it in an entry the hook accepts: the hook says it
       installed this directory. That outranks the frontmatter — a recorded
       directory with a mistyped `name:` is the hook's, whatever the typo says.
-    * A lock declares it, so "no name-keyed channel here produced this" is
-      already false — the hook is about to overwrite the directory whatever its
-      frontmatter says. Its frontmatter agreeing with its basename lands here
-      too: there is no disagreement to measure.
+    * Some other name-keyed channel here names it, so "no name-keyed channel
+      produced this" is already false: a lock declares it — and the hook is
+      about to overwrite the directory whatever its frontmatter says — or the
+      record carries an entry for it that the hook's shape check REJECTED. The
+      rejected entry counts because `read_record` drops it from `entries` while
+      the file on disk still holds the name. Its frontmatter agreeing with its
+      basename lands here too: there is no disagreement to measure.
     * Otherwise its SKILL.md declares a name that is not its basename, and no
       name-keyed channel here could have produced it: FOREIGN.
     """
@@ -970,7 +988,8 @@ def assign_origins(skills_dir: Path, names: List[str], record: Record,
             assigned[name] = Origin(UNKNOWN)
         elif name in record.entries:
             assigned[name] = Origin(HOOK)
-        elif name in locked or name not in declared:
+        elif (name in locked or name in record.skipped_names
+                or name not in declared):
             assigned[name] = Origin(UNATTRIBUTED)
         else:
             assigned[name] = Origin(FOREIGN, declared[name])
@@ -1018,8 +1037,8 @@ def foreign_notes(origins: Dict[str, Origin],
             f"directories — and the registry's own CI refuses a skill whose "
             f"frontmatter name disagrees with its directory "
             f"(scripts/check_skills.py, kind name-dir-mismatch). No lock read "
-            f"here names it and the install record does not name it either. "
-            f"{collision} So "
+            f"here names it, and the install record does not name it: not in an "
+            f"entry the hook accepts, and not in one it skips. {collision} So "
             f"nothing this script can see delivered THIS directory, and it is "
             f"reported as a state rather than as something to fix: on a hosted "
             f"surface the harness seeds directories under this HOME before the "
