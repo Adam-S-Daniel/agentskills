@@ -183,8 +183,16 @@ def require_bash():
 
 
 _CASE_TOKEN = re.compile(r'(?<![\w.-])(?:case|esac)(?![\w.-])|;;&|;;|;&')
-_CASE_VERDICT = re.compile(r'(?<![\w.-])case\s+"\$verdict"\s+in(?![\w.-])')
-_CASE_SKILL = re.compile(r'(?<![\w.-])case\s+"\$SKILL"')
+# THE QUOTES ON THE WORD ARE OPTIONAL, because bash cannot see them. `case`
+# expands its word but does NOT field-split or pathname-expand the result -
+# verified: `v="a b"; case $v in "a b")` matches, and `v="*"; case $v in "*")`
+# matches the literal star - so `case $verdict in` and `case "$verdict" in`
+# are the same command. Requiring the quoted form made an editor's reformat
+# red 29 tests in one file and 11 in the other, which is the false red this
+# whole scanner exists to stop. (Contrast a case PATTERN, where the quotes are
+# load-bearing and `_unquote` keeps them on anything glob-like.)
+_CASE_VERDICT = re.compile(r'(?<![\w.-])case\s+"?\$verdict"?\s+in(?![\w.-])')
+_CASE_SKILL = re.compile(r'(?<![\w.-])case\s+"?\$SKILL"?(?![\w.-])')
 
 
 def _shell_scan(body):
@@ -471,6 +479,12 @@ _ARMS_OK = [
      _arm('case "$verdict" in\n  stale|missing|unreadable)',
           'case "$verdict" in stale|missing|unreadable)')),
     ("quoted-literals", _arm(_QUIET, '''  "fresh"|'unavailable'|"$drift")''')),
+    # The word, not a pattern. `case` expands its word and then neither splits
+    # nor globs the result, so the quotes here are invisible to bash - unlike
+    # the quotes on `"$drift"` two lines down, which are the difference between
+    # a literal and a pattern and are asserted for.
+    ("unquoted-case-word",
+     _arm('case "$verdict" in', 'case $verdict in')),
     ("comment-containing-a-terminator",
      _arm('  not-yet-bootstrapped)',
           '  # the arm below used to end in ;; on its own line\n'
@@ -1752,7 +1766,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         reds rather than passing quietly, and dropping a shape is exactly how
         the eleven false reds got in.
         """
-        assert len(_ARMS_OK) == 26, (
+        assert len(_ARMS_OK) == 27, (
             "a shape came out of the reformat set. Removing one is how a "
             "scanner starts false-reding on it again; add shapes freely and "
             "update this number, but do not take one out to make a helper "
@@ -2197,7 +2211,7 @@ class TestSkillInputIsValidatedBeforeUse:
         deleting admit cases ships a suite asserting nothing about injection.
         """
         snippet = self._guard()
-        assert snippet.count('case "$SKILL"') == 1, (
+        assert len(_CASE_SKILL.findall(snippet)) == 1, (
             f"the extracted snippet is not one SKILL guard:\n{snippet}"
         )
         assert snippet.rstrip().endswith("esac"), (
@@ -2211,6 +2225,44 @@ class TestSkillInputIsValidatedBeforeUse:
             "the extracted snippet admits a command separator, so it is not "
             "the guard"
         )
+
+    def test_the_guard_is_found_with_or_without_quotes_on_its_case_word(self):
+        """A reformat bash cannot see, on the OTHER workflow's guard.
+
+        `case` expands its word and then neither field-splits nor
+        pathname-expands the result, so `case $SKILL in` and `case "$SKILL" in`
+        are one command. The slice finder required the quoted form, which made
+        dropping the quotes red eleven tests in this class with "no longer a
+        command this test can find" - an honest message about a change bash
+        does not see, which is the false red this file's scanners exist to
+        remove.
+
+        BOTH FORMS ARE RUN rather than compared as text: the equivalence being
+        claimed is a runtime one, so the proof is that the unquoted slice still
+        admits a real name and still refuses a command separator.
+        """
+        body = next(
+            s["run"] for s in load(RECORD)["jobs"]["record"]["steps"]
+            if s.get("name") == "Resolve the run that built the artifact"
+        )
+        unquoted = body.replace('case "$SKILL"', "case $SKILL")
+        assert unquoted != body, (
+            "the guard no longer spells its word `case \"$SKILL\"`, so this "
+            "test is comparing one form against itself"
+        )
+        for label, variant in (("quoted", body), ("unquoted", unquoted)):
+            text, mask = _shell_scan(variant)
+            opener, _, closer = _case_block(
+                text, mask, _CASE_SKILL,
+                f"the {label} form of the SKILL guard was not found",
+            )
+            snippet = variant[opener.start():closer.end()]
+            assert self._run(snippet, "sync-skills") == 0, (
+                f"the {label} slice refuses a real declared name"
+            )
+            assert self._run(snippet, "sync-skills;id") != 0, (
+                f"the {label} slice admits a command separator"
+            )
 
     @pytest.mark.parametrize("name", [
         "sync-skills", "wj-next-break", "pdf-ocr-audit",
