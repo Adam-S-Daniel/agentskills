@@ -152,6 +152,54 @@ def canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+# A bare distribution name (PEP 508), and a version with nothing trailing it.
+# Both halves are checked: `pytest-cov[toml]==7.0.0` used to be read as the
+# name `pytest-cov[toml]` pinned to `7.0.0` and passed, even though an extra
+# pulls in requirements this file does not name.
+REQUIREMENT_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+REQUIREMENT_VERSION = re.compile(r"[0-9][0-9A-Za-z.+!-]*")
+
+
+def parse_requirements(text: str, source: str = "requirements-dev.txt") -> dict:
+    """{canonical name: version}, asserting the shape of every line it reads.
+
+    Takes the text rather than reading the file so the shapes it rejects can
+    be tested without writing into requirements-dev.txt.
+    """
+    declared = {}
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        assert "==" in line, (
+            f"{source}:{lineno}: `{line}` is not an exact pin. "
+            f"AGENTS.md requires `name==version`; a range or a bare name lets "
+            f"CI resolve to whatever is newest at job time."
+        )
+        name, _, version = line.partition("==")
+        name, version = name.strip(), version.strip()
+        assert REQUIREMENT_NAME.fullmatch(name), (
+            f"{source}:{lineno}: `{name}` is not a bare distribution name. An "
+            f"extra (`pytest-cov[toml]`) installs requirements this file does "
+            f"not name, so the set CI gets stops being the set written here."
+        )
+        key = canonical(name)
+        assert key not in declared, (
+            f"{source}:{lineno}: `{name}` is pinned twice, "
+            f"so the file no longer states one version for it."
+        )
+        assert version, f"{source}:{lineno}: empty version."
+        assert REQUIREMENT_VERSION.fullmatch(version), (
+            f"{source}:{lineno}: `{name}` is pinned to `{version}`, which is "
+            f"not a plain version. An environment marker or anything else "
+            f"trailing the version makes what CI installs depend on the "
+            f"runner rather than on this line."
+        )
+        declared[key] = version
+    assert declared, f"{source} declares nothing."
+    return declared
+
+
 def declared_requirements() -> dict:
     """{canonical name: version} read out of requirements-dev.txt.
 
@@ -159,27 +207,7 @@ def declared_requirements() -> dict:
     the requirements file is part of the set these tests enforce as soon as it
     lands there.
     """
-    declared = {}
-    for lineno, raw in enumerate(
-            REQUIREMENTS.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        assert "==" in line, (
-            f"requirements-dev.txt:{lineno}: `{line}` is not an exact pin. "
-            f"AGENTS.md requires `name==version`; a range or a bare name lets "
-            f"CI resolve to whatever is newest at job time."
-        )
-        name, _, version = line.partition("==")
-        key = canonical(name.strip())
-        assert key not in declared, (
-            f"requirements-dev.txt:{lineno}: `{name.strip()}` is pinned twice, "
-            f"so the file no longer states one version for it."
-        )
-        assert version.strip(), f"requirements-dev.txt:{lineno}: empty version."
-        declared[key] = version.strip()
-    assert declared, "requirements-dev.txt declares nothing."
-    return declared
+    return parse_requirements(REQUIREMENTS.read_text(encoding="utf-8"))
 
 
 def governed_files(root=REPO_ROOT):
@@ -558,16 +586,40 @@ def test_no_pip_install_hides_where_the_parsed_walk_cannot_see_it(path):
 
 
 def test_every_declared_requirement_is_pinned_exactly():
-    """declared_requirements() asserts the shape of every line as it reads
-    them; this is the test that makes those assertions run even on a day when
-    no workflow names a package and the drift test returns early."""
-    declared = declared_requirements()
-    for name, version in declared.items():
-        assert re.fullmatch(r"[0-9][0-9A-Za-z.+!-]*", version), (
-            f"requirements-dev.txt pins {name} to `{version}`, which is not a "
-            f"plain version. An environment marker, extra or URL here would "
-            f"make what CI installs depend on the runner."
-        )
+    """parse_requirements() asserts the shape of every line as it reads them;
+    this is the test that makes those assertions run even on a day when no
+    workflow names a package and the drift test returns early."""
+    assert declared_requirements()
+
+
+REJECTED_REQUIREMENT_LINES = [
+    ("pytest-cov[toml]==7.0.0", "bare distribution name"),
+    ('requests==2.32.3 ; python_version < "3.13"', "plain version"),
+    ("requests>=2.32.3", "exact pin"),
+    ("requests", "exact pin"),
+    ("requests @ https://example.com/requests.whl", "exact pin"),
+    ("-r other-requirements.txt", "exact pin"),
+    ("requests==", "empty version"),
+    ("pyyaml==6.0.3\nPyYAML==6.0.1", "pinned twice"),
+    ("# nothing but a comment", "declares nothing"),
+]
+
+
+@pytest.mark.parametrize("text, expected", REJECTED_REQUIREMENT_LINES)
+def test_a_requirement_line_that_is_not_one_exact_pin_is_rejected(text, expected):
+    """The extras case is the one that used to pass: `pytest-cov[toml]` was
+    read as the name and `7.0.0` satisfied the version check, so a line
+    pulling in unnamed requirements was green."""
+    with pytest.raises(AssertionError) as raised:
+        parse_requirements(text, source="fixture")
+    assert expected in str(raised.value)
+
+
+def test_the_pins_a_requirements_file_may_hold_still_parse():
+    assert parse_requirements(
+        "# a comment\n\npyyaml==6.0.3  # trailing comment\n"
+        "markdown-it-py==4.2.0\nPyYAML_x==1.0.0rc1\n"
+    ) == {"pyyaml": "6.0.3", "markdown-it-py": "4.2.0", "pyyaml-x": "1.0.0rc1"}
 
 
 # --- the recogniser's own tests -------------------------------------------
