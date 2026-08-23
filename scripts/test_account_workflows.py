@@ -311,14 +311,35 @@ def _case_block(text, mask, opener_re, what):
     return opener, spans, closer
 
 
-def _unquote(token):
-    """One `case` pattern with a symmetric pair of surrounding quotes removed.
+# The three characters that make a `case` pattern a PATTERN. Quoting any of
+# them takes that away, which is why `_unquote` refuses to touch a token that
+# holds one.
+_GLOB_META = "*?["
 
-    `"fresh"`, `'fresh'` and `fresh` are one pattern to bash. Only ever
-    applied to a LITERAL - see the caller for why an expansion keeps its
-    quotes.
+
+def _unquote(token):
+    """One `case` pattern with a symmetric pair of surrounding quotes removed -
+    but only where the quotes are invisible to bash.
+
+    `"fresh"`, `'fresh'` and `fresh` are one pattern, so the set comparison in
+    the caller must not tell them apart. `"*"` and `*` are NOT one pattern:
+    quoting turns the catch-all into a match on a literal asterisk. Measured:
+    `case wat in "*") echo hit ;; esac` prints nothing and exits 0, while the
+    unquoted form prints `hit`.
+
+    So the quotes come off only when the token holds no `*`, `?` or `[`, and
+    stay on otherwise - where staying on is what makes the token compare
+    unequal to `*` and to every status name, so the caller reds instead of
+    accepting a `case` whose unknown-verdict arm matches nothing. Stripping
+    them unconditionally is the silent-green hole
+    test_the_case_block_names_every_status_the_module_knows exists to close,
+    and `_ARMS_RED` holds both quotings of it.
+
+    Only ever applied to a LITERAL - see the caller for why an expansion keeps
+    its quotes.
     """
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+    if (len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'"
+            and not any(ch in _GLOB_META for ch in token[1:-1])):
         return token[1:-1]
     return token
 
@@ -501,6 +522,16 @@ _ARMS_RED = [
     ("the drift arm through an UNQUOTED expansion",
      _arm(_QUIET, '  fresh|unavailable|$drift)')),
     ("no catch-all arm at all", _arm('  *)\n' + _CATCHALL + '\n', '')),
+    # THE CATCH-ALL THAT IS NOT ONE, in both quotings. Quoting a `*` is not a
+    # reformat: bash matches a literal asterisk and every unknown verdict
+    # falls through the block in silence. It belongs HERE and not in
+    # `_ARMS_OK` for that reason - a scanner that strips quotes off any
+    # literal reads this as a catch-all and goes green on a workflow whose
+    # unknown-verdict arm is dead.
+    ("the catch-all arm through a DOUBLE-QUOTED star",
+     _arm('  *)', '  "*")')),
+    ("the catch-all arm through a SINGLE-QUOTED star",
+     _arm('  *)', "  '*')")),
     ("an arm the module knows but the case does not",
      _arm('  stale|missing|unreadable)', '  stale|missing)')),
 ]
