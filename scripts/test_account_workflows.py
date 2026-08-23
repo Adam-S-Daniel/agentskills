@@ -188,7 +188,7 @@ _CASE_TOKEN = re.compile(r'(?<![\w.-])(?:case|esac)(?![\w.-])|;;&|;;|;&')
 # verified: `v="a b"; case $v in "a b")` matches, and `v="*"; case $v in "*")`
 # matches the literal star - so `case $verdict in` and `case "$verdict" in`
 # are the same command. Requiring the quoted form made an editor's reformat
-# red 29 tests in one file and 11 in the other, which is the false red this
+# red most of the tests reading each workflow, which is the false red this
 # whole scanner exists to stop. (Contrast a case PATTERN, where the quotes are
 # load-bearing and `_unquote` keeps them on anything glob-like.)
 _CASE_VERDICT = re.compile(r'(?<![\w.-])case\s+"?\$verdict"?\s+in(?![\w.-])')
@@ -219,7 +219,7 @@ def _shell_scan(body):
     `;;` with it; a whole-text masker then sees a string left open and reads
     the rest of the block - including the real `esac` - as data. The shipped
     helper passes that shape. A composed one does not, and it blames the
-    `case` block for damage done fifteen lines above it.
+    `case` block for damage done in an arm above it.
 
     The two remedies that look right and were measured wrong: resetting quote
     state at each newline reds every wrapped string, including ones with no
@@ -444,7 +444,7 @@ def _splice(block):
     return body[:opener.start()] + block + body[closer.end():]
 
 
-# The shipped `case`, reduced to its four arms: the fixtures below are this
+# The shipped `case`, reduced to its arms: the fixtures below are this
 # block with ONE thing about its formatting changed. Shorter warning text than
 # the real step's, because what is under test is the shape.
 _ARMS_BASE = '''case "$verdict" in
@@ -481,11 +481,13 @@ def _arm(old, new, count=1):
 # anything - so a typo in a fixture reds as a typo rather than masquerading as
 # a helper bug.
 #
-# ELEVEN OF THEM WERE RED before the scanners started reading code instead of
-# text, which is the whole case for this set existing. The false red is the
-# expensive direction: it accuses an author of moving skills-evals' vocabulary
-# when all they did was wrap a line, and the message it accuses them with
-# points at the `case` block rather than at the reformat.
+# MANY OF THEM RED on a scanner that reads the block as TEXT rather than as
+# code, and that is the whole case for this set existing. No count here:
+# nothing in this repo can run the old scanner, so a number would be
+# unasserted prose about a thing that no longer exists - see #120. The false
+# red is the expensive direction: it accuses an author of moving skills-evals'
+# vocabulary when all they did was wrap a line, and the message it accuses
+# them with points at the `case` block rather than at the reformat.
 #
 # THE SET SHRINKING IS HOW THE FALSE REDS GOT HERE, so its length is asserted
 # by test_the_regression_set_did_not_shrink. That is the one count in this
@@ -1862,11 +1864,11 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             self, tmp_path, monkeypatch, name, block):
         """A REFORMAT MUST NOT READ AS A CROSS-REPO VOCABULARY DRIFT.
 
-        Every block here is bash-identical to the shipped one: the same four
-        arms, the same seven patterns, the same quoted expansion. Eleven of
-        them red on a scanner that reads the block as TEXT, and the message it
-        reds with says the `case` and account_zip_selection.py disagree about
-        which statuses exist - which sends the reader to diff two files over a
+        Every block here is bash-identical to the shipped one: the same
+        arms, the same patterns, the same quoted expansion. Many of them red
+        on a scanner that reads the block as TEXT, and the message it reds
+        with says the `case` and account_zip_selection.py disagree about which
+        statuses exist - which sends the reader to diff two files over a
         wrapped line.
 
         The `bash -n` gate first, so a broken fixture cannot masquerade as a
@@ -1884,7 +1886,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         """The other half, without which the set above is a licence to accept.
 
         A scanner that admits every reformat by admitting everything would
-        pass all 23 cases above and hold nothing. These four are real
+        pass every case above and hold nothing. The ones here are real
         divergences and must still fail.
 
         The UNQUOTED `$drift` case is the sharpest of them. The helper strips
@@ -2155,12 +2157,13 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         repo can see - prepends a line and `echo "status=$verdict"` writes a
         two-line entry whose second line has no `=`. The runner parses that
         file line by line and REJECTS it: the step dies instead of degrading,
-        which is the one outcome this whole block exists to avoid. The last
-        two cases are what exercise it, and on the untrimmed step they wrote
-        two lines while both of the assertions below still passed.
+        which is the one outcome this whole block exists to avoid. The
+        cases holding an embedded newline are what exercise it, and on the
+        untrimmed step they wrote two lines while both of the assertions below
+        still passed.
 
-        This is the same fault this workflow already documents twenty lines
-        further down for `drift`, where a test executes the read. This capture
+        The workflow documents this same fault a second time, further down,
+        for the `drift` read - where a test already executes it. This capture
         had nothing.
         """
         _, out = self._run(tmp_path, verdict)
@@ -2383,8 +2386,8 @@ class TestSkillInputIsValidatedBeforeUse:
         # THE SAME BOUNDARY RULE, because this slice is EXECUTED and a wrong
         # boundary here fails in the direction that hides itself. A truncated
         # slice is broken bash: it returns non-zero for EVERY input, so
-        # test_it_admits_every_real_declared_name goes red - loud - while all
-        # six refusals below PASS VACUOUSLY, proving the guard rejects
+        # test_it_admits_every_real_declared_name goes red - loud - while
+        # every refusal below PASSES VACUOUSLY, proving the guard rejects
         # `sync-skills;id` with a snippet that also rejects `sync-skills`.
         # Anyone who "fixes" the red by trimming the admit list ships a suite
         # that asserts nothing about the injection guard. An EMPTY slice is the
@@ -2427,8 +2430,8 @@ class TestSkillInputIsValidatedBeforeUse:
 
         NOT a `bash -n` control, which is the obvious shape and a strict
         subset of a test that already exists: a truncated slice is broken
-        bash, so it returns non-zero for every input and reds all four
-        test_it_admits_every_real_declared_name cases already. `bash -n`
+        bash, so it returns non-zero for every input and reds every
+        test_it_admits_every_real_declared_name case already. `bash -n`
         failing therefore tells you nothing new, and `bash -n` PASSING tells
         you nothing at all - `case "$SKILL" in *) exit 1 ;; esac` is valid
         bash that refuses everything and sails through it.
@@ -2436,8 +2439,9 @@ class TestSkillInputIsValidatedBeforeUse:
         Pairing one admit with one refusal in ONE body is what cannot be
         defeated by trimming the admit list, which is the failure mode this
         guards: the vacuous slice reds loudly in the admit tests and passes
-        VACUOUSLY in all six refusals, so a reader who "fixes" the red by
-        deleting admit cases ships a suite asserting nothing about injection.
+        VACUOUSLY in every refusal below, so a reader who "fixes" the red
+        by deleting admit cases ships a suite asserting nothing about
+        injection.
         """
         snippet = self._guard()
         assert len(_CASE_SKILL.findall(snippet)) == 1, (
@@ -2460,11 +2464,10 @@ class TestSkillInputIsValidatedBeforeUse:
 
         `case` expands its word and then neither field-splits nor
         pathname-expands the result, so `case $SKILL in` and `case "$SKILL" in`
-        are one command. The slice finder required the quoted form, which made
-        dropping the quotes red eleven tests in this class with "no longer a
-        command this test can find" - an honest message about a change bash
-        does not see, which is the false red this file's scanners exist to
-        remove.
+        are one command. The slice finder required the quoted form, so
+        dropping the quotes reded this whole class with "no longer a command
+        this test can find" - an honest message about a change bash does not
+        see, which is the false red this file's scanners exist to remove.
 
         BOTH FORMS ARE RUN rather than compared as text: the equivalence being
         claimed is a runtime one, so the proof is that the unquoted slice still
