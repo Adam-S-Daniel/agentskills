@@ -1685,14 +1685,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # registry key and never replaces the inherited array, so folding it in
     # would make the one flag that can fix a federated pin an error alongside
     # the only flag it means anything with.
-    if args.repin_source and not args.repin:
+    # `is not None`, never truthiness, in all three: argparse leaves an unpassed
+    # flag as None, so presence is what these guards are about and an EMPTY
+    # value is still a value the caller passed. `--only "$REG"` with an unset
+    # REG is the ordinary route in a shell caller — which the fleet bumper is —
+    # so the empty string is the failure mode of the intended input, not an
+    # exotic one. Testing truth let `--only ''` slip both guards and degrade a
+    # run into a DIFFERENT command silently: on a plain generate, one that
+    # rebuilds the lock from the command line alone, de-federating it and
+    # resetting `registry` to DEFAULT_REGISTRY at exit 0 with --check green
+    # afterwards. (`--repin-source ''` was safe only by accident — argparse's
+    # append action makes it the truthy `['']` — and is spelled the same way
+    # here so the next flag added beside it copies the right pattern.)
+    if args.repin_source is not None and not args.repin:
         parser.error(
             "--repin-source advances a pin the lock already carries, so it only "
             "means anything alongside --repin; a plain generate states its "
             "sources with --source.")
-    if args.only and not args.check_current:
+    if args.only is not None and not args.check_current:
         parser.error("--only scopes --check-current; pass it alongside that flag.")
-    if args.only and (args.check or args.check_format):
+    if args.only is not None and (args.check or args.check_format):
         parser.error(
             "--only scopes --check-current alone. --check compares the WHOLE "
             "document and --check-format reads the file alone, so neither can be "
