@@ -565,8 +565,11 @@ def _shell_scan(body):
 # Each is the smallest faithful version of the idea rather than a straw man:
 # same signature, same return contract, same comment-opening rule - every
 # scanner in this file asks `_WordParens` and `_COMMENT_OPENS_AFTER` the same
-# question - differing only in where quote state is tracked. A model that also
-# differed in where a comment opens would be discriminated by the wrong half.
+# question, and the same backslash rule - `_shell_scan`'s mask keeps a line
+# continuation and blanks an escape, and so do these - differing only in where
+# quote state is tracked. A model that also differed in where a comment opens,
+# or in what the mask says about a backslash, would be discriminated by the
+# wrong half.
 
 
 def _model_per_line_quotes(body):
@@ -583,10 +586,13 @@ def _model_per_line_quotes(body):
             i += 1
             continue
         if ch == "\\" and quote != "'":
-            mask[i] = " "
-            if i + 1 < n and body[i + 1] != "\n":
-                mask[i + 1] = " "
-                parens.saw(body, i + 1, True)
+            if i + 1 < n and body[i + 1] == "\n":
+                mask[i] = "\\"
+            else:
+                mask[i] = " "
+                if i + 1 < n:
+                    mask[i + 1] = " "
+                    parens.saw(body, i + 1, True)
             i += 2
             continue
         if quote:
@@ -625,9 +631,12 @@ def _model_strip_then_mask(body):
     while i < n:
         ch = text[i]
         if ch == "\\" and quote != "'":
-            mask[i] = " "
-            if i + 1 < n and text[i + 1] != "\n":
-                mask[i + 1] = " "
+            if i + 1 < n and text[i + 1] == "\n":
+                mask[i] = "\\"
+            else:
+                mask[i] = " "
+                if i + 1 < n:
+                    mask[i + 1] = " "
             i += 2
             continue
         if quote:
@@ -655,9 +664,12 @@ def _model_mask_then_strip(body):
     while i < n:
         ch = body[i]
         if ch == "\\" and quote != "'":
-            mask[i] = " "
-            if i + 1 < n and body[i + 1] != "\n":
-                mask[i + 1] = " "
+            if i + 1 < n and body[i + 1] == "\n":
+                mask[i] = "\\"
+            else:
+                mask[i] = " "
+                if i + 1 < n:
+                    mask[i + 1] = " "
             i += 2
             continue
         if quote:
@@ -3681,6 +3693,27 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         "strip-then-mask": _model_strip_then_mask,
         "mask-then-strip": _model_mask_then_strip,
     }
+
+    def test_every_rejected_model_reads_a_backslash_as_the_scanner_does(self):
+        """The one axis these models may differ on is quote tracking.
+
+        The comment above them says so, and the matrix below only means what
+        it says while it is true: a model that also disagreed about what the
+        mask says for a backslash would be caught - or missed - by the wrong
+        half of a fixture. The mask distinguishes a line continuation from an
+        escaped backslash, which is a rule none of these three is a variant
+        of, so all four scanners have to give the same answer for it.
+        """
+        for name, body, _printed, _commands in \
+                TestEveryFailableCommandInTheAuditStepIsGuarded._BACKSLASH_PAIR:
+            expected = _shell_scan(body)[1]
+            for model_name, model in self._REJECTED_MODELS.items():
+                assert model(body)[1] == expected, (
+                    f"`{model_name}` disagrees with `_shell_scan` about the "
+                    f"mask for `{name}`: {model(body)[1]!r} against "
+                    f"{expected!r}. These models exist to differ in ONE way, "
+                    f"and this is not it."
+                )
 
     # WHICH FIXTURE CATCHES WHICH REJECTED MODEL - THE WHOLE MATRIX, not only
     # the cells that hold. `_shell_scan`'s docstring names the pairings and
