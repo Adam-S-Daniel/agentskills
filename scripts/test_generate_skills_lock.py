@@ -2832,6 +2832,40 @@ def test_repin_source_honours_source_repo_for_an_out_of_tree_clone(
     assert json.loads(out.read_text(encoding="utf-8"))["sources"][0]["ref"] == advanced
 
 
+def test_repin_source_refuses_a_checkout_that_is_not_the_source_it_names(
+        federated, tmp_path):
+    """The identity probe the primary's --repin has, applied per source.
+
+    A sibling directory of the right NAME is not proof of the right
+    repository: a fork, or a same-named repo under another owner, sits at
+    `../cms-platform` just as happily. Every source this flag does not name is
+    still probed by accident downstream — plan_sources resolves its inherited
+    pin in that clone and fails there — but the named source's pin is REPLACED
+    before plan_sources sees it, so the wrong clone's HEAD is written under the
+    right registry's name at exit 0. The commit the lock already pins is the
+    probe, exactly as it is for the primary.
+    """
+    primary, _, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+    before = out.read_text(encoding="utf-8")
+
+    # A DIFFERENT repository at the same sibling path, so the default
+    # `../<repo-name>` lookup finds it and the lock's registry string still
+    # matches. Its HEAD resolves; the commit the lock pins does not exist.
+    shutil.rmtree(extra)
+    decoy_sha = make_registry(extra, {"cms-platform/deploy": SKILL_C}, layout="skills")
+    assert decoy_sha != extra_sha
+
+    proc = run_generator("--repo", str(primary), "--repin",
+                         "--repin-source", f"{extra.resolve().as_uri()}@", "-o", str(out))
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert extra_sha in proc.stderr, proc.stderr
+    assert "is not that registry" in proc.stderr, proc.stderr
+    assert out.read_text(encoding="utf-8") == before
+    assert decoy_sha not in out.read_text(encoding="utf-8")
+
+
 def test_repin_source_with_a_missing_checkout_leaves_the_lock_untouched(
         federated, tmp_path):
     """A re-pin that cannot read the new content must write nothing at all.

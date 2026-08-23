@@ -828,6 +828,31 @@ def _apply_repin_sources(
                 f"{source['registry']}: no checkout at {path} — clone it there, or point "
                 f"at it with --source-repo '{','.join(source['bundles'])}=<path>'"
             )
+        # The same identity probe the primary's --repin does before it writes,
+        # and for the same reason: the lock names a registry, the sibling
+        # lookup (or --source-repo) names a directory, and NOTHING else ties
+        # the two together. A fork, or a same-named repo under a different
+        # owner, sits at `../cms-platform` just as happily, and `HEAD` resolves
+        # in any git repo at all — so without this the wrong clone's HEAD is
+        # written under the right registry's name at exit 0, and --check is
+        # green afterwards because it re-derives from that same wrong clone.
+        # The pin the lock ALREADY carries is the proof: a checkout that is
+        # this registry has that commit.
+        #
+        # Every source this flag does NOT name gets the equivalent check for
+        # free downstream — plan_sources resolves its inherited ref in this
+        # same clone and fails there. The named source is precisely the one
+        # that loses it, because its ref is replaced before plan_sources sees
+        # it. This restores the guard rather than adding one.
+        if _git(path, "cat-file", "-e", f"{source['ref']}^{{commit}}").returncode != 0:
+            raise GeneratorError(
+                f"{path} does not contain {source['ref']}, the commit this lock pins for "
+                f"'{source['registry']}' — so this checkout is not that registry, and "
+                "re-pinning from it would write a commit the registry does not have (the "
+                "hook then cannot fetch it, and every consumer session reports DEGRADED). "
+                f"Point --source-repo '{','.join(source['bundles'])}=<path>' at a clone of "
+                "that registry, or fetch the pinned commit into this one."
+            )
         # Resolved HERE, so the literal `HEAD` can never reach the extras array
         # and be written into a lock: an extra source has no `generated_from` to
         # record a resolution in, so an unresolved ref there is the one unpinned
