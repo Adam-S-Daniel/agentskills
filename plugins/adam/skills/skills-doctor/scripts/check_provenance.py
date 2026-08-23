@@ -114,6 +114,23 @@ PRESENT, ABSENT, UNREADABLE = "present", "absent", "unreadable"
 REJECTED = "rejected"
 
 UNCHANGED, EDITED, UNMEASURABLE = "unchanged", "edited", "unmeasurable"
+# The fourth integrity reading, and it exists because the third one reddened an
+# ordinary workflow. `digest_skill_dir` covers the whole directory, which is
+# what the hook compares — so running a skill's own suite from the installed
+# copy at `~/.claude/skills/<skill>/scripts`, which `_walk_up`'s docstring
+# blesses, drops a `__pycache__` and a `.pytest_cache` beside the scripts and
+# turns the doctor permanently red with `edited-and-locked`. The finding is
+# true and useless: nothing a reader would want back is at stake.
+#
+# The separating measurement is `digest_shared_payload`, which is
+# `digest_skill_dir`'s manifest algorithm over the files an upload carries.
+# Comparing it to a whole-directory digest is normally a lie (its own docstring
+# says so) — but comparing EQUAL is not. Any filtered file present when the
+# hook recorded the digest is inside that digest and excluded from this one, so
+# equality can only hold when there were none then, none of the remaining files
+# has changed, and none has been added or removed. It is an extra fact, not a
+# weakened one.
+ARTEFACTS_ONLY = "unchanged-but-for-build-artefacts"
 # FOREIGN is the fourth origin, and it is named for what was MEASURED rather
 # than for who is suspected. The measurement is that the directory's SKILL.md
 # declares a `name:` other than the directory's own basename, and every channel
@@ -179,7 +196,8 @@ OBSERVATION_KINDS: Dict[str, Tuple[str, ...]] = {
     "lock-expectation": ("untracked", "hand-placed-over-locked",
                          "stale-out-of-scope", "stale"),
     "integrity": ("edited-and-locked", "unmeasurable-and-locked",
-                  "edited-and-stale", "unmeasurable-and-stale"),
+                  "edited-and-stale", "unmeasurable-and-stale",
+                  "artefacts-and-locked", "artefacts-and-stale"),
     "shadow": ("shadow-copies-differ", "shadowed-by-the-account-store"),
     "foreign": ("foreign",),
 }
@@ -1222,6 +1240,8 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             integrity = UNMEASURABLE
         elif measured == entry.digest:
             integrity = UNCHANGED
+        elif digest_shared_payload(skills_dir / name) == entry.digest:
+            integrity = ARTEFACTS_ONLY
         else:
             integrity = EDITED
         rows.append(Row(name, HOOK, entry.registry, entry.bundle, integrity, in_lock))
@@ -1229,12 +1249,23 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
         if not expected:
             continue
         in_scope = (entry.registry, entry.bundle) in lock.claims
-        if in_lock and integrity != UNCHANGED:
+        if in_lock and integrity in (EDITED, UNMEASURABLE):
             findings.append(_observed(
                 f"{integrity}-and-locked", HOOK, name,
                 f"{_cause(integrity)} and the lock still names it. The directory "
                 f"does not survive the next session start, so any local change "
                 f"here is lost without a prompt."))
+        elif in_lock and integrity == ARTEFACTS_ONLY:
+            notes.append(_observed(
+                "artefacts-and-locked", HOOK, name,
+                "every file an upload would carry is byte-for-byte the one the "
+                "hook installed, and the only difference is files the upload "
+                "filter drops — a __pycache__, a .pytest_cache, a .pyc. The hook "
+                "digests the whole directory, so it still sees a mismatch: the "
+                "directory is replaced at the next session start and those go "
+                "with it. No instruction byte is at risk, which is why this is "
+                "a note rather than the edited-and-locked finding. Running a "
+                "test suite from inside an installed skill is one way here."))
         elif in_lock:
             continue
         elif not in_scope:
@@ -1250,7 +1281,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 f"scoped to what the lock claims, so nothing here will ever "
                 f"clean it up — and the hook does not mention it either, because "
                 f"it is not in scope to have an opinion."))
-        elif integrity != UNCHANGED:
+        elif integrity in (EDITED, UNMEASURABLE):
             findings.append(_observed(
                 f"{integrity}-and-stale", HOOK, name,
                 f"{_cause(integrity)} and it has left the lock. The hook leaves "
@@ -1258,6 +1289,16 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 f"— but what preserves it is the MISMATCH, not having left the "
                 f"lock: restore the original bytes and the next run removes it. "
                 f"Move it out of the store to keep it."))
+        elif integrity == ARTEFACTS_ONLY:
+            notes.append(_observed(
+                "artefacts-and-stale", HOOK, name,
+                "it has left the lock, and every file an upload would carry is "
+                "byte-for-byte the one the hook installed — but files the upload "
+                "filter drops (a __pycache__, a .pytest_cache) make the hook's "
+                "whole-directory digest differ, and the hook keeps whatever it "
+                "cannot show it installed unchanged. So the removal this would "
+                "otherwise get does not happen. Delete those and the next run "
+                "cleans it up."))
         else:
             notes.append(_observed(
                 "stale", HOOK, name,

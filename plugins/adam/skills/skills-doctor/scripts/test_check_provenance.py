@@ -172,7 +172,10 @@ def _walk_up(relpath: str):
 
     This file ships inside the skill, so it legitimately runs from an installed
     copy at `~/.claude/skills/skills-doctor/scripts` where the registry's own
-    `scripts/` are absent — there, skipping is right. Inside a registry checkout
+    `scripts/` are absent — there, skipping is right. (That run leaves a
+    `__pycache__` and a `.pytest_cache` in the installed directory. The doctor
+    reports them as an `artefacts-and-locked` NOTE and stays at exit 0; it used
+    to call the directory edited and hold the exit code at 1 forever.) Inside a registry checkout
     it is not: the two tests that use this are the only ones binding the digest
     and the record format to the real hook, and a skip would retire them silently
     at exactly the moment they broke. So a checkout-shaped path FAILS instead.
@@ -3235,6 +3238,215 @@ def test_crlf_on_both_sides_is_described_as_being_on_both_sides(tmp_path, capsys
     code, out = run(store, lock, capsys)
     assert code == 0, out
     assert "both carry CRLF, and they disagree about where" in flat(out), out
+
+
+# ---------------------------------------------------------------------------
+# a build artefact is not an edit (#123's class, one channel over)
+# ---------------------------------------------------------------------------
+
+def test_running_a_suite_inside_an_installed_skill_does_not_make_it_edited(
+        tmp_path, capsys, ephemeral):
+    """The documented workflow that turned the doctor permanently red.
+
+    `_walk_up`'s docstring blesses running this suite from the installed copy at
+    `~/.claude/skills/skills-doctor/scripts`. Doing so writes `__pycache__` and
+    `.pytest_cache` beside the scripts, the whole-directory digest stops
+    matching the record, and every later run reports `edited-and-locked` at exit
+    1 with nothing wrong and nothing to restore. Reddening an ordinary session
+    is the defect #123 exists to remove, whichever finding does it.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+    _artefacts(store / "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "FINDINGS (0)" in out, out
+    assert "[edited-and-locked] alpha" not in out, out
+    assert "[artefacts-and-locked] alpha" in out, out
+    # The consequence is still real and still stated: the hook digests the whole
+    # directory, so it replaces this one anyway.
+    assert "replaced at the next session start" in flat(out), out
+
+
+def test_an_edit_beside_a_build_artefact_is_still_edited(tmp_path, capsys,
+                                                         ephemeral):
+    """The negative control, and the one that matters most.
+
+    A reading that answered "artefacts only" whenever any artefact was present
+    would pass the test above and silently stop reporting real edits — the
+    integrity column going quietly wrong is what the install record exists to
+    prevent.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+    _artefacts(store / "alpha")
+    (store / "alpha" / "SKILL.md").write_text(
+        "---\nname: alpha\n---\nedited body\n", encoding="utf-8")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[edited-and-locked] alpha" in out, out
+    assert "[artefacts-and-locked] alpha" not in out, out
+
+
+def test_a_filtered_file_present_at_install_is_not_read_as_an_artefact(
+        tmp_path, capsys, ephemeral):
+    """The second negative control: equality is the claim, not the filter.
+
+    `digest_shared_payload` drops `.b64` files, so a skill that SHIPPED one and
+    has had it rewritten is a directory whose uploaded set is unchanged. It is
+    still an edit — and the equality catches it, because the recorded
+    whole-directory digest included that file and the payload digest excludes
+    it, so the two cannot compare equal. Asserting it here is what stops the
+    argument in `ARTEFACTS_ONLY`'s comment from being prose nobody checked.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    (store / "alpha" / "payload.b64").write_bytes(b"QUFB")
+    write_record(store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+    before = prov.digest_shared_payload(store / "alpha")
+    (store / "alpha" / "payload.b64").write_bytes(b"QkJC")
+    # The premise: the filter really does drop it, so the uploaded set is
+    # unchanged by an edit that the whole-directory digest does see.
+    assert prov.digest_shared_payload(store / "alpha") == before
+    assert prov.digest_skill_dir(store / "alpha") != before
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[edited-and-locked] alpha" in out, out
+    assert "artefacts-and-locked" not in out, out
+
+
+def test_a_stale_skill_a_build_artefact_keeps_alive_says_so(tmp_path, capsys,
+                                                            ephemeral):
+    """Out of the lock and preserved by a cache directory — a note, and a why.
+
+    The hook keeps what it cannot show it installed unchanged, so the artefact
+    silently cancels the removal the plain `stale` note promises. Reporting it
+    as plain `stale` would tell the reader the next bootstrap removes it, which
+    is exactly what will not happen.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "beta")
+    write_record(store, "alpha", "beta")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+    _artefacts(store / "beta")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "[artefacts-and-stale] beta" in out, out
+    assert "[stale] beta" not in out, out
+    assert "the removal this would otherwise get does not happen" in flat(out), out
+
+
+# ---------------------------------------------------------------------------
+# the central property: no ordinary session may red
+# ---------------------------------------------------------------------------
+
+def _ordinary_nothing_declared(tmp_path):
+    """A store with a skill in it and no lock: nothing to fall short of."""
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    return store, tmp_path / "skills.lock"
+
+
+def _ordinary_hook_delivered_the_lock(tmp_path):
+    """The healthy ephemeral session: the hook installed exactly what is locked."""
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "beta")
+    write_record(store, "alpha", "beta")
+    return store, write_lock(tmp_path / "skills.lock", store, "alpha", "beta")
+
+
+def _ordinary_shadowed_by_the_account_store(tmp_path):
+    """#122's session: every locked skill also arrives from the account store."""
+    return shadowed_store(tmp_path)
+
+
+def _ordinary_suite_run_from_the_installed_copy(tmp_path):
+    """#123's class: a documented workflow left build artefacts behind."""
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+    _artefacts(store / "alpha")
+    return store, lock
+
+
+def _ordinary_harness_seeded_a_directory(tmp_path):
+    """#123 itself: the hosted harness places a directory before the hook runs."""
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    seeded_skill(store, "session-start-hook", "startup-hook-skill")
+    return store, write_lock(tmp_path / "skills.lock", store, "alpha")
+
+
+def _ordinary_seeded_name_the_account_store_also_holds(tmp_path):
+    """The same, one upload later: the account store carries that basename too."""
+    store, lock = _ordinary_harness_seeded_a_directory(tmp_path)
+    account_copy(store, "session-start-hook")
+    return store, lock
+
+
+def _ordinary_skill_left_the_lock(tmp_path):
+    """A skill dropped from the lock and untouched: the next bootstrap removes it."""
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "beta")
+    write_record(store, "alpha", "beta")
+    return store, write_lock(tmp_path / "skills.lock", store, "alpha")
+
+
+ORDINARY_SESSIONS = (
+    _ordinary_nothing_declared,
+    _ordinary_hook_delivered_the_lock,
+    _ordinary_shadowed_by_the_account_store,
+    _ordinary_suite_run_from_the_installed_copy,
+    _ordinary_harness_seeded_a_directory,
+    _ordinary_seeded_name_the_account_store_also_holds,
+    _ordinary_skill_left_the_lock,
+)
+
+
+@pytest.mark.parametrize("build", ORDINARY_SESSIONS,
+                         ids=[build.__name__[len("_ordinary_"):]
+                              for build in ORDINARY_SESSIONS])
+def test_no_ordinary_session_reddens(tmp_path, capsys, ephemeral, build):
+    """The property the module docstring names, on the harshest surface there is.
+
+    Exit 1 means "a human has to decide about this". Every session below is the
+    correct, expected resting state of a class of machines this registry
+    delivers into — so each may print as many NOTES as it likes and must exit 0.
+    An exit code that can never be green has stopped carrying information, and
+    each of the last three rounds of this branch found one more way to hold it
+    at 1 forever. Adding a shape here is cheaper than rediscovering that.
+
+    Run on the EPHEMERAL surface deliberately: it is the one that promotes
+    absences to findings, so a session that stays green here stays green
+    anywhere.
+    """
+    store, lock = build(tmp_path)
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "FINDINGS (0)" in out, out
 
 
 def test_the_folded_digest_folds_crlf_and_the_unfolded_one_does_not(tmp_path):
