@@ -80,6 +80,20 @@ UPLOAD_SKIP_DIRS = frozenset({"__pycache__", ".pytest_cache", ".git", ".venv",
 UPLOAD_SKIP_DIR_PREFIXES = ("pytest-cache-files-",)
 UPLOAD_SKIP_EXTS = frozenset({".pyc", ".pyo", ".b64"})
 
+# What every sentence about "the two copies" is a statement about, said in the
+# REPORT and not only in the docstrings here. Narrowing the comparison to the
+# filtered set above left four sentences claiming the copies were
+# "byte-identical" beside both absolute paths — false for any pair whose only
+# difference is a build artefact, and checkable in one `diff -r`, in a report
+# that three lines earlier could be calling the same directory edited since
+# install. The word carrying the narrowing is "instructions".
+PAYLOAD_SCOPE = (
+    "\"Instructions\" here means the files an upload carries: the account copy "
+    "is the ZIP zip_skill built out of a directory, never the directory, so "
+    "build artefacts — __pycache__, .pytest_cache, .pyc, .pyo, .b64, .venv, "
+    "node_modules — are excluded from both sides. A diff -r of the two paths "
+    "above can differ over those and change nothing about what the model reads.")
+
 # The hook's charsets, applied to the same fields on the way out of the same file.
 # An entry failing any of them is one the hook SKIPS, so it is invisible to the
 # pruner — counted and reported here rather than quietly parsed anyway.
@@ -1485,7 +1499,7 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
             continue
 
         if exact_mine == exact_theirs:
-            sameness = "The two copies are byte-identical"
+            sameness = "The two copies carry byte-identical instructions"
         else:
             norm_mine = digest_shared_payload(mine, fold=True)
             norm_theirs = digest_shared_payload(theirs, fold=True)
@@ -1499,25 +1513,28 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
             if norm_mine != norm_theirs:
                 findings.append(_observed(
                     "shadow-copies-differ", origins[name].kind, name,
-                    f"{both} And the two are NOT the same content: they still "
-                    f"differ once CRLF line endings are folded to LF "
+                    f"{both} And the two do NOT carry the same instructions: "
+                    f"they still differ once CRLF line endings are folded to LF "
                     f"({norm_mine[:12]} here, {norm_theirs[:12]} in the account "
                     f"store). So the model is reading one of two different sets "
                     f"of instructions under this name and nothing records which. "
+                    f"{PAYLOAD_SCOPE} "
                     f"{clocks} The usual cause is the account copy being behind — "
                     f"a skill edited and re-locked, and never re-uploaded. "
                     f"Compare them with the account-drift procedure in "
                     f"skills-doctor's SKILL.md, then either re-upload or accept "
                     f"the drift deliberately."))
                 continue
-            sameness = ("The two copies are byte-identical once CRLF line "
-                        "endings are folded to LF" + _crlf_side(mine, theirs))
+            sameness = ("The two copies carry byte-identical instructions "
+                        "once CRLF line endings are folded to LF"
+                        + _crlf_side(mine, theirs))
 
         notes.append(_observed(
             "shadowed-by-the-account-store", origins[name].kind, name,
             f"{both} {sameness}, so which one wins does not change what the "
             f"model reads TODAY. That is a property of this moment and not of "
-            f"the design. {clocks} Reported so the shadow is a measured "
+            f"the design. {PAYLOAD_SCOPE} {clocks} Reported so the shadow is a "
+            f"measured "
             f"condition rather than an invisible one; naming a winner between "
             f"the two channels is a policy question this does not answer. See "
             f"docs/decisions/0002, which costed the duplicated context and not "

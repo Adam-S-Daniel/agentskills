@@ -2874,7 +2874,8 @@ def test_the_benign_note_says_it_is_benign_only_for_now(tmp_path, capsys,
 
     _, out = run(store, lock, capsys)
     flattened = flat(out)
-    assert "byte-identical once CRLF line endings are folded to LF" in flattened, out
+    assert "byte-identical instructions once CRLF line endings are folded to LF" \
+        in flattened, out
     assert "a property of this moment and not of the design" in flattened, out
     assert "update on different clocks" in flattened, out
     # It must not quietly settle the precedence question, which is #122 item 1.
@@ -2896,7 +2897,7 @@ def test_two_copies_that_really_differ_are_a_finding(tmp_path, capsys,
     code, out = run(store, lock, capsys)
     assert code == 1, out
     assert "[shadow-copies-differ] writing-adrs" in out, out
-    assert "NOT the same content" in flat(out), out
+    assert "do NOT carry the same instructions" in flat(out), out
     # The other two are untouched by one skill having drifted.
     assert "[shadowed-by-the-account-store] finding-unknowns" in out, out
     assert "[shadow-copies-differ] finding-unknowns" not in out, out
@@ -2929,7 +2930,8 @@ def test_identical_bytes_are_described_as_identical_bytes(tmp_path, capsys,
 
     code, out = run(store, lock, capsys)
     assert code == 0, out
-    assert "The two copies are byte-identical, so which one wins" in flat(out), out
+    assert "The two copies carry byte-identical instructions, so which one wins" \
+        in flat(out), out
     assert "folded to LF" not in flat(out), out
 
 
@@ -3078,6 +3080,37 @@ def test_a_build_artefact_is_not_a_second_set_of_instructions(tmp_path, capsys,
     assert code == 0, out
     assert "shadow-copies-differ" not in out, out
     assert "[shadowed-by-the-account-store] writing-adrs" in out, out
+
+
+def test_the_shadow_note_claims_no_more_than_it_compared(tmp_path, capsys,
+                                                        ephemeral):
+    """The note prints two absolute paths; a reader can diff them.
+
+    Narrowing the comparison to the uploader's filtered set left the sentence
+    "The two copies are byte-identical" beside those paths, which is false the
+    moment a `__pycache__` sits in one of them — the ordinary state of any skill
+    whose scripts have been imported. Same defect class as the CRLF direction
+    one sentence over: a reader who checks the bytes finds the claim wrong.
+    """
+    store, lock = shadowed_store(tmp_path, crlf=False)
+    _artefacts(store / "writing-adrs")
+    write_record(store, "adam-writing-style", "finding-unknowns", "writing-adrs")
+
+    mine, theirs = store / "writing-adrs", store / prov.ACCOUNT_DIR / "writing-adrs"
+    # The premise: the directories really do differ, and only the uploaded set
+    # agrees. Without this the assertions below would pass on a pair that is
+    # identical either way and prove nothing.
+    assert prov.digest_skill_dir(mine) != prov.digest_skill_dir(theirs)
+    assert prov.digest_shared_payload(mine) == prov.digest_shared_payload(theirs)
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    flattened = flat(out)
+    assert "The two copies are byte-identical" not in flattened, out
+    assert "carry byte-identical instructions" in flattened, out
+    # And the report defines the word rather than leaving it to be guessed.
+    assert "means the files an upload carries" in flattened, out
+    assert "A diff -r of the two paths above can differ over those" in flattened, out
 
 
 def test_a_file_the_uploader_would_have_carried_is_still_a_divergence(
