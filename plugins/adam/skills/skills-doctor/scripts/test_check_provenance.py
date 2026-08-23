@@ -2368,9 +2368,9 @@ def test_two_locks_disagreeing_about_one_skill_stay_two_findings(tmp_path,
 def seeded_skill(store: Path, directory: str, declared: str) -> Path:
     """A directory whose SKILL.md declares a name that is not its basename.
 
-    The exact shape measured in two independent hosted cloud sessions: a lone
-    SKILL.md, no payload directories, and a frontmatter `name:` belonging to
-    something else. Built from bytes rather than copied from the real
+    The shape #123 reports: a lone SKILL.md, no payload directories, and a
+    frontmatter `name:` belonging to something else. Built from bytes rather
+    than copied from the real
     `~/.claude/skills`, which would make the suite report on whichever surface
     it happens to run on.
     """
@@ -2872,8 +2872,6 @@ def test_a_shadow_is_attributed_to_no_lock_however_many_there_are(
     (kind, subject, detail) and folds identical notes however many times they are
     raised, so a version of this reporting moved inside the per-lock loop would
     still print one line and the test would stay green over the regression.
-    (Measured: multiplying `shadow_noted` by the lock count changes the output
-    not at all.)
 
     What per-lock reporting DOES change is the header, which `_whose` decorates
     with "declared by <lock>" as soon as a note carries one and there is more
@@ -2899,7 +2897,7 @@ def test_a_shadow_is_attributed_to_no_lock_however_many_there_are(
     # own HEADER line. A bare "declared by" would also match the phrase "declared
     # by the lock and not in the personal store" inside `not-in-the-store`'s
     # wrapped prose, which would make the control below pass over a `_whose` that
-    # had stopped working entirely. (Measured: it did.)
+    # had stopped working entirely.
     headers = [line for line in out.splitlines() if line.lstrip().startswith("[")]
     mine = [line for line in headers
             if "[shadowed-by-the-account-store] shared" in line]
