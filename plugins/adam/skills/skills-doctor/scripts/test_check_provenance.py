@@ -165,6 +165,18 @@ def ephemeral(monkeypatch):
 
 
 @pytest.fixture
+def unsure(monkeypatch):
+    """An entrypoint with no session id: `read_surface`'s third state.
+
+    Judged as durable and PRINTED as unsure, so a sentence about the next run
+    may not claim either machine — which is a third arm of
+    `when_the_hook_runs`, not a rounding of the other two.
+    """
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE_SESSION_ID", raising=False)
+
+
+@pytest.fixture
 def store(tmp_path):
     """A store holding two hook-installed skills, recorded and locked."""
     store = tmp_path / "skills"
@@ -3920,6 +3932,111 @@ def test_a_hook_installed_copy_edited_up_to_the_locked_bytes_is_a_note(
     # the record and the directory are out of step, and a note that suppressed
     # that would trade one silence for another.
     assert "alpha                        hook" in out, out
+
+
+# The surface guard the refusal sentences hang off. `may_replace` decides what
+# the hook does with a directory; this decides whether the hook gets that far at
+# all, and the two were reported as if only the first existed.
+HOOK_SURFACE_GUARD = 'emit "skills: skipped \u2014 durable session'
+DURABLE_CAVEAT = "None of that happens on THIS machine"
+UNSURE_CAVEAT = "Whether any of that happens here is unmeasured"
+
+
+def test_the_hook_really_does_stop_before_reading_the_lock_when_durable():
+    """The premise of every caveat below, read out of the hook rather than assumed.
+
+    Three separate facts, and the caveats need all three: the durable guard is
+    where the report says it is, `emit` ENDS the process rather than printing and
+    carrying on, and the lock is not read before either. If the guard moved — or
+    started falling through into the install — the caveats would be the new
+    false sentence and nothing else in this file would notice.
+    """
+    lines = _hook_path().read_text(encoding="utf-8").splitlines()
+    guard = [i for i, line in enumerate(lines) if HOOK_SURFACE_GUARD in line]
+    assert len(guard) == 1, guard
+    chosen = [i for i, line in enumerate(lines) if line.startswith('LOCK=')]
+    assert chosen and min(chosen) > guard[0], (guard, chosen)
+
+    # `emit` never returns to its caller: both of its arms exit, so reaching the
+    # guard IS the end of that run. A `return` on either would make the guard a
+    # message rather than a stop, and every caveat below wrong again.
+    body = _bash_function("\n".join(lines) + "\n", "emit")
+    assert body.count("\n    exit 0\n") == 1, body
+    assert body.endswith("  exit 0\n}\n"), body[-40:]
+    assert "\n  return" not in body, body
+
+
+@pytest.mark.parametrize("which", sorted(REFUSAL_STATES))
+def test_a_refusal_on_an_ephemeral_surface_carries_no_caveat(
+        tmp_path, capsys, ephemeral, which):
+    """The surface the sentences were written for: they are true, so nothing is added."""
+    store, lock, _locked, _recorded = _may_replace_state(tmp_path, which)
+    _code, out = run(store, lock, capsys,
+                     project_dir=tmp_path / which / "project")
+    assert flat(prov.HOOK_REFUSAL) in flat(out), out
+    assert DURABLE_CAVEAT not in flat(out), out
+    assert UNSURE_CAVEAT not in flat(out), out
+
+
+@pytest.mark.parametrize("which", sorted(REFUSAL_STATES))
+def test_a_refusal_on_a_durable_surface_says_the_run_does_not_happen(
+        tmp_path, capsys, which):
+    """The same finding on the machine where its verdict clause is false.
+
+    `HOOK_REFUSAL` promises the next session start names the directory after
+    `DEGRADED` as shadowed, and the `edited-and-locked` remedy promises the run
+    after that installs the locked copy. On a durable machine the hook prints
+    `skills: skipped` and returns before it reads the lock, so there is no
+    verdict, no shadowed list and no install — and the report printed all of it
+    two blocks under its own `SURFACE  durable` line.
+    """
+    store, lock, _locked, _recorded = _may_replace_state(tmp_path, which)
+    code, out = run(store, lock, capsys,
+                    project_dir=tmp_path / which / "project")
+    assert code == 1, out
+    assert "SURFACE  durable" in out, out
+    assert DURABLE_CAVEAT in flat(out), out
+
+
+def test_an_unsure_surface_claims_neither_machine(tmp_path, capsys, unsure):
+    """The third arm, which must not be folded into the durable one.
+
+    `read_surface` judges unsure AS durable and prints it as unsure, precisely so
+    that an unmeasured reading is not reported as a measured one. A caveat saying
+    "this machine reads durable" would put the rounding back.
+    """
+    store, lock, _locked, _recorded = _may_replace_state(tmp_path, "edited")
+    code, out = run(store, lock, capsys,
+                    project_dir=tmp_path / "edited" / "project")
+    assert code == 1, out
+    assert "SURFACE  unsure" in out, out
+    assert UNSURE_CAVEAT in flat(out), out
+    assert DURABLE_CAVEAT not in flat(out), out
+
+
+def test_the_stale_note_and_the_lock_findings_are_gated_too(tmp_path, capsys):
+    """Not only the refusals: anything that says what a next run does.
+
+    `stale` promises the next bootstrap removes the directory and
+    `lock-unreadable` promises DEGRADED at every session start. Gating the
+    refusals and leaving these is the half-fix that reads as consistency.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store)          # names nothing
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "[stale] alpha" in flat(out), out
+    assert DURABLE_CAVEAT in flat(out), out
+
+    lock.write_text("{ not json", encoding="utf-8")
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[lock-unreadable]" in out, out
+    assert DURABLE_CAVEAT in flat(out), out
 
 
 def _hook_verdict_line(source: str, phrase: str) -> str:
