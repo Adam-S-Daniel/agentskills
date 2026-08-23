@@ -631,8 +631,8 @@ _ARMS_OK = [
     ("quoted-literals", _arm(_QUIET, '''  "fresh"|'unavailable'|"$drift")''')),
     # The word, not a pattern. `case` expands its word and then neither splits
     # nor globs the result, so the quotes here are invisible to bash - unlike
-    # the quotes on `"$drift"` two lines down, which are the difference between
-    # a literal and a pattern and are asserted for.
+    # the quotes on the `"$drift"` PATTERN in the quiet arm, which are the
+    # difference between a literal and a glob and are asserted for.
     ("unquoted-case-word",
      _arm('case "$verdict" in', 'case $verdict in')),
     ("comment-containing-a-terminator",
@@ -2269,8 +2269,8 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             f"branch, so it was diagnosed as something it is not:\n{log}"
         )
 
-    # WHITESPACE THAT HAPPENS TO BE A NEWLINE, which is where the two lines
-    # this step normalises with and the one it condemns with meet. `fresh\n`
+    # WHITESPACE THAT HAPPENS TO BE A NEWLINE, which is where the trim and
+    # the newline-reject meet. `fresh\n`
     # and `\nfresh` are the shape a heredoc emits when something prints a bare
     # newline at import time, or when `print()` is called with no argument -
     # padding, not a second value.
