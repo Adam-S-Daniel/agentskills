@@ -188,15 +188,16 @@ STILL_DELIVERS = frozenset({REPLACED})
 # and one nothing attributes to the hook — say the same thing about the same
 # rung, which is the mistake the ladder exists to stop being possible.
 DUP_GUARD_DELETES = (
-    "two rows of this lock fold onto this one destination name. The install "
-    "directory is FLAT, so `<bundle-a>/{name}` and `<bundle-b>/{name}` are one "
+    "more than one row of this lock folds onto this one destination name. The "
+    "install directory is FLAT, so `<bundle-a>/{name}` and `<bundle-b>/{name}` "
+    "are one "
     "directory — the hook's lock reader stamps both rows `dup`, and the install "
     "loop removes the destination and installs NEITHER. So this directory is "
     "deleted and the skill is not delivered by any row: the verdict names it "
     "after `DEGRADED` as `lock rows share a destination name, none installed`. "
     "`scripts/generate_skills_lock.py` refuses to write such a lock, so this is "
     "a hand-edited one, or one written before that rule existed. Rename the "
-    "skill directory in one of the two registries.")
+    "skill directory in all but one of the registries that ship it.")
 COLLISION_GUARD_DELETES = (
     "the project ships `.claude/skills/{name}/SKILL.md`, and personal "
     "`~/.claude/skills` shadows the project's — so the hook DELETES this "
@@ -1690,8 +1691,8 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             rows.append(Row(name, origin, None, None, None, in_lock))
             if not expected:
                 continue
-            # The ladder, not the rung: `may_replace` saying yes is the SECOND
-            # of five questions, and the two below it delete the directory.
+            # The ladder, not the rung: `may_replace` saying yes is one of
+            # several questions, and the ones below it delete the directory.
             fate = (hook_fate(lock, name, repo_owned=repo_owned,
                               replaceable=lock_names_the_bytes(
                                   lock, name, digest_skill_dir(skills_dir / name)))
@@ -1799,10 +1800,10 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             continue
         in_scope = (entry.registry, entry.bundle) in lock.claims
         if in_lock:
-            # `may_replace`'s three clauses, as this origin can satisfy them:
-            # the record vouches for exactly these bytes (UNCHANGED), or the
-            # lock names them. Then the LADDER, because a yes here is only the
-            # second of five questions.
+            # `may_replace`'s clauses, as this origin can satisfy them: the
+            # record vouches for exactly these bytes (UNCHANGED), or the lock
+            # names them. Then the LADDER, because a yes here is only the rung
+            # after the whole-lock gate.
             fate = hook_fate(
                 lock, name, repo_owned=repo_owned,
                 replaceable=(integrity == UNCHANGED
@@ -2098,8 +2099,8 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
     gone wrong in between, and nothing in CI can see it: the collision exists
     only on a surface CI never stands on.
 
-    That clocks sentence is why `surface` is a parameter. It is quoted into all
-    four branches below, the benign note among them — which is the ordinary
+    That clocks sentence is why `surface` is a parameter. It is quoted into
+    every branch below, the benign note among them — which is the ordinary
     cloud session this whole comparison was written for — and on a durable
     machine the personal copy is refreshed at NO session start: the hook returns
     `skills: skipped` before it reads the lock. Printing `SURFACE durable` above
@@ -2109,7 +2110,7 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
     """
     findings: List[Finding] = []
     notes: List[Finding] = []
-    # Appended to all four texts below rather than folded into `clocks`, so the
+    # Appended to each text below rather than folded into `clocks`, so the
     # caveat lands at the END of whichever paragraph the reader gets instead of
     # in the middle of the one branch that keeps writing after it.
     but_here = when_the_hook_runs(surface)

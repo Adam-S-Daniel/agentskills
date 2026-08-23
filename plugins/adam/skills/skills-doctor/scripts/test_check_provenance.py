@@ -129,7 +129,7 @@ def write_lock(path: Path, store: Path, *names: str, registry: str = REGISTRY_SL
 # ---------------------------------------------------------------------------
 # reading the module instead of listing its sentences
 #
-# Two invariants below are quantified over "every sentence that says X". A test
+# The invariants below are quantified over "every sentence that says X". A test
 # that spells out which sentences those are is a test of the author's grep, and
 # round 5's did exactly that: a commit claiming to have gated EVERY
 # what-the-next-run-does sentence shipped with four ungated ones, because the
