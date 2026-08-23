@@ -2548,6 +2548,16 @@ def test_a_name_the_record_names_in_a_skipped_entry_is_not_foreign(
     assert "[foreign] helper" not in out, out
     assert "[untracked] helper" in out, out
     assert "helper                       unattributed" in out, out
+    # The finding it is rerouted INTO must not then assert the opposite of the
+    # reason it was rerouted. `untracked` used to end "A seeded directory is
+    # recognised and reported as a `foreign` NOTE instead when its SKILL.md
+    # declares a name other than its own basename; this one does not" — about a
+    # directory whose SKILL.md declares `some-other-name`, three lines under a
+    # finding pointing at the record entry that is the real reason.
+    assert "declares `name: some-other-name`" in flat(out), out
+    assert "this one does not, so that evidence is absent" not in flat(out), out
+    assert "the install record carries an entry for it that the hook's own " \
+        "shape check rejected" in flat(out), out
 
 
 def test_an_unnamed_skipped_entry_contributes_no_name(tmp_path):
@@ -2695,6 +2705,13 @@ def test_a_name_one_lock_declares_is_not_foreign_under_another(tmp_path, capsys)
     assert "[hand-placed-over-locked] helper" in out, out
     assert "[untracked] helper" in out, out
     assert "[foreign] helper" not in out, out
+    # The second route into the same false sentence, and the one no fixture had
+    # covered: lock `two` does not name `helper`, so it raises `untracked` — and
+    # the reason there is no foreign note is lock `one`, not the frontmatter,
+    # which declares `some-other-name` and is printed as declaring it.
+    assert "declares `name: some-other-name`" in flat(out), out
+    assert "this one does not, so that evidence is absent" not in flat(out), out
+    assert "a lock read this run declares it" in flat(out), out
 
 
 def test_an_ordinary_untracked_directory_is_still_a_finding(
@@ -2716,6 +2733,10 @@ def test_an_ordinary_untracked_directory_is_still_a_finding(
     assert code == 1, out
     assert "[untracked] mine" in out, out
     assert "[foreign] mine" not in out, out
+    # The other side of the measured reason: here the frontmatter really does
+    # agree with the basename, and that is what the finding says.
+    assert "its SKILL.md declares this directory's own basename" \
+        in flat(out), out
 
 
 def test_the_untracked_finding_names_the_surface_as_a_fourth_cause(

@@ -332,9 +332,16 @@ class Surface(NamedTuple):
 class Origin(NamedTuple):
     """One directory's origin, and the measurement that chose it.
 
-    `declared` is the frontmatter name, carried only for FOREIGN so that the
-    row and the note are two views of ONE reading rather than two readings that
-    can disagree about one directory.
+    `declared` is the frontmatter name when it disagrees with the basename, and
+    None otherwise — carried so that the row, the note and the finding are views
+    of ONE reading rather than readings that can disagree about one directory.
+
+    Carried for UNATTRIBUTED as well as for FOREIGN, because the two arms are
+    separated by things that have nothing to do with the frontmatter: a lock
+    naming the basename, or a record entry naming it that the hook's shape check
+    rejected. Without it, `untracked` could only GUESS at why no `foreign` note
+    accompanied it, and it guessed wrong — it told the reader the SKILL.md
+    agreed with the basename in exactly the two states where it does not.
     """
     kind: str
     declared: Optional[str] = None
@@ -1078,10 +1085,32 @@ def assign_origins(skills_dir: Path, names: List[str], record: Record,
             assigned[name] = Origin(HOOK)
         elif (name in locked or name in record.skipped_names
                 or name not in declared):
-            assigned[name] = Origin(UNATTRIBUTED)
+            assigned[name] = Origin(UNATTRIBUTED, declared.get(name))
         else:
             assigned[name] = Origin(FOREIGN, declared[name])
     return assigned
+
+
+def _why_not_foreign(origin: Origin) -> str:
+    """Why this UNATTRIBUTED directory got no `foreign` note, from the reading.
+
+    Reads `assign_origins`' own answer rather than re-deciding, because the two
+    reasons are not visible from the frontmatter at all: a lock declaring the
+    basename, or an install-record entry naming it that the hook's shape check
+    rejected, both outrank a disagreeing `name:`. The sentence this replaced
+    asserted the opposite of both — "its SKILL.md declares its own basename" —
+    over directories whose SKILL.md plainly does not, with the contradicting
+    evidence printed a few lines above in the same report.
+    """
+    if origin.declared is None:
+        return ("its SKILL.md declares this directory's own basename, or "
+                "declares nothing this script can read.")
+    return (f"its SKILL.md declares `name: {origin.declared}`, but some "
+            f"name-keyed channel here does name the basename — a lock read "
+            f"this run declares it, or the install record carries an entry for "
+            f"it that the hook's own shape check rejected. Either outranks the "
+            f"frontmatter, so the seeded reading is ruled out rather than "
+            f"untested.")
 
 
 def foreign_notes(origins: Dict[str, Origin],
@@ -1274,10 +1303,8 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "seeded it — a hosted harness places skill directories "
                     "under this HOME before the bootstrap hook runs, and one of "
                     "those is nobody's decision to review. A seeded directory "
-                    "is recognised and reported as a `foreign` NOTE instead "
-                    "when its SKILL.md declares a name other than its own "
-                    "basename; this one does not, so that evidence is absent "
-                    "here rather than the cause being ruled out."))
+                    "is recognised and reported as a `foreign` NOTE instead, "
+                    f"and this one is not: {_why_not_foreign(origins[name])}"))
             else:
                 # Same directory, same consequence, weaker evidence: without a
                 # record nothing can say who installed it, and the hook removes
