@@ -4256,6 +4256,72 @@ def test_the_placer_keeps_the_command_a_command():
             _place_one_report_path(printed)
 
 
+# A citation this repo cannot resolve because the test really is somewhere
+# else. Each entry says where, and each is a deliberate cross-repo pointer the
+# prose introduces AS one ("THERE:") rather than a name that went stale. The
+# CHECK is derived — every `test_*` token in every non-test source — and this
+# is only the set of answers that live outside the repo.
+_TESTS_IN_ANOTHER_REPO = {
+    # _agent-guidance's scripts/bump-consumer-locks.sh test suite; named by
+    # `report_digest_format`'s docstring as the far end of a contract this
+    # repo cannot run.
+    "test_bump_format_gate_empty_skills",
+}
+
+
+def _cited_test_names(path: Path) -> set:
+    return set(re.findall(r"\btest_[a-z0-9_]+", path.read_text(encoding="utf-8")))
+
+
+def test_every_test_this_repo_cites_by_name_exists():
+    """A pointer to nowhere is a comment asserting what a reader cannot check.
+
+    This file's comments carry a lot of "X pins that" and "Y binds the two",
+    and the value of every one of them is that the reader can go and read Y.
+    A renamed test leaves the sentence looking exactly as authoritative as it
+    was and pointing at nothing, and nothing else in the suite notices —
+    24bb05d added `test_check_format_asks_no_git_and_still_addresses_its_own_
+    line` to a docstring and `test_check_format_asks_no_git_even_to_address_
+    its_own_line` to this file, in one commit. Two more were already stale at
+    the merge base: both copies of `test_the_hooks_inline_digest_matches_the_
+    generators`, in the generator and in the bootstrap hook, whose real name
+    is `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill`.
+
+    Scanned over every non-test source this repo tracks, so a citation in the
+    hook counts the same as one in the generator. A name resolves if some
+    tracked module defines it as a function OR is a test module of that name
+    (`scripts/account_zip_selection.py` names its own test file).
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.py", "*.sh"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout.split()
+    defined = set(_TESTS_IN_ANOTHER_REPO)
+    for name in tracked:
+        path = REPO_ROOT / name
+        if path.suffix == ".py":
+            defined.add(path.stem)
+            # Indentation allowed: a test defined as a method on a class is
+            # cited by its bare name just like a top-level one.
+            defined |= set(re.findall(r"^\s*def (test_[a-z0-9_]+)",
+                                      path.read_text(encoding="utf-8"), re.M))
+    assert "test_every_test_this_repo_cites_by_name_exists" in defined, (
+        "the scan found no test names at all, so it would pass on anything")
+
+    dangling = {}
+    for name in tracked:
+        path = REPO_ROOT / name
+        if path.name.startswith("test_"):
+            continue
+        for cited in sorted(_cited_test_names(path) - defined):
+            dangling.setdefault(cited, []).append(name)
+    assert not dangling, (
+        "these comments name a test that does not exist — rename the citation to "
+        "the test that took its place, or add it to _TESTS_IN_ANOTHER_REPO with "
+        "the repo it lives in: "
+        + "; ".join(f"{cited} (cited in {', '.join(where)})"
+                    for cited, where in sorted(dangling.items())))
+
+
 # The one function allowed to spell this script's own name. Everything else in
 # the module — report path, refusal predicate, helper, nested def, method —
 # must reach a runnable line by asking it.

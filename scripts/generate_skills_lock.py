@@ -305,10 +305,10 @@ That is the second copy this docstring's older wording warned about, and the
 warning was right — an independently written copy is how two hashers silently
 drift. It is therefore not independent: the hook's copy mirrors
 `digest_skill_dir` below line for line, and
-`test_the_hooks_inline_digest_matches_the_generators` asserts the two agree on a
-non-trivial directory (nested dirs, an empty file, CRLF, a UTF-8 filename, no
-trailing newline). Change either copy and change the other; that test is what
-says so.
+`test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill` asserts
+the two agree on a non-trivial directory (nested dirs, an empty file, CRLF, a
+UTF-8 filename, no trailing newline). Change either copy and change the other;
+that test is what says so.
 
 Usage:
   python3 scripts/generate_skills_lock.py [--registry OWNER/REPO] [--ref REF]
@@ -446,8 +446,8 @@ def digest_skill_dir(path: Path, skip: frozenset = frozenset()) -> str:
     MIRRORED, line for line, by `digest_dir` in
     `.claude/hooks/skills-bootstrap.sh` — the hook hashes what it installed
     itself rather than executing a copy of this file it just fetched.
-    `test_the_hooks_inline_digest_matches_the_generators` binds the two; edit
-    one and you must edit the other.
+    `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill` binds
+    the two; edit one and you must edit the other.
 
     `skip` excludes specific, already-resolved paths from the manifest —
     `--check-current` passes it the working tree's `ignored_paths` so a
@@ -2261,7 +2261,7 @@ def _addressing(output: Path, repo: Path, source_repos: Sequence[str] = (),
     no checkout, reads no file, spawns no git and reaches no network — it asks
     whether a directory is there, and answers the same either way, which is
     what "the verdict cannot depend on which clone, or no clone, is at hand"
-    means. `test_check_format_asks_no_git_and_still_addresses_its_own_line`
+    means. `test_check_format_asks_no_git_even_to_address_its_own_line`
     pins that with a `git` on PATH that fails the run if it is ever spawned.
     """
     flags = ""

@@ -1425,11 +1425,14 @@ def account_drift_report(rows: List[Dict], state: Optional[Dict]) -> Dict:
 # ---------------------------------------------------------------------------
 # Account-store upload tracking issue (--report-issue)
 #
-# THE GAP THIS FILLS. Membership in the account store is already CI-locked:
-# tests/test_sync_skills.py::test_shipped_declaration_is_the_ruled_set reads
-# the REAL shipped account-skills.txt and pins its exact name set, and it runs
-# in the REQUIRED pytest / pytest-windows jobs. So adding a name is a
-# deliberate two-file edit that a human reviews. What NOTHING checks is the
+# THE GAP THIS FILLS. Membership in the account store is declared by the
+# COMMITTED account-skills.txt, so adding a name is a deliberate two-file edit
+# that a human reviews. CI reads that real file in the REQUIRED pytest /
+# pytest-windows jobs — tests/test_sync_skills.py::
+# test_ordinary_skill_names_are_all_legal loads the shipped declaration and
+# requires every name in it to be well formed. It pins the names' SHAPE, not
+# the set: no test says which names the store should hold, and none could
+# without becoming a second copy of the declaration. What NOTHING checks is the
 # other half: whether the claude.ai account store has actually RECEIVED the
 # skill that name declares. It cannot — the account store is reachable only
 # from a laptop with a logged-in browser session, never from CI — so the
@@ -1548,9 +1551,10 @@ def declaration_differs_from_committed(
     """A reason string if the declaration on disk is not the committed one.
 
     The tracking issue is a shared, durable artifact, and what makes the
-    declaration trustworthy enough to write one off is that its membership is
-    CI-locked (``test_shipped_declaration_is_the_ruled_set`` pins the exact
-    name set in the required jobs). An UNCOMMITTED edit is outside that lock
+    declaration trustworthy enough to write one off is that it is COMMITTED
+    and reviewed — that, and not a test, is the lock on its membership (see
+    the section comment above for what CI does and does not assert about it).
+    An UNCOMMITTED edit is outside that lock
     entirely, and it breaks the write in both directions: a locally-added
     name makes the issue announce a backlog item the committed declaration
     does not contain, and a locally-removed one makes the remaining names
