@@ -2879,6 +2879,48 @@ def test_a_file_the_uploader_would_have_carried_is_still_a_divergence(
         assert "[shadow-copies-differ] writing-adrs" in out, (depth, out)
 
 
+def test_a_directory_with_no_skill_md_collides_with_nothing(tmp_path, capsys,
+                                                            ephemeral):
+    """One channel delivering `beta` is one `beta`, whatever else is on disk.
+
+    A leftover directory holding no SKILL.md is not a skill: the session's
+    listing never sees it, so it shadows nothing. Reporting it as a two-channel
+    collision also guarantees the divergence finding, since an empty directory
+    is unavoidably not the account skill — the doctor inventing both the
+    collision and the defect, at exit 1, over a directory that delivers nothing.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    (store / "beta").mkdir()                  # a leftover, not a skill
+    account_copy(store, "beta")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    _, out = run(store, lock, capsys)
+    assert "shadow-copies-differ" not in out, out
+    assert "shadowed-by-the-account-store" not in out, out
+
+
+def test_the_same_directory_with_a_skill_md_is_a_shadow(tmp_path, capsys,
+                                                        ephemeral):
+    """The control for the test above: the SKILL.md is what makes it a skill.
+
+    Without this, deleting the collision reporting entirely would pass there.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "beta", body="line one\nline two\n")
+    write_record(store, "alpha", "beta")
+    account_copy(store, "beta")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha", "beta")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "[shadowed-by-the-account-store] beta" in out, out
+
+
 def test_the_folded_digest_folds_crlf_and_the_unfolded_one_does_not(tmp_path):
     """The two digests must disagree on a CRLF pair, or normalising is a no-op.
 

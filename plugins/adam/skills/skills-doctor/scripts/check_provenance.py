@@ -1210,7 +1210,12 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str]
     """
     findings: List[Finding] = []
     notes: List[Finding] = []
-    for name in sorted(set(names) & set(account)):
+    # A directory with no SKILL.md is not a skill and the session's listing never
+    # sees it, so it collides with nothing: an empty `beta/` left behind beside a
+    # real account `beta` is ONE delivered skill, and calling it two — then
+    # finding the two "different", which a directory holding nothing next to a
+    # skill unavoidably is — invents both the collision and the divergence.
+    for name in sorted(set(names) & set(account) & skill_names(skills_dir)):
         mine = skills_dir / name
         theirs = skills_dir / ACCOUNT_DIR / name
         both = (f"delivered by BOTH channels under one bare name — {mine} and "
