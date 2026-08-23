@@ -3897,6 +3897,51 @@ def test_the_report_and_the_refusal_give_the_same_reason(build, tmp_path):
         assert out.read_text(encoding="utf-8") == before, "a refused re-pin still wrote"
 
 
+def test_an_uppercase_commit_sha_is_treated_as_the_commit_sha_it_is(registry, tmp_path):
+    """A refusal a reader can check and find false is worse than no refusal.
+
+    `_COMMIT_SHA_RE` was lowercase-only, so a lock pinned at a 40-hex sha in
+    uppercase — which git resolves; `git cat-file -e <UPPER>^{commit}` exits 0,
+    measured — was refused with "which is not a commit sha", and then sent to
+    the repair advice beside it. Accepting it also normalises the lock, because
+    the re-pin writes `resolve_ref`'s lowercase output back, and the bootstrap
+    hook's `fetch_source` branches on `^[0-9a-f]{40}$` and would try to clone
+    `--branch <UPPER>` for one it was left holding.
+    """
+    root, sha = registry
+    out = tmp_path / "skills.lock"
+    assert run_generator("--repo", str(root), "--registry", "Acme/registry",
+                         "--ref", sha, "--bundles", "adam",
+                         "-o", str(out)).returncode == 0
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["ref"] = sha.upper()
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    proc = run_generator("--repo", str(root), "--repin", "-o", str(out))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["ref"] == sha
+
+
+def test_a_blocked_source_headline_does_not_name_two_pins_for_one_source(tmp_path):
+    """One sentence, one answer to "what does this lock pin for that source".
+
+    `source` in the report loop is PLANNED, so its ref is resolved; the reason
+    printed beside it may be about a lock that records a branch name. The
+    headline said "moved on since <resolved sha>, which <lock> still pins for
+    it" and then, one clause later, "this lock pins that source at 'main'".
+    """
+    primary, out, _ = _source_hand_pinned_at_a_branch(tmp_path)
+    resolved = _head(tmp_path / "cms-platform")
+
+    report = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert report.returncode == 1, report.stdout + report.stderr
+    headline = next(line for line in report.stdout.splitlines()
+                    if line.startswith("FAILED:"))
+    assert resolved in headline, headline
+    assert f"{resolved}, which {out} still pins for it" not in headline, headline
+    assert "resolves to" in headline, headline
+
+
 def test_a_source_ref_is_resolved_before_it_is_written_and_a_primarys_is_not(
         federated, tmp_path):
     """The asymmetry the two refusals above are worded around, pinned.
