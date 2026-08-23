@@ -103,18 +103,33 @@ PAYLOAD_SCOPE = (
 # recorded — and refuses everything else. A refusal is not a deferral: the run
 # copies nothing, deletes nothing, and lists the name after `DEGRADED`.
 #
-# One constant rather than the same promise re-typed at four call sites, and
+# One constant rather than the same promise re-typed at each call site, and
 # bound to the hook by `test_the_refusal_claim_is_the_hooks_own_may_replace`,
-# which extracts `may_replace` from the hook and RUNS it against each of the
-# states these findings describe. Every earlier version of these sentences said
-# the opposite — that the directory is replaced, or removed, at the next
-# session start — which is the one thing the hook is written never to do.
+# which extracts `may_replace` from the hook and RUNS it against the states
+# these findings describe — and by its mirror over the states the hook
+# REPLACES, without which a refusal claim over a store the hook is happy with
+# goes unmeasured. `REFUSAL_KINDS` below is what makes "these findings" a list
+# rather than a phrase: `_observed` refuses to build a finding that quotes this
+# constant under a kind not in it, and the test asserts every kind in it is
+# either exercised by a real store or named as one the suite cannot reach.
+# Every earlier version of these sentences said the opposite — that the
+# directory is replaced, or removed, at the next session start — which is the
+# one thing the hook is written never to do.
 HOOK_REFUSAL = (
     "The hook does not overwrite a directory it cannot show it installed "
     "unchanged: the next session start copies nothing here, leaves these bytes "
     "exactly as they are, and names this directory after `DEGRADED` in the "
     "session's `skills:` verdict as shadowed, so the locked copy is not "
     "delivered for as long as this holds.")
+
+# Every finding kind whose text quotes HOOK_REFUSAL, enforced by `_observed`.
+# Kept because the comment above wants to say which of these the binding test
+# actually runs the hook against, and a claim like that is worth nothing unless
+# the set it is about is closed.
+REFUSAL_KINDS = frozenset({
+    "hand-placed-over-locked", "unattributable-over-locked",
+    "edited-and-locked", "unmeasurable-and-locked", "artefacts-and-locked",
+})
 
 # The other side of the same rule, quoted into the note that stands where a
 # refusal finding used to when the second clause DOES apply. Bound by
@@ -428,6 +443,10 @@ def _observed(kind: str, origin: str, subject: str, detail: str) -> Finding:
     if origin not in OBSERVATION_ORIGINS[observation]:
         raise ValueError(f"{kind!r} belongs to the {observation!r} observation, "
                          f"which is not raised about a {origin!r} directory")
+    if HOOK_REFUSAL in detail and kind not in REFUSAL_KINDS:
+        raise ValueError(f"{kind!r} quotes HOOK_REFUSAL and is not in "
+                         f"REFUSAL_KINDS, so the binding test's claim to cover "
+                         f"the states these findings describe no longer holds")
     return Finding(kind, subject, detail)
 
 
@@ -507,10 +526,15 @@ def dropped_files(skill_dir: Path) -> List[str]:
     listed "a __pycache__, a .pytest_cache, a .pyc" unconditionally, and printed
     that list over a directory whose only extra was a node_modules/.
 
-    Empty is a real answer as well as a failure answer: the difference can be a
-    dropped file that was there at install and is not now, in which case there
-    is nothing left to name. Callers phrase around an empty list rather than
-    printing "()".
+    Empty is a failure answer as much as a real one — an unwalkable directory
+    gives [] rather than raising — and callers phrase around it rather than
+    printing "()". Not because either of them has been seen empty: both are
+    guarded by ARTEFACTS_ONLY, which needs the uploaded-file digest to have
+    succeeded AND the whole-directory digest to differ from it, and that
+    difference IS a dropped file. What the guard is actually for is the gap
+    between the two: the classification reads the directory, this re-reads it,
+    and a build that finishes in between can empty the list under a finding
+    already decided on.
     """
     kept = uploaded_files(skill_dir)
     if kept is None:
@@ -536,11 +560,21 @@ def name_list(items: List[str], cap: int = 3) -> str:
 def digest_shared_payload(path: Path, fold: bool = False) -> Optional[str]:
     """`digest_skill_dir`'s manifest shape over the files BOTH channels carry.
 
-    For COMPARING two copies of one skill with each other, and for nothing else.
-    Never for judging a copy against a RECORDED digest: the record and the lock
-    both carry `digest_skill_dir`'s answer over the whole directory, so using
-    this against one of those would report edited bytes as unchanged — precisely
-    the lie `_cause` exists to avoid telling.
+    For COMPARING two copies of one skill with each other — and for exactly one
+    thing besides, which used to be forbidden here in capitals while the code
+    below did it. `classify`'s ARTEFACTS_ONLY test asks whether this equals the
+    RECORDED digest, and it is not the naive comparison the prohibition was
+    aimed at. Both functions emit the same `<relpath>\0<sha256>\n` manifest, so
+    the equality can only hold when the uploaded subset of the files here IS the
+    whole set of files that were here at install — which, taken with
+    `digest_skill_dir` differing from that same recorded digest, says the
+    difference is entirely files the upload filter drops. That is a measurement,
+    not the lie `_cause` exists to avoid telling.
+
+    What stays forbidden is using this ALONE as a verdict on whether a directory
+    is unchanged: on its own it cannot see a dropped file, so it would call an
+    edited copy untouched. The recorded-digest comparison above is safe because
+    the whole-directory one is asked FIRST and has already said no.
 
     Two things separate it from `digest_skill_dir`, and both exist because the
     account copy is not a directory anyone copied — it is the ZIP `zip_skill`

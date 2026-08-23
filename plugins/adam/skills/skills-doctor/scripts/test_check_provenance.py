@@ -3969,7 +3969,8 @@ def test_the_hook_really_does_stop_before_reading_the_lock_when_durable():
 @pytest.mark.parametrize("which", sorted(REFUSAL_STATES))
 def test_a_refusal_on_an_ephemeral_surface_carries_no_caveat(
         tmp_path, capsys, ephemeral, which):
-    """The surface the sentences were written for: they are true, so nothing is added."""
+    """The surface those sentences were written for: true as written, so nothing
+    is appended to them."""
     store, lock, _locked, _recorded = _may_replace_state(tmp_path, which)
     _code, out = run(store, lock, capsys,
                      project_dir=tmp_path / which / "project")
@@ -4037,6 +4038,111 @@ def test_the_stale_note_and_the_lock_findings_are_gated_too(tmp_path, capsys):
     assert code == 1, out
     assert "[lock-unreadable]" in out, out
     assert DURABLE_CAVEAT in flat(out), out
+
+
+# The kinds the binding test claims to cover, and the one it does not.
+# `unmeasurable-and-locked` needs `digest_skill_dir` to fail, which needs a path
+# this process cannot read — and the suite runs as root in CI, where a chmod is
+# not a refusal. Named here so the comment above HOOK_REFUSAL can say "these
+# states" and have it mean a closed set rather than a gesture.
+UNEXERCISED_REFUSAL_KINDS = frozenset({"unmeasurable-and-locked"})
+
+
+def test_every_kind_that_quotes_the_refusal_is_exercised_or_declared_not():
+    """The comment above HOOK_REFUSAL says the binding runs against these states.
+
+    That sentence is worth nothing while the set it refers to is a phrase. This
+    is the set: every kind quoting the constant is either a `REFUSAL_STATES`
+    entry — a real store the extracted `may_replace` is run over — or is named
+    above as one this suite cannot build. A new finding that quotes the constant
+    and is neither lands here rather than in a reader's assumption.
+    """
+    assert set(REFUSAL_STATES.values()) | UNEXERCISED_REFUSAL_KINDS \
+        == prov.REFUSAL_KINDS
+    assert not set(REFUSAL_STATES.values()) & UNEXERCISED_REFUSAL_KINDS
+
+
+def test_a_new_finding_cannot_quote_the_refusal_without_joining_that_set():
+    """And the set is closed by the builder, not by anyone remembering.
+
+    `_observed` is the one door every per-directory finding goes through, which
+    is what keeps `REFUSAL_KINDS` from becoming the next unmaintained list.
+    """
+    with pytest.raises(ValueError, match="REFUSAL_KINDS"):
+        prov._observed("untracked", prov.UNATTRIBUTED, "alpha",
+                       "something. " + prov.HOOK_REFUSAL)
+    # A kind that IS in the set still builds, so the guard is not just refusing.
+    assert prov._observed("hand-placed-over-locked", prov.UNATTRIBUTED, "alpha",
+                          prov.HOOK_REFUSAL).kind == "hand-placed-over-locked"
+
+
+def test_the_shared_payload_docstring_admits_the_use_its_caller_makes():
+    """It forbade, in capitals, the one thing the file below it does with it.
+
+    `classify` compares `digest_shared_payload` against `entry.digest` — a
+    RECORDED digest — to reach ARTEFACTS_ONLY, and the inference is valid. The
+    prohibition was aimed at using this alone as a verdict on "unchanged", which
+    is a different comparison and still forbidden. A reader who took the old
+    docstring at face value had to conclude the artefacts branch was a bug.
+    """
+    doc = prov.digest_shared_payload.__doc__
+    assert "Never for judging a copy against a RECORDED digest" not in doc, doc
+    assert "ARTEFACTS_ONLY" in doc, doc
+    source = Path(prov.__file__).read_text(encoding="utf-8")
+    assert "digest_shared_payload(skills_dir / name) == entry.digest" in source
+
+
+def test_the_shared_payload_inference_the_docstring_now_states(tmp_path):
+    """And the inference itself, measured rather than argued.
+
+    With nothing dropped the two digests are the same answer; with an artefact
+    present the whole-directory one moves and this one does not. That pair is
+    exactly what makes "equal to the recorded digest, and the whole-directory
+    digest is not" mean "the difference is only dropped files".
+    """
+    skill = make_skill(tmp_path, "alpha")
+    assert prov.dropped_files(skill) == []
+    assert prov.digest_shared_payload(skill) == prov.digest_skill_dir(skill)
+
+    installed = prov.digest_skill_dir(skill)
+    _artefacts(skill)
+    assert prov.dropped_files(skill) != []
+    assert prov.digest_shared_payload(skill) == installed
+    assert prov.digest_skill_dir(skill) != installed
+
+
+def test_the_dropped_files_docstring_justifies_its_guard_with_a_live_case():
+    """Its old reason — a file dropped since install — reaches neither caller.
+
+    Both are behind ARTEFACTS_ONLY, which needs the whole-directory digest to
+    differ from the uploaded-file one, and that difference IS a dropped file. So
+    the empty arm was justified by a state neither call site can be in, which is
+    the same defect as a comment asserting a count nothing holds.
+    """
+    doc = prov.dropped_files.__doc__
+    assert "there at install and is not now" not in doc, doc
+    assert "unwalkable" in doc, doc
+
+
+def test_an_artefacts_finding_always_has_a_file_to_name(tmp_path, capsys):
+    """The unreachability the docstring now asserts, from the outside.
+
+    If ARTEFACTS_ONLY could be reached with nothing to list, this is where a
+    bare "()" would appear in the rendered report.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    _artefacts(store / "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha",
+                      digests={"alpha": NOT_ON_DISK})
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[artefacts-and-locked] alpha" in flat(out), out
+    assert " ()" not in out, out
+    assert "`__pycache__" in out, out
 
 
 def _hook_verdict_line(source: str, phrase: str) -> str:
