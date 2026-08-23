@@ -1233,6 +1233,34 @@ HEREDOC_INSTALLS = [
 ]
 
 
+HEREDOC_SWALLOWING_AN_INSTALL = [
+    "cat <<EOF\nsome text\npython3 -m pip install pyyaml==6.0.1",
+    "# see <<PY below\npython3 -m pip install pyyaml==6.0.1",
+]
+
+
+@pytest.mark.parametrize("body", HEREDOC_SWALLOWING_AN_INSTALL)
+def test_a_heredoc_that_never_ends_reports_what_it_swallowed(body):
+    """Lifting heredoc bodies out is itself a way to lose an install, and this
+    is the hole that would open: a heredoc with no terminator takes the rest of
+    the body with it, and split_heredocs runs before shlex so it cannot tell a
+    `#` comment mentioning `<<PY` from a real redirect. Neither case is
+    silent — the swallowed text names pip, so it is reported as a heredoc body
+    rather than parsed away."""
+    found, unplaceable = scan_shell_body(body)
+    assert found == []
+    assert len(unplaceable) == 1, unplaceable
+
+
+def test_a_terminated_heredoc_hands_back_the_commands_after_it():
+    """The other direction: the split must not eat past the terminator."""
+    found, unplaceable = scan_shell_body(
+        "cat <<EOF\nhello\nEOF\npython3 -m pip install -r requirements-dev.txt")
+    assert not unplaceable, unplaceable
+    assert [install_operands(args) for _, args in found] == [
+        (["requirements-dev.txt"], [], [])]
+
+
 @pytest.mark.parametrize("body", HEREDOC_INSTALLS)
 def test_an_install_inside_a_heredoc_is_reported(body):
     """A heredoc body is stdin, not shell. Left in the token stream it parsed
