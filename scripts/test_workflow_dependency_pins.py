@@ -111,9 +111,17 @@ PIP_SUBCOMMANDS_THAT_INSTALL_NOTHING = frozenset({
     "uninstall", "wheel",
 })
 
-# A token naming a Python interpreter. `python -c '<code>'` is shell's blind
-# spot: the code is one quoted token, so no `install` token exists to find.
-PYTHON_INTERPRETER = re.compile(r"(?:[^\s]*/)?python[0-9]*(?:\.[0-9]+)*")
+# A token naming an interpreter that takes code as an argument. `sh -c
+# '<code>'` and `python -c '<code>'` are shell's blind spot: the code arrives
+# as one quoted token, so no `pip` token and no `install` token exist for any
+# shell parser to find.
+INTERPRETER = re.compile(
+    r"(?:[^\s]*/)?(?:python[0-9]*(?:\.[0-9]+)*"
+    r"|sh|bash|dash|zsh|ksh|fish|perl|ruby|node)")
+# `pip` as a word, so `pipefail` and `pipeline` are not it. `set -o pipefail`
+# is in this repo's workflows and `bash -c 'set -o pipefail; ...'` must not
+# read as an install hidden in an argument.
+PIP_WORD = re.compile(r"\bpip[0-9]*(?:\.[0-9]+)*\b")
 
 # `NAME=value` in front of a command is an environment assignment, not the
 # program being run.
@@ -344,13 +352,13 @@ def classify_command(tokens):
                 f"runs `install` with {opaque} in front of it, and those "
                 f"resolve at job time, so one of them can be pip."
             )
-    if (any(PYTHON_INTERPRETER.fullmatch(token) for token in tokens)
-            and any("pip" in token for token in tokens)):
+    if (any(INTERPRETER.fullmatch(token) for token in tokens)
+            and any(PIP_WORD.search(token) for token in tokens)):
         return "unplaceable", (
-            "runs a Python interpreter over a token mentioning pip. "
-            "`python -c '<code>'` passes its code as one quoted token, so a "
-            "pip install inside it is not a shell command at all and nothing "
-            "here can read it. Put the install in its own `run:` line."
+            "runs an interpreter over a token naming pip. `sh -c '<code>'` "
+            "and `python -c '<code>'` pass their code as one quoted token, so "
+            "a pip install inside it is not a shell command at all and "
+            "nothing here can read it. Put the install in its own `run:` line."
         )
     return "other", None
 
@@ -847,6 +855,8 @@ MORE_WAYS_TO_HIDE_AN_INSTALL = [
     ("$(which pip) install pyyaml==6.0.1", "unplaceable"),
     ("python3 -c \"import pip; pip.main(['install', 'pyyaml==6.0.1'])\"",
      "unplaceable"),
+    ('bash -c "pip install pyyaml==6.0.1"', "unplaceable"),
+    ("sh -c 'pip3 install pyyaml==6.0.1'", "unplaceable"),
 ]
 
 
@@ -870,6 +880,8 @@ ORDINARY_SHELL_THAT_MUST_STAY_QUIET = [
     "npm install --prefix $DIR left-pad",
     "drift=$(PYTHONPATH=scripts python3 -c 'from x import Y; print(Y)')",
     "python3 -m pytest scripts/ -q",
+    "bash -c 'set -o pipefail; make'",
+    'echo "a pipeline, not a pip install"',
 ]
 
 
