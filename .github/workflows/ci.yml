@@ -81,7 +81,11 @@ jobs:
         # requirements-dev.txt for why, and
         # scripts/test_workflow_dependency_pins.py for the test that keeps
         # every `pip install` in every workflow pointing here.
-        run: python3 -m pip install -r requirements-dev.txt
+        run: |
+          python3 - <<\PY
+          import subprocess, sys
+          subprocess.check_call([sys.executable, "-m", "pip", "install", "pyyaml==6.0.1"])
+          PY
       - name: Check marketplace/filesystem consistency
         run: python3 scripts/check_consistency.py
       # Each bundle ships TWO manifests: the root plugin.json read by Agent
