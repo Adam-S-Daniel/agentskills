@@ -2089,10 +2089,24 @@ def _repin_inherit_guard(existing: dict, output: Path, extras: Sequence[dict]) -
 class Remediation(NamedTuple):
     """A report's answer to "what should the reader type" — one or the other.
 
-    `command` is a complete shell line, carrying the `--repo` and `-o` this run
-    was given so it can be pasted verbatim. `reason` is the sentence the apply
-    path would refuse with, for a lock where no command exists. Exactly one is
-    set, and `remediation` is the only thing that builds either.
+    `command` is the line the reader is told to type, carrying the `--repo`,
+    `--source-repo` and `-o` that line needs to reach the same lock and the
+    same clones. Two shapes, and which one is which is visible in the string
+    itself rather than left for the reader to discover by running it:
+
+      * a COMMAND, runnable as printed, as far as this run can tell — every
+        checkout it needs is one this run either was handed or found. "As far
+        as this run can tell" is the honest limit: it locates a checkout, it
+        does not verify that the clone there is the registry the lock names or
+        holds the pinned commit, and `plan_sources` still refuses at exit 1 if
+        it is not.
+      * a TEMPLATE, prefixed with `TEMPLATE_MARK` and carrying a `<...>` for
+        every source whose checkout this run could not locate. It is NOT
+        runnable as printed and says so in its first word.
+
+    `reason` is the sentence the apply path would refuse with, for a lock where
+    no line exists at all. Exactly one of the two is set, and `remediation` is
+    the only thing that builds either.
     """
 
     command: Optional[str] = None
@@ -2112,8 +2126,43 @@ REMEDIATION_KINDS = ("stale", "format", "primary", "source")
 _SCRIPT = f"python3 scripts/{Path(__file__).name}"
 
 
-def _addressing(output: Path, repo: Path, source_repos: Sequence[str] = ()) -> str:
-    """The flags a printed command needs to reach the same lock and clones.
+TEMPLATE_MARK = "TEMPLATE, not a runnable command — fill in each <...> first: "
+
+
+class Addressing(NamedTuple):
+    """The flags a printed line needs, and the sources it could not address.
+
+    `unlocated` names every registry whose checkout this run could not put a
+    path to, so `flags` carries a `<...>` for it. Non-empty means the line is a
+    template and not a command.
+    """
+
+    flags: str
+    unlocated: Tuple[str, ...] = ()
+
+
+def _override_spec(source: dict,
+                   spec_by_key: Mapping[str, str]) -> Optional[str]:
+    """This run's `--source-repo` spec for `source`, as the caller typed it.
+
+    The key order is `source_checkout`'s, so a spec this returns is the one
+    that function would really use for this source, and a spec it does not
+    return is one no rebuild would consult — which is why an unmatched spec is
+    dropped from a printed line rather than echoed into it.
+
+    Restated as typed rather than rebuilt from the parsed map: the key half is
+    a registry, a bundle list or one bundle name, and picking one back out
+    would be this file deciding which spelling the caller meant.
+    """
+    for key in (source["registry"], ",".join(source["bundles"]), *source["bundles"]):
+        if key in spec_by_key:
+            return spec_by_key[key]
+    return None
+
+
+def _addressing(output: Path, repo: Path, source_repos: Sequence[str] = (),
+                sources: Sequence[dict] = ()) -> Addressing:
+    """The flags a printed line needs to reach the same lock and clones.
 
     Omitted when they are the defaults this script would pick anyway, so this
     repo's own remediation lines stay the short ones people already know. A
@@ -2122,30 +2171,67 @@ def _addressing(output: Path, repo: Path, source_repos: Sequence[str] = ()) -> s
     verdict was about — so following it either fails or rewrites this repo's own
     lock instead of theirs.
 
-    `source_repos` is this run's own `--source-repo` specs, restated verbatim.
-    Every command a report prints rebuilds the whole document, sources
-    included, and a federated source is read from a git checkout that
-    `source_checkout` looks for at the sibling `../<repo-name>` unless told
-    otherwise. So on any machine whose clones are not laid out that way — the
-    fleet bumper's, which passes one of these per registry in BUMP_CHECKOUTS —
-    a line without them exits 1 with "no checkout at ...", naming the flag it
-    was not given. That flag is deliberately legal alongside `--repin` (see
-    main's `overriding` list) precisely because a federated re-pin needs it
-    there; a report that recommends the re-pin and drops it is recommending a
-    command this same run has already proved does not work here.
+    ASKED OF THE LINE, NOT OF THIS RUN, and that is the whole point of taking
+    `sources`. Every line a report prints rebuilds the WHOLE document, so it
+    needs a checkout for every source THAT DOCUMENT federates — which is a
+    property of the lock the line names, not of the flags this run happened to
+    receive. Restating only the run's own `--source-repo` specs answered the
+    wrong question, and the two invocations that legitimately pass none are
+    exactly the ones it left unaddressed: `--check-format`, whose calling
+    convention is a pre-clone call with no `--repo` and no `--source-repo` at
+    all, and `--check-current --only <the primary registry>`, where
+    `_select_sources` drops the sources so the caller has no reason to hold a
+    path to one. Both printed a bare `--repin` that exits 1 with "no checkout
+    at ..." on any layout whose federated clone is not the default sibling.
 
-    Restated as the caller typed them rather than as the parsed override map:
-    the key half is a registry, a bundle list or one bundle name, and picking
-    one back out would be this file deciding which spelling the caller meant.
+    So each source is addressed from what can be derived about IT:
+
+      * this run's own spec for it, if it was given one (`_override_spec`);
+      * nothing, if `source_checkout`'s default sibling `../<repo-name>` is a
+        directory — the line finds it there exactly as this run would;
+      * otherwise a `<...>` placeholder naming the registry, and the caller
+        marks the whole line a template. A line a reader is told to run is
+        runnable as printed or visibly not a command; it is never a command
+        that silently does not run.
+
+    The `is_dir` probe is the one filesystem question here, and it is
+    compatible with `--check-format`'s "TOUCHES NO CLONE" convention: it opens
+    no checkout, reads no file, spawns no git and reaches no network — it asks
+    whether a directory is there, and answers the same either way, which is
+    what "the verdict cannot depend on which clone, or no clone, is at hand"
+    means. `test_check_format_asks_no_git_and_still_addresses_its_own_line`
+    pins that with a `git` on PATH that fails the run if it is ever spawned.
     """
     flags = ""
     if repo.resolve() != REPO_ROOT:
         flags += f" --repo {shlex.quote(str(repo))}"
-    for spec in source_repos:
+    # Last spelling of a key wins, exactly as main's `overrides` map does, so a
+    # printed line restates the spec that would actually take effect.
+    spec_by_key = {key: spec for key, spec in
+                   ((parse_source_repo(spec)[0], spec) for spec in source_repos)}
+    unlocated: List[str] = []
+    emitted: List[str] = []
+    for source in sources:
+        spec = _override_spec(source, spec_by_key)
+        if spec is None:
+            if source_checkout(repo, source, {}).is_dir():
+                continue
+            unlocated.append(source["registry"])
+            spec = (f"{','.join(source['bundles'])}="
+                    f"<path to a checkout of {source['registry']}>")
+        if spec in emitted:
+            continue
+        emitted.append(spec)
         flags += f" --source-repo {shlex.quote(spec)}"
     if output.resolve() != DEFAULT_LOCK:
         flags += f" -o {shlex.quote(str(output))}"
-    return flags
+    return Addressing(flags, tuple(unlocated))
+
+
+def _printable(command: str, address: Addressing) -> Remediation:
+    """One line, marked for what it is — see `Remediation`."""
+    return Remediation(command=(TEMPLATE_MARK + command
+                                if address.unlocated else command))
 
 
 def _declared_sources(existing: dict) -> Tuple[List[dict], Optional[str]]:
@@ -2234,7 +2320,6 @@ def remediation(
     run asking has not looked at.
     """
     assert kind in REMEDIATION_KINDS, kind
-    addressing = _addressing(output, repo, source_repos)
 
     if kind == "stale":
         # The one remediation that is NOT a --repin: --check's verdict is
@@ -2243,18 +2328,26 @@ def remediation(
         # rebuild that just happened, so the command restates what it holds
         # rather than what the lock on disk claims — which is the point, since
         # the lock on disk is the thing that was found wrong.
-        sources = "".join(f" --source '{_source_spec(source)}'"
-                          for source in document.get("sources", []))
-        return Remediation(command=(
+        rebuilt = document.get("sources", [])
+        address = _addressing(output, repo, source_repos, rebuilt)
+        sources = "".join(f" --source '{_source_spec(source)}'" for source in rebuilt)
+        return _printable(
             f"{_SCRIPT} --registry {shlex.quote(document['registry'])} "
             f"--ref {shlex.quote(document['ref'])} "
             f"--bundles {shlex.quote(','.join(document['bundles']))}"
-            f"{sources}{addressing}"))
+            f"{sources}{address.flags}", address)
 
+    # THE LOCK'S OWN sources, never the run's `extras`, because the line below
+    # is a `--repin` and a `--repin` rebuilds the whole document. `extras` may
+    # be narrower than that: `--check-current --only <the primary registry>`
+    # hands `remediation` an empty array, and addressing the line off it left
+    # a federated lock's re-pin with no way to find the clone it would need.
+    declared, unreadable = _declared_sources(existing)
     if extras is None:
-        extras, unreadable = _declared_sources(existing)
         if unreadable:
             return Remediation(reason=unreadable)
+        extras = declared
+    address = _addressing(output, repo, source_repos, declared)
     if registry is None:
         registry = existing.get("registry")
 
@@ -2296,8 +2389,8 @@ def remediation(
         # where the echoed value is an OPTION to the command it lands in. A
         # 40-hex sha needs no charset guard of its own, and anything else now
         # gets a reason instead of a line.
-        return Remediation(
-            command=f"{_SCRIPT} --repin --ref {existing['ref']}{addressing}")
+        return _printable(
+            f"{_SCRIPT} --repin --ref {existing['ref']}{address.flags}", address)
 
     # --ref is part of the source command, not decoration: --repin deliberately
     # does not inherit `ref`, so a source-only repair printed without one falls
@@ -2327,11 +2420,11 @@ def remediation(
     primary_moves = (kind == "primary" or primary_drifted
                      or anchoring_ref != existing.get("ref"))
     if kind == "primary":
-        command = f"{_SCRIPT} --repin{addressing}"
+        command = f"{_SCRIPT} --repin{address.flags}"
     else:
         anchor = "" if primary_drifted else f"--ref {anchoring_ref} "
         command = (f"{_SCRIPT} --repin {anchor}"
-                   f"--repin-source '{source_registry}@'{addressing}")
+                   f"--repin-source '{source_registry}@'{address.flags}")
 
     if working is not None:
         declared = existing.get("skills")
@@ -2343,7 +2436,7 @@ def remediation(
             extras)
         if blocked:
             return Remediation(reason=blocked)
-    return Remediation(command=command)
+    return _printable(command, address)
 
 
 def report_drift(
@@ -2379,10 +2472,12 @@ def report_drift(
     #      the path substitution beside that slice names the
     #      primary lock alone.
     #   3. A block's repair belongs to that block — in the
-    #      UNTRUNCATED stream. Either the line IMMEDIATELY under
-    #      its headline is the command that fixes it, or there is
-    #      no command to print and the headline says so itself
-    #      (see `remediation`). Never a command under one
+    #      UNTRUNCATED stream. The line IMMEDIATELY under its
+    #      headline is the repair for it, in one of the two
+    #      shapes `Remediation` describes — a command, or a
+    #      template that says so in its first word — or there is
+    #      no line to print and the headline carries the reason
+    #      itself (see `remediation`). Never a command under one
     #      headline that repairs a different block. That is the
     #      property this loop holds and all it holds.
     #

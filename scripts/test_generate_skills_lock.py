@@ -4290,6 +4290,48 @@ def _printed_commands(stdout: str) -> list:
             if line.strip().startswith("python3 ")]
 
 
+# The one `<...>` a remediation line can carry — see `_addressing`. Named as a
+# pattern rather than matched loosely, so a template this cannot COMPLETE
+# fails here instead of being run half-filled and reported as a bad command.
+_TEMPLATE_PLACEHOLDER = re.compile(r"<path to a checkout of ([^>]+)>")
+
+
+def _printed_templates(stdout: str) -> list:
+    """Every line a verdict marked as a template, with the marker stripped.
+
+    Kept apart from `_printed_commands` on purpose: a template is NOT runnable
+    as printed, and a helper that returned the two together would be the very
+    thing the marker exists to prevent — a reader (or a test) treating a line
+    with a hole in it as a command.
+    """
+    return [line.strip()[len(gsl.TEMPLATE_MARK):] for line in stdout.splitlines()
+            if line.strip().startswith(gsl.TEMPLATE_MARK)]
+
+
+def _completed(template: str, document: dict) -> str:
+    """A template with every `<...>` filled in from where this lock's clones are.
+
+    Mechanical for the same reason `_source_repo_flags` is: these fixtures'
+    registries are `file://` URIs naming the checkout itself. Completing and
+    RUNNING is what makes a template an honest answer rather than a way to
+    stop printing a command that did not work — a marker over a line nobody
+    can finish would be the same defect wearing an apology.
+    """
+    paths = {}
+    for source in document.get("sources") or []:
+        registry = source.get("registry") if isinstance(source, dict) else None
+        if isinstance(registry, str) and registry.startswith("file://"):
+            paths[registry] = url2pathname(urlparse(registry).path)
+
+    def fill(match):
+        assert match.group(1) in paths, (match.group(1), template)
+        return paths[match.group(1)]
+
+    filled = _TEMPLATE_PLACEHOLDER.sub(fill, template)
+    assert "<" not in filled, filled
+    return filled
+
+
 @pytest.mark.parametrize("build, printable", _EVERY_SHAPE)
 def test_every_command_check_current_prints_is_one_the_generator_accepts(
         build, printable, tmp_path):
@@ -4607,6 +4649,131 @@ def test_check_format_reads_the_lock_and_its_addressing_and_no_clone(tmp_path):
             f"{claim!r} is back in generate_skills_lock.py. The measurements above "
             "are what --check-format reads; a sentence saying otherwise is a "
             "cross-repo contract that lies to the caller reading it.")
+
+
+def _ask_without_addressing(primary: Path, lock: Path, *flags: str):
+    """One verdict, asked with no `--source-repo` — the form its caller uses.
+
+    `--check-format`'s caller is the fleet bumper's PRE-CLONE call, which
+    passes neither `--repo` nor `--source-repo` (measured in _agent-guidance's
+    scripts/bump-consumer-locks.sh at 4c505e3: `python3 "$GENERATOR"
+    --check-format -o "$lock_file"`). `--check-current --only <the primary
+    registry>` reads no source at all, so its caller has no path to one to
+    pass. `--repo` is kept here only because a fixture registry is not this
+    checkout.
+    """
+    return run_generator(*flags, "--repo", str(primary), "-o", str(lock))
+
+
+def test_a_printed_line_addresses_the_clones_that_line_needs(tmp_path):
+    """Addressing is a property of the LINE, not of the flags this run got.
+
+    Every line these verdicts print is a rebuild of the WHOLE document, so it
+    needs a checkout for every source THAT DOCUMENT federates. Restating this
+    run's own `--source-repo` specs answered a different question, and left
+    unanswered exactly the two invocations that legitimately pass none:
+    `--check-format`, whose convention is a pre-clone call, and
+    `--check-current --only <the primary registry>`, where `_select_sources`
+    drops the sources before anything is read. Both printed a bare `--repin`
+    that exits 1 at "no checkout at <the default sibling>" on the fleet
+    bumper's own layout. Measured in both directions here.
+
+    The control half is the reason this cannot be fixed by templating every
+    federated line: on the ORDINARY layout the same two questions must print a
+    plain, runnable command with no placeholder and no marker, because the
+    default sibling is where the clone actually is. The answer comes from this
+    machine, not from a rule about layouts.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    _primary_drifted(primary)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    unlocated = document["sources"][0]["registry"]
+    asks = (("--check-format", _bare_digest_copy(out), ("--check-format",)),
+            ("--check-current --only <primary>", out,
+             ("--check-current", "--only", document["registry"])))
+
+    for label, lock, flags in asks:
+        verdict = _ask_without_addressing(primary, lock, *flags)
+        assert verdict.returncode == 1, (label, verdict.stdout + verdict.stderr)
+        # No line claiming to be runnable, because none of them is.
+        assert not _printed_commands(verdict.stdout), (label, verdict.stdout)
+        templates = _printed_templates(verdict.stdout)
+        assert len(templates) == 1, (label, verdict.stdout)
+        assert unlocated in templates[0], (label, templates[0])
+        applied = _run_printed(_completed(templates[0], document))
+        assert applied.returncode == 0, (label, applied.stdout + applied.stderr)
+
+    # THE CONTROL: the same two questions, the same two verdicts, a layout
+    # whose source IS the default sibling.
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    sibling_primary, sibling_out, _ = _drifted_source_only(ordinary)
+    _primary_drifted(sibling_primary)
+    sibling_doc = json.loads(sibling_out.read_text(encoding="utf-8"))
+    for label, lock, flags in (
+            ("--check-format", _bare_digest_copy(sibling_out), ("--check-format",)),
+            ("--check-current --only <primary>", sibling_out,
+             ("--check-current", "--only", sibling_doc["registry"]))):
+        verdict = _ask_without_addressing(sibling_primary, lock, *flags)
+        assert verdict.returncode == 1, (label, verdict.stdout + verdict.stderr)
+        assert not _printed_templates(verdict.stdout), (label, verdict.stdout)
+        printed = _printed_commands(verdict.stdout)
+        assert len(printed) == 1, (label, verdict.stdout)
+        assert "--source-repo" not in printed[0], (label, printed[0])
+        applied = _run_printed(printed[0])
+        assert applied.returncode == 0, (label, applied.stdout + applied.stderr)
+
+
+def test_check_format_asks_no_git_even_to_address_its_own_line(tmp_path):
+    """The flag locates a checkout without opening one.
+
+    Its calling convention is TOUCHES NO CLONE — the bumper asks it per
+    consumer lock before it has cloned any registry — and deriving the
+    addressing of its printed line added the one filesystem question it asks:
+    is the default sibling a directory. That opens no checkout, reads no file
+    and spawns no process, which is what makes it compatible with the
+    convention; this is what holds the distinction rather than asserting it.
+
+    `git` on PATH is a shim that records the call and fails, so a single git
+    call would both leave the marker and break the run.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    bare = _bare_digest_copy(out)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    marker = tmp_path / "git-was-spawned"
+    (shim / "git").write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> {shlex.quote(str(marker))}\n'
+        "exit 97\n",
+        encoding="utf-8")
+    (shim / "git").chmod(0o755)
+    env = {**os.environ, "PATH": str(shim)}
+
+    def ask(*flags, lock):
+        return subprocess.run(
+            [sys.executable, str(GENERATOR), *flags,
+             "--repo", str(primary), "-o", str(lock)],
+            capture_output=True, text=True, env=env)
+
+    verdict = ask("--check-format", lock=bare)
+    assert not marker.exists(), (
+        marker.read_text(encoding="utf-8"), verdict.stdout + verdict.stderr)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert verdict.stdout.startswith("FAILED:"), verdict.stdout
+    assert len(_printed_templates(verdict.stdout)) == 1, verdict.stdout
+
+    # NEGATIVE CONTROL, so "no marker" cannot mean "the shim never worked":
+    # --check must read a tree, and the same env trips it. Addressed, because
+    # an unaddressed --check on this layout stops at "no checkout at ..."
+    # before it reaches git — which would leave the marker empty for a reason
+    # that says nothing about the shim.
+    source = json.loads(out.read_text(encoding="utf-8"))["sources"][0]
+    control = ask("--check", "--source-repo",
+                  f"{source['registry']}={url2pathname(urlparse(source['registry']).path)}",
+                  lock=out)
+    assert marker.exists(), control.stdout + control.stderr
+    assert control.returncode != 0, control.stdout
 
 
 def test_one_sources_emptied_bundle_does_not_suppress_anothers_remediation(tmp_path):
