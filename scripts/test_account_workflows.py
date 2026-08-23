@@ -472,12 +472,33 @@ def _scan(body, heredocs=False):
     mask = list(body)
     kinds = [_KIND_CODE] * len(body)
     quote = None
+    # ANSI-C QUOTING, `$'...'`, which is a single-quoted string in every way
+    # but the one that matters here: bash honours a backslash escape inside
+    # it, so `$'\''` is a two-character string and NOT a closed quote
+    # followed by an opener. Reading it the ordinary way desyncs the rest of
+    # the walk from bash by one quote - measured, `echo $'\''` spliced above
+    # the `case` made this file red about the shipped catch-all arm, a line
+    # the splice did not touch. Loud, but naming a construct the input does
+    # not contain, and this class's own standard is that a refusal names what
+    # it found.
+    #
+    # THE `$` HAS TO BE AT A CODE POSITION, which is why this is a flag off
+    # the walk rather than a look at `body[i - 1]`. In `\$'x'` the `$` is
+    # literal and the quote is ordinary, and the backslash branch below has
+    # already consumed it - so the flag is false there, where an index-back
+    # would have said `$`. The residue is `$$'x'`: `$$` is the PID and the
+    # quote after it is ordinary, and telling that apart needs a model of
+    # parameter expansion rather than one character of state. It reads as
+    # ANSI-C here, which affects only whether a backslash inside that string
+    # masks the character after it.
+    ansi_c = False
+    dollar = False
     parens = _WordParens()
     pending, unterminated = [], None
     line, i, n = 1, 0, len(body)
     while i < n:
         ch = body[i]
-        if ch == "\\" and quote != "'":
+        if ch == "\\" and (quote != "'" or ansi_c):
             if i + 1 < n and body[i + 1] == "\n":
                 mask[i] = "\\"
             else:
@@ -487,6 +508,11 @@ def _scan(body, heredocs=False):
                     parens.saw(body, i + 1, True)
             if i + 1 < n and body[i + 1] == "\n":
                 line += 1
+            if quote:
+                kinds[i] = quote
+                if i + 1 < n:
+                    kinds[i + 1] = quote
+            dollar = False
             i += 2
             continue
         if quote:
@@ -498,12 +524,15 @@ def _scan(body, heredocs=False):
             parens.saw(body, i, True)
             if ch == quote:
                 quote = None
+                ansi_c = False
             i += 1
             continue
         if ch in "'\"":
             mask[i] = " "
             kinds[i] = ch
             quote = ch
+            ansi_c = ch == "'" and dollar
+            dollar = False
             i += 1
             continue
         if ch == "#" and parens.opens_comment(body, i):
@@ -520,6 +549,7 @@ def _scan(body, heredocs=False):
             if opener:
                 pending.append((opener.group(1), opener.group(3), line))
         parens.saw(body, i, False)
+        dollar = ch == "$"
         i += 1
         if ch == "\n":
             line += 1
@@ -3004,14 +3034,18 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"which is not one of {self._BUCKETS}: {command!r}"
             )
 
-    # A MENU OF CONSTRUCTS THIS CLASSIFIER DOES NOT MODEL, each with the text
-    # its failure has to name. Three of these were live silent exemptions -
-    # the escaped backslash, the assignment-headed pipeline and the one-line
-    # `case` arm - and the rest are the neighbouring shapes a reader would
-    # reasonably wonder about. The requirement is the same for all of them
-    # and it is not "handled": each has to be classified as the failable
-    # unguarded command it is, or to RAISE naming itself. What none of them
-    # may do is pass.
+    # A MENU OF CONSTRUCTS AT THE EDGE OF WHAT THIS CLASSIFIER MODELS, each
+    # with the text its failure has to name. Three of these were live silent
+    # exemptions - the escaped backslash, the assignment-headed pipeline and
+    # the one-line `case` arm - and the rest are the neighbouring shapes a
+    # reader would reasonably wonder about, whether the walk models them or
+    # not. The requirement is the same for all of them and it is not
+    # "handled": each has to be classified as the failable unguarded command
+    # it is, or to RAISE naming itself. What none of them may do is pass -
+    # and a row whose construct the walk DOES model has a third requirement
+    # underneath that one, which is that the failure be about the row's own
+    # line. A desynced quote walk reds about some other line entirely, and
+    # the third field is what distinguishes the two.
     #
     # The fourth field is the row's OWN benign commands - the scaffolding a
     # shape needs to be written down at all, which is not part of the shipped
@@ -3044,6 +3078,16 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
          "mkdir -p ../scratch", ()),
         ("a-one-line-if-with-its-body",
          ["if true; then mkdir -p ../scratch; fi"], "mkdir -p ../scratch", ()),
+        # ANSI-C quoting, where bash honours a backslash-escaped quote and a
+        # walk that does not desyncs from bash by one quote for the rest of
+        # the body. Named by its HEAD rather than in full, because the
+        # guard's message quotes the command with `!r` and `\'` comes back
+        # out of `repr` as `\\'` - a full-text field would never match and
+        # would say nothing about which line was named. The head cannot
+        # match any other line in the step, which is the property this row
+        # is for.
+        ("an-ansi-c-string-holding-a-quote",
+         [r"mkdir -p $'zz\'yy'"], r"mkdir -p $'zz", ()),
     )
 
     def test_a_construct_this_classifier_cannot_place_is_never_a_pass(
