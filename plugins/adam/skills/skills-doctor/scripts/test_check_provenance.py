@@ -233,6 +233,69 @@ def _finding_sites():
     return sites
 
 
+# The phrasings that make a sentence a claim about a RUN of the hook, each one
+# a form this module actually uses. They are what `when_the_hook_runs` exists
+# for: on a durable machine the hook returns `skills: skipped` before it reads
+# the lock, so a sentence in any of these shapes describes something that does
+# not happen there.
+#
+#   next bootstrap/run/session   the explicit form
+#   session start                "at every session start", "no session has started"
+#   that run                     "forgets every install before that run"
+#   is refreshed                 the shadow note's two-clocks sentence
+#   self-heals                   "it self-heals in one run"
+#   install loop                 the loop is the thing that does the installing
+#   can never remove             a promise about every future prune
+#   the hook <does something>    the hook as the actor, in the present tense
+#
+# Deliberately NOT here: "the hook did not put it there", "the hook cannot read
+# it either". Those are steady-state facts about a file or a past run, true on
+# both surfaces, and a caveat on them would be noise — which is how a rule of
+# this shape stops being read.
+NEXT_RUN_CLAIM = re.compile("|".join((
+    r"next (?:bootstrap|run|session)",
+    r"session start",
+    r"that run",
+    r"is refreshed",
+    r"self-heals",
+    r"install loop",
+    r"can never remove",
+    r"the hook (?:removes|installs|refuses|leaves|deletes|skips|prunes"
+    r"|overwrites|cleans|only removes|will not remove)",
+)), re.I)
+
+
+def test_every_sentence_about_the_next_run_is_gated_on_the_surface():
+    """The quantifier round 5 asserted in a commit message and nothing checked.
+
+    That commit said it had gated `every "what the next run does" sentence` on
+    the surface. Four were not: the shadow note's two-clocks sentence, quoted
+    into all four shadow branches including the benign one that is the ordinary
+    #122 session, so a durable machine printed `SURFACE durable` and then told
+    the reader the personal copy `is refreshed at every session start` — on a
+    machine where the hook returns `skills: skipped` before it reads the lock,
+    so it is refreshed at NO session start and the remedy is the marketplace.
+
+    Fixing those four and leaving the quantifier unbacked is what round 5 did.
+    So the set is DERIVED: every finding-building call in `check_provenance.py`,
+    with the module constants and locals it interpolates resolved, and any of
+    them that can say one of `NEXT_RUN_CLAIM`'s phrasings has to carry
+    `when_the_hook_runs`' answer. A new sentence is in the set the moment it is
+    written, whether or not anybody greps for it.
+    """
+    ungated = [
+        f"{site.function}:{site.lineno} -> "
+        f"{sorted(set(NEXT_RUN_CLAIM.findall(site.universe)))}"
+        for site in _finding_sites()
+        if NEXT_RUN_CLAIM.search(site.universe)
+        and "but_here" not in site.detail
+        and "when_the_hook_runs" not in site.detail
+    ]
+    assert not ungated, (
+        "these say what a next run does without saying whether one happens:\n"
+        + "\n".join(ungated))
+
+
 def _contains(root, node) -> bool:
     return root is node or any(_contains(child, node)
                                for child in ast.iter_child_nodes(root))
@@ -4462,6 +4525,84 @@ def test_the_stale_note_and_the_lock_findings_are_gated_too(tmp_path, capsys):
     code, out = run(store, lock, capsys)
     assert code == 1, out
     assert "[lock-unreadable]" in out, out
+    assert DURABLE_CAVEAT in flat(out), out
+
+
+@pytest.mark.parametrize("body, kind, exit_code", [
+    ("body\n", "shadowed-by-the-account-store", 0),
+    ("theirs\n", "shadow-copies-differ", 1),
+], ids=["benign-note", "divergent-finding"])
+def test_the_shadow_notes_two_clocks_sentence_is_gated_too(
+        tmp_path, capsys, body, kind, exit_code):
+    """The instance the "every next-run sentence" commit missed, at the surface.
+
+    `clocks` is quoted into all four shadow branches, the BENIGN note among them
+    — the ordinary #122 cloud session. So a durable machine printed `SURFACE
+    durable ... the marketplace install is authoritative` and then told the
+    reader the personal copy `is refreshed at every session start`, which is the
+    contradiction round-4 defect 3 was raised about, in the one place a reader is
+    most likely to act on it. Both branches are parametrised because gating the
+    finding and leaving the note is exactly the half-fix that would look done.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    account_copy(store, "alpha", body=body, crlf=False)
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == exit_code, out
+    assert f"[{kind}] alpha" in out, out
+    assert "refreshed at every session start" in flat(out), out
+    assert "SURFACE  durable" in out, out
+    assert DURABLE_CAVEAT in flat(out), out
+
+
+def test_the_two_clocks_sentence_carries_no_caveat_where_it_is_true(
+        tmp_path, capsys, ephemeral):
+    """The negative control, and the reason the caveat is not just always-on text.
+
+    On an ephemeral surface the sentence is true exactly as written — the hook
+    runs, and the personal copy really is refreshed at this session start. A
+    caveat there would be the same defect pointing the other way.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+    account_copy(store, "alpha", body="body\n", crlf=False)
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "[shadowed-by-the-account-store] alpha" in out, out
+    assert "refreshed at every session start" in flat(out), out
+    assert DURABLE_CAVEAT not in flat(out), out
+    assert UNSURE_CAVEAT not in flat(out), out
+
+
+def test_the_prune_promise_on_a_skipped_record_entry_is_gated(tmp_path, capsys):
+    """`record-entries-skipped`, the second instance the same commit walked past.
+
+    "Those installs are invisible to the prune: it can never remove them" is a
+    promise about every future run, printed under `SURFACE durable` where no
+    future run reads the record at all.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    path = write_record(store, "alpha")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["installed"].append({"name": "../escape", "registry": REGISTRY_URL,
+                              "bundle": "adam", "digest": "0" * 64})
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[record-entries-skipped]" in out, out
+    assert "can never remove them" in flat(out), out
     assert DURABLE_CAVEAT in flat(out), out
 
 
