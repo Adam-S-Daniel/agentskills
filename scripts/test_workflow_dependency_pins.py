@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every `pip install` in this repo's workflows installs requirements-dev.txt.
+"""Every `pip install` this repo's CI runs installs requirements-dev.txt.
 
 Issue #121. The packages this repo tests itself with used to be pinned inline
 in the `pip install` lines of .github/workflows/. Nothing required any two of
@@ -26,8 +26,8 @@ repo needs is not flagged by anything here; deciding a package is no longer
 used takes reading the scripts, which these tests do not do.
 
 FAIL-CLOSED IS THE POINT. A command these tests cannot place, or a pip install
-that the YAML walk never reached, is a FAILURE naming the file, the job and the
-step it sits in — not a silent pass. The whole failure mode being guarded is a
+that the YAML walk never reached, is a FAILURE naming the file, the job or
+composite action, and the step index — not a silent pass. The whole failure mode being guarded is a
 pin drifting back into a workflow unnoticed, and a checker that shrugs at a
 shape it does not recognise would be the exact hole it was written to close.
 
@@ -44,15 +44,15 @@ command counts as a pip install whenever a token naming pip (`pip`, `pip3`,
 however many tokens sit in front of it and whatever flags sit between.
 
 Parsed with `yaml`, not grepped: a `run:` body is a folded or literal scalar
-whose indentation and continuations a line scan does not see, and this repo's
-workflows are mostly comments — several of which now contain the words `pip
-install` inside prose about pip installs, so a line scan would report those and
-a commented-out install as real commands. Tokenising drops a `#` comment and
-keeps a quoted `"pip install ..."` as one token, so neither is mistaken for a
-command. The stray-scalar test below is the second pair of eyes on the walk: it
-re-reads the SAME parsed document as a tree of scalars, with no notion of what
-a job or a step is, and fails when a pip install turns up in a scalar the
-`jobs -> steps -> run` walk never visited.
+whose indentation and continuations a line scan does not see, and these
+workflows carry comments that contain the words `pip install` inside prose
+about pip installs, so a line scan would report those and a commented-out
+install as real commands. Tokenising drops a `#` comment and keeps a quoted
+`"pip install ..."` as one token, so neither is mistaken for a command. The
+stray-scalar test below is the second pair of eyes on the walk: it re-reads the
+SAME parsed document as a tree of scalars, with no notion of what a job or a
+step is, and fails when a pip install turns up in a scalar the step walk never
+visited.
 
 Scope is the YAML this repo runs its own CI from: .github/workflows/*.yml and
 the composite actions at .github/actions/**/action.yml. A composite action's
@@ -86,8 +86,10 @@ PUNCTUATION = "();<>|&\n"
 BRACES = {"{", "}"}
 
 # Cheap pre-filter. Tokenising is only attempted on text that could hold a pip
-# install at all, which keeps shlex away from the many scalars in these files
-# that are English prose and would raise on an apostrophe.
+# install at all, which keeps shlex away from scalars that are prose rather
+# than shell: an apostrophe is an unbalanced quote to shlex, and this repo has
+# a step `name:` with one in it. Text that gets past this filter and still
+# cannot be tokenised is reported, not skipped.
 PIP_HINT = re.compile(r"pip|install", re.IGNORECASE)
 
 # A token that names the pip program: `pip`, `pip3`, `pip3.11`, and the same
@@ -426,14 +428,16 @@ INSTALL_IDS = [where for where, _, _ in ALL_INSTALLS]
 
 
 def test_the_workflows_install_python_dependencies_at_all():
-    """Guards the vacuous pass for the checks that are parametrized over the
-    installs found: with none found, pytest generates no cases for them and
-    they cannot fail."""
+    """Guards the vacuous pass for the checks parametrized over the installs
+    found. With none found pytest generates no case for any of them: they
+    report as skipped and cannot fail, so nothing would be checking the
+    workflows at all. Measured by rewriting every workflow install to `true`,
+    which leaves this assertion as the failure."""
     assert ALL_INSTALLS, (
-        "no `pip install` was found in any workflow under .github/workflows/. "
-        "Either the jobs stopped installing their Python dependencies, or the "
-        "scanner in this file no longer recognises how they do it — and the "
-        "checks parametrized over the installs pass either way, which is why "
+        "no `pip install` was found under .github/. Either the jobs stopped "
+        "installing their Python dependencies, or the scanner in this file no "
+        "longer recognises how they do it — and the checks parametrized over "
+        "the installs are skipped rather than failed either way, which is why "
         "this one exists."
     )
 
