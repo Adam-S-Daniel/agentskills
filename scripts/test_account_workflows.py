@@ -3315,6 +3315,17 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             wants one per position twice over; the loop below moves that
             overhead inside a single shell. Each file is still parsed by its
             own `bash -n`, so the answer per position is unchanged.
+
+            The batch is handed over as a FILE OF PATHS, not as argv. There is
+            one path per line of the step body, and a Windows temp path is long
+            enough that the argv form overran the 32767-character command line
+            and died with `WinError 206: the filename or extension is too
+            long` -- so the sweep, the one gate that would have caught the four
+            blocking defects this class keeps producing, was the thing that
+            could not run there. A path cannot contain a newline here (they are
+            all `<tmp_path>/sweep-<tag>-<n>.sh`), so a newline-delimited list is
+            unambiguous, and it keeps the single-invocation property the
+            paragraph above is about.
             """
             paths = {}
             for pos in positions:
@@ -3323,10 +3334,14 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                               name=f"sweep-{tag}-{pos}.sh")] = pos
             if not paths:
                 return set()
+            listing = tmp_path / f"sweep-{tag}.list"
+            listing.write_text("\n".join(paths) + "\n",
+                               encoding="utf-8", newline="\n")
             done = subprocess.run(
                 [bash, "-c",
-                 'for f in "$@"; do bash -n "$f" 2>/dev/null '
-                 '|| printf "%s\\n" "$f"; done', "_"] + list(paths),
+                 'while IFS= read -r f; do bash -n "$f" 2>/dev/null '
+                 '|| printf "%s\\n" "$f"; done < "$1"',
+                 "_", str(listing).replace("\\", "/")],
                 capture_output=True, text=True)
             assert done.returncode == 0, (
                 f"the batched `bash -n` runner itself failed, so nothing it "
@@ -5585,12 +5600,17 @@ class TestSkillInputIsValidatedBeforeUse:
         check that reads like validation and is not.
         """
         bash = require_bash()
+        # The multiline value goes through the ENVIRONMENT, not argv: MSYS2
+        # re-parses the Windows command line and cuts an argument at its first
+        # newline, which would leave `grep` matching a single-line pattern and
+        # this negative control quietly asserting nothing.
         script = (
             'printf \'%s\\n\' "sync-skills" "other" '
-            '| grep -qxF -- "$1"'
+            '| grep -qxF -- "$MULTILINE_VALUE"'
         )
         assert subprocess.run(
-            [bash, "-c", script, "_", "sync-skills\nfoo=bar"],
+            [bash, "-c", script],
+            env={**os.environ, "MULTILINE_VALUE": "sync-skills\nfoo=bar"},
             capture_output=True,
         ).returncode == 0, (
             "grep -F unexpectedly rejected the multiline pattern; if this "
