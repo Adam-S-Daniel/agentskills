@@ -41,8 +41,8 @@
 # the class of bug that produces an "expected" number nobody can explain. So the
 # copy is not independent — it is ten lines of hashlib mirroring
 # generate_skills_lock.py's `digest_skill_dir` line for line, with
-# `test_the_hooks_inline_digest_matches_the_generators` asserting the two agree
-# on a non-trivial fixture. A hook that runs at SessionStart with NO approval
+# `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill`
+# asserting the two agree on a non-trivial fixture. A hook that runs at SessionStart with NO approval
 # prompt must not execute code it just downloaded; ten lines of hash under an
 # equality test is a far smaller risk than remote code execution.
 #
@@ -877,8 +877,8 @@ fi
 # not independent: it mirrors `digest_skill_dir` in
 # scripts/generate_skills_lock.py line for line (see the module docstring's
 # "The digest" section for the specification), and
-# `test_the_hooks_inline_digest_matches_the_generators` asserts the two produce
-# the same digest for a non-trivial directory. Change one, change the other, and
+# `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill` asserts
+# the two produce the same digest for a non-trivial directory. Change one, change the other, and
 # let that test say so.
 digest_dir () {
   # `-I` (isolated): see the header. This is the invocation the isolation

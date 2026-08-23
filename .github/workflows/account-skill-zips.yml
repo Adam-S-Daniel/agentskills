@@ -162,15 +162,64 @@ jobs:
         # there, and it is the reason the headline above says "reaches for
         # skills-evals" rather than "every".
         #
-        # THE QUALIFIER IS LOAD-BEARING, because an unqualified count here
+        # THE QUALIFIER IS LOAD-BEARING, because an unqualified claim here
         # would be false and this paragraph's own argument is that a wrong
-        # tolerance comment is worse than none. Twelve other `echo` commands
-        # sit equally bare - the two clone-success lines, every `::warning::`,
-        # and the `published account audit reads:` line - each of them in an
-        # `if` or `case` BODY, which errexit does act on. They are left that
-        # way because an `echo` to a runner's stdout essentially never fails;
-        # the one that also REDIRECTS is the one named above, and redirection
-        # is what makes it failable.
+        # tolerance comment is worse than none. Every OTHER `echo` in this
+        # step is left unguarded too, and errexit reaches all of them alike:
+        # the ones in an `if`, `elif`, `else` or `case` body, the ones at the
+        # step's top level, and the ones written as the right-hand side of a
+        # `||`.
+        #
+        # THAT LAST SHAPE IS THE ONE THAT LOOKS PROTECTED AND IS NOT. A `||`
+        # covers the `mkdir` or the `pip install` on its LEFT; the command
+        # AFTER the final `||` is the one member of the list errexit is not
+        # exempted from, so it aborts the step exactly like a bare one. In one
+        # line each, and they print the same thing and both exit 1:
+        #   bash -e -c 'false || echo hi >&-; echo reached'
+        #   bash -e -c 'echo hi >&-; echo reached'
+        #
+        # They are all left that way because an `echo` to a runner's stdout
+        # essentially never fails; the one that also REDIRECTS is the one
+        # named above, and redirection is what makes it failable.
+        #
+        # NO COUNT HERE, DELIBERATELY. There was one, and the set it named
+        # left out the `mkdir` fallback and the `no verdict, which follows
+        # from the clone failure` line. Nothing in this repo asserted it
+        # either, and that is the whole reason it is gone rather than
+        # corrected: an unasserted count reads as checked, and this one was
+        # still accurate on the day it was deleted - which is exactly when
+        # nobody is looking at it. See #120. The SHAPE is the durable claim:
+        # every SIMPLE `echo` in this step is left unguarded, including the
+        # `$GITHUB_OUTPUT` write named above, and any command here that can
+        # plausibly fail and has a degraded path to take belongs in an `if`
+        # condition or a `||` list. Simple, because an `echo` at the head of
+        # a PIPELINE takes the status of whatever the pipeline ends with, and
+        # that one is an ordinary failable command however it starts.
+        #
+        # scripts/test_account_workflows.py holds that shape rather than
+        # leaving it to be read - see #124.
+        # TestEveryFailableCommandInTheAuditStepIsGuarded parses this step's
+        # body, blanks the Python heredoc and the comments, and reds on an
+        # `echo` that redirects anywhere but the `$GITHUB_OUTPUT` write, and
+        # on any command sitting outside an `if` condition and a `||` list
+        # that is not in that test's own carve-out list. That list is the
+        # EXACT TEXT of every command this step leaves unguarded on purpose,
+        # not a pattern, so nothing is exempt by resembling something: a
+        # pipeline is never carved out, an `echo` with a second redirect is
+        # never carved out, a command with an assignment before its name is
+        # never carved out, and a command whose name is glued to a `{` is
+        # never carved out. One entry does carry punctuation ahead of its
+        # name - the `{ pip_ok=no` this step's pip guard opens its brace
+        # group with, listed with the brace because that is the text the
+        # test is handed; drop the brace and the exemption goes with it.
+        # Which means EDITING A LINE BELOW CAN RED
+        # THAT TEST even when the edit is harmless - re-quoting one of these
+        # `::warning::` strings will do it. That is deliberate: the failure
+        # message quotes the new text to paste into the list, and pasting it
+        # is a reviewer re-affirming that the command may abort this step
+        # unnoticed. It also reds if a count comes back into this paragraph,
+        # and if the `status=` write acquires the guard the sentence above
+        # says it must not have.
         run: |
           set -uo pipefail
           # ONE ANNOTATION PER DISTINCT FAULT. Not "one annotation per run":
@@ -257,6 +306,56 @@ jobs:
           print(status)
           PY
           ) || verdict=""
+          # NORMALISED HERE, BECAUSE THE `case` BELOW AND
+          # account_zip_selection.py HAVE TO AGREE ABOUT WHAT A VERDICT IS.
+          # `normalise_status` strips before it tests the vocabulary; a `case`
+          # pattern does not.
+          #
+          # BEFORE THE `-z` GUARD, DELIBERATELY. A single space is an empty
+          # capture in every sense that matters and `[ -z "$verdict" ]` cannot
+          # see one, so a whitespace-only capture used to skip the diagnostic
+          # branch below, reach `*)`, and accuse skills-evals of a rename that
+          # never happened while writing `status= ` downstream. Trimming first
+          # hands it to the branch that was written for it.
+          #
+          # THE TRIM IS DEFENCE IN DEPTH AND IS NOT LOAD-BEARING TODAY:
+          # `freshness_verdict` returns string literals and its
+          # artifact-derived text goes to stderr, so nothing padded reaches
+          # this capture from skills-evals as it stands. It is two lines
+          # against a change in another repo that no test here can see.
+          verdict="${verdict#"${verdict%%[![:space:]]*}"}"
+          verdict="${verdict%"${verdict##*[![:space:]]}"}"
+          # THE LINE BELOW IS THE ONE THAT CLOSES A REACHABLE FAULT. `$( )`
+          # captures ALL stdout of the heredoc, so anything printing at import
+          # time inside it - in `yaml`, or in skills-evals' own
+          # `propagation.account_store` - prepends a line, and
+          # `echo "status=$verdict"` then writes a MULTI-LINE entry to
+          # $GITHUB_OUTPUT whose second line has no `=`. The runner parses that
+          # file line by line and rejects it, so the step dies instead of
+          # degrading. This is the same fault the paragraph above the `drift`
+          # read already names; `drift` has a test that executes it and this
+          # capture had nothing.
+          #
+          # REJECTED RATHER THAN SALVAGED. Keeping the last line would recover
+          # a plausible answer and leave the run green with no annotation,
+          # which is this file header's "we could not ask" read as "we asked
+          # and it passed". Blanking it hands the capture to the empty-capture
+          # branch, whose text - "what broke is the import inside this step" -
+          # is already the right diagnosis, and which degrades loudly.
+          #
+          # AFTER THE TRIM, so a capture that is only surrounded by whitespace
+          # is normalised rather than condemned: `$( )` already discards a
+          # TRAILING blank line, and treating a LEADING one as fatal while its
+          # mirror image is invisible would be the inconsistent rule.
+          #
+          # THE ORDER IS EXECUTED, NOT ARGUED. This paragraph used to be the
+          # only thing holding it: moving the line above the two trims left
+          # every test in this repo green while `\nfresh` began degrading to
+          # `unavailable` with an annotation blaming a cross-repo import.
+          # test_a_capture_padded_with_a_newline_is_trimmed_not_condemned runs
+          # the step for a padding that leads with a newline and reds if the
+          # two are swapped.
+          [ "$verdict" = "${verdict%%[$'\n']*}" ] || verdict=""
           # An empty capture is the ONLY way this can end without a verdict, and
           # it must not read as one. `unavailable` is not a skills-evals status;
           # the selection module treats it - and any string it does not

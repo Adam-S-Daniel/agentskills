@@ -113,6 +113,23 @@ is what separates them. A skill in `synced/manifest.json` came from the
 account; one on disk in `~/.claude/skills/` but absent from the manifest came
 from the hook or a hand copy.
 
+**One name can be in both, and there the manifest confirms the collision
+rather than resolving it.** Names reach a cloud session from the hook and the
+account store at once — measured on this registry's own sessions
+(agentskills#122). The listing shows each such name once, and nothing in it,
+on disk, or in any log says which copy the model read.
+`check_provenance.py` reports every one: a `shadowed-by-the-account-store`
+NOTE where the two copies match once CRLF is folded to LF, and a
+`shadow-copies-differ` FINDING where they do not. Both verdicts are over the
+files an UPLOAD carries — the account copy is the ZIP `zip_skill` built, so
+what the upload filter drops is excluded from both sides (`__pycache__`,
+`.pytest_cache`, `.pyc`, `.b64` and `node_modules` among them), and a `diff -r`
+of the two directories can disagree with a NOTE that calls their instructions
+identical. Treat a match as a
+measurement of the moment and not a guarantee — the two copies update on
+different clocks, and only the divergent case is a defect. Which channel wins
+when they disagree is an open question, not something the report answers.
+
 **Which of those two it is, the hook already answered.** It writes
 `~/.claude/skills/.skills-bootstrap-installed.json` — one entry per skill it
 installed, with the registry it was fetched from, the bundle, and the digest
@@ -163,6 +180,13 @@ entrypoint's shape — unproven against `remote_cowork`, held deliberately — s
 any other entrypoint with no session id reports as `unsure` and is judged as
 durable, which is the quiet reading.
 
+The same reading gates every sentence about what the NEXT run does. Those three
+arms are tested by the hook BEFORE it reads the lock, and failing all three it
+prints `skills: skipped` and exits — so on a durable or unsure machine there is
+no install, no refusal and no `skills:` verdict to read `DEGRADED`. Findings
+that promise any of those carry the caveat themselves rather than leaving the
+reader to reconcile them against the SURFACE block further up the report.
+
 **`hook-not-wired` is the finding to look for in a multi-repo session.** A lock
 plus a SessionStart hook wired only in a *child* of the project dir means no
 hook is consulted at all, so nothing is delivered and nothing says so — there is
@@ -205,9 +229,18 @@ collapse them into "no record":
 The lock has states of its own, and one of them is not a shade of "no lock":
 a file that parses as JSON but that the hook's reader **refuses** — no
 `bundles`, a bundle no source claims, a registry that is not `OWNER/REPO` or a
-URL. It installs nothing at all from such a lock, so every skill judgement made
-against one names a cause that never happened. `check_provenance.py` reports it
-as `lock-rejected` and withholds the rest.
+URL, a `skills` value that is not an object, a key that is not
+`<bundle>/<skill>`, a digest that is not 64 hex (with or without a `sha256:`
+prefix), or a key whose skill part is `synced`. The refusal is the WHOLE LOCK
+and it happens **before** the install loop exists: it installs nothing at all
+from such a lock, so every skill judgement made against one names a cause that
+never happened. `check_provenance.py` reports it as `lock-rejected` and
+withholds the rest — no declared count, no `missing`.
+
+One bad row is therefore never one bad skill. A single hand-edited digest stops
+delivery of every skill in that lock, and the session-start verdict says only
+`DEGRADED — could not read …/skills.lock`; the reason is in the hook's `$LOG`,
+and `lock-rejected` names it.
 
 Only when the record cannot answer — absent, or unreadable — does the old
 heuristic apply: directories the hook wrote in one run share an mtime, because
@@ -371,4 +404,52 @@ figure. No remediation is performed — recommend, do not do.
   edited digest would make the next run's comparison succeed and delete the
   user's work. So a digest mismatch against the record means *edited*, while a
   mismatch against the **lock** means the copy predates the current lock — two
-  different facts from the same number.
+  different facts from the same number. One mismatch against the record is
+  neither: when every file an UPLOAD would carry still matches, the difference
+  is a build artefact (`__pycache__`, `.pytest_cache`) and the doctor reports
+  `artefacts-and-locked`, naming the extra files it actually found.
+- **A directory the hook will not overwrite is not a directory the hook is
+  about to delete.** `may_replace` in `.claude/hooks/skills-bootstrap.sh`
+  overwrites in three cases only — nothing is there, what is there already
+  digests to the digest the lock names, or the record names it and the bytes
+  still digest to what was recorded — and REFUSES everything else. That third
+  clause reads the record under LOOSER rules than the prune does: `name` and
+  `digest` only, no `registry` and no `bundle`, so a row the prune throws away
+  can still authorise an overwrite, and a name recorded twice is decided by the
+  row nearer the top of the file. A refusal
+  copies nothing and removes nothing: the skill is dropped from that run, the
+  bytes stay, and the name is listed after `DEGRADED … shadowed`. So the risk a
+  refusal finding describes is a skill that stops being delivered, never local
+  work about to be overwritten. The refusal findings are `edited-and-locked`,
+  `unmeasurable-and-locked`, `artefacts-and-locked`, `hand-placed-over-locked`,
+  `unattributable-over-locked` and `recorded-twice-and-locked`; that list is
+  `REFUSAL_KINDS` in `scripts/check_provenance.py` and a test holds this
+  sentence to it, because an enumeration nothing checks is how this one came to
+  be missing two. A build artefact
+  left by running a skill's own suite in place stalls that skill's updates
+  until it is deleted, which is why it is a finding rather than a note.
+- **The middle clause is why some of those are only a note.** "What is there
+  already digests to the digest the lock names" asks nothing about who put the
+  directory there, so a hand-placed copy of exactly the bytes the bundle ships
+  is overwritten like any other. The doctor measures that clause and reports
+  `bytes-are-the-locked-ones` instead of a refusal — the state is not a defect,
+  it is a state that becomes one the next time the lock's digest for that name
+  moves.
+- **`may_replace` saying yes is not the end of the story, and the doctor walks
+  the rest of the ladder before it says delivery is unaffected.** The install
+  loop asks several more questions after that gate, and seven of its arms end in
+  `rm -rf` on the very directory it just agreed it could replace. The doctor
+  models the two that a reading of your own disk can answer: two lock rows
+  folding onto one destination name (`deleted-by-the-dup-guard`, a finding —
+  neither row installs) and the project shipping a `.claude/skills/<name>` of
+  its own (`deleted-by-the-collision-guard`, a note — repo-owned is supposed to
+  win). That last question is asked the hook's own way — one
+  `[ -f .claude/skills/<name>/SKILL.md ]` per name, never a listing of the
+  directory — so a plain file, a missing directory or a symlink loop where
+  `.claude/skills` belongs is a measured "the project ships nothing", exactly as
+  it is for the hook. Only a stat that fails for a reason which is not about the
+  path leaves it unknown, and the doctor says so
+  (`collision-guard-unmeasured`) rather than assuming the benign reading.
+  `bytes-are-the-locked-ones` is now raised only where every local rung is
+  clear, which is the only state in which "delivery is unaffected" is a
+  measurement rather than a hope.
