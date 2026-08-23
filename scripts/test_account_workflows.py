@@ -43,15 +43,27 @@ def echoed(body):
     return " ".join(m.group(1) for m in ECHOED.finditer(body))
 
 
+# `#` OPENS A COMMENT WHEREVER IT BEGINS A WORD, and a word begins after
+# whitespace OR after an unquoted metacharacter. `: ;;# note` is a comment to
+# bash - verified, `case x in x) : ;;# note` runs the arm and prints nothing -
+# and it was not one to either scanner here, which is the same false red these
+# scanners exist to remove. `;`, `&`, `|` and `(` are in; `<` and `>` are not,
+# because `echo hi >#x` is a syntax error either way and `bash -n` catches it;
+# `)` is not, because a `)` is only a metacharacter SOMETIMES - `x=$(date)#y`
+# is one word and prints `...#y`, so counting it would invent a comment where
+# bash sees data, which is the direction that loses text.
+_COMMENT_OPENS_AFTER = " \t\n;&|("
+
+
 def _uncomment(line):
     """One line of shell with a trailing `#` comment removed.
 
     Quote-aware, because the alternative is a lint that mangles the step's own
     `::warning::` text. Bash starts a comment at a `#` that begins a WORD -
-    line start or after whitespace - and only when it is not quoted, so
-    `${v#x}`, `$#` and `a#b` are untouched, and a `#` inside `'...'` or
-    `"..."` is data. A backslash escapes the next character everywhere except
-    inside single quotes.
+    see `_COMMENT_OPENS_AFTER` for where a word begins - and only when it is
+    not quoted, so `${v#x}`, `$#` and `a#b` are untouched, and a `#` inside
+    `'...'` or `"..."` is data. A backslash escapes the next character
+    everywhere except inside single quotes.
 
     WHAT IT DELIBERATELY DOES NOT MODEL, stated so nobody reads more into it:
     quoting is tracked per LINE, and a heredoc body is read as shell rather
@@ -74,7 +86,7 @@ def _uncomment(line):
                 quote = None
         elif ch in "'\"":
             quote = ch
-        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+        elif ch == "#" and (i == 0 or line[i - 1] in _COMMENT_OPENS_AFTER):
             return line[:i].rstrip()
         i += 1
     return line
@@ -183,6 +195,13 @@ def _shell_scan(body):
     index found in either indexes all three - which is what lets `_tail` and
     `_guard` go on returning slices of the raw body.
 
+    COMMENTS OPEN WHERE BASH OPENS THEM, which is `_COMMENT_OPENS_AFTER` and
+    not merely after whitespace. `: ;;# note` is a comment; reading it as code
+    made the `;;` inside the prose end an arm and the next arm start
+    mid-sentence, so the block reded with "an arm has no pattern this test can
+    read" over a missing space. Three `_ARMS_OK` shapes and three decoys in
+    test_the_tail_slice_is_not_relocated_by_a_comment hold it.
+
     ONE WALK, ONE QUOTE MODEL, and that is the point rather than an
     efficiency. `_uncomment` tracks quotes per LINE; anything that tracks them
     across lines and consumes `_uncomment`'s output disagrees with it, and the
@@ -250,7 +269,7 @@ def _shell_scan(body):
             quote = ch
             i += 1
             continue
-        if ch == "#" and (i == 0 or body[i - 1] in " \t\n"):
+        if ch == "#" and (i == 0 or body[i - 1] in _COMMENT_OPENS_AFTER):
             j = body.find("\n", i)
             j = n if j == -1 else j
             for k in range(i, j):
@@ -492,6 +511,16 @@ _ARMS_OK = [
          'liveness."', 'liveness - an esacapade of renames."'))),
     ("trailing-comment-containing-a-terminator",
      _arm('    : ;;', '    : ;;  # was ;; before the fallthrough experiment')),
+    # THE SAME COMMENT WITH THE SPACE TAKEN OUT, and the space was load-bearing
+    # until it was not supposed to be. Bash opens a comment wherever `#` begins
+    # a WORD, so `;;#` is a comment and `;; #` is the same comment - the pair
+    # is here so the two cannot drift apart again.
+    ("trailing-comment-with-no-space-after-the-terminator",
+     _arm('    : ;;', '    : ;;# was ;; before the fallthrough experiment')),
+    ("comment-opening-straight-after-a-single-semicolon",
+     _arm('    : ;;', '    : ;# the esac below is unaffected\n    ;;')),
+    ("comment-opening-straight-after-an-open-paren",
+     _arm('    : ;;', '    (# a subshell whose esac and ;; are prose\n    :)\n    ;;')),
     ("command-substitution-in-an-arm-body",
      _arm('    : ;;',
           '    echo "seen at $(date -u +%Y 2>/dev/null || echo ?)" ;;')),
@@ -1723,7 +1752,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         reds rather than passing quietly, and dropping a shape is exactly how
         the eleven false reds got in.
         """
-        assert len(_ARMS_OK) == 23, (
+        assert len(_ARMS_OK) == 26, (
             "a shape came out of the reformat set. Removing one is how a "
             "scanner starts false-reding on it again; add shapes freely and "
             "update this number, but do not take one out to make a helper "
@@ -1749,7 +1778,15 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         monkeypatch.setattr(type(self), "_body", lambda self: body)
         self.test_the_case_block_names_every_status_the_module_knows()
 
-    def test_the_tail_slice_is_not_relocated_by_a_comment(self, monkeypatch):
+    # THE DECOY IN EVERY SHAPE A COMMENT CAN OPEN IN. The own-line form is the
+    # one a text search and a code search already agree is a comment; the three
+    # after it open the comment straight after a metacharacter, which is where
+    # both scanners in this file used to disagree with bash and hand `_tail`
+    # a slice that starts mid-sentence.
+    @pytest.mark.parametrize("decoy_prefix", ["", ": ;", "true &", "("],
+                             ids=["own-line", "after-;", "after-&", "after-("])
+    def test_the_tail_slice_is_not_relocated_by_a_comment(
+            self, monkeypatch, decoy_prefix):
         """`_tail()` is the slice EVERY verdict test in this class executes.
 
         So a boundary found by text rather than by code is the worst-placed
@@ -1757,14 +1794,17 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         verbatim relocates the slice, and every test below goes on passing
         against a region that is not the step. Green, and wired to nothing.
 
-        Measured with the decoy below spliced above the real `verdict=$(`
-        line: a `body.index` slice starts ` and then dispatches\\nverdict=$(`,
-        mid-comment; this one returns the real tail byte for byte.
+        The naive slice is COMPUTED below and asserted to differ rather than
+        described, so each decoy is proved to be a decoy on the machine
+        running this instead of on the one that wrote the docstring.
         """
         body = _audit_body()
         lines = body.splitlines()
         i = next(k for k, l in enumerate(lines) if l.startswith("verdict=$("))
-        decoy = '# the heredoc ends with ) || verdict="" and then dispatches'
+        decoy = (decoy_prefix
+                 + '# the heredoc ends with ) || verdict="" and then dispatches')
+        if decoy_prefix == "(":
+            decoy += "\n:)"
         poisoned = "\n".join(lines[:i] + [decoy] + lines[i:]) + "\n"
         pristine = self._tail()
         assert "verdict=$(" not in pristine, (
