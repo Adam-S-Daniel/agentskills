@@ -119,10 +119,11 @@ BRACES = {"{", "}"}
 
 # Cheap pre-filter, and a sound one: every rule below needs either the letters
 # `pip` or the word `install` present, so nothing the scanner could have
-# flagged is dropped here. What it buys is keeping shlex away from scalars that
-# are prose rather than shell — an apostrophe is an unbalanced quote to shlex,
-# and this repo has a step `name:` with one in it. Text that gets past the
-# filter and still cannot be tokenised is reported, not skipped.
+# flagged is dropped here. It is ONLY a speed-up. It was briefly described as
+# what keeps shlex away from prose, and it is not: `Install the runner's
+# Python dependencies` is prose, gets past it on the word `install`, and then
+# fails to tokenise on the apostrophe. What separates prose from shell is the
+# `strict` argument to scan_shell_body below, not this.
 PIP_HINT = re.compile(r"pip|install", re.IGNORECASE)
 
 # A `run:` body is only shell if the step says so. `shell:` is a first-class
@@ -497,7 +498,7 @@ def classify_command(tokens):
     return "other", None
 
 
-def scan_shell_body(body: str, shell=None):
+def scan_shell_body(body: str, shell=None, strict: bool = True):
     """(pip install commands, unplaceable commands) for one step body.
 
     Each entry is (command text, ...) where the text is the command's tokens
@@ -509,6 +510,16 @@ def scan_shell_body(body: str, shell=None):
     language is not a command line is not tokenised at all: it is reported,
     because reading Python as shell is what let a `shell: python` step install
     a drifted pin at exit 0.
+
+    `strict` is what separates a step's `run:` body from every other scalar in
+    a document. A `run:` body is shell this repo executes, so anything
+    unreadable in it fails. Any other scalar is usually prose, and two things
+    that are evidence in shell are not evidence there: text shlex cannot
+    tokenise (an apostrophe is an unbalanced quote, and `Install the runner's
+    Python dependencies` is a step name, not a broken command), and a `pip`
+    token whose subcommand is an ordinary word rather than `install`. Dropping
+    those hides nothing, because every `run:` body is read with strict=True by
+    the step walk; what it stops is a rename reddening CI over a name.
     """
     if not PIP_HINT.search(body):
         return [], []
@@ -535,6 +546,8 @@ def scan_shell_body(body: str, shell=None):
     try:
         tokens = shell_tokens(text)
     except ValueError as exc:
+        if not strict:
+            return found, unplaceable
         return found, unplaceable + [
             (body.strip(), f"could not be tokenised as shell: {exc}")]
     for command in shell_commands(tokens):
@@ -542,7 +555,7 @@ def scan_shell_body(body: str, shell=None):
         text = shlex.join(command)
         if kind == "install":
             found.append((text, payload))
-        elif kind == "unplaceable":
+        elif kind == "unplaceable" and (strict or "install" in command):
             unplaceable.append((text, payload))
         if command_program(command) in DIRECTORY_CHANGERS:
             changed_directory.append(text)
@@ -923,14 +936,14 @@ def test_no_pip_install_hides_where_the_parsed_walk_cannot_see_it(path):
     known = step_run_paths(doc)
     stray = sorted(
         key for key, text in scalars(doc)
-        if key not in known and any(scan_shell_body(text))
+        if key not in known and any(scan_shell_body(text, strict=False))
     )
     assert not stray, (
-        f"{path.relative_to(REPO_ROOT).as_posix()} runs `pip install` from "
-        f"{len(stray)} place(s) the step walk in this file never reaches, so "
+        f"{path.relative_to(REPO_ROOT).as_posix()} holds {len(stray)} "
+        f"scalar(s) that read as a pip install outside any step's `run:`, so "
         f"none of the checks above apply to them: {stray}. Either move the "
-        f"install into a step's `run:`, or teach installs() to reach it — do "
-        f"not leave it ungoverned."
+        f"install into a step's `run:`, or teach step_containers() to reach "
+        f"it — do not leave it ungoverned."
     )
 
 
@@ -1143,7 +1156,8 @@ def test_the_second_pair_of_eyes_reaches_a_composite_action_too(tmp_path):
     doc = yaml.safe_load(COMPOSITE_ACTION_WITH_A_DRIFTED_PIN)
     assert step_run_paths(doc) == {".runs.steps[0].run"}
     stray = [key for key, text in scalars(doc)
-             if key not in step_run_paths(doc) and any(scan_shell_body(text))]
+             if key not in step_run_paths(doc)
+             and any(scan_shell_body(text, strict=False))]
     assert stray == []
 
 
@@ -1480,6 +1494,44 @@ jobs:
           python3 -m pip install -r requirements-dev.txt || pip_ok=no
 """)
     assert pip_environment(tmp_path) == []
+
+
+PROSE_A_STEP_NAME_MAY_HOLD = [
+    "Install the runner's Python dependencies",
+    "Don't reinstall anything",
+    "Verify the runner's pip cache",
+    "Install pip packages",
+    "Read the published account audit's verdict",
+]
+
+
+@pytest.mark.parametrize("text", PROSE_A_STEP_NAME_MAY_HOLD)
+def test_prose_outside_a_run_body_is_not_read_as_a_command(text):
+    """Renaming a step must not red CI. Each of these is a `name:`, gets past
+    the pip/install pre-filter, and then reads as broken shell: the first
+    three raise on the apostrophe, and the fourth tokenises to a `pip` token
+    whose subcommand is the word `packages`. The last is this repo's own step
+    name, which survived only because it happens to contain neither `pip` nor
+    `install`. A `run:` body is still read strictly — that is where shell
+    lives — so nothing hides behind this."""
+    assert scan_shell_body(text, strict=False) == ([], [])
+
+
+def test_a_run_body_is_still_read_strictly():
+    """The negative control for the case above: the same two shapes are
+    findings when they are shell this repo executes, and the step walk reads
+    every `run:` body that way."""
+    assert scan_shell_body("pip install 'pyyaml==6.0.1") != ([], [])
+    assert scan_shell_body("pip $SUBCOMMAND pyyaml==6.0.1") != ([], [])
+
+
+def test_a_real_install_outside_a_run_body_is_still_a_stray():
+    """What the stray walk is for. Dropping prose must not drop an install
+    that turns up in an `env:` default or a `with:` argument, where nothing
+    else here would look at it."""
+    for text in ("python3 -m pip install pyyaml==6.0.1",
+                 "${PIP} install pyyaml==6.0.1"):
+        assert any(scan_shell_body(text, strict=False)), text
 
 
 MORE_WAYS_TO_HIDE_AN_INSTALL = [
