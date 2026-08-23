@@ -795,8 +795,18 @@ def _apply_repin_sources(
     Merge by registry KEY, never replace the array: that distinction is the
     whole difference between this flag and `--source`, which took precedence
     over the inherited `sources` and dropped every registry the command line
-    did not repeat. A source this flag does not name comes back by reference,
-    so it serializes byte-identically.
+    did not repeat. A source this flag does not name comes back by REFERENCE —
+    nothing here rewrites it, reorders it or drops it.
+
+    That is a promise about this function and NOT about the bytes that reach
+    disk, and the two part company for a ref this generator would never have
+    written: `validate_ref` accepts a BRANCH name in a source's ref, so a lock
+    can carry `"ref": "main"`, and plan_sources resolves every source's ref
+    downstream — so such a source is re-resolved, and can advance, under any
+    --repin at all, this flag or a bare one. For a ref that is already a 40-hex
+    sha, which is all this generator writes, by-reference and byte-identical
+    are the same thing. `test_an_unnamed_source_with_a_branch_ref_is_re_resolved`
+    is the measurement.
 
     ADDING a source is refused rather than allowed as a convenience — it
     changes what the lock means, which is a plain generate's decision — and so
