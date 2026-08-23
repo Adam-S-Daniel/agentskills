@@ -2864,25 +2864,34 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     # sit there - the carve-out "matches a command's NAME rather than its
     # first four letters, and takes a pipeline as the command it ends with" -
     # was checkable and wrong in both halves: no pipeline is carved out at
-    # all, and after this round nothing matches a name either. It survived
-    # two rounds because nothing tied it to the code, so the replacement is
-    # tied: the sentence has to be in the workflow AND the behaviour it
-    # describes has to be the behaviour.
+    # all, and nothing matches a name either. It survived two rounds because
+    # nothing tied it to the code, and then a third because the tie was to
+    # the wrong instance. So the tie is per sentence: each one has to be in
+    # the workflow AND the payload beside it has to be refused.
     #
-    # EACH PAYLOAD ENDS IN A COMMAND THE LIST REALLY DOES EXEMPT, which is
-    # what makes it a test rather than a shape nothing would ever admit. The
-    # regression to catch is a rule that reads a pipeline as "whatever it
-    # ends with" or a command as "whatever follows its assignments" - and
-    # such a rule only exempts something when what it looks at is on the
-    # list. `true | echo done` would be refused by that rule too, so it
-    # measures nothing.
+    # EACH PAYLOAD IS ONE A PLAUSIBLE LOOSENING WOULD EXEMPT, which is what
+    # makes it a test rather than a shape nothing would ever admit. The
+    # regressions to catch are a rule that reads a pipeline as "whatever it
+    # ends with", a command as "whatever follows its assignments", or a
+    # command as "whatever follows its punctuation" - and each of those only
+    # exempts something when what it looks at is on the list. `true | echo
+    # done` would be refused by all three, so it measures nothing.
+    #
+    # THE FOURTH ROW IS WHY THIS TABLE NEEDED A FOURTH ROW. The sentence
+    # about a `{` was certified for a round by the assignment payload, which
+    # never reached the branch that stripped one, so the tie held the
+    # sentence to code the sentence was not about. A claim's payload has to
+    # exercise the transformation the claim denies.
     _WORKFLOW_CLAIMS = (
         ("a pipeline is never carved out",
          'true | echo "eval-results checked out"'),
         ("an `echo` with a second redirect is never carved out",
          'echo hi > /dev/null >> "$GITHUB_OUTPUT"'),
-        ("a command with anything at all before its name is never carved out",
+        ("a command with an assignment before its name is never carved out",
          "FOO=bar harness_ok=yes"),
+        ("a command whose name is glued to a `{` is never carved out",
+         '{echo "eval-results checked out"'),
+        ("drop the brace and the exemption goes with it", "pip_ok=no"),
     )
 
     def test_the_workflow_comment_describes_the_carve_out_list_it_has(self):

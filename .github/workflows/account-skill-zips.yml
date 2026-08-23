@@ -206,8 +206,13 @@ jobs:
         # EXACT TEXT of every command this step leaves unguarded on purpose,
         # not a pattern, so nothing is exempt by resembling something: a
         # pipeline is never carved out, an `echo` with a second redirect is
-        # never carved out, and a command with anything at all before its
-        # name is never carved out. Which means EDITING A LINE BELOW CAN RED
+        # never carved out, a command with an assignment before its name is
+        # never carved out, and a command whose name is glued to a `{` is
+        # never carved out. One entry does carry punctuation ahead of its
+        # name - the `{ pip_ok=no` this step's pip guard opens its brace
+        # group with, listed with the brace because that is the text the
+        # test is handed; drop the brace and the exemption goes with it.
+        # Which means EDITING A LINE BELOW CAN RED
         # THAT TEST even when the edit is harmless - re-quoting one of these
         # `::warning::` strings will do it. That is deliberate: the failure
         # message quotes the new text to paste into the list, and pasting it
