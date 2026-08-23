@@ -46,6 +46,19 @@ and whatever flags sit between. Where pip cannot be ruled out rather than
 found — a token before `install` that only resolves at job time, or a Python
 interpreter handed code mentioning pip — the command is reported instead.
 
+A `run:` BODY IS NOT ALWAYS SHELL, and reading one that is not as if it were
+is the same silent pass in a second costume. `shell: python` — a first-class
+step key, and settable for a whole job or workflow through `defaults.run` —
+makes the body Python, where an install is written
+`subprocess.check_call([sys.executable, "-m", "pip", "install", "x"])`: no
+`pip` token, no `install` token, nothing for a shell parser to find. A heredoc
+does the same thing inside a bash step, since `python3 - <<PY` hands its body
+to the interpreter on stdin. So the effective `shell:` is resolved before
+anything is tokenised, a body in another language is reported rather than
+parsed, and heredoc bodies are lifted out of the shell text and looked at as
+what they are. Both heredocs these workflows actually use sit in bodies that
+also run real commands, so lifting them out has to leave those readable.
+
 Parsed with `yaml`, not grepped: a `run:` body is a folded or literal scalar
 whose indentation and continuations a line scan does not see, and these
 workflows carry comments that contain the words `pip install` inside prose
@@ -95,6 +108,24 @@ BRACES = {"{", "}"}
 # and this repo has a step `name:` with one in it. Text that gets past the
 # filter and still cannot be tokenised is reported, not skipped.
 PIP_HINT = re.compile(r"pip|install", re.IGNORECASE)
+
+# A `run:` body is only shell if the step says so. `shell:` is a first-class
+# step key, and `shell: python` makes the body Python — where
+# `subprocess.check_call([sys.executable, "-m", "pip", "install", "x"])` has no
+# `pip` token and no `install` token for any shell parser to find, so the
+# tokeniser below read it as QUIET. These are the values whose body is a
+# command line the tokeniser can read at all; `python`, and any custom
+# `shell: <program> {0}` template, are a different language, so a body under
+# one of those is reported rather than parsed. An ABSENT `shell:` is a command
+# line: bash is the documented default everywhere but Windows, and pwsh writes
+# an install with the same tokens.
+COMMAND_LINE_SHELLS = frozenset({"bash", "sh", "pwsh", "powershell", "cmd"})
+
+# A heredoc redirect and the word that ends it. The body in between is text
+# handed to the command, not shell — `python3 - <<PY ... PY` is the same
+# hole as `shell: python` written inside a bash step, and the tokeniser read
+# the Python as more shell commands and found nothing.
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 # A token that names the pip program: `pip`, `pip3`, `pip3.11`, and the same
 # reached by path. Deliberately a full match — `pipefail` and `pip_ok=no` both
@@ -253,6 +284,56 @@ def join_continuations(body: str) -> str:
     return re.sub(r"\\\n[ \t]*", " ", body)
 
 
+def runs_a_command_line(shell) -> bool:
+    """Whether a step's `shell:` makes its `run:` body a command line.
+
+    An absent `shell:` is one — bash is the documented default off Windows,
+    and pwsh spells an install with the same tokens. `shell: python` and a
+    custom `shell: <program> {0}` template are not.
+    """
+    if shell is None:
+        return True
+    first = str(shell).split()[:1]
+    return bool(first) and first[0] in COMMAND_LINE_SHELLS
+
+
+def split_heredocs(body: str):
+    """(the shell text with heredoc bodies lifted out, [those bodies]).
+
+    A heredoc body is not shell — it is text the command reads on stdin, and
+    `python3 - <<PY` makes it a Python program. Leaving it in the token stream
+    let `subprocess.check_call(["pip", "install", "x"])` parse as ordinary
+    words in a command with no `pip` token and no `install` token, which is a
+    silent pass. Two heredocs in these workflows are real, so they are lifted
+    out and looked at as what they are rather than reported wholesale.
+
+    The terminator is matched on the stripped line rather than at column 0.
+    That is more generous than bash, and generous in the safe direction: it
+    ends the heredoc sooner, so more text goes back to the scanner.
+    """
+    lines = body.split("\n")
+    shell_lines, bodies = [], []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        matches = list(HEREDOC.finditer(line))
+        shell_lines.append(HEREDOC.sub(" ", line))
+        for match in matches:
+            delimiter = match.group(2)
+            tabbed = match.group(0).startswith("<<-")
+            collected = []
+            while index < len(lines):
+                candidate = lines[index]
+                index += 1
+                seen = candidate.lstrip("\t") if tabbed else candidate
+                if seen.strip() == delimiter:
+                    break
+                collected.append(candidate)
+            bodies.append("\n".join(collected))
+    return "\n".join(shell_lines), bodies
+
+
 def shell_tokens(body: str):
     """The shell tokens of one `run:` body, separators included.
 
@@ -363,21 +444,46 @@ def classify_command(tokens):
     return "other", None
 
 
-def scan_shell_body(body: str):
-    """(pip install commands, unplaceable commands) for one shell body.
+def scan_shell_body(body: str, shell=None):
+    """(pip install commands, unplaceable commands) for one step body.
 
     Each entry is (command text, ...) where the text is the command's tokens
     re-joined by shlex — a faithful, runnable rendering of what was parsed
     rather than a slice of the original, so a failure message shows what the
     checker actually saw.
+
+    `shell` is the step's effective `shell:`. A body under a shell whose
+    language is not a command line is not tokenised at all: it is reported,
+    because reading Python as shell is what let a `shell: python` step install
+    a drifted pin at exit 0.
     """
     if not PIP_HINT.search(body):
         return [], []
-    try:
-        tokens = shell_tokens(body)
-    except ValueError as exc:
-        return [], [(body.strip(), f"could not be tokenised as shell: {exc}")]
+    if not runs_a_command_line(shell):
+        return [], [(body.strip(), (
+            f"runs under `shell: {shell}`, whose body is not a command line, "
+            f"and it names pip or an install. Nothing here can read another "
+            f"language, so it is reported rather than parsed as shell — "
+            f"`subprocess.check_call([sys.executable, '-m', 'pip', "
+            f"'install', ...])` has no `pip` token for any shell parser to "
+            f"find. Put the install in its own `run:` step under bash."
+        ))]
+    text, heredocs = split_heredocs(body)
     found, unplaceable = [], []
+    for heredoc in heredocs:
+        if PIP_HINT.search(heredoc):
+            unplaceable.append((heredoc.strip(), (
+                "is a heredoc body naming pip or an install. A heredoc is "
+                "text handed to a command on stdin, not shell, and this file "
+                "cannot tell whether the command reading it is an interpreter "
+                "that will run the install. Put the install in its own `run:` "
+                "line, outside the heredoc."
+            )))
+    try:
+        tokens = shell_tokens(text)
+    except ValueError as exc:
+        return found, unplaceable + [
+            (body.strip(), f"could not be tokenised as shell: {exc}")]
     for command in shell_commands(tokens):
         kind, payload = classify_command(command)
         text = shlex.join(command)
@@ -388,44 +494,63 @@ def scan_shell_body(body: str):
     return found, unplaceable
 
 
+def run_defaults(node):
+    """A workflow's or a job's `defaults.run` mapping, or an empty one.
+
+    `shell:` and `working-directory:` can be declared once for a whole job or
+    a whole workflow instead of on the step, so a step read on its own says
+    nothing about the language its body is in.
+    """
+    defaults = node.get("defaults") if isinstance(node, dict) else None
+    run = defaults.get("run") if isinstance(defaults, dict) else None
+    return run if isinstance(run, dict) else {}
+
+
 def step_containers(doc):
-    """(label, key path prefix, steps) for each place a document holds steps.
+    """(label, key path prefix, steps, defaults) per place a doc holds steps.
 
     A workflow keeps them under `jobs.<id>.steps`; a composite action keeps
-    them under `runs.steps`. Both are shell this repo runs.
+    them under `runs.steps`. Both are shell this repo runs. `defaults` is the
+    workflow's `defaults.run` overlaid with the job's, which is the order
+    Actions resolves them in.
     """
+    workflow_defaults = run_defaults(doc)
     for job_id, job in (doc.get("jobs") or {}).items():
         if isinstance(job, dict):
-            yield f"job `{job_id}`", f".jobs.{job_id}.steps", job.get("steps")
+            yield (f"job `{job_id}`", f".jobs.{job_id}.steps", job.get("steps"),
+                   {**workflow_defaults, **run_defaults(job)})
     runs = doc.get("runs")
     if isinstance(runs, dict):
-        yield "composite action", ".runs.steps", runs.get("steps")
+        # A composite action has no `defaults:`; every step declares its own
+        # `shell:`, which Actions requires.
+        yield "composite action", ".runs.steps", runs.get("steps"), {}
 
 
 def parsed_run_steps(root=REPO_ROOT):
-    """(path, container label, step index, step name, run body) per step."""
+    """(path, container label, step index, step name, run body, shell) per step."""
     for path in governed_files(root):
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(doc, dict):
             continue
-        for label, _, steps in step_containers(doc):
+        for label, _, steps, defaults in step_containers(doc):
             for index, step in enumerate(steps or []):
                 if not isinstance(step, dict):
                     continue
                 run = step.get("run")
                 if isinstance(run, str):
-                    yield path, label, index, step.get("name"), run
+                    shell = step.get("shell", defaults.get("shell"))
+                    yield path, label, index, step.get("name"), run, shell
 
 
 def scan_workflows(root=REPO_ROOT):
     """(installs, unplaceable) over every governed step body under .github/."""
     found, unplaceable = [], []
-    for path, label, index, name, body in parsed_run_steps(root):
+    for path, label, index, name, body, shell in parsed_run_steps(root):
         where = (
             f"{path.relative_to(root).as_posix()} {label} "
             f"step {index}" + (f" ({name})" if name else "")
         )
-        commands, strays = scan_shell_body(body)
+        commands, strays = scan_shell_body(body, shell)
         found.extend((where, text, args) for text, args in commands)
         unplaceable.extend((where, text, why) for text, why in strays)
     return found, unplaceable
@@ -606,7 +731,7 @@ def scalars(node, path=""):
 def step_run_paths(doc):
     return {
         f"{prefix}[{index}].run"
-        for _, prefix, steps in step_containers(doc)
+        for _, prefix, steps, _defaults in step_containers(doc)
         for index, step in enumerate(steps or [])
         if isinstance(step, dict) and isinstance(step.get("run"), str)
     }
@@ -846,6 +971,98 @@ def test_the_second_pair_of_eyes_reaches_a_composite_action_too(tmp_path):
     stray = [key for key, text in scalars(doc)
              if key not in step_run_paths(doc) and any(scan_shell_body(text))]
     assert stray == []
+
+
+WORKFLOW_WITH_A_PYTHON_SHELL_STEP = """\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: python
+        run: |
+          import subprocess, sys
+          subprocess.check_call(
+              [sys.executable, "-m", "pip", "install", "pyyaml==6.0.1"])
+"""
+
+WORKFLOW_WITH_A_PYTHON_SHELL_DEFAULT = """\
+name: CI
+on: push
+defaults:
+  run:
+    shell: python
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          import subprocess, sys
+          subprocess.check_call(
+              [sys.executable, "-m", "pip", "install", "pyyaml==6.0.1"])
+"""
+
+
+def write_workflow(root, text, name="ci.yml"):
+    path = root / ".github" / "workflows" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("text", [WORKFLOW_WITH_A_PYTHON_SHELL_STEP,
+                                  WORKFLOW_WITH_A_PYTHON_SHELL_DEFAULT],
+                         ids=["on the step", "in defaults.run"])
+def test_a_step_whose_shell_is_not_a_command_line_is_reported(tmp_path, text):
+    """`shell: python` makes the `run:` body Python, and Python spells an
+    install with no `pip` token and no `install` token — the tokeniser found
+    neither, called the step QUIET, and a drifted pin installed at exit 0.
+    Declared on the step or inherited from `defaults.run`, both reach here."""
+    write_workflow(tmp_path, text)
+    found, unplaceable = scan_workflows(tmp_path)
+    assert found == []
+    assert len(unplaceable) == 1, unplaceable
+    assert "shell: python" in unplaceable[0][2]
+
+
+HEREDOC_INSTALLS = [
+    "python3 - <<'PY'\n"
+    "import subprocess\n"
+    "subprocess.check_call(['pip', 'install', 'pyyaml==6.0.1'])\n"
+    "PY",
+    "python3 - <<PY\nsubprocess.check_call(['pip', 'install', 'x'])\nPY",
+    "\tpython3 - <<-PY\n\tpip install pyyaml==6.0.1\n\tPY",
+]
+
+
+@pytest.mark.parametrize("body", HEREDOC_INSTALLS)
+def test_an_install_inside_a_heredoc_is_reported(body):
+    """A heredoc body is stdin, not shell. Left in the token stream it parsed
+    as ordinary words in a command holding no `pip` token, so `python3 -
+    <<PY` with an install inside it was read as QUIET."""
+    found, unplaceable = scan_shell_body(body)
+    assert found == []
+    assert len(unplaceable) == 1, unplaceable
+    assert "heredoc" in unplaceable[0][1]
+
+
+def test_a_heredoc_that_names_no_install_leaves_the_shell_around_it_readable():
+    """Both heredocs in this repo's workflows sit in a body that also runs a
+    real install — account-skill-zips.yml pipes a Python program into `python3
+    -` two lines after `pip install -r requirements-dev.txt`. Lifting the
+    heredoc out must not take that install with it."""
+    found, unplaceable = scan_shell_body(
+        "python3 -m pip install -r requirements-dev.txt\n"
+        "verdict=$(python3 - <<'PY'\n"
+        "import yaml\n"
+        "print(yaml.__version__)\n"
+        "PY\n"
+        ")"
+    )
+    assert not unplaceable, unplaceable
+    assert [install_operands(args) for _, args in found] == [
+        (["requirements-dev.txt"], [], [])]
 
 
 MORE_WAYS_TO_HIDE_AN_INSTALL = [
