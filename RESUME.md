@@ -1,54 +1,61 @@
-# Resume pointer — ultracode session, agentskills / _agent-guidance / skills-evals
+# Resume pointer — ultracode session
 
-Goal (user): "The issues in the screenshot are completed, as are any emergent issues,
-recursively." — agentskills#120, skills-evals#48, _agent-guidance#58. Emergent issues are
-completed in THIS session, not deferred (user, explicitly, twice).
+Goal: agentskills#120, skills-evals#48, _agent-guidance#58 completed, plus emergent issues
+recursively, in-session (user, twice). **Token budget is the binding constraint: the user's
+weekly allowance hit 98%, so all five adversarial workflows were stopped mid-round.**
 
-## Done and closed
-- **skills-evals#48** CLOSED. Tier-3 audit run in a session holding `~/.claude/skills/synced/`,
-  `pass` / 10 checked / 0 findings, published to `eval-results`, `account-store-drift.yml`
-  closed the issue at 15:04:29Z. `propagation.yml`'s gate passes again.
-- **skills-evals#54** MERGED (ROUTINE.md: third binding loss + the `unarchive_session` repair;
-  the prompt-correction record).
-- **Tier-3 Routine repaired** — `trig_01AK5s6efLSzdHBSZhkx6KW1`, cron `0 5 * * *`, bound to
-  sourced session `session_01GJAYVjFux2xte99afwoFJB`, prompt carries both ROUTINE.md corrections.
-- **_agent-guidance#64** (red nightly) GREEN, verified by dispatch 32585595150.
-- **agentskills#121** answered with a counter-measurement.
+## PRs OPEN
 
-## Branches (all pushed to `backup/<name>` on Adam-S-Daniel/agentskills)
-| branch | closes | state |
+- **Adam-S-Daniel/agentskills#127** — head `claude/ultracode-workflow-testing-r31h75`.
+  Closes #122, #123, #125; carries the generator half of _ag#58.
+  Local suite 1383 passed / 10 skipped. CI green on `0efc7ad` except `pytest-windows` (running).
+  Contains `ag58-generator@b44cd31` + `doctor-122-123@4ab5a89` + account-state + a lock re-pin.
+- **Adam-S-Daniel/_agent-guidance#66** — head `claude/ultracode-workflow-testing-r31h75`.
+  Closes #58, #65. Published at the round-3 tip `2a8085a` (662 passed).
+  **~18 further local commits are NOT pushed**: 17 carry a `Co-Authored-By: Claude <model>`
+  trailer that must not reach a pushed artifact.
+
+**Merge order: _agent-guidance#66 FIRST, then agentskills#127.** Argued in `MERGE-ORDER.md`.
+
+## Closed / done
+skills-evals#48 CLOSED · skills-evals#54 MERGED · Tier-3 Routine repaired
+(`trig_01AK5s6efLSzdHBSZhkx6KW1`) · _ag#64 root cause fixed, auto-closes · agentskills#121
+answered with a counter-measurement · **jodidaniel/scratch-claude-002#16 MERGED** by a live
+`skills-lock-bump` dispatch (`1 merged, 0 proposed, 19 skipped, 0 failed`), which is also the
+first end-to-end proof of the nightly's LIVE write path — the earlier dispatch was a dry run.
+
+## What is left, in priority order
+
+1. **Strip trailers on the _ag branch and force-push to #66.** Tree is free now.
+   `git filter-branch -f --msg-filter "grep -v '^Co-Authored-By: Claude .*<noreply@anthropic\.com>$' | cat" origin/main..HEAD`,
+   confirm trees byte-identical, run the gate ONCE sequentially, force-push.
+2. **Graft a120 then a121 onto #127** (a121 second — it conflicts). Last grafted:
+   `grafted-ag58.txt`, `grafted-doctor.txt`. Suite must be green on the merged result.
+3. Fold in: the runner-path leak in bump PR bodies, and `repos.yml`'s staleness (both _ag).
+4. Delete `origin/record-account-upload/sync-skills-32558665629` (superseded; sha `a691453`).
+5. Delete every `backup/*` ref — they carry the un-stripped trailers.
+
+## Branch state at stop time
+| branch | tip | suite |
 |---|---|---|
-| `a120-impl` | #120, #124, #126 | round 5 landed, 1224 passed |
-| `ag58-generator` | #58 (generator half), #125 | round 7 in flight; r6 = 1110 passed / 10 skipped |
-| `doctor-122-123` | #122, #123 | round 5 in flight |
-| `_agent-guidance` `claude/ultracode-workflow-testing-r31h75` | #58 (bumper half), _ag#65 | round 3 in flight; pushed at `c7e5569` |
+| `ag58-generator` | `b44cd31` clean | 1114 passed / 10 skipped (grafted) |
+| `doctor-122-123` | WIP on `4ab5a89` | 4ab5a89 grafted; WIP unrun |
+| `a120-impl` | `56fc28a` clean | unrun |
+| `a121-requirements` | WIP on `c627e55` | unrun |
+| `_agent-guidance` | `ee8c00b` clean | unrun since 662 @ round 3 |
 
-## Remaining plan
-1. Let the in-flight adversarial rounds settle. Stopping line: **no blocking defect and no
-   user-visible should-fix**; surviving nits go into the PR body as known limitations.
-2. `graft.sh <repo> <base> <branch>` cherry-picks each branch onto
-   `claude/ultracode-workflow-testing-r31h75` **stripping the `Co-Authored-By: Claude <model>`
-   trailer** — a model identifier must not reach a pushed artifact. The three agentskills
-   branches touch disjoint files, so the graft is conflict-free.
-3. Delete the `backup/*` refs once grafted: they carry the un-stripped trailers.
-4. Remove the subagent worktrees, run the full suite once on the merged result.
-5. Open PRs **agentskills first, then _agent-guidance** — merge order is load-bearing, because
-   the bumper's degraded mode exists to survive the window where the generator is behind it.
-6. Close #120, #122, #123, #124, #125, #126, #58, _ag#65.
+All pushed to `backup/*`; `scratchpad/autobackup.sh` re-pushes every 4 minutes.
 
 ## Measured facts worth keeping
-- `)` opens a bash comment as an OPERATOR (case-pattern terminator, subshell close) but NOT when
-  it closes `$( )`: `x=$(echo hi)#notcomment` -> `[hi#notcomment]`.
-- An `echo` on the RIGHT of a final `||` is NOT exempt from errexit.
-- Two concurrent `run-tests.sh` runs collide on the shared `git config --global` identity and
-  produce a log with two result blocks. Run it sequentially; read the LAST block.
-- `create_session` has been unavailable on two independent days (status pages green).
-- `update_trigger` refuses to edit the prompt of a Routine bound to another session; replacing
-  the binding needs `create_trigger` + `delete_trigger`.
-- Pre-existing, filed: `--check`'s remediation omits `--registry`/`--bundles`, silently
-  re-pointing a lock at `DEFAULT_REGISTRY`.
-
-## Cannot complete (credential boundary, not deferral)
-- `jodidaniel/scratch-claude-002#16` — the session connector refuses cross-tier `add_repo`; the
-  org connector reads the repo but 403s on merge. It only warns; it blocks nothing.
-- Root-causing `repo-settings#25`'s sweep read failure needs the agents-md-sync App's token.
+- `)` opens a bash comment as an OPERATOR but not when it closes `$( )`.
+- An `echo` right of a final `||` is NOT exempt from errexit.
+- Two concurrent `run-tests.sh` runs collide on the shared `git config --global` identity.
+- `_COMMIT_SHA_RE` is case-INSENSITIVE — an uppercase sha is NOT one of the new refusals
+  (I briefed agents that it was; it is not).
+- The bumper's population is NOT `skills_bootstrap.repos`; it is `gh repo list --no-archived
+  --source` filtered on `.exclude` alone.
+- `test_the_fetch_budget_ends_a_stalled_fetch[timeout-absent]` is load-sensitive: it fails its own
+  precondition under concurrency and passes in isolation in 6s.
+- Cross-tier `add_repo` (jodidaniel/* from an adam-s-daniel session) is refused by platform v1,
+  regardless of user authorization. The org connector reads jodidaniel but 403s on merge.
+  The bumper's own App mints a jodidaniel token and can merge — that is the working path.
