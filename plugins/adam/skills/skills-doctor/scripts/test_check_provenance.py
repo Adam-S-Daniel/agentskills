@@ -1613,6 +1613,26 @@ def _suite():
     return test_generate_skills_lock
 
 
+def test_the_source_limits_are_the_hooks_own():
+    """The two hook constants `read_lock` now copies, read back out of the hook.
+
+    `MAX_SOURCES` and `SOURCE_FIELDS` are the only lock rules this file states as
+    VALUES rather than as shapes, so they are the only ones that can drift
+    without changing a line here — raise the hook's cap and the doctor starts
+    calling a lock the hook accepts REJECTED, which is the one direction
+    `test_a_lock_this_rejects_is_one_the_hook_rejects_too` is built to catch and
+    the wrong place to catch it.
+    """
+    source = _hook_path().read_text(encoding="utf-8")
+    cap = re.search(r"^MAX_SOURCES = (\d+)$", source, re.M)
+    fields = re.search(r"^SOURCE_FIELDS = \(([^)]*)\)$", source, re.M)
+    assert cap and fields, "the hook no longer states these at module scope"
+    assert int(cap.group(1)) == prov.MAX_SOURCES
+    assert tuple(part.strip().strip('"') for part in
+                 fields.group(1).split(",") if part.strip()) \
+        == prov.SOURCE_FIELDS
+
+
 @pytest.mark.parametrize("mutate", [
     lambda lock: lock.pop("bundles"),
     lambda lock: lock.update(bundles=[]),
@@ -1623,9 +1643,17 @@ def _suite():
     lambda lock: lock["skills"].update({"adam/alpha/extra": "0" * 64}),
     lambda lock: lock["skills"].update({"nobody/gamma": "0" * 64}),
     lambda lock: lock.update(skills=["adam/alpha"]),
+    lambda lock: lock.update(sources={}),
+    lambda lock: lock.update(sources=[42]),
+    lambda lock: lock.update(sources=[{"registry": "o/r", "bundles": ["b"],
+                                       "commit": "abc"}]),
+    lambda lock: lock.update(sources=[{"registry": "o/r%d" % n,
+                                       "bundles": ["b%d" % n]}
+                                      for n in range(prov.MAX_SOURCES + 1)]),
 ], ids=["no-bundles", "empty-bundles", "bad-registry", "bad-digest",
         "non-string-digest", "synced-key", "three-segment-key",
-        "unclaimed-bundle", "skills-not-an-object"])
+        "unclaimed-bundle", "skills-not-an-object", "sources-not-a-list",
+        "source-not-an-object", "unknown-source-key", "too-many-sources"])
 def test_a_lock_this_rejects_is_one_the_hook_rejects_too(tmp_path, mutate):
     """The binding for the SECOND copy of the hook's lock validation in this file.
 
@@ -1657,11 +1685,26 @@ def test_a_lock_this_rejects_is_one_the_hook_rejects_too(tmp_path, mutate):
 
 
 @pytest.mark.parametrize("mutate, cause", [
-    (lambda skills: skills.update({"adam/alpha": "not-a-digest"}),
+    (lambda lock: lock["skills"].update({"adam/alpha": "not-a-digest"}),
      "has no sha256 digest"),
-    (lambda skills: skills.update({"adam/synced": "0" * 64}),
+    (lambda lock: lock["skills"].update({"adam/synced": "0" * 64}),
      "account-sync directory"),
-], ids=["bad-digest", "synced-key"])
+    # The `sources` shapes, which `_sources` walked past while returning a
+    # PRESENT lock: a non-list, a non-object entry, an unknown key and the count
+    # cap are each a `sys.exit` in the hook's reader.
+    (lambda lock: lock.update(sources={}),
+     "'sources' must be a list"),
+    (lambda lock: lock.update(sources=[42]),
+     "sources[1] must be an object"),
+    (lambda lock: lock.update(sources=[{"registry": "o/r", "bundles": ["b"],
+                                        "commit": "abc"}]),
+     "unknown key(s) 'commit'"),
+    (lambda lock: lock.update(sources=[{"registry": "o/r%d" % n,
+                                        "bundles": ["b%d" % n]}
+                                       for n in range(prov.MAX_SOURCES + 1)]),
+     "are allowed"),
+], ids=["bad-digest", "synced-key", "sources-not-a-list",
+        "source-not-an-object", "unknown-source-key", "too-many-sources"])
 def test_a_lock_the_hook_refuses_outright_reds_naming_the_real_cause(
         tmp_path, capsys, mutate, cause):
     """The whole-lock gate, measured END TO END against the real hook.
@@ -1686,7 +1729,7 @@ def test_a_lock_the_hook_refuses_outright_reds_naming_the_real_cause(
     home = tmp_path / "home"
 
     data = json.loads(lock_path.read_text(encoding="utf-8"))
-    mutate(data["skills"])
+    mutate(data)
     lock_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
