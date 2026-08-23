@@ -1,0 +1,57 @@
+# The Python packages this repo needs to check and test itself.
+#
+# This file is the ONLY place a version of any of them is written down. Before
+# it existed the same pins were restated inline in the `pip install` lines of
+# .github/workflows/, so nothing outside a workflow could install what CI
+# installs and nothing required any two of those lines to agree: at b81f6f1
+# some named different subsets of the set, and others restated the identical
+# set. scripts/test_workflow_dependency_pins.py now asserts
+# that every `pip install` in every workflow and composite action under
+# .github/ installs THIS FILE, names no package of its own, and passes no
+# option that could resolve to a different version — which is what keeps the
+# "only place" claim true.
+#
+# EVERY JOB INSTALLS THE WHOLE SET, including the jobs whose scripts import
+# only part of it. That is deliberate: a per-job subset has to be maintained by
+# hand against what each script happens to import, and a test could only check
+# it against a hand-written map of job -> packages — the same restated list
+# this file replaces, one level up. Uniform installs need no such map, so the
+# invariant above holds with no per-job knowledge at all. The price is that a
+# job needing one of these pays for all of them; the reason to pay it is the
+# map, not a claim about how cheap the install is.
+#
+# The checking runs one way. A name added here is governed on the workflow
+# side at once, but nothing notices a name left here after nothing needs it —
+# it just keeps being installed by every job. Deciding that takes reading the
+# scripts, which no test here does.
+#
+# Not governed by this file: the workflow template a skill SHIPS as an asset
+# (plugins/adam/.../assets/workflows/repo-settings-fanout.yml) runs in other
+# people's repos, so its own `pip install` is theirs to pin, not ours.
+#
+# Pins are exact and each release has cleared this repo's 7-day dependency
+# cooling-off (AGENTS.md, "Dependency updates"). Changing a version here is a
+# separate change from moving one, and needs its own cooling-off check.
+
+# generate_readme_table.py parses SKILL.md frontmatter with it; check_skills.py
+# reads scripts/skills_registries.yml and scripts/skills_waivers.yml with it;
+# the workflow tests parse .github/workflows/*.yml with it rather than grepping.
+pyyaml==6.0.3
+
+# check_skills.py parses SKILL.md bodies with a real CommonMark parser rather
+# than a regex.
+markdown-it-py==4.2.0
+
+# check_agent_plugins.py validates the root plugin.json manifests against the
+# vendored Agent Plugins 1.0.0 schema with a real JSON Schema implementation.
+jsonschema==4.26.0
+
+# The runner for every suite in the repo. AGENTS.md is emphatic that
+# `python3 scripts/test_<x>.py` asserts nothing, so pytest is not optional
+# tooling here — it is the only thing that runs the tests at all.
+#
+# Previously the one unpinned name in CI, left to resolve to whatever was
+# newest at job time. 9.1.1 was published 2026-06-19, which clears the
+# cooling-off, and was still the newest release when it was pinned, so pinning
+# it changed no version CI was already resolving to.
+pytest==9.1.1

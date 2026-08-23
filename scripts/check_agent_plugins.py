@@ -50,7 +50,8 @@ Notes on the schema, since they drive what the manifests may contain:
 
 Usage:  python3 scripts/check_agent_plugins.py
 Exits 0 when every check passes, 1 otherwise, listing every problem found.
-Requires: jsonschema (pip install jsonschema)
+Requires: jsonschema, declared with every other dev dependency in
+          requirements-dev.txt (python3 -m pip install -r requirements-dev.txt)
 """
 
 import hashlib
@@ -63,7 +64,7 @@ try:
 except ImportError:  # pragma: no cover - exercised only without the dep
     sys.stderr.write(
         "ERROR: the 'jsonschema' package is required.\n"
-        "       Install it with: python3 -m pip install jsonschema\n"
+        "       Install it with: python3 -m pip install -r requirements-dev.txt\n"
     )
     raise SystemExit(1)
 

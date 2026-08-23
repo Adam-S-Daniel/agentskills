@@ -2065,7 +2065,7 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
          '-e` on `false || { mkdir -p /proc/nope/child; echo inner; }` '
          'exits 1 with `inner` never printed - so each of them is '
          'subject to the rule in its own right'),
-        ('echo "::warning::pyyaml install failed; unless it is already present the verdict will be unavailable"',
+        ('echo "::warning::the requirements-dev.txt install failed; unless pyyaml is already present the verdict will be unavailable"',
          'an `echo` to stdout - a `::warning::` annotation'),
         ('verdict=""',
          'a bare assignment - the degraded value a guard sets'),
@@ -2082,9 +2082,9 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         ('echo "no verdict, which follows from the clone failure annotated above; this run used the local recording alone"',
          'an `echo` to stdout - the empty capture a clone failure '
          'explains'),
-        ('echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the pyyaml install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
+        ('echo "::warning::could not compute the published account audit verdict - both clones succeeded, so what broke is either the dependency install annotated above or the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
          'an `echo` to stdout - a `::warning::` annotation'),
-        ('echo "::warning::could not compute the published account audit verdict - both clones and the pyyaml install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
+        ('echo "::warning::could not compute the published account audit verdict - both clones and the dependency install succeeded, so what broke is the import inside this step (a moved module, a renamed function, a renamed fixture key in Adam-S-Daniel/skills-evals). This run used the local recording alone."',
          'an `echo` to stdout - a `::warning::` annotation'),
         ('echo "published account audit reads: $verdict"',
          'an `echo` to stdout - the verdict this step read'),
@@ -3579,7 +3579,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
     """The audit step's own tail, EXECUTED - not string-matched.
 
     THE FAILURE THIS LOCKS OUT IS A GREEN RUN THAT ASKED NOTHING. Every other
-    failure in that step (both clones, the pyyaml install) raises a
+    failure in that step (both clones, the dependency install) raises a
     `::warning::`; THREE paths failed OPEN, and each has its own test below.
 
     THREE, not two - the count is maintained here because a reader auditing
@@ -3851,7 +3851,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         a reader who learns the annotations are duplicated stops counting them,
         and the silent one goes unnoticed.
 
-        ONE fault is what these rows arrange - the pyyaml install is green in
+        ONE fault is what these rows arrange - the dependency install is green in
         every one of them. The rule is one annotation per DISTINCT fault, not
         one per run, and the sibling test below crosses each of these rows
         with a pip failure to hold the other half of it.
@@ -3910,7 +3910,8 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         assert len(annotations) == 2, (
             f"{why}, so the run page must carry both:\n{log}"
         )
-        install = [l for l in annotations if "pyyaml install failed" in l]
+        install = [l for l in annotations
+                   if "requirements-dev.txt install failed" in l]
         assert len(install) == 1, f"the failed install went unreported:\n{log}"
         other = [l for l in annotations if l not in install]
         assert names in other[0], (
@@ -3921,9 +3922,9 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             # The text has to stop claiming what is no longer true. Saying the
             # install succeeded, on the run where it did not, is the same
             # wrong-label failure one level down.
-            assert "the pyyaml install succeeded" not in other[0], (
-                "the import annotation asserts the pyyaml install succeeded "
-                f"on a run where it failed: {other[0]}"
+            assert "install succeeded" not in other[0], (
+                "the import annotation asserts the dependency install "
+                f"succeeded on a run where it failed: {other[0]}"
             )
 
     def test_an_empty_verdict_does_not_re_annotate_a_reported_fault(
@@ -3963,7 +3964,7 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         """
         log, out = self._run(tmp_path, "", pip_ok="no")
         assert log.count("::warning::") == 1, (
-            "an empty capture after a failed pyyaml install raises no "
+            "an empty capture after a failed dependency install raises no "
             f"annotation, so a cross-repo rename would reach nobody:\n{log}"
         )
         annotation = next(l for l in log.splitlines() if "::warning::" in l)
@@ -3971,9 +3972,9 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "the annotation does not send the reader at the import, which is "
             f"what an empty capture with both clones green means: {annotation}"
         )
-        assert "the pyyaml install succeeded" not in annotation, (
-            "the annotation claims the pyyaml install succeeded on a run "
-            f"where it failed: {annotation}"
+        assert "install succeeded" not in annotation, (
+            "the annotation claims the dependency install succeeded on a "
+            f"run where it failed: {annotation}"
         )
         assert out.strip() == "status=unavailable"
 
