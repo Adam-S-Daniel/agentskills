@@ -412,12 +412,20 @@ figure. No remediation is performed — recommend, do not do.
   about to delete.** `may_replace` in `.claude/hooks/skills-bootstrap.sh`
   overwrites in three cases only — nothing is there, what is there already
   digests to the digest the lock names, or the record names it and the bytes
-  still digest to what was recorded — and REFUSES everything else. A refusal
+  still digest to what was recorded — and REFUSES everything else. That third
+  clause reads the record under LOOSER rules than the prune does: `name` and
+  `digest` only, no `registry` and no `bundle`, so a row the prune throws away
+  can still authorise an overwrite, and a name recorded twice is decided by the
+  row nearer the top of the file. A refusal
   copies nothing and removes nothing: the skill is dropped from that run, the
-  bytes stay, and the name is listed after `DEGRADED … shadowed`. So the risk
-  an `edited-and-locked`, `artefacts-and-locked`, `hand-placed-over-locked` or
-  `unattributable-over-locked` finding describes is a skill that stops being
-  delivered, never local work about to be overwritten — and a build artefact
+  bytes stay, and the name is listed after `DEGRADED … shadowed`. So the risk a
+  refusal finding describes is a skill that stops being delivered, never local
+  work about to be overwritten. The refusal findings are `edited-and-locked`,
+  `unmeasurable-and-locked`, `artefacts-and-locked`, `hand-placed-over-locked`,
+  `unattributable-over-locked` and `recorded-twice-and-locked`; that list is
+  `REFUSAL_KINDS` in `scripts/check_provenance.py` and a test holds this
+  sentence to it, because an enumeration nothing checks is how this one came to
+  be missing two. A build artefact
   left by running a skill's own suite in place stalls that skill's updates
   until it is deleted, which is why it is a finding rather than a note.
 - **The middle clause is why some of those are only a note.** "What is there

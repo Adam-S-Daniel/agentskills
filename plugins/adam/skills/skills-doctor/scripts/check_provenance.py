@@ -130,6 +130,7 @@ HOOK_REFUSAL = (
 REFUSAL_KINDS = frozenset({
     "hand-placed-over-locked", "unattributable-over-locked",
     "edited-and-locked", "unmeasurable-and-locked", "artefacts-and-locked",
+    "recorded-twice-and-locked",
 })
 
 # The other side of the same rule, quoted into the note that stands where a
@@ -326,7 +327,8 @@ OBSERVATION_KINDS: Dict[str, Tuple[str, ...]] = {
                          "stale-out-of-scope", "stale"),
     "integrity": ("edited-and-locked", "unmeasurable-and-locked",
                   "edited-and-stale", "unmeasurable-and-stale",
-                  "artefacts-and-locked", "artefacts-and-stale"),
+                  "artefacts-and-locked", "artefacts-and-stale",
+                  "recorded-twice-and-locked"),
     "shadow": ("shadow-copies-differ", "shadowed-by-the-account-store"),
     "foreign": ("foreign",),
 }
@@ -398,6 +400,13 @@ class Entry(NamedTuple):
     digest: str
 
 
+# The default `vouched` for every `Record` built without one. Read-only for
+# `NO_DIGESTS`' reason, and empty is the right answer in every state that uses
+# it: the hook's own reader `sys.exit`s on a record it cannot parse and writes
+# no `recorded.nul`, so an unreadable or absent record vouches for nothing.
+NO_VOUCHED: Mapping[str, str] = MappingProxyType({})
+
+
 class Record(NamedTuple):
     """The hook's install record, as much of it as the hook itself would use.
 
@@ -409,11 +418,23 @@ class Record(NamedTuple):
     report is already complaining about with `record-entries-skipped`. Only
     entries whose `name` is a string can contribute one; there is nothing to
     carry otherwise, and `skipped` counts those too.
+
+    `vouched` IS THE OTHER READER, and it is a separate field rather than a view
+    of `entries` because the hook reads this one file twice, under two different
+    sets of rules, for two different decisions. `entries` follows the PLANNER's
+    rules, which decide the prune. `vouched` follows the rules of the loop that
+    writes `recorded.nul` — `name` and `digest` only, no `registry`, no `bundle`
+    — and that is the stream `may_replace` scans, so it is what decides whether
+    a directory is the hook's to OVERWRITE. The planner's set is a strict subset
+    of it, which is why collapsing the two was invisible for so long and why the
+    error only ever ran one way: a row the planner skips and the hook accepts
+    made the doctor promise that bytes the next run overwrites would survive.
     """
     state: str
     entries: Dict[str, Entry]
     skipped: int
     skipped_names: Set[str] = frozenset()
+    vouched: Mapping[str, str] = NO_VOUCHED
 
 
 # The default `digests` every `Lock` built without one shares. A NamedTuple's
@@ -1138,7 +1159,8 @@ def read_record(path: Path) -> Record:
                 skipped_names.add(raw["name"])
             continue
         entries[entry.name] = entry
-    return Record(PRESENT, entries, skipped, skipped_names)
+    return Record(PRESENT, entries, skipped, skipped_names,
+                  _vouched(record["installed"]))
 
 
 def _entry(raw: object) -> Optional[Entry]:
@@ -1154,6 +1176,47 @@ def _entry(raw: object) -> Optional[Entry]:
     if not DIGEST.fullmatch(digest) or CONTROL.search(registry):
         return None
     return Entry(name, registry, bundle, digest)
+
+
+def _vouched(rows: List[object]) -> Mapping[str, str]:
+    """(name -> digest) as the hook's `may_replace` reader accepts them.
+
+    A SECOND copy of a record reader in this file, and deliberately not a filter
+    over `_entry`'s output: the hook validates `name` and `digest` here and
+    nothing else, so an entry with a null `bundle`, a missing `registry` or a
+    control character in one is one the PLANNER throws away and `may_replace`
+    honours. Reading it with the planner's rules called such a directory
+    hand-placed and told the reader its bytes would be left alone, over a run
+    that overwrites them.
+
+    FIRST wins, because the hook's is a linear scan that `break`s on the first
+    matching `REC_NAME` — so a name recorded twice is decided by the row nearer
+    the top of the file, not the last one, which is the opposite of what
+    `entries` does one loop above.
+    """
+    out: Dict[str, str] = {}
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        name, digest = raw.get("name"), raw.get("digest")
+        if not isinstance(name, str) or not isinstance(digest, str):
+            continue
+        if NAME.fullmatch(name) and DIGEST.fullmatch(digest):
+            out.setdefault(name, digest)
+    return out
+
+
+def record_vouches_for(record: Record, name: str,
+                       measured: Optional[str]) -> bool:
+    """`may_replace`'s THIRD clause, asked of the reader the hook asks.
+
+    The record claims this exact name AND the bytes on disk still digest to what
+    it says was installed. `measured` is None when the directory could not be
+    hashed, and the hook's `[ -n "$have" ]` guard refuses there rather than
+    letting two empty strings compare equal — so None is False and not a match
+    against a `vouched` entry that happens to be absent too.
+    """
+    return measured is not None and record.vouched.get(name) == measured
 
 
 def read_lock(path: Path) -> Lock:
@@ -1693,9 +1756,16 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 continue
             # The ladder, not the rung: `may_replace` saying yes is one of
             # several questions, and the ones below it delete the directory.
+            # BOTH of the clauses a directory nothing attributes to the hook can
+            # satisfy — the lock names these bytes, or the RECORD does under the
+            # rules `may_replace`'s own reader applies. The second one is why
+            # this origin is not "hand-placed" as far as the install loop is
+            # concerned: `_vouched` accepts rows `_entry` throws away.
+            measured = digest_skill_dir(skills_dir / name)
+            replaceable = (record_vouches_for(record, name, measured)
+                           or lock_names_the_bytes(lock, name, measured))
             fate = (hook_fate(lock, name, repo_owned=repo_owned,
-                              replaceable=lock_names_the_bytes(
-                                  lock, name, digest_skill_dir(skills_dir / name)))
+                              replaceable=replaceable)
                     if in_lock else None)
             if fate == DELETED_BY_THE_DUP_GUARD:
                 findings.append(_observed(
@@ -1710,9 +1780,17 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     COLLISION_UNMEASURED, origin, name,
                     COLLISION_GUARD_UNMEASURED.format(name=name) + but_here))
             elif fate in STILL_DELIVERS:
-                notes.append(_observed(
-                    "bytes-are-the-locked-ones", origin, name,
-                    THE_BYTES_THE_LOCK_NAMES + but_here))
+                # Only the LOCK clause makes that sentence true. Where the
+                # record clause is what said yes, the bytes are NOT the ones the
+                # lock names and the note would be a false statement about the
+                # only measurement it quotes; the store already carries
+                # `record-entries-skipped` about the row that did it, so the
+                # silence is the same one the hook-origin arm keeps for the same
+                # clause.
+                if lock_names_the_bytes(lock, name, measured):
+                    notes.append(_observed(
+                        "bytes-are-the-locked-ones", origin, name,
+                        THE_BYTES_THE_LOCK_NAMES + but_here))
             elif in_lock and origin == UNATTRIBUTED:
                 findings.append(_observed(
                     "hand-placed-over-locked", origin, name,
@@ -1800,13 +1878,16 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             continue
         in_scope = (entry.registry, entry.bundle) in lock.claims
         if in_lock:
-            # `may_replace`'s clauses, as this origin can satisfy them: the
-            # record vouches for exactly these bytes (UNCHANGED), or the lock
-            # names them. Then the LADDER, because a yes here is only the rung
+            # `may_replace`'s clauses, asked of the reader the hook asks: the
+            # record vouches for exactly these bytes, or the lock names them.
+            # NOT `integrity == UNCHANGED`, which is the same question put to the
+            # PLANNER's reader — the two disagree whenever the record names one
+            # directory twice, and there the hook reads the other row and
+            # refuses. Then the LADDER, because a yes here is only the rung
             # after the whole-lock gate.
             fate = hook_fate(
                 lock, name, repo_owned=repo_owned,
-                replaceable=(integrity == UNCHANGED
+                replaceable=(record_vouches_for(record, name, measured)
                              or lock_names_the_bytes(lock, name, measured)))
             if fate == DELETED_BY_THE_DUP_GUARD:
                 findings.append(_observed(
@@ -1846,12 +1927,28 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     f"those files and the next run installs normally. Running a "
                     f"skill's own test suite from inside the installed copy gets "
                     f"you here.{but_here}"))
+            elif integrity == UNCHANGED:
+                # The one way the two record readers disagree, and it is a state
+                # not a theory: the record names this directory TWICE with
+                # different digests. `entries` keeps the last row, which is what
+                # `integrity` was measured against and why it reads unchanged;
+                # `may_replace` scans from the top and stops at the first, which
+                # vouches for other bytes, so the hook refuses. Measured against
+                # the real hook, which reported `1 shadowed — refusing to
+                # overwrite a directory this hook did not install, or that was
+                # edited since (alpha)` over exactly this store.
+                findings.append(_observed(
+                    "recorded-twice-and-locked", HOOK, name,
+                    f"the record names this directory more than once, and the "
+                    f"two rows carry different digests. These bytes are what "
+                    f"the row this report measured against vouches for — but "
+                    f"the hook scans the record from the top and stops at the "
+                    f"FIRST row for a name, and that one vouches for bytes that "
+                    f"are not here. {HOOK_REFUSAL} Nothing here is lost. Delete "
+                    f"the stale duplicate row from "
+                    f"`{RECORD_NAME}`, or move the directory out of the store, "
+                    f"and the next run installs the locked copy.{but_here}"))
             else:
-                # LEFT_UNREPLACED with UNCHANGED is unreachable by construction —
-                # UNCHANGED is one of the clauses that makes it replaceable — and
-                # `_observed` is what proves it rather than an assert nobody
-                # reads: `unchanged-and-locked` is in no observation, so the
-                # impossible arm raises instead of printing.
                 findings.append(_observed(
                     f"{integrity}-and-locked", HOOK, name,
                     f"{_cause(integrity)} and the lock still names it. "
