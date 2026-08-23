@@ -388,4 +388,10 @@ figure. No remediation is performed — recommend, do not do.
   edited digest would make the next run's comparison succeed and delete the
   user's work. So a digest mismatch against the record means *edited*, while a
   mismatch against the **lock** means the copy predates the current lock — two
-  different facts from the same number.
+  different facts from the same number. One mismatch against the record is
+  neither: when every file an UPLOAD would carry still matches, the difference
+  is a build artefact (`__pycache__`, `.pytest_cache`) and the doctor reports
+  `artefacts-and-locked` as a NOTE. The hook still replaces the directory —
+  its digest is the whole of it — but nothing a reader wants back is at
+  stake, which is why running a skill's own suite from the installed copy no
+  longer holds the exit code at 1.

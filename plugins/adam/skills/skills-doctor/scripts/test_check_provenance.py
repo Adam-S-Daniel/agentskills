@@ -2625,7 +2625,7 @@ def test_a_recorded_name_disagreement_gets_no_foreign_note(tmp_path, capsys,
                                                            ephemeral):
     """A record ENTRY is the hook saying it installed exactly this directory.
 
-    The same contradiction `reported_foreign`'s other gates exist for, in the
+    The same contradiction `assign_origins`' other arms exist for, in the
     state neither of them reaches: a skill the hook installed and the lock has
     since dropped, whose frontmatter disagrees with its basename — which a
     federated registry that does not run the name-dir-mismatch lint can ship.
