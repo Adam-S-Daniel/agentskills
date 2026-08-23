@@ -5307,6 +5307,72 @@ def test_check_format_reads_the_lock_and_its_addressing_and_no_clone(tmp_path):
             "cross-repo contract that lies to the caller reading it.")
 
 
+def test_check_format_reads_exactly_the_lock_fields_its_help_names(tmp_path):
+    """The enumeration in the cross-repo help, measured field by field.
+
+    `--check-format`'s argparse help tells a caller in another repo which lock
+    fields the flag reads beyond the digests it judges. af0090e introduced that
+    list and left `ref` out of it — on a flag whose entire printed line is
+    `--repin --ref <that field>`. A list of what something reads, with one read
+    field missing, is the same checkable-and-false shape as any other stale
+    comment, and the help is the copy a caller who cannot read this file will
+    believe.
+
+    READ is defined operationally, so the test measures rather than restates:
+    a field is read when REMOVING it or REPLACING it with another well-formed
+    value changes what the verdict prints. Both, because one alone misses
+    fields — a different-but-valid `registry` produces byte-identical output
+    while dropping it produces a refusal, and the reverse holds for `ref`.
+
+    On the federated non-default layout, because that is the only one where
+    `sources` reaches the printed line at all: with every clone at its default
+    sibling, dropping `sources` changes nothing, and the fixture would quietly
+    stop measuring the field it was added for.
+    """
+    primary, out, _ = _source_at_a_non_default_checkout(tmp_path)
+    document = json.loads(_bare_digest_copy(out).read_text(encoding="utf-8"))
+
+    def ask(mutated, name):
+        lock = tmp_path / f"read-set-{name}.lock"
+        lock.write_text(json.dumps(mutated, indent=2) + "\n", encoding="utf-8")
+        verdict = run_generator("--check-format", "--repo", str(primary),
+                                "-o", str(lock))
+        # The lock's own path is in every line; normalised out so a differing
+        # FILENAME cannot read as a differing answer.
+        return verdict.stdout.replace(str(lock), "<lock>")
+
+    # Well formed and not what the lock says, one per field. `skills` is
+    # excluded: it is the thing being judged, not a read beyond it.
+    replacements = {
+        "ref": "0" * 39 + "1",
+        "registry": (tmp_path / "some-other-registry").resolve().as_uri(),
+        "bundles": ["adam", "another"],
+        "sources": [],
+        "generated_from": {"changed": True},
+    }
+    baseline = ask(document, "baseline")
+    assert baseline.startswith("FAILED:"), baseline
+
+    read = set()
+    for field in document:
+        if field == "skills":
+            continue
+        assert field in replacements, (
+            f"the lock grew a {field!r} field; give it a well-formed replacement "
+            "here so this measures it rather than skipping it")
+        without = {key: value for key, value in document.items() if key != field}
+        instead = {**document, field: replacements[field]}
+        if (ask(without, f"{field}-removed") != baseline
+                or ask(instead, f"{field}-replaced") != baseline):
+            read.add(field)
+
+    assert read == set(gsl.CHECK_FORMAT_LOCK_READS), (
+        "--check-format's help enumerates the lock fields it reads beyond the "
+        f"digests. It names {sorted(gsl.CHECK_FORMAT_LOCK_READS)} and it measurably "
+        f"reads {sorted(read)}. A cross-repo caller reads that list and cannot "
+        "check it; fix CHECK_FORMAT_LOCK_READS, not this assertion.")
+
+
 def _ask_without_addressing(primary: Path, lock: Path, *flags: str):
     """One verdict, asked with no `--source-repo` — the form its caller uses.
 

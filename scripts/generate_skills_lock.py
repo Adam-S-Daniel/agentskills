@@ -1674,7 +1674,12 @@ def report_digest_format(document: dict, output: Path, repo: Path,
     of a line — and this run's `--repo` and `--source-repo`, which that line
     restates so it can be pasted. Every clause of that is measured in
     `test_check_format_reads_the_lock_and_its_addressing_and_no_clone`,
-    including the no-clone half, against a `--repo` that does not exist.
+    including the no-clone half, against a `--repo` that does not exist. That
+    the list is COMPLETE — no read field left out of it, which is how `ref`
+    went missing from the argparse help's copy — is the separate measurement in
+    `test_check_format_reads_exactly_the_lock_fields_its_help_names`, which
+    mutates each field of a real lock in turn; `CHECK_FORMAT_LOCK_READS` is the
+    one enumeration both the help and that test read.
 
     Written defensively for the same reason `_render_sources` is: the document
     arrives as found ON DISK and may be hand-edited into any shape at all, and
@@ -2184,6 +2189,23 @@ class Remediation(NamedTuple):
 #   primary --check-current: the primary's bundles moved past the pinned commit
 #   source  --check-current: one federated source's bundles did
 REMEDIATION_KINDS = ("stale", "format", "primary", "source")
+
+# The lock fields `--check-format` reads BEYOND the digests it judges. A
+# constant because two things have to agree about it and they live apart: the
+# argparse help enumerates them for a cross-repo caller who cannot read this
+# file, and `test_check_format_reads_exactly_the_lock_fields_its_help_names`
+# measures the enumeration against the verdict one field at a time. The list
+# went stale the round it was written — `ref` was missing from it, on a flag
+# whose whole printed line is `--repin --ref <that field>`.
+CHECK_FORMAT_LOCK_READS = ("ref", "registry", "bundles", "sources")
+
+
+def _and_list(names: Sequence[str]) -> str:
+    """`'a', 'b' and 'c'` — an enumeration built from the tuple, not retyped."""
+    quoted = [f"'{name}'" for name in names]
+    return " and ".join([", ".join(quoted[:-1]), quoted[-1]] if len(quoted) > 1
+                        else quoted)
+
 
 _SCRIPT = f"python3 scripts/{Path(__file__).name}"
 
@@ -2778,11 +2800,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "'digest changed' — so a lock of bare hex is green on the "
                              "first and indistinguishable from content drift on the "
                              "second. TOUCHES NO CLONE: no registry checkout, no "
-                             "network, not one git call — so the verdict cannot depend "
+                             "network, not one git call — so the VERDICT cannot depend "
                              "on which clone, or no clone, is at hand, which is what "
-                             "lets the fleet bumper ask it before cloning anything. It "
-                             "does read more of the LOCK than the digests it judges: "
-                             "'registry', 'bundles' and 'sources', plus this run's "
+                             "lets the fleet bumper ask it before cloning anything. "
+                             "(The line it prints is addressed off this machine and "
+                             "does move with it — see `_addressing`; what never moves "
+                             "is the verdict, and a moved line is a command or is "
+                             "marked a template.) It does read more of the LOCK than "
+                             "the digests it judges: "
+                             f"{_and_list(CHECK_FORMAT_LOCK_READS)}, plus this run's "
                              "--repo and --source-repo, because the re-pin command it "
                              "prints is the same one --check-current prints and meets "
                              "the same refusals. An empty 'skills' map is an ERROR "
