@@ -184,13 +184,20 @@ jobs:
         #
         # NO COUNT HERE, DELIBERATELY. There was one, and the set it named
         # left out the `mkdir` fallback and the `no verdict, which follows
-        # from the clone failure` line. It was unstable as well - it moved
-        # inside the branch that wrote it, when the empty-capture guard grew a
-        # third arm - and nothing in this repo asserts it, so it read as
-        # checked while going stale on the next edit. The SHAPE is the durable
-        # claim: an `echo` may be left unguarded anywhere in this step, and
-        # every command that can plausibly fail belongs in an `if` condition
-        # or a `||` list.
+        # from the clone failure` line. Nothing in this repo asserted it
+        # either, and that is the whole reason it is gone rather than
+        # corrected: an unasserted count reads as checked, and this one was
+        # still accurate on the day it was deleted - which is exactly when
+        # nobody is looking at it. See #120. The SHAPE is the durable claim:
+        # every `echo` in this step is left unguarded, including the
+        # `$GITHUB_OUTPUT` write named above, and any command here that can
+        # plausibly fail and has a degraded path to take belongs in an `if`
+        # condition or a `||` list.
+        #
+        # scripts/test_account_workflows.py holds both halves of that: it reds
+        # if a count comes back into this paragraph, and it reds if the
+        # `status=` write acquires the guard the sentence above says it must
+        # not have.
         run: |
           set -uo pipefail
           # ONE ANNOTATION PER DISTINCT FAULT. Not "one annotation per run":
