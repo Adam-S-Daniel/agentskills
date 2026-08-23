@@ -59,6 +59,18 @@ parsed, and heredoc bodies are lifted out of the shell text and looked at as
 what they are. Both heredocs these workflows actually use sit in bodies that
 also run real commands, so lifting them out has to leave those readable.
 
+`-r requirements-dev.txt` NAMES A RELATIVE PATH, and pip resolves it against
+the step's directory rather than against this repo's root. `working-directory:`
+is another step key the tokeniser never sees, settable through `defaults.run`
+as well, and resolving the path from the root regardless said a step at
+`tools/` was reading the declared file when it was reading
+tools/requirements-dev.txt. So each install carries the directory it runs in,
+the path is resolved from there, and a working directory that only resolves at
+job time is reported. A `cd` in the body does the same thing with nothing in
+the YAML to record it, so an install sharing a body with one is reported too —
+in either order, because a token walk cannot say which side of the install the
+`cd` runs on.
+
 Parsed with `yaml`, not grepped: a `run:` body is a folded or literal scalar
 whose indentation and continuations a line scan does not see, and these
 workflows carry comments that contain the words `pip install` inside prose
@@ -120,6 +132,12 @@ PIP_HINT = re.compile(r"pip|install", re.IGNORECASE)
 # line: bash is the documented default everywhere but Windows, and pwsh writes
 # an install with the same tokens.
 COMMAND_LINE_SHELLS = frozenset({"bash", "sh", "pwsh", "powershell", "cmd"})
+
+# Commands that move the directory pip resolves `-r` against. pip reads a
+# requirements path relative to the process's cwd, so a `cd` in front of an
+# install decides which requirements-dev.txt it reads — and which one this
+# file should have checked.
+DIRECTORY_CHANGERS = frozenset({"cd", "pushd", "popd"})
 
 # A heredoc redirect and the word that ends it. The body in between is text
 # handed to the command, not shell — `python3 - <<PY ... PY` is the same
@@ -469,7 +487,7 @@ def scan_shell_body(body: str, shell=None):
             f"find. Put the install in its own `run:` step under bash."
         ))]
     text, heredocs = split_heredocs(body)
-    found, unplaceable = [], []
+    found, unplaceable, changed_directory = [], [], []
     for heredoc in heredocs:
         if PIP_HINT.search(heredoc):
             unplaceable.append((heredoc.strip(), (
@@ -491,6 +509,19 @@ def scan_shell_body(body: str, shell=None):
             found.append((text, payload))
         elif kind == "unplaceable":
             unplaceable.append((text, payload))
+        if command_program(command) in DIRECTORY_CHANGERS:
+            changed_directory.append(text)
+    if found and changed_directory:
+        unplaceable.append((changed_directory[0], (
+            f"changes directory in a body that also runs a pip install, so "
+            f"the directory pip resolves `-r <file>` against is not this "
+            f"repo's root and this file cannot say which requirements file "
+            f"the install reads. Every command in the body is checked, not "
+            f"just the ones ahead of the install: which side of it a `cd` "
+            f"lands on is not something a token walk can order. Run the "
+            f"install from the root, or set `working-directory:` so the step "
+            f"says where it runs."
+        )))
     return found, unplaceable
 
 
@@ -527,7 +558,7 @@ def step_containers(doc):
 
 
 def parsed_run_steps(root=REPO_ROOT):
-    """(path, container label, step index, step name, run body, shell) per step."""
+    """(path, label, step index, name, run body, shell, working dir) per step."""
     for path in governed_files(root):
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(doc, dict):
@@ -539,21 +570,44 @@ def parsed_run_steps(root=REPO_ROOT):
                 run = step.get("run")
                 if isinstance(run, str):
                     shell = step.get("shell", defaults.get("shell"))
-                    yield path, label, index, step.get("name"), run, shell
+                    workdir = step.get("working-directory",
+                                       defaults.get("working-directory"))
+                    yield (path, label, index, step.get("name"), run, shell,
+                           workdir)
 
 
 def scan_workflows(root=REPO_ROOT):
-    """(installs, unplaceable) over every governed step body under .github/."""
+    """(installs, unplaceable) over every governed step body under .github/.
+
+    An install entry carries the step's effective working directory, because
+    that — not this file's location — is what pip resolves `-r <file>`
+    against.
+    """
     found, unplaceable = [], []
-    for path, label, index, name, body, shell in parsed_run_steps(root):
+    for path, label, index, name, body, shell, workdir in parsed_run_steps(root):
         where = (
             f"{path.relative_to(root).as_posix()} {label} "
             f"step {index}" + (f" ({name})" if name else "")
         )
         commands, strays = scan_shell_body(body, shell)
-        found.extend((where, text, args) for text, args in commands)
+        found.extend((where, text, args, workdir or ".") for text, args in commands)
         unplaceable.extend((where, text, why) for text, why in strays)
+        if commands and UNRESOLVABLE.search(str(workdir or ".")):
+            unplaceable.append((where, body.strip(), (
+                f"runs a pip install under `working-directory: {workdir}`, "
+                f"which only resolves at job time, so this file cannot tell "
+                f"which requirements file `-r` names."
+            )))
     return found, unplaceable
+
+
+def requirements_path_read_by(workdir: str, path: str) -> Path:
+    """The file pip opens for `-r <path>` in a step running at `workdir`.
+
+    pip resolves a requirements path against the process's cwd, and a step's
+    cwd is its `working-directory:` — not the repo root this file lives in.
+    """
+    return (REPO_ROOT / workdir / path).resolve()
 
 
 def install_operands(args):
@@ -594,8 +648,8 @@ def install_operands(args):
 
 
 ALL_INSTALLS, UNPLACEABLE = scan_workflows()
-INSTALL_CASES = [(where, text, args) for where, text, args in ALL_INSTALLS]
-INSTALL_IDS = [where for where, _, _ in ALL_INSTALLS]
+INSTALL_CASES = list(ALL_INSTALLS)
+INSTALL_IDS = [where for where, _, _, _ in ALL_INSTALLS]
 
 
 def test_the_workflows_install_python_dependencies_at_all():
@@ -627,9 +681,14 @@ def test_no_workflow_command_that_might_be_a_pip_install_is_left_unplaced():
     )
 
 
-@pytest.mark.parametrize("where, command, args", INSTALL_CASES, ids=INSTALL_IDS)
+@pytest.mark.parametrize("where, command, args, workdir", INSTALL_CASES,
+                         ids=INSTALL_IDS)
 def test_a_workflow_install_reads_the_declared_requirements_file(
-        where, command, args):
+        where, command, args, workdir):
+    """`-r <path>` is resolved the way pip resolves it — against the step's
+    working directory, not against this repo's root. A step carrying
+    `working-directory: tools` reads tools/requirements-dev.txt, and resolving
+    that path from the root instead said it read the declared file."""
     files, _, _ = install_operands(args)
     assert files, (
         f"{where} runs `{command}` without `-r`. Every workflow install has "
@@ -639,17 +698,21 @@ def test_a_workflow_install_reads_the_declared_requirements_file(
     )
     expected = REQUIREMENTS.relative_to(REPO_ROOT).as_posix()
     for path in files:
-        resolved = (REPO_ROOT / path).resolve()
+        resolved = requirements_path_read_by(workdir, path)
+        where_from = "" if workdir == "." else (
+            f" from `working-directory: {workdir}`, i.e. "
+            f"`{(Path(workdir) / path).as_posix()}`,")
         assert resolved == REQUIREMENTS, (
-            f"{where} installs `-r {path}`, which is not the declared "
-            f"dependency set at {expected}. A second requirements file is a "
-            f"second place a version is written down."
+            f"{where} installs `-r {path}`{where_from} which is not the "
+            f"declared dependency set at {expected}. A second requirements "
+            f"file is a second place a version is written down."
         )
 
 
-@pytest.mark.parametrize("where, command, args", INSTALL_CASES, ids=INSTALL_IDS)
+@pytest.mark.parametrize("where, command, args, workdir", INSTALL_CASES,
+                         ids=INSTALL_IDS)
 def test_a_workflow_install_uses_no_option_that_can_change_the_version(
-        where, command, args):
+        where, command, args, workdir):
     """`-r requirements-dev.txt` only states the pins; several pip options
     override them. A constraints file wins over a requirements file, and an
     index option moves where every pin resolves from, so an install carrying
@@ -666,8 +729,9 @@ def test_a_workflow_install_uses_no_option_that_can_change_the_version(
     )
 
 
-@pytest.mark.parametrize("where, command, args", INSTALL_CASES, ids=INSTALL_IDS)
-def test_a_workflow_install_names_no_package_of_its_own(where, command, args):
+@pytest.mark.parametrize("where, command, args, workdir", INSTALL_CASES,
+                         ids=INSTALL_IDS)
+def test_a_workflow_install_names_no_package_of_its_own(where, command, args, workdir):
     """The drift check proper, and the one that reads the declared set.
 
     A package named on a workflow's command line is measured against
@@ -955,7 +1019,7 @@ def test_a_composite_action_is_governed_like_a_workflow_step(tmp_path):
     assert governed_files(tmp_path) == [action]
     found, unplaceable = scan_workflows(tmp_path)
     assert not unplaceable
-    assert [(where, command) for where, command, _ in found] == [
+    assert [(where, command) for where, command, _, _ in found] == [
         (".github/actions/setup/action.yml composite action step 0",
          "python3 -m pip install pyyaml==6.0.1")
     ]
@@ -1063,6 +1127,107 @@ def test_a_heredoc_that_names_no_install_leaves_the_shell_around_it_readable():
     assert not unplaceable, unplaceable
     assert [install_operands(args) for _, args in found] == [
         (["requirements-dev.txt"], [], [])]
+
+
+WORKFLOW_WITH_A_WORKING_DIRECTORY = """\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 -m pip install -r requirements-dev.txt
+        working-directory: tools
+"""
+
+WORKFLOW_WITH_A_WORKING_DIRECTORY_DEFAULT = """\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - run: python3 -m pip install -r requirements-dev.txt
+"""
+
+
+@pytest.mark.parametrize("text", [WORKFLOW_WITH_A_WORKING_DIRECTORY,
+                                  WORKFLOW_WITH_A_WORKING_DIRECTORY_DEFAULT],
+                         ids=["on the step", "in defaults.run"])
+def test_an_install_carries_the_directory_it_resolves_its_requirements_from(
+        tmp_path, text):
+    """`working-directory:` is a step key the shell tokeniser never sees, and
+    the `-r` check used to resolve the path against this repo's root. A step
+    at `tools/` reads tools/requirements-dev.txt, so a drifted pin in that
+    file installed while the check said the declared file was being read."""
+    write_workflow(tmp_path, text)
+    found, unplaceable = scan_workflows(tmp_path)
+    assert not unplaceable, unplaceable
+    assert [workdir for _, _, _, workdir in found] == ["tools"]
+
+
+def test_the_requirements_path_is_resolved_from_the_step_not_the_repo_root():
+    """The two directions of the same resolution: at the root `-r
+    requirements-dev.txt` IS the declared file, and one directory down it is a
+    different file with the same name."""
+    assert requirements_path_read_by(".", "requirements-dev.txt") == REQUIREMENTS
+    assert requirements_path_read_by(
+        "tools", "requirements-dev.txt") != REQUIREMENTS
+    assert requirements_path_read_by(
+        "tools", "../requirements-dev.txt") == REQUIREMENTS
+
+
+WORKFLOW_WITH_AN_UNRESOLVABLE_WORKING_DIRECTORY = """\
+name: CI
+on: push
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 -m pip install -r requirements-dev.txt
+        working-directory: ${{ github.workspace }}/tools
+"""
+
+
+def test_an_install_under_a_working_directory_decided_at_job_time_is_reported(
+        tmp_path):
+    """Fail-closed on the resolution too: a working directory that is an
+    expression is not a directory this file can resolve `-r` against, so it
+    refuses rather than guessing the root."""
+    write_workflow(tmp_path, WORKFLOW_WITH_AN_UNRESOLVABLE_WORKING_DIRECTORY)
+    _, unplaceable = scan_workflows(tmp_path)
+    assert len(unplaceable) == 1, unplaceable
+    assert "working-directory" in unplaceable[0][2]
+
+
+CD_BEFORE_AN_INSTALL = [
+    "cd tools && python3 -m pip install -r requirements-dev.txt",
+    "cd tools\npython3 -m pip install -r requirements-dev.txt",
+    "python3 -m pip install -r requirements-dev.txt\ncd tools",
+    "pushd tools\npython3 -m pip install -r requirements-dev.txt\npopd",
+]
+
+
+@pytest.mark.parametrize("body", CD_BEFORE_AN_INSTALL)
+def test_a_body_that_changes_directory_around_an_install_is_reported(body):
+    """The plain-shell twin of `working-directory:`, and the one no YAML key
+    records. `cd tools && pip install -r requirements-dev.txt` reads
+    tools/requirements-dev.txt, and the scanner reported it as a clean install
+    of the declared file. The last two cases are here because a token walk
+    cannot order a `cd` against an install: both are reported."""
+    found, unplaceable = scan_shell_body(body)
+    assert len(found) == 1, found
+    assert len(unplaceable) == 1, unplaceable
+    assert "changes directory" in unplaceable[0][1]
+
+
+def test_a_body_that_changes_directory_and_installs_nothing_stays_quiet():
+    """`cd` is ordinary in these workflows. It is only a finding next to an
+    install, or the rule would red every step that moves around a checkout."""
+    assert scan_shell_body("cd tools && npm install left-pad") == ([], [])
 
 
 MORE_WAYS_TO_HIDE_AN_INSTALL = [
