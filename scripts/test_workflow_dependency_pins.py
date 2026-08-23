@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Every `pip install` this repo's CI runs installs requirements-dev.txt.
+"""Every `pip install` in this repo's own CI YAML installs requirements-dev.txt.
 
 Issue #121. The packages this repo tests itself with used to be pinned inline
 in the `pip install` lines of .github/workflows/. Nothing required any two of
-those lines to agree, and nothing outside Actions could read the set at all.
+those lines to agree — at b81f6f1 some named different subsets of the set and
+others restated the identical set — and nothing outside Actions could read the
+set at all.
 requirements-dev.txt is now the one place a version of any of them is written;
 these tests are what makes that claim hold rather than describe the day it was
 made.
@@ -86,8 +88,13 @@ SAME parsed document as a tree of scalars, with no notion of what a job or a
 step is, and fails when a pip install turns up in a scalar the step walk never
 visited.
 
-Scope is the YAML this repo runs its own CI from: .github/workflows/*.yml and
-the composite actions at .github/actions/**/action.yml. A composite action's
+Scope is the YAML — the opening sentence means the YAML and not more. What a
+step RUNS is read; what a script the step calls goes on to do is not, so
+`bash scripts/setup-env.sh` is a place a pin could live that nothing here
+looks at. Closing that needs a scanner for committed scripts rather than a
+wider glob, and it is not written. The YAML this repo runs its own CI from is
+.github/workflows/*.yml and the composite actions at
+.github/actions/**/action.yml. A composite action's
 `runs.steps[].run` is shell this repo's jobs execute exactly as a workflow step
 is, so leaving it out would have left a place a pin could drift back into with
 nothing looking. Skills SHIP workflow YAML as assets
