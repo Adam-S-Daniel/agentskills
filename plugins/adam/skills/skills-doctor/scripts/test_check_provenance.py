@@ -3763,6 +3763,54 @@ def test_the_hook_does_overwrite_the_bytes_it_already_ships(tmp_path):
     assert not hook_may_replace(store, "alpha", "b" * 64, ())
 
 
+def _hook_verdict_line(source: str, phrase: str) -> str:
+    """The single hook line that pushes `phrase` into a verdict.
+
+    Which ARRAY it appends to is the whole question — `problems` is what makes
+    the run read DEGRADED, `notes` rides along on an OK. So the line is returned
+    rather than a boolean, and the caller asserts the array by name.
+    """
+    hits = [line.strip() for line in source.splitlines() if phrase in line]
+    assert len(hits) == 1, (phrase, hits)
+    return hits[0]
+
+
+def test_the_stale_verdicts_name_the_array_the_hook_appends_to(tmp_path, capsys,
+                                                               ephemeral):
+    """`stale` is a note and `artefacts-and-stale` is a finding, per the hook.
+
+    Both sentences are claims about a verdict this script never sees, and the
+    split between them is not a matter of taste: the hook pushes the removal
+    into `notes`, which rides along on an OK, and the left-in-place case into
+    `problems`, which is what DEGRADED means. Reading the arrays here is what
+    keeps the doctor's note/finding split answerable to that rather than to
+    whichever reading made the last round's exit codes come out green.
+    """
+    source = _hook_path().read_text(encoding="utf-8")
+    left = "no longer in the lock left in place, edited since install"
+    assert _hook_verdict_line(source, left).startswith("problems+=(")
+    assert _hook_verdict_line(
+        source, 'removed ${#removed[@]} $(plural').startswith("notes+=(")
+
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "beta")
+    make_skill(store, "gamma")
+    write_record(store, "alpha", "beta", "gamma")
+    _artefacts(store / "gamma")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    # Untouched and out of the lock: the hook removes it and says so in `notes`.
+    assert "[stale] beta" in out, out
+    assert "the next bootstrap removes it" in flat(out), out
+    # Held alive by an artefact: the hook keeps it and says so in `problems`.
+    assert "[artefacts-and-stale] gamma" in out, out
+    assert f"`DEGRADED`, as `{left}`" in flat(out), out
+
+
 def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory(
         tmp_path, capsys, ephemeral):
     """The claim, banned by its words, across every state that raises it.
