@@ -1241,7 +1241,8 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         assert "::warning::" not in log, log
         assert out.strip() == "status=not-yet-bootstrapped"
 
-    def test_nothing_in_this_workflow_overrides_the_runner_s_shell(self):
+    @pytest.mark.parametrize("path", [ZIPS, RECORD], ids=["zips", "record"])
+    def test_nothing_in_this_workflow_overrides_the_runner_s_shell(self, path):
         """The premise the harness above rests on, asserted instead of assumed.
 
         `_run` spawns the step's tail under `bash -e` BECAUSE that is what the
@@ -1258,24 +1259,98 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         which is the harness lying in the safer-looking direction: a command
         that fails soft here would abort there.
 
+        BOTH WORKFLOWS THIS FILE EXECUTES, not just the one the harness
+        above spawns. record-account-upload.yml declares no `shell:` and no
+        `defaults:` either, so it runs under the same `/usr/bin/bash -e {0}`,
+        and TestSkillInputIsValidatedBeforeUse lifts a `case` block out of it
+        and runs it. Asserting this for one of the two files left the other
+        free to grow a `defaults:` that nothing here would see.
+
         Parsed, per AGENTS.md - the same shape as scripts/test_ci_workflow.py
         holding ci.yml's no-`concurrency` invariant.
         """
-        wf = load(ZIPS)
+        wf = load(path)
         assert "defaults" not in wf, (
-            "a workflow-level `defaults:` overrides the runner's "
-            "`/usr/bin/bash -e {0}`, so the shell the tests execute is no "
-            "longer the shell the step gets"
+            f"{path.name}: a workflow-level `defaults:` overrides the "
+            "runner's `/usr/bin/bash -e {0}`, so the shell the tests execute "
+            "is no longer the shell the step gets"
         )
         for job_id, job in wf["jobs"].items():
             assert "defaults" not in job, (
-                f"job `{job_id}` declares `defaults:`; see above"
+                f"{path.name}: job `{job_id}` declares `defaults:`; see above"
             )
             for step in job.get("steps", []):
                 assert "shell" not in step, (
-                    f"step `{step.get('name') or step.get('id')}` in job "
+                    f"{path.name}: step "
+                    f"`{step.get('name') or step.get('id')}` in job "
                     f"`{job_id}` declares `shell:`; see above"
                 )
+
+    def test_both_harnesses_hand_the_step_to_the_runner_s_shell(
+            self, tmp_path, monkeypatch):
+        """The OTHER half of the premise above, and the half nothing held.
+
+        The test before this one locks the WORKFLOW: no `shell:`, no
+        `defaults:`, so GitHub runs the step as `/usr/bin/bash -e {0}`. That
+        says nothing about how THIS FILE spawns it. `_run` and `_run_step`
+        each pass `-e` by hand, in two places, and `bash -e script` ->
+        `bash script` is exactly the tidy-up that looks harmless: dropping it
+        from both spawns changed no test result on the tree before this test
+        existed, while the same edit disarms
+        test_a_placeholder_it_cannot_create_does_not_abort_the_step, the only
+        test that catches an unguarded `mkdir` in the step head.
+
+        Asserted by RECORDING the argv, not by reading this file's own
+        source: a source scan cannot see a spawn that moved behind a helper,
+        it would go green on a helper that stopped passing the flag on, and
+        it would false-red on the deliberate `bash -c` spawns further down,
+        which run a `case` fragment rather than a `run:` body.
+
+        WHAT THIS DOES NOT COVER, said rather than implied: a brand-new third
+        sibling harness that this test never calls. `len(seen) == 2` catches
+        an extra spawn inside `_run` or `_run_step` and nothing beyond them.
+        """
+        seen = []
+        real = subprocess.run
+
+        def record(argv, *args, **kwargs):
+            seen.append(list(argv))
+            return real(argv, *args, **kwargs)
+
+        tail = tmp_path / "tail"
+        tail.mkdir()
+        step = tmp_path / "step"
+        step.mkdir()
+        monkeypatch.setattr(subprocess, "run", record)
+        self._run(tail, "fresh")
+        self._run_step(step)
+        monkeypatch.undo()
+
+        assert len(seen) == 2, (
+            "expected exactly one spawn from each harness; a third execution "
+            f"path is not covered by this assertion:\n{seen}"
+        )
+        for argv in seen:
+            assert argv[:2] == [require_bash(), "-e"], (
+                "a harness in this file spawned the step body as "
+                f"{argv[:2]} rather than `bash -e`. The runner gives the step "
+                "errexit and the step cannot take it back, so a harness "
+                "without it reports the opposite of what production does on "
+                "any unguarded failure."
+            )
+
+        # NEGATIVE CONTROL: that the flag asserted above still means errexit
+        # on the machine running this. Without it the loop is a string
+        # comparison wired to nothing.
+        probe = real(
+            [require_bash(), "-e",
+             _script(tmp_path, "false\necho reached\n", name="probe.sh")],
+            capture_output=True, text=True,
+        )
+        assert probe.returncode != 0 and "reached" not in probe.stdout, (
+            "`bash -e` ran on past an unguarded failure, so the assertion "
+            "above proves nothing about this shell"
+        )
 
     def test_the_verdict_still_reaches_the_step_output(self, tmp_path):
         """Whatever else the step says, `status=` is the only thing the next
