@@ -147,6 +147,76 @@ THE_BYTES_THE_LOCK_NAMES = (
     "true the moment the lock's digest for this name moves, and the same "
     "directory becomes a refusal then.")
 
+# WHAT THE NEXT HOOK RUN DOES TO ONE DIRECTORY THE LOCK NAMES — the closed set,
+# read off `.claude/hooks/skills-bootstrap.sh`'s own control flow IN ORDER. It is
+# a ladder and not a set of independent tests: the hook asks these questions one
+# after another and the FIRST one to answer decides the directory's whole fate,
+# so a doctor that models one rung and reports its answer as the answer is wrong
+# exactly where the rungs disagree.
+#
+# That is not hypothetical. `may_replace` is the rung immediately after the
+# whole-lock gate, and round 5 reported its "yes" as the end of the story:
+# measured end to end against the real hook, two stores reached
+# `bytes-are-the-locked-ones` — "delivery is unaffected and nothing here needs
+# deciding", exit 0 — while the next run DELETED the directory and reported
+# DEGRADED. A project collision and a lock whose rows share a destination name
+# both reach an `rm -rf "${DEST:?}/$name"` that sits BELOW the gate whose answer
+# was being quoted. `hook_fate` walks the whole ladder; see its docstring for
+# where each rung lives and for the rungs it deliberately does not model.
+#
+# `hook_fate` is total over this set and RAISES rather than defaulting. A default
+# arm here would mean "no rung objected", which is precisely the reading that was
+# wrong — the rungs it had not asked were the ones that delete.
+LOCK_REFUSED = "not-reached-the-lock-is-refused"
+LEFT_UNREPLACED = "left-in-place-unreplaced"
+DELETED_BY_THE_DUP_GUARD = "deleted-by-the-dup-guard"
+DELETED_BY_THE_COLLISION_GUARD = "deleted-by-the-collision-guard"
+COLLISION_UNMEASURED = "collision-guard-unmeasured"
+REPLACED = "replaced-by-the-locked-copy"
+FATES = (LOCK_REFUSED, LEFT_UNREPLACED, DELETED_BY_THE_DUP_GUARD,
+         DELETED_BY_THE_COLLISION_GUARD, COLLISION_UNMEASURED, REPLACED)
+
+# The fates under which the locked skill is still delivered out of THIS
+# directory, and therefore the only ones any sentence may say "delivery is
+# unaffected" about. One member, and it is a whitelist rather than a blacklist
+# for the reason above: a fate added tomorrow is not delivering until somebody
+# says it is.
+STILL_DELIVERS = frozenset({REPLACED})
+
+# The deleting fates and the unmeasured one, as the sentences a reader gets.
+# Module-level so that both call sites in `classify` — a hook-installed directory
+# and one nothing attributes to the hook — say the same thing about the same
+# rung, which is the mistake the ladder exists to stop being possible.
+DUP_GUARD_DELETES = (
+    "two rows of this lock fold onto this one destination name. The install "
+    "directory is FLAT, so `<bundle-a>/{name}` and `<bundle-b>/{name}` are one "
+    "directory — the hook's lock reader stamps both rows `dup`, and the install "
+    "loop removes the destination and installs NEITHER. So this directory is "
+    "deleted and the skill is not delivered by any row: the verdict names it "
+    "after `DEGRADED` as `lock rows share a destination name, none installed`. "
+    "`scripts/generate_skills_lock.py` refuses to write such a lock, so this is "
+    "a hand-edited one, or one written before that rule existed. Rename the "
+    "skill directory in one of the two registries.")
+COLLISION_GUARD_DELETES = (
+    "the project ships `.claude/skills/{name}/SKILL.md`, and personal "
+    "`~/.claude/skills` shadows the project's — so the hook DELETES this "
+    "directory to let the repo-owned copy win, skips the install, and names it "
+    "after `DEGRADED` as `collision(s) skipped, repo-owned wins`. Nothing is "
+    "broken by that and nothing needs deciding about the project's copy; it is "
+    "recorded because these bytes go away, which is not what the rest of this "
+    "report would lead a reader to expect of a directory whose digest the lock "
+    "names.")
+COLLISION_GUARD_UNMEASURED = (
+    "the project's `.claude/skills` is there and could not be listed, so "
+    "whether the project ships a `{name}` of its own is UNMEASURED — and that "
+    "is the one question left between this directory and the hook's copy. If it "
+    "does, the next run deletes these bytes so the repo-owned copy wins; if it "
+    "does not, the bundle's copy is installed over them. Reported rather than "
+    "resolved, because an unreadable directory answers neither way and the "
+    "answer this script would otherwise assume is the benign one. Make "
+    "`.claude/skills` readable — or point --project-dir at the directory the "
+    "session actually opens on — and re-run.")
+
 # The hook's charsets, applied to the same fields on the way out of the same file.
 # An entry failing any of them is one the hook SKIPS, so it is invisible to the
 # pruner — counted and reported here rather than quietly parsed anyway.
@@ -249,6 +319,9 @@ OBSERVATION_KINDS: Dict[str, Tuple[str, ...]] = {
     "lock-expectation": ("untracked", "hand-placed-over-locked",
                          "unattributable-over-locked",
                          "bytes-are-the-locked-ones",
+                         DELETED_BY_THE_DUP_GUARD,
+                         DELETED_BY_THE_COLLISION_GUARD,
+                         COLLISION_UNMEASURED,
                          "stale-out-of-scope", "stale"),
     "integrity": ("edited-and-locked", "unmeasurable-and-locked",
                   "edited-and-stale", "unmeasurable-and-stale",
@@ -363,12 +436,19 @@ class Lock(NamedTuple):
     directory the hook overwrites no matter who put it there. A SET per name
     because `names` folds `bundle/skill` keys to their last segment — two keys
     can land on one directory, and the hook asks `may_replace` once per key.
+
+    `duplicates` is the destination names TWO OR MORE lock keys fold onto. The
+    install dir is flat, so `adam/alpha` and `fastmail/alpha` are one directory:
+    the hook's lock reader marks both rows `dup` and the install loop removes the
+    destination and installs neither. A name here is one no lock row can deliver,
+    whatever else is true of it.
     """
     state: str
     names: Set[str]
     claims: Set[Tuple[str, str]]
     reason: Optional[str] = None
     digests: Mapping[str, FrozenSet[str]] = NO_DIGESTS
+    duplicates: FrozenSet[str] = frozenset()
 
 
 class Surface(NamedTuple):
@@ -782,6 +862,75 @@ def lock_names_the_bytes(lock: Lock, name: str,
     return measured is not None and measured in lock.digests.get(name, frozenset())
 
 
+def hook_fate(lock: Lock, name: str, *, replaceable: bool,
+              repo_owned: Optional[Set[str]]) -> str:
+    """What the next hook run does to `~/.claude/skills/<name>`, as one of `FATES`.
+
+    The install loop's own ladder, in the hook's order, and TOTAL: every path
+    ends in a named fate and the paths that cannot be named raise. See the
+    `FATES` comment for why a default arm is the specific thing being avoided.
+
+    The rungs this models, in `.claude/hooks/skills-bootstrap.sh`'s order:
+
+      * the whole-lock gate, which exits inside the lock reader before the
+        install loop exists. Nothing is installed and nothing is removed;
+      * `may_replace` — false means the directory is left exactly as it is and
+        named after `DEGRADED` as shadowed. THIS IS THE RUNG ROUND 5 MODELLED,
+        and everything below it is what it reported nothing about;
+      * the `dup` guard — `rm -rf "${DEST:?}/$name"`, then the row is skipped.
+        Both rows sharing the destination are stamped, so neither is installed;
+      * the collision guard — the project ships `.claude/skills/<name>/SKILL.md`,
+        so `rm -rf "${DEST:?}/$name"` and repo-owned wins;
+      * the copy itself.
+
+    NOT MODELLED, and named here rather than silently folded into the copy: the
+    source-index framing check, an unreachable source, the skill being absent at
+    the pinned ref, the `cp` failing, and the post-copy digest mismatch. Every
+    one of them ALSO removes the destination — so `REPLACED` is not a promise
+    that the bytes survive, it is "the ladder's local rungs are all clear and the
+    run reaches the copy". None of the five is a property of this store: they are
+    properties of a framing bug, a network, a remote tree and a filesystem write,
+    and no measurement of a reader's own disk predicts any of them. The rungs
+    above ARE decided by that disk, which is what makes them the doctor's
+    business and these five somebody else's.
+
+    `replaceable` is the CALLER's answer to the `may_replace` rung, because the
+    two call sites have different evidence for it: a hook-origin directory can
+    satisfy `may_replace`'s record clause, and a directory nothing attributes to
+    the hook can only satisfy the lock clause. Passing the answer in keeps one
+    ladder rather than two copies of it that can disagree.
+
+    `repo_owned` is `None` when the project's skills directory is there and could
+    not be listed. That is the collision rung with no answer, and it gets a fate
+    of its own instead of the empty set's: an unreadable directory is not an
+    empty one, and rounding it to "no collision" is how the benign note this
+    ladder exists to gate would come back through the one input nobody measured.
+    """
+    if lock.state in (REJECTED, UNREADABLE):
+        # Rung zero, and it is answered for every name at once: the reader exits
+        # before the loop, so there is no per-name question left to ask and
+        # `lock.names` is empty for the same reason.
+        return LOCK_REFUSED
+    if lock.state != PRESENT:
+        raise ValueError(
+            f"a {lock.state} lock is not one the hook refuses — there is no "
+            f"lock for it to refuse — so {name!r} has no fate on this ladder; "
+            f"callers guard on the lock being PRESENT before asking")
+    if name not in lock.names:
+        raise ValueError(
+            f"{name!r} is not a destination this lock names, so the install "
+            f"loop never visits it and it has no fate on this ladder")
+    if not replaceable:
+        return LEFT_UNREPLACED
+    if name in lock.duplicates:
+        return DELETED_BY_THE_DUP_GUARD
+    if repo_owned is None:
+        return COLLISION_UNMEASURED
+    if name in repo_owned:
+        return DELETED_BY_THE_COLLISION_GUARD
+    return REPLACED
+
+
 def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
     """Every lock to judge against, and where a multi-repo session hides them.
 
@@ -1094,6 +1243,7 @@ def read_lock(path: Path) -> Lock:
     # bad rows is refused for the row the hook's log names.
     names: Set[str] = set()
     digests: Dict[str, Set[str]] = {}
+    landings: Dict[str, int] = {}
     for key in sorted(skills):
         if not isinstance(key, str) or not re.fullmatch(
                 NAME.pattern + "/" + NAME.pattern, key):
@@ -1123,10 +1273,15 @@ def read_lock(path: Path) -> Lock:
         # installs by — `adam/foo` and `other/foo` are one directory, not two.
         names.add(name)
         digests.setdefault(name, set()).add(matched.group(1))
+        # Counted per KEY, not per name: the hook's `seen[row[4]] > 1` over the
+        # rows it is about to write, which is what stamps both rows `dup`.
+        landings[name] = landings.get(name, 0) + 1
 
     return Lock(PRESENT, names, claims,
                 digests={name: frozenset(values)
-                         for name, values in digests.items()})
+                         for name, values in digests.items()},
+                duplicates=frozenset(name for name, count in landings.items()
+                                     if count > 1))
 
 
 def _sources(lock: dict) -> List[Tuple[object, object]]:
@@ -1163,18 +1318,42 @@ def scan(skills_dir: Path) -> Tuple[str, List[str]]:
                      and not child.name.startswith(".")]
 
 
-def skill_names(directory: Path) -> Set[str]:
-    """Directory names under `directory` that hold a SKILL.md.
+def readable_skill_names(directory: Path) -> Optional[Set[str]]:
+    """`skill_names`, with "could not be read" kept apart from "nothing there".
 
-    Used for the two channels this script only needs to ANSWER a question about
-    — the account store and the project's own skills — so the SKILL.md test is
-    the cheap way to avoid counting an incidental directory as a skill.
+    Not a distinction `skill_names` can make, and one rung of `hook_fate` needs
+    it: whether the project ships a skill of some name decides whether the next
+    run DELETES the personal copy, and a directory that is there and unlistable
+    answers that question neither way. Folding it into the empty set answers it
+    "no", which is the benign reading, which is the reading this ladder exists
+    to stop being assumed.
+
+    FileNotFoundError is the empty set and not None on purpose: a project with
+    no `.claude/skills` at all ships no skill of any name, and that IS measured.
+    Everything else — a plain file where the directory should be, a permission
+    refusal, an I/O error — is None.
     """
     try:
         children = sorted(directory.iterdir())
-    except OSError:
+    except FileNotFoundError:
         return set()
+    except OSError:
+        return None
     return {child.name for child in children if (child / "SKILL.md").is_file()}
+
+
+def skill_names(directory: Path) -> Set[str]:
+    """Directory names under `directory` that hold a SKILL.md.
+
+    Used for the channel this script only needs to ANSWER a question about — the
+    account store — so the SKILL.md test is the cheap way to avoid counting an
+    incidental directory as a skill. Unreadable reads as empty here because the
+    question it answers ("is there a second copy of this name?") is one an
+    absent answer already leaves unraised; the project channel needs the other
+    treatment and uses `readable_skill_names` directly.
+    """
+    names = readable_skill_names(directory)
+    return set() if names is None else names
 
 
 def declared_name(skill_dir: Path) -> Optional[str]:
@@ -1440,7 +1619,8 @@ def cluster(stamped: List[Tuple[str, float]]) -> List[List[Tuple[str, float]]]:
 
 def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
              origins: Dict[str, Origin], account: Set[str] = frozenset(),
-             repo_owned: Set[str] = frozenset(), store_state: str = PRESENT,
+             repo_owned: Optional[Set[str]] = frozenset(),
+             store_state: str = PRESENT,
              surface: str = DURABLE,
              ) -> Tuple[List[Row], List[Finding], List[Finding]]:
     """One row per directory on disk, plus the findings and notes they imply.
@@ -1475,7 +1655,9 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
     `account` and `repo_owned` are the names the OTHER two channels deliver. They
     are here only so that "not in the personal store" does not get reported as
     "not delivered": both of those channels satisfy a locked name without the
-    hook installing anything.
+    hook installing anything. `repo_owned` is None when the project's skills
+    directory could not be listed — see `readable_skill_names` — and every use
+    of it below has to say what it does with an answer nobody has.
     """
     rows: List[Row] = []
     findings: List[Finding] = []
@@ -1502,8 +1684,25 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             rows.append(Row(name, origin, None, None, None, in_lock))
             if not expected:
                 continue
-            if in_lock and lock_names_the_bytes(
-                    lock, name, digest_skill_dir(skills_dir / name)):
+            # The ladder, not the rung: `may_replace` saying yes is the SECOND
+            # of five questions, and the two below it delete the directory.
+            fate = (hook_fate(lock, name, repo_owned=repo_owned,
+                              replaceable=lock_names_the_bytes(
+                                  lock, name, digest_skill_dir(skills_dir / name)))
+                    if in_lock else None)
+            if fate == DELETED_BY_THE_DUP_GUARD:
+                findings.append(_observed(
+                    DELETED_BY_THE_DUP_GUARD, origin, name,
+                    DUP_GUARD_DELETES.format(name=name) + but_here))
+            elif fate == DELETED_BY_THE_COLLISION_GUARD:
+                notes.append(_observed(
+                    DELETED_BY_THE_COLLISION_GUARD, origin, name,
+                    COLLISION_GUARD_DELETES.format(name=name) + but_here))
+            elif fate == COLLISION_UNMEASURED:
+                findings.append(_observed(
+                    COLLISION_UNMEASURED, origin, name,
+                    COLLISION_GUARD_UNMEASURED.format(name=name) + but_here))
+            elif fate in STILL_DELIVERS:
                 notes.append(_observed(
                     "bytes-are-the-locked-ones", origin, name,
                     THE_BYTES_THE_LOCK_NAMES + but_here))
@@ -1592,43 +1791,68 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
         if not expected:
             continue
         in_scope = (entry.registry, entry.bundle) in lock.claims
-        if (in_lock and integrity != UNCHANGED
-                and lock_names_the_bytes(lock, name, measured)):
-            # The same second clause, on the one origin that can reach this
-            # without it being the whole story: the record vouches for older
-            # bytes than these, and the lock has moved on to exactly the ones
-            # here. Reported as a note and not withheld, because "the record
-            # and the directory disagree" is worth seeing even where the
-            # disagreement costs nothing. UNCHANGED is excluded rather than
-            # left to fall through: there the record, the lock and the disk all
-            # agree, and a note on every healthy locked skill is noise.
-            notes.append(_observed("bytes-are-the-locked-ones", HOOK, name,
-                                   THE_BYTES_THE_LOCK_NAMES + but_here))
-        elif in_lock and integrity in (EDITED, UNMEASURABLE):
-            findings.append(_observed(
-                f"{integrity}-and-locked", HOOK, name,
-                f"{_cause(integrity)} and the lock still names it. "
-                f"{HOOK_REFUSAL} Nothing here is lost; what stops is this "
-                f"skill's updates. Restore the bytes the record vouches for, "
-                f"or move the directory out of the store, and the next run "
-                f"installs the locked copy.{but_here}"))
-        elif in_lock and integrity == ARTEFACTS_ONLY:
-            extra = dropped_files(skills_dir / name)
-            findings.append(_observed(
-                "artefacts-and-locked", HOOK, name,
-                f"every file an upload would carry is byte-for-byte the one "
-                f"the hook installed, and the whole difference is files the "
-                f"upload filter drops"
-                f"{' (' + name_list(extra) + ')' if extra else ''}. No "
-                f"instruction byte is at risk. The hook's digest is the WHOLE "
-                f"directory, though, so what is here matches neither the "
-                f"locked digest nor the recorded one. {HOOK_REFUSAL} Delete "
-                f"those files and the next run installs normally. Running a "
-                f"skill's own test suite from inside the installed copy gets "
-                f"you here.{but_here}"))
-        elif in_lock:
+        if in_lock:
+            # `may_replace`'s three clauses, as this origin can satisfy them:
+            # the record vouches for exactly these bytes (UNCHANGED), or the
+            # lock names them. Then the LADDER, because a yes here is only the
+            # second of five questions.
+            fate = hook_fate(
+                lock, name, repo_owned=repo_owned,
+                replaceable=(integrity == UNCHANGED
+                             or lock_names_the_bytes(lock, name, measured)))
+            if fate == DELETED_BY_THE_DUP_GUARD:
+                findings.append(_observed(
+                    DELETED_BY_THE_DUP_GUARD, HOOK, name,
+                    DUP_GUARD_DELETES.format(name=name) + but_here))
+            elif fate == DELETED_BY_THE_COLLISION_GUARD:
+                notes.append(_observed(
+                    DELETED_BY_THE_COLLISION_GUARD, HOOK, name,
+                    COLLISION_GUARD_DELETES.format(name=name) + but_here))
+            elif fate == COLLISION_UNMEASURED:
+                findings.append(_observed(
+                    COLLISION_UNMEASURED, HOOK, name,
+                    COLLISION_GUARD_UNMEASURED.format(name=name) + but_here))
+            elif fate in STILL_DELIVERS:
+                # The record vouches for older bytes than these and the lock has
+                # moved on to exactly the ones here. Reported as a note and not
+                # withheld, because "the record and the directory disagree" is
+                # worth seeing even where the disagreement costs nothing.
+                # UNCHANGED is excluded rather than left to fall through: there
+                # the record, the lock and the disk all agree, and a note on
+                # every healthy locked skill is noise.
+                if integrity != UNCHANGED:
+                    notes.append(_observed(
+                        "bytes-are-the-locked-ones", HOOK, name,
+                        THE_BYTES_THE_LOCK_NAMES + but_here))
+            elif integrity == ARTEFACTS_ONLY:
+                extra = dropped_files(skills_dir / name)
+                findings.append(_observed(
+                    "artefacts-and-locked", HOOK, name,
+                    f"every file an upload would carry is byte-for-byte the one "
+                    f"the hook installed, and the whole difference is files the "
+                    f"upload filter drops"
+                    f"{' (' + name_list(extra) + ')' if extra else ''}. No "
+                    f"instruction byte is at risk. The hook's digest is the WHOLE "
+                    f"directory, though, so what is here matches neither the "
+                    f"locked digest nor the recorded one. {HOOK_REFUSAL} Delete "
+                    f"those files and the next run installs normally. Running a "
+                    f"skill's own test suite from inside the installed copy gets "
+                    f"you here.{but_here}"))
+            else:
+                # LEFT_UNREPLACED with UNCHANGED is unreachable by construction —
+                # UNCHANGED is one of the clauses that makes it replaceable — and
+                # `_observed` is what proves it rather than an assert nobody
+                # reads: `unchanged-and-locked` is in no observation, so the
+                # impossible arm raises instead of printing.
+                findings.append(_observed(
+                    f"{integrity}-and-locked", HOOK, name,
+                    f"{_cause(integrity)} and the lock still names it. "
+                    f"{HOOK_REFUSAL} Nothing here is lost; what stops is this "
+                    f"skill's updates. Restore the bytes the record vouches for, "
+                    f"or move the directory out of the store, and the next run "
+                    f"installs the locked copy.{but_here}"))
             continue
-        elif not in_scope:
+        if not in_scope:
             # Scope is checked BEFORE integrity, because out of scope the planner
             # short-circuits to `keep` without ever consulting the digest — so the
             # edited-and-stale verdict degrade below simply does not happen, and
@@ -1695,7 +1919,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "under that name. The session sees that one; the hook did not "
                     "put it there and does not manage it."))
                 continue
-            if missing in repo_owned:
+            if repo_owned and missing in repo_owned:
                 notes.append(Finding(
                     "delivered-by-the-project", missing,
                     "not in the personal store because the project ships a skill "
@@ -2376,7 +2600,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     record = read_record(record_path)
     store_state, names = scan(skills_dir)
     account = skill_names(skills_dir / ACCOUNT_DIR)
-    repo_owned = skill_names(project_dir / ".claude" / "skills")
+    repo_owned = readable_skill_names(project_dir / ".claude" / "skills")
     # Every lock is read BEFORE any of them is judged against, because the
     # foreign gate is store-wide: "some bundle here delivers this name" is a
     # question about all the locks at once, and asking it lock by lock is how the

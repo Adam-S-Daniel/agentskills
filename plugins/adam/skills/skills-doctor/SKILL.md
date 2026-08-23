@@ -423,7 +423,20 @@ figure. No remediation is performed — recommend, do not do.
 - **The middle clause is why some of those are only a note.** "What is there
   already digests to the digest the lock names" asks nothing about who put the
   directory there, so a hand-placed copy of exactly the bytes the bundle ships
-  is overwritten like any other and delivery is unaffected. The doctor measures
-  that clause and reports `bytes-are-the-locked-ones` instead of a refusal —
-  the state is not a defect, it is a state that becomes one the next time the
-  lock's digest for that name moves.
+  is overwritten like any other. The doctor measures that clause and reports
+  `bytes-are-the-locked-ones` instead of a refusal — the state is not a defect,
+  it is a state that becomes one the next time the lock's digest for that name
+  moves.
+- **`may_replace` saying yes is not the end of the story, and the doctor walks
+  the rest of the ladder before it says delivery is unaffected.** The install
+  loop asks several more questions after that gate, and two of them end in
+  `rm -rf` on the very directory it just agreed it could replace: two lock rows
+  folding onto one destination name (`deleted-by-the-dup-guard`, a finding —
+  neither row installs) and the project shipping a `.claude/skills/<name>` of
+  its own (`deleted-by-the-collision-guard`, a note — repo-owned is supposed to
+  win). Where the project's skills directory is there and unlistable the answer
+  to that last question is unknown, and the doctor says so
+  (`collision-guard-unmeasured`) rather than assuming the benign reading.
+  `bytes-are-the-locked-ones` is now raised only where every local rung is
+  clear, which is the only state in which "delivery is unaffected" is a
+  measurement rather than a hope.
