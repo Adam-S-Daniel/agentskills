@@ -116,6 +116,21 @@ HOOK_REFUSAL = (
     "session's `skills:` verdict as shadowed, so the locked copy is not "
     "delivered for as long as this holds.")
 
+# The other side of the same rule, quoted into the note that stands where a
+# refusal finding used to when the second clause DOES apply. Bound by
+# `test_the_states_the_hook_replaces_carry_no_refusal`, which puts each such
+# store to the extracted `may_replace` first and to the rendered report second —
+# the same two halves as the refusal binding, in the direction round 4 had no
+# test for at all.
+THE_BYTES_THE_LOCK_NAMES = (
+    "the bytes here digest to exactly the digest the lock names for this "
+    "skill. That is the one state in which the hook overwrites a directory it "
+    "cannot show it installed unchanged, because replacing these bytes with "
+    "the bundle's copy could not change a byte anyone would observe — so "
+    "delivery is unaffected and nothing here needs deciding. It stops being "
+    "true the moment the lock's digest for this name moves, and the same "
+    "directory becomes a refusal then.")
+
 # The hook's charsets, applied to the same fields on the way out of the same file.
 # An entry failing any of them is one the hook SKIPS, so it is invisible to the
 # pruner — counted and reported here rather than quietly parsed anyway.
@@ -216,6 +231,8 @@ OBSERVATION_ORIGINS: Dict[str, FrozenSet[str]] = {
 # disk (`missing`, `not-in-the-store`, `delivered-by-*`).
 OBSERVATION_KINDS: Dict[str, Tuple[str, ...]] = {
     "lock-expectation": ("untracked", "hand-placed-over-locked",
+                         "unattributable-over-locked",
+                         "bytes-are-the-locked-ones",
                          "stale-out-of-scope", "stale"),
     "integrity": ("edited-and-locked", "unmeasurable-and-locked",
                   "edited-and-stale", "unmeasurable-and-stale",
@@ -310,10 +327,20 @@ class Record(NamedTuple):
 
 
 class Lock(NamedTuple):
+    """A lock file's expectation, as much of it as changes what is reported.
+
+    `digests` is the `locked` argument `may_replace` takes, which this file
+    spent three rounds not carrying: a destination name maps to the digests the
+    lock itself names for it, and a directory whose bytes are one of them is a
+    directory the hook overwrites no matter who put it there. A SET per name
+    because `names` folds `bundle/skill` keys to their last segment — two keys
+    can land on one directory, and the hook asks `may_replace` once per key.
+    """
     state: str
     names: Set[str]
     claims: Set[Tuple[str, str]]
     reason: Optional[str] = None
+    digests: Dict[str, FrozenSet[str]] = {}
 
 
 class Surface(NamedTuple):
@@ -648,6 +675,29 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
     return Surface(UNSURE, entrypoint, remote, forced)
 
 
+def lock_names_the_bytes(lock: Lock, name: str,
+                         measured: Optional[str]) -> bool:
+    """`may_replace`'s second clause: are these bytes what the lock names?
+
+    The hook overwrites a directory in three cases and this is the middle one —
+    `[ "$have" = "$locked" ]`, tested BEFORE the install record is consulted at
+    all. It is the clause that makes provenance irrelevant: whoever put the
+    directory there, if what is there already digests to the digest the lock
+    names, replacing it could not change a byte anyone could observe, so the
+    hook does it and delivery proceeds.
+
+    `measured is None` is `digest_skill_dir`'s "could not read", and it answers
+    False for the hook's own reason: `may_replace` refuses outright when
+    `digest_dir` prints nothing, because two empty strings would otherwise
+    compare equal and hand back a directory nothing was ever measured against.
+
+    Bound to the hook by `test_the_refusal_claim_is_the_hooks_own_may_replace`
+    and its REPLACE control, which run the extracted `may_replace` over the same
+    stores these findings are rendered from.
+    """
+    return measured is not None and measured in lock.digests.get(name, frozenset())
+
+
 def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
     """Every lock to judge against, and where a multi-repo session hides them.
 
@@ -873,11 +923,14 @@ def _entry(raw: object) -> Optional[Entry]:
 
 
 def read_lock(path: Path) -> Lock:
-    """The destination names a lock declares, and the (registry, bundle) it claims.
+    """The destination names a lock declares, their digests, and its claims.
 
     `claims` is what decides whether a stale skill gets removed or kept: the hook
     removes only within the pairs its own lock declares, so that two repos sharing
     one ~/.claude/skills do not reap each other's installs.
+
+    `digests` is what decides whether a directory nothing attributes to the hook
+    gets overwritten anyway — `may_replace`'s second clause. See `Lock`.
     """
     try:
         lock = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -894,6 +947,22 @@ def read_lock(path: Path) -> Lock:
     # The destination is the key's LAST segment, the same reading the hook
     # installs by — `adam/foo` and `other/foo` are one directory, not two.
     names = {key.rsplit("/", 1)[-1] for key in skills if isinstance(key, str)}
+
+    # The digest each destination is expected to end up holding, normalised the
+    # way the hook normalises it before writing `skills.nul` — a `sha256:` prefix
+    # is stripped there, and `digest_dir`'s answer, which `may_replace` compares
+    # against, is always bare hex. A value that is neither shape is skipped here
+    # rather than rejected: the hook exits the whole lock over one, so nothing
+    # this function could return about such a lock would describe a run that
+    # happens. What that leaves open is recorded in the skill's own known
+    # limitations, not papered over with a guess.
+    digests: Dict[str, Set[str]] = {}
+    for key, digest in skills.items():
+        if not isinstance(key, str) or not isinstance(digest, str):
+            continue
+        matched = re.fullmatch(r"(?:sha256:)?([0-9a-f]{64})", digest)
+        if matched:
+            digests.setdefault(key.rsplit("/", 1)[-1], set()).add(matched.group(1))
 
     # The subset of the hook's lock validation that changes what this reports.
     # Not the whole of it — but a lock failing any of these is one the hook
@@ -926,7 +995,9 @@ def read_lock(path: Path) -> Lock:
         if isinstance(key, str) and "/" in key and key.split("/", 1)[0] not in owner:
             return Lock(REJECTED, set(), set(),
                         f"skill {key!r} names a bundle no source claims")
-    return Lock(PRESENT, names, claims)
+    return Lock(PRESENT, names, claims,
+                digests={name: frozenset(values)
+                         for name, values in digests.items()})
 
 
 def _sources(lock: dict) -> List[Tuple[object, object]]:
@@ -1299,24 +1370,42 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             rows.append(Row(name, origin, None, None, None, in_lock))
             if not expected:
                 continue
-            if in_lock and origin == UNATTRIBUTED:
+            if in_lock and lock_names_the_bytes(
+                    lock, name, digest_skill_dir(skills_dir / name)):
+                notes.append(_observed("bytes-are-the-locked-ones", origin,
+                                       name, THE_BYTES_THE_LOCK_NAMES))
+            elif in_lock and origin == UNATTRIBUTED:
                 findings.append(_observed(
                     "hand-placed-over-locked", origin, name,
                     "the lock names it and the record does not name it, so "
                     "nothing establishes it as the hook's. " + HOOK_REFUSAL +
-                    " The single exception is bytes that already digest to "
-                    "exactly what the lock names, where overwriting could not "
-                    "change anything anyone would notice. So it is not this "
-                    "copy that is at risk, it is the locked skill's delivery — "
-                    "including the project-collision path, which the hook "
-                    "reaches only after deciding it may replace this "
+                    " The one state that would be overwritten anyway — bytes "
+                    "that already digest to exactly what the lock names — was "
+                    "measured here and is not this directory. So it is not "
+                    "this copy that is at risk, it is the locked skill's "
+                    "delivery — including the project-collision path, which "
+                    "the hook reaches only after deciding it may replace this "
                     "directory. Move it out of the store if you want the "
                     "bundle's copy instead."))
             elif in_lock:
-                # UNKNOWN and locked. Nothing to say that the absent record has
-                # not already said store-wide: the hook will replace it, and
-                # whether anyone hand-placed it is exactly what cannot be read.
-                continue
+                # UNKNOWN and locked, and the bytes are not the ones the lock
+                # names. Both of the clauses that would let the hook overwrite
+                # have now been asked: the record clause cannot be satisfied by
+                # a record nothing can read, and the lock clause was measured
+                # above. What is left is a refusal, which the absent record
+                # note does NOT already say — it says nothing about delivery.
+                findings.append(_observed(
+                    "unattributable-over-locked", origin, name,
+                    "the lock names it, the bytes here are not the bytes the "
+                    "lock names, and there is no readable record to say the "
+                    "hook installed them — so neither of the two clauses that "
+                    "let the hook overwrite a directory is satisfied. " +
+                    HOOK_REFUSAL + " Who put it here is exactly what the "
+                    "unreadable record cannot say, so this is not an "
+                    "accusation: it is the delivery consequence, which holds "
+                    "whoever the answer turns out to be. Move the directory "
+                    "out of the store and the next run installs the locked "
+                    "copy."))
             elif origin == UNATTRIBUTED:
                 findings.append(_observed(
                     "untracked", origin, name,
@@ -1368,7 +1457,19 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
         if not expected:
             continue
         in_scope = (entry.registry, entry.bundle) in lock.claims
-        if in_lock and integrity in (EDITED, UNMEASURABLE):
+        if (in_lock and integrity != UNCHANGED
+                and lock_names_the_bytes(lock, name, measured)):
+            # The same second clause, on the one origin that can reach this
+            # without it being the whole story: the record vouches for older
+            # bytes than these, and the lock has moved on to exactly the ones
+            # here. Reported as a note and not withheld, because "the record
+            # and the directory disagree" is worth seeing even where the
+            # disagreement costs nothing. UNCHANGED is excluded rather than
+            # left to fall through: there the record, the lock and the disk all
+            # agree, and a note on every healthy locked skill is noise.
+            notes.append(_observed("bytes-are-the-locked-ones", HOOK, name,
+                                   THE_BYTES_THE_LOCK_NAMES))
+        elif in_lock and integrity in (EDITED, UNMEASURABLE):
             findings.append(_observed(
                 f"{integrity}-and-locked", HOOK, name,
                 f"{_cause(integrity)} and the lock still names it. "

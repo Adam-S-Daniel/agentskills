@@ -105,6 +105,16 @@ def write_record(store: Path, *names: str, registry: str = REGISTRY_URL,
     return path
 
 
+# A digest no directory this suite builds ever has. A lock naming it for a skill
+# is what puts that skill in `may_replace`'s REFUSING state: the bytes on disk
+# are not the bytes the lock names, so the second clause cannot authorise an
+# overwrite and only the install record is left to. Without it `write_lock`
+# digests the store as it stands, which names the very bytes under test — and a
+# store the hook would happily overwrite is the wrong fixture for every finding
+# that says it refuses.
+NOT_ON_DISK = "c" * 64
+
+
 def write_lock(path: Path, store: Path, *names: str, registry: str = REGISTRY_SLUG,
                bundle: str = "adam", digests: dict = None) -> Path:
     skills = {f"{bundle}/{name}": (digests or {}).get(
@@ -617,7 +627,36 @@ def test_the_untracked_finding_still_fires_without_a_record(tmp_path, capsys):
 
 
 def test_a_hand_placed_copy_of_a_locked_skill_is_a_finding(tmp_path, capsys):
-    """Not "untracked": the next bootstrap overwrites this one in place."""
+    """Not "untracked": the hook refuses this one and stops delivering it.
+
+    `beta`'s locked digest is deliberately not `beta`'s: with the two equal the
+    hook overwrites regardless of provenance, which is the next test.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "beta")
+    write_record(store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha", "beta",
+                      digests={"beta": NOT_ON_DISK})
+
+    code, out = run(store, lock, capsys)
+    assert code == 1, out
+    assert "[hand-placed-over-locked] beta" in flat(out), out
+
+
+def test_a_hand_placed_copy_the_lock_already_names_is_only_a_note(tmp_path,
+                                                                  capsys):
+    """The same store with one digest changed, and the opposite verdict.
+
+    `may_replace`'s second clause asks nothing about provenance: if the bytes on
+    disk already digest to the digest the LOCK names, the hook overwrites them
+    with identical bytes and delivery proceeds. The doctor modelled only the
+    other two clauses, so it printed `hand-placed-over-locked` — with its whole
+    "the locked copy is not delivered" paragraph — over a store the hook is
+    perfectly happy with. The hook's own answer is measured here rather than
+    asserted, so this cannot go back to a flat claim.
+    """
     store = tmp_path / "skills"
     store.mkdir()
     make_skill(store, "alpha")
@@ -625,9 +664,16 @@ def test_a_hand_placed_copy_of_a_locked_skill_is_a_finding(tmp_path, capsys):
     write_record(store, "alpha")
     lock = write_lock(tmp_path / "skills.lock", store, "alpha", "beta")
 
+    assert hook_may_replace(store, "beta",
+                            prov.digest_skill_dir(store / "beta"),
+                            (("alpha", prov.digest_skill_dir(store / "alpha")),))
+
     code, out = run(store, lock, capsys)
-    assert code == 1, out
-    assert "[hand-placed-over-locked] beta" in flat(out), out
+    assert code == 0, out
+    flattened = flat(out)
+    assert "[hand-placed-over-locked] beta" not in flattened, out
+    assert "[bytes-are-the-locked-ones] beta" in flattened, out
+    assert flat(prov.HOOK_REFUSAL) not in flattened, out
 
 
 def test_editing_a_locked_skill_warns_that_the_edit_is_overwritten(store, capsys):
@@ -2457,7 +2503,8 @@ def test_a_name_disagreement_the_lock_declares_is_still_a_finding(
     store.mkdir()
     seeded_skill(store, "alpha", "something-else")
     write_record(store)                       # a run that recorded no install
-    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha",
+                      digests={"alpha": NOT_ON_DISK})
 
     code, out = run(store, lock, capsys)
     assert code == 1, out
@@ -2737,7 +2784,8 @@ def test_a_locked_name_disagreement_gets_no_foreign_note(tmp_path, capsys,
     store.mkdir()
     seeded_skill(store, "alpha", "something-else")
     write_record(store)                       # a run that recorded no install
-    lock = write_lock(tmp_path / "skills.lock", store, "alpha")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha",
+                      digests={"alpha": NOT_ON_DISK})
 
     code, out = run(store, lock, capsys)
     assert code == 1, out
@@ -3681,27 +3729,61 @@ def hook_may_replace(dest: Path, name: str, locked: str,
     return answer == "REPLACE"
 
 
-def _refusal_state(tmp_path, which: str):
+def _may_replace_state(tmp_path, which: str):
     """One store in which the hook's answer about `alpha` is worth measuring.
 
-    Returns (store, lock, locked digest, recorded rows). The lock and the record
-    are written BEFORE the directory is disturbed, so both carry the digest of
-    the copy the hook installed — which is what a real second run compares
-    against.
+    Returns (store, lock, locked digest, recorded rows) — the three inputs
+    `may_replace` reads besides the bytes on disk, so a caller can put the same
+    store to the hook and to the doctor and compare their answers.
+
+    The lock and the record are written BEFORE the directory is disturbed, so
+    both carry the digest of the copy the hook installed, which is what a real
+    second run compares against. Where a state needs the lock to name something
+    ELSE, `NOT_ON_DISK` says so explicitly rather than being arrived at by
+    writing the lock at a different moment.
     """
     store = tmp_path / which / "skills"
     store.mkdir(parents=True)
     make_skill(store, "alpha")
     pristine = prov.digest_skill_dir(store / "alpha")
-    lock = write_lock(tmp_path / which / "skills.lock", store, "alpha")
+    lock_path = tmp_path / which / "skills.lock"
 
+    # --- states in which `may_replace` REFUSES ---------------------------
     if which == "hand-placed":
-        # A record that names no install: nothing attributes this directory.
+        # A record that names no install: nothing attributes this directory,
+        # and the bytes are not the ones the lock names either.
+        lock = write_lock(lock_path, store, "alpha")
         write_record(store)
         (store / "alpha" / "SKILL.md").write_text(
             "---\nname: alpha\n---\nmy own copy\n", encoding="utf-8")
         return store, lock, pristine, ()
+    if which == "unattributable":
+        # No record FILE at all, which is a different input from a record that
+        # names nothing: the hook's `REC_NAME` is empty either way, so the third
+        # clause cannot fire, and the doctor's origin is UNKNOWN rather than
+        # UNATTRIBUTED. Same refusal, different sentence.
+        lock = write_lock(lock_path, store, "alpha")
+        (store / "alpha" / "SKILL.md").write_text(
+            "---\nname: alpha\n---\nsomebody's copy\n", encoding="utf-8")
+        return store, lock, pristine, ()
 
+    # --- states in which it REPLACES -------------------------------------
+    if which == "lock-already-has-these-bytes":
+        # `may_replace`'s SECOND clause, with no record naming the directory:
+        # provenance is not asked about, because overwriting bytes with the
+        # identical bytes changes nothing anyone can observe.
+        lock = write_lock(lock_path, store, "alpha")
+        write_record(store)
+        return store, lock, pristine, ()
+    if which == "record-vouches-and-the-lock-moved-on":
+        # The THIRD clause on its own: the lock names a digest the directory
+        # does not have, so only the record can say yes — and it does.
+        lock = write_lock(lock_path, store, "alpha",
+                          digests={"alpha": NOT_ON_DISK})
+        write_record(store, "alpha")
+        return store, lock, NOT_ON_DISK, (("alpha", pristine),)
+
+    lock = write_lock(lock_path, store, "alpha")
     write_record(store, "alpha")
     if which == "edited":
         (store / "alpha" / "SKILL.md").write_text(
@@ -3718,6 +3800,16 @@ REFUSAL_STATES = {
     "edited": "edited-and-locked",
     "artefacts": "artefacts-and-locked",
     "hand-placed": "hand-placed-over-locked",
+    "unattributable": "unattributable-over-locked",
+}
+
+# The other direction, which had no test at all until the false RED it hid was
+# found: state -> the NOTE kind the doctor raises, or None where the state is
+# ordinary enough that it says nothing. Both are stores `may_replace` overwrites,
+# so neither may carry a refusal sentence or a non-zero exit.
+REPLACE_STATES = {
+    "lock-already-has-these-bytes": "bytes-are-the-locked-ones",
+    "record-vouches-and-the-lock-moved-on": None,
 }
 
 
@@ -3730,9 +3822,9 @@ def test_the_refusal_claim_is_the_hooks_own_may_replace(tmp_path, capsys,
     "refuses" is not this file's reading of the hook. The doctor's half is the
     rendered report, so it is what a reader is actually shown.
     """
-    store, lock, pristine, recorded = _refusal_state(tmp_path, which)
+    store, lock, locked, recorded = _may_replace_state(tmp_path, which)
 
-    assert not hook_may_replace(store, "alpha", pristine, recorded), (
+    assert not hook_may_replace(store, "alpha", locked, recorded), (
         f"the hook now OVERWRITES the {which} state; every finding below "
         f"describes a refusal and none of them is true any more")
 
@@ -3740,6 +3832,33 @@ def test_the_refusal_claim_is_the_hooks_own_may_replace(tmp_path, capsys,
     assert code == 1, out
     assert f"[{REFUSAL_STATES[which]}] alpha" in out, out
     assert flat(prov.HOOK_REFUSAL) in flat(out), out
+
+
+@pytest.mark.parametrize("which", sorted(REPLACE_STATES))
+def test_the_states_the_hook_replaces_carry_no_refusal(tmp_path, capsys,
+                                                       ephemeral, which):
+    """The mirror of the test above, and the half round 4 did not have.
+
+    `may_replace` returns true in three cases and the doctor modelled two of
+    them, so over a store satisfying the second it printed the entire refusal
+    paragraph — "the locked copy is not delivered", `DEGRADED`, shadowed — at
+    exit 1, about a store the hook overwrites without complaint. Measuring only
+    the refusing states cannot catch that: they all agreed.
+    """
+    store, lock, locked, recorded = _may_replace_state(tmp_path, which)
+
+    assert hook_may_replace(store, "alpha", locked, recorded), (
+        f"the hook now REFUSES the {which} state; this test exists to measure "
+        f"the other direction and has stopped doing so")
+
+    code, out = run(store, lock, capsys, project_dir=tmp_path / which / "project")
+    assert code == 0, out
+    assert flat(prov.HOOK_REFUSAL) not in flat(out), out
+    expected = REPLACE_STATES[which]
+    if expected is None:
+        assert "] alpha" not in out, out
+    else:
+        assert f"[{expected}] alpha" in out, out
 
 
 def test_the_hook_does_overwrite_the_bytes_it_already_ships(tmp_path):
@@ -3751,7 +3870,7 @@ def test_the_hook_does_overwrite_the_bytes_it_already_ships(tmp_path):
     the answer REPLACE, which only the real second clause produces: the bytes on
     disk already digest to the digest the lock names.
     """
-    store, _lock, pristine, recorded = _refusal_state(tmp_path, "identical")
+    store, _lock, pristine, recorded = _may_replace_state(tmp_path, "identical")
     # All three of the cases HOOK_REFUSAL's comment enumerates, so the count in
     # it is measured rather than read off the hook once and copied.
     #
@@ -3765,6 +3884,42 @@ def test_the_hook_does_overwrite_the_bytes_it_already_ships(tmp_path):
     # only the record clause can be what says yes.
     assert hook_may_replace(store, "alpha", "b" * 64, recorded)
     assert not hook_may_replace(store, "alpha", "b" * 64, ())
+
+
+def test_a_hook_installed_copy_edited_up_to_the_locked_bytes_is_a_note(
+        tmp_path, capsys, ephemeral):
+    """The pair the origin/observation matrix cannot hold, so it lives here.
+
+    A HOOK-origin directory needs an integrity outcome AND a lock-digest outcome
+    at the same time to reach this branch, and that table varies one observation
+    per cell. The state is real: the hook installed v1, the lock moved to v2, and
+    somebody applied v2 by hand. The record still vouches for v1, so the digest
+    comparison the doctor makes FIRST says `edited` — and `edited-and-locked`
+    would then tell the reader their updates have stopped, over a store the hook
+    is about to overwrite with the very bytes already in it.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")                    # vouches for v1
+    installed = prov.digest_skill_dir(store / "alpha")
+    (store / "alpha" / "SKILL.md").write_text(
+        "---\nname: alpha\n---\nv2, applied by hand\n", encoding="utf-8")
+    lock = write_lock(tmp_path / "skills.lock", store, "alpha")   # names v2
+
+    assert prov.digest_skill_dir(store / "alpha") != installed
+    assert hook_may_replace(store, "alpha",
+                            prov.digest_skill_dir(store / "alpha"),
+                            (("alpha", installed),))
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "[edited-and-locked] alpha" not in flat(out), out
+    assert "[bytes-are-the-locked-ones] alpha" in flat(out), out
+    # The disagreement is still SHOWN — the row's integrity column is what says
+    # the record and the directory are out of step, and a note that suppressed
+    # that would trade one silence for another.
+    assert "alpha                        hook" in out, out
 
 
 def _hook_verdict_line(source: str, phrase: str) -> str:
@@ -3828,7 +3983,7 @@ def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory
               "removes it outright",
               "is lost without a prompt")
     for which in sorted(REFUSAL_STATES):
-        store, lock, _pristine, _recorded = _refusal_state(tmp_path, which)
+        store, lock, _pristine, _recorded = _may_replace_state(tmp_path, which)
         _code, out = run(store, lock, capsys,
                          project_dir=tmp_path / which / "project")
         for phrase in banned:
@@ -3881,12 +4036,23 @@ BODY = "line one\nline two\n"
 # so `stale-out-of-scope` was. `foreign` genuinely has one outcome — the kind is
 # raised or the origin is not FOREIGN.
 #
+# `digest-moved-on` is the axis round 4 was missing, and it is an outcome of
+# `lock-expectation` because the digest is the lock's: on every other variant
+# `write_lock` names the bytes the store already holds, which is the one state
+# in which `may_replace` overwrites a directory whatever its provenance. With
+# only those, no cell could distinguish "the hook refuses this" from "the hook
+# replaces it and delivery is fine", and the doctor asserted the first over both.
+#
 # Still not covered, and named rather than left to be discovered again:
 # `unmeasurable-and-*` has no variant here, because making `digest_skill_dir`
 # fail needs an unreadable path and this suite runs as root in CI, where a
-# chmod is not a refusal.
+# chmod is not a refusal. And `bytes-are-the-locked-ones` about a HOOK-origin
+# directory needs a lock-expectation outcome AND an integrity outcome at once —
+# a cross this table's one-observation-at-a-time shape cannot express — so
+# `test_a_hook_installed_copy_edited_up_to_the_locked_bytes_is_a_note` carries
+# that pair instead.
 OBSERVATION_VARIANTS = {
-    "lock-expectation": ("in-scope", "out-of-scope"),
+    "lock-expectation": ("in-scope", "out-of-scope", "digest-moved-on"),
     "integrity": ("edited", "artefacts"),
     "shadow": ("identical", "divergent"),
     "foreign": ("declares-another-name",),
@@ -3918,19 +4084,28 @@ def matrix_store(tmp_path, origin, observation, variant, record_present,
                      body=BODY if variant == "identical" else BODY + "theirs\n")
     if record_present:
         write_record(store, *( [TARGET] if origin == prov.HOOK else [] ))
+    lock = tmp_path / "skills.lock"
+    # `claims` comes from the lock's `bundles`, not from its skill keys, so an
+    # out-of-scope lock is one naming a bundle the record's entry did not come
+    # from — which is what routes a stale skill away from removal entirely.
+    #
+    # Written BEFORE the integrity mutation below, so the digest it names is the
+    # one the record vouches for rather than the edited copy's. Written after,
+    # every integrity cell in this table became a store whose lock names the
+    # bytes on disk — `may_replace`'s second clause — and the hook would have
+    # overwritten all of them, which is not the state `edited-and-locked` or
+    # `artefacts-and-locked` describes.
+    write_lock(lock, store, *([TARGET] if lock_declares else []),
+               bundle="adam" if variant != "out-of-scope" else "other",
+               digests=({TARGET: NOT_ON_DISK}
+                        if variant == "digest-moved-on" else None))
     if observation == "integrity":
-        # After the record, so the recorded digest is the pre-change one.
+        # After the record and the lock, so both carry the pre-change digest.
         if variant == "edited":
             (skill / "SKILL.md").write_text(
                 f"---\nname: {declared}\n---\n{BODY}edited\n", encoding="utf-8")
         else:
             _artefacts(skill)
-    lock = tmp_path / "skills.lock"
-    # `claims` comes from the lock's `bundles`, not from its skill keys, so an
-    # out-of-scope lock is one naming a bundle the record's entry did not come
-    # from — which is what routes a stale skill away from removal entirely.
-    write_lock(lock, store, *([TARGET] if lock_declares else []),
-               bundle="adam" if variant != "out-of-scope" else "other")
     return store, lock
 
 
@@ -3974,8 +4149,8 @@ _H, _U, _F, _K = prov.HOOK, prov.UNATTRIBUTED, prov.FOREIGN, prov.UNKNOWN
 #     (finding kinds, note kinds, exit code)
 # Every key absent from this table is unreachable and asserted to be. The
 # arithmetic in `test_the_matrix_is_complete` is the checkable statement of the
-# shape: 49 of 112 cells reachable, being the seven (origin, record, lock)
-# triples the ladder can produce times the seven observation outcomes.
+# shape: 56 of 128 cells reachable, being the seven (origin, record, lock)
+# triples the ladder can produce times the eight observation outcomes.
 MATRIX = {
     (_H, True, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
     (_H, True, True, 'integrity', 'edited'): ({'edited-and-locked'}, set(), 1),
@@ -3983,6 +4158,10 @@ MATRIX = {
         ({'artefacts-and-locked'}, set(), 1),
     (_H, True, True, 'lock-expectation', 'in-scope'): (set(), set(), 0),
     (_H, True, True, 'lock-expectation', 'out-of-scope'): (set(), set(), 0),
+    # The lock has moved on and the record still vouches for what is here, so
+    # `may_replace`'s THIRD clause carries it — this is the one triple where a
+    # digest the directory does not match costs nothing.
+    (_H, True, True, 'lock-expectation', 'digest-moved-on'): (set(), set(), 0),
     (_H, True, True, 'shadow', 'identical'):
         (set(), {'shadowed-by-the-account-store'}, 0),
     (_H, True, True, 'shadow', 'divergent'):
@@ -3996,6 +4175,10 @@ MATRIX = {
     (_H, True, False, 'lock-expectation', 'in-scope'): (set(), {'stale'}, 0),
     (_H, True, False, 'lock-expectation', 'out-of-scope'):
         ({'stale-out-of-scope'}, set(), 1),
+    # Unlocked: the lock names no digest for this name, so the variant that
+    # changes one changes nothing here.
+    (_H, True, False, 'lock-expectation', 'digest-moved-on'):
+        (set(), {'stale'}, 0),
     (_H, True, False, 'shadow', 'identical'):
         (set(), {'shadowed-by-the-account-store', 'stale'}, 0),
     (_H, True, False, 'shadow', 'divergent'):
@@ -4013,23 +4196,32 @@ MATRIX = {
     (_F, True, False, 'lock-expectation', 'in-scope'): (set(), {'foreign'}, 0),
     (_F, True, False, 'lock-expectation', 'out-of-scope'):
         (set(), {'foreign'}, 0),
+    (_F, True, False, 'lock-expectation', 'digest-moved-on'):
+        (set(), {'foreign'}, 0),
     (_F, True, False, 'shadow', 'identical'): (set(), {'foreign'}, 0),
     (_F, True, False, 'shadow', 'divergent'): (set(), {'foreign'}, 0),
 
+    # Nothing attributes these to the hook, so whether the hook refuses them
+    # turns entirely on the lock's digest — which is why five of these eight
+    # are now a NOTE. Round 4's table read `hand-placed-over-locked` at exit 1
+    # in all eight, over five stores the hook overwrites without complaint.
     (_U, True, True, 'foreign', 'declares-another-name'):
-        ({'hand-placed-over-locked'}, set(), 1),
+        (set(), {'bytes-are-the-locked-ones'}, 0),
     (_U, True, True, 'integrity', 'edited'):
         ({'hand-placed-over-locked'}, set(), 1),
     (_U, True, True, 'integrity', 'artefacts'):
         ({'hand-placed-over-locked'}, set(), 1),
     (_U, True, True, 'lock-expectation', 'in-scope'):
-        ({'hand-placed-over-locked'}, set(), 1),
+        (set(), {'bytes-are-the-locked-ones'}, 0),
     (_U, True, True, 'lock-expectation', 'out-of-scope'):
+        (set(), {'bytes-are-the-locked-ones'}, 0),
+    (_U, True, True, 'lock-expectation', 'digest-moved-on'):
         ({'hand-placed-over-locked'}, set(), 1),
     (_U, True, True, 'shadow', 'identical'):
-        ({'hand-placed-over-locked'}, {'shadowed-by-the-account-store'}, 1),
+        (set(), {'bytes-are-the-locked-ones',
+                 'shadowed-by-the-account-store'}, 0),
     (_U, True, True, 'shadow', 'divergent'):
-        ({'hand-placed-over-locked', 'shadow-copies-differ'}, set(), 1),
+        ({'shadow-copies-differ'}, {'bytes-are-the-locked-ones'}, 1),
 
     (_U, True, False, 'foreign', 'declares-another-name'):
         ({'untracked'}, set(), 1),
@@ -4039,20 +4231,36 @@ MATRIX = {
         ({'untracked'}, set(), 1),
     (_U, True, False, 'lock-expectation', 'out-of-scope'):
         ({'untracked'}, set(), 1),
+    (_U, True, False, 'lock-expectation', 'digest-moved-on'):
+        ({'untracked'}, set(), 1),
     (_U, True, False, 'shadow', 'identical'):
         ({'untracked'}, {'shadowed-by-the-account-store'}, 1),
     (_U, True, False, 'shadow', 'divergent'):
         ({'shadow-copies-differ', 'untracked'}, set(), 1),
 
-    (_K, False, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
-    (_K, False, True, 'integrity', 'edited'): (set(), set(), 0),
-    (_K, False, True, 'integrity', 'artefacts'): (set(), set(), 0),
-    (_K, False, True, 'lock-expectation', 'in-scope'): (set(), set(), 0),
-    (_K, False, True, 'lock-expectation', 'out-of-scope'): (set(), set(), 0),
+    # And the false GREEN, which is the same omission from the other side.
+    # Round 4 read (set(), set(), 0) in all eight of these: an unreadable record
+    # cannot satisfy `may_replace`'s third clause, so a directory whose bytes
+    # the lock does not name is refused and the locked skill stops arriving —
+    # reported here at exit 0 with nothing said, over a session whose own
+    # `skills:` verdict reads DEGRADED.
+    (_K, False, True, 'foreign', 'declares-another-name'):
+        (set(), {'bytes-are-the-locked-ones'}, 0),
+    (_K, False, True, 'integrity', 'edited'):
+        ({'unattributable-over-locked'}, set(), 1),
+    (_K, False, True, 'integrity', 'artefacts'):
+        ({'unattributable-over-locked'}, set(), 1),
+    (_K, False, True, 'lock-expectation', 'in-scope'):
+        (set(), {'bytes-are-the-locked-ones'}, 0),
+    (_K, False, True, 'lock-expectation', 'out-of-scope'):
+        (set(), {'bytes-are-the-locked-ones'}, 0),
+    (_K, False, True, 'lock-expectation', 'digest-moved-on'):
+        ({'unattributable-over-locked'}, set(), 1),
     (_K, False, True, 'shadow', 'identical'):
-        (set(), {'shadowed-by-the-account-store'}, 0),
+        (set(), {'bytes-are-the-locked-ones',
+                 'shadowed-by-the-account-store'}, 0),
     (_K, False, True, 'shadow', 'divergent'):
-        ({'shadow-copies-differ'}, set(), 1),
+        ({'shadow-copies-differ'}, {'bytes-are-the-locked-ones'}, 1),
 
     (_K, False, False, 'foreign', 'declares-another-name'):
         ({'untracked'}, set(), 1),
@@ -4061,6 +4269,8 @@ MATRIX = {
     (_K, False, False, 'lock-expectation', 'in-scope'):
         ({'untracked'}, set(), 1),
     (_K, False, False, 'lock-expectation', 'out-of-scope'):
+        ({'untracked'}, set(), 1),
+    (_K, False, False, 'lock-expectation', 'digest-moved-on'):
         ({'untracked'}, set(), 1),
     (_K, False, False, 'shadow', 'identical'):
         ({'untracked'}, {'shadowed-by-the-account-store'}, 1),
@@ -4093,8 +4303,8 @@ def test_the_matrix_is_complete():
     # The numbers the section comment quotes, so that changing the shape
     # of the table and leaving the prose behind is a failure rather than a
     # stale sentence nobody re-derives.
-    assert (len(REACHABLE), len(OBSERVATIONS)) == (7, 7)
-    assert (len(MATRIX), len(CELLS)) == (49, 112)
+    assert (len(REACHABLE), len(OBSERVATIONS)) == (7, 8)
+    assert (len(MATRIX), len(CELLS)) == (56, 128)
     assert set(MATRIX) <= set(CELLS)
     assert set(MATRIX) == {(origin, record, lock, observation, variant)
                            for origin, record, lock in REACHABLE
