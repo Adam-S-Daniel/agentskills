@@ -1493,7 +1493,8 @@ def _why_not_foreign(origin: Origin) -> str:
 
 
 def foreign_notes(skills_dir: Path, origins: Dict[str, Origin],
-                  account: Set[str] = frozenset()) -> List[Finding]:
+                  account: Set[str] = frozenset(),
+                  surface: str = DURABLE) -> List[Finding]:
     """One note per directory no name-keyed channel here could have produced.
 
     A NOTE and not a finding, for the central property: this is the correct
@@ -1504,6 +1505,11 @@ def foreign_notes(skills_dir: Path, origins: Dict[str, Origin],
 
     Reads `assign_origins`' answer rather than re-deciding, so the note and the
     origin column are two views of one decision.
+
+    `surface` is here for the note's last sentence, which says what the hook
+    does about this directory. Same reason every other such sentence carries it:
+    on a durable machine the hook returns before it reads the lock, so "the hook
+    will not remove it" is true for a reason the sentence does not give.
 
     `account` is passed because the account manifest is one of the three
     name-keyed channels this rules out, and it is the one that can name the
@@ -1578,7 +1584,7 @@ def foreign_notes(skills_dir: Path, origins: Dict[str, Origin],
             f"registry whose CI does not run the name-dir-mismatch check could "
             f"have shipped this frontmatter. It is still always-on context, and "
             f"the hook will not remove it, because the hook removes only what "
-            f"its record proves it installed."))
+            f"its record proves it installed.{when_the_hook_runs(surface)}"))
     return notes
 
 
@@ -1759,7 +1765,8 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "under this HOME before the bootstrap hook runs, and one of "
                     "those is nobody's decision to review. A seeded directory "
                     "is recognised and reported as a `foreign` NOTE instead, "
-                    f"and this one is not: {_why_not_foreign(origins[name])}"))
+                    f"and this one is not: {_why_not_foreign(origins[name])}"
+                    f"{but_here}"))
             else:
                 # Same directory, same consequence, weaker evidence: without a
                 # record nothing can say who installed it, and the hook removes
@@ -1773,7 +1780,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "there. The four causes the attributable case lists apply "
                     "here too, the surface having seeded it among them — and "
                     "with no record, even 'the hook installed it' cannot be "
-                    "ruled out."))
+                    "ruled out." + but_here))
             continue
 
         entry = record.entries[name]
@@ -1924,7 +1931,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "delivered-by-the-project", missing,
                     "not in the personal store because the project ships a skill "
                     "of that name and repo-owned wins — the hook removes its own "
-                    "copy on purpose. The session sees the project's."))
+                    "copy on purpose. The session sees the project's." + but_here))
                 continue
             if not attributable:
                 # No record means the hook has never delivered into this store.
@@ -2024,7 +2031,8 @@ def record_findings(record: Record, record_path: Path,
             "record-entries-skipped", str(record_path),
             f"{record.skipped} entry/entries do not match the shape the hook "
             f"accepts, so the hook skips them. Those installs are invisible to "
-            f"the prune: it can never remove them, whatever the lock says."))
+            f"the prune: it can never remove them, whatever the lock says."
+            f"{when_the_hook_runs(surface)}"))
     return findings
 
 
@@ -2050,7 +2058,7 @@ def _crlf_side(mine: Path, theirs: Path) -> str:
 
 
 def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
-                    origins: Dict[str, Origin]
+                    origins: Dict[str, Origin], surface: str = DURABLE
                     ) -> Tuple[List[Finding], List[Finding]]:
     """(findings, notes) for every bare name BOTH channels deliver into one session.
 
@@ -2089,9 +2097,22 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
     forget to re-upload" turns the note into the finding with nothing having
     gone wrong in between, and nothing in CI can see it: the collision exists
     only on a surface CI never stands on.
+
+    That clocks sentence is why `surface` is a parameter. It is quoted into all
+    four branches below, the benign note among them — which is the ordinary
+    cloud session this whole comparison was written for — and on a durable
+    machine the personal copy is refreshed at NO session start: the hook returns
+    `skills: skipped` before it reads the lock. Printing `SURFACE durable` above
+    and "refreshed at every session start" below is the contradiction the
+    caveat exists to stop, in the one place a reader is most likely to act on
+    it.
     """
     findings: List[Finding] = []
     notes: List[Finding] = []
+    # Appended to all four texts below rather than folded into `clocks`, so the
+    # caveat lands at the END of whichever paragraph the reader gets instead of
+    # in the middle of the one branch that keeps writing after it.
+    but_here = when_the_hook_runs(surface)
     # A directory with no SKILL.md is not a skill and the session's listing never
     # sees it, so it collides with nothing: an empty `beta/` left behind beside a
     # real account `beta` is ONE delivered skill, and calling it two — then
@@ -2128,7 +2149,7 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
                 "shadowed-by-the-account-store", origins[name].kind, name,
                 f"{both} The two could NOT be compared: {unread} could not be "
                 f"read, so whether they hold the same instructions is unmeasured "
-                f"rather than confirmed. {clocks}"))
+                f"rather than confirmed. {clocks}{but_here}"))
             continue
 
         if exact_mine == exact_theirs:
@@ -2141,7 +2162,8 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
                     "shadowed-by-the-account-store", origins[name].kind, name,
                     f"{both} The two differ byte-for-byte and could not be "
                     f"re-compared with line endings normalised, so whether that "
-                    f"difference is only CRLF-vs-LF is unmeasured. {clocks}"))
+                    f"difference is only CRLF-vs-LF is unmeasured. {clocks}"
+                    f"{but_here}"))
                 continue
             if norm_mine != norm_theirs:
                 findings.append(_observed(
@@ -2156,7 +2178,7 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
                     f"a skill edited and re-locked, and never re-uploaded. "
                     f"Compare them with the account-drift procedure in "
                     f"skills-doctor's SKILL.md, then either re-upload or accept "
-                    f"the drift deliberately."))
+                    f"the drift deliberately.{but_here}"))
                 continue
             sameness = ("The two copies carry byte-identical instructions "
                         "once CRLF line endings are folded to LF"
@@ -2171,7 +2193,7 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
             f"condition rather than an invisible one; naming a winner between "
             f"the two channels is a policy question this does not answer. See "
             f"docs/decisions/0002, which costed the duplicated context and not "
-            f"this collision."))
+            f"this collision.{but_here}"))
     return findings, notes
 
 
@@ -2629,7 +2651,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # property of the two stores, not of any lock, so raising it per lock would
     # report one shadowed name N times in a multi-repo session.
     shadow_raised, shadow_noted = shadow_findings(skills_dir, names, account,
-                                                  origins)
+                                                  origins, surface[0])
 
     here, user, children = hook_wiring(project_dir)
     hook_raised, hook_noted = hook_findings(
@@ -2643,7 +2665,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         + [finding for result in results for finding in result.findings])
     notes = dedupe(hook_noted
                    + shadow_noted
-                   + foreign_notes(skills_dir, origins, account)
+                   + foreign_notes(skills_dir, origins, account, surface[0])
                    + [note for result in results for note in result.notes])
 
     stamped: List[Tuple[str, float]] = []
