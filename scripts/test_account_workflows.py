@@ -2124,9 +2124,12 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     _CASE_OPEN = re.compile(r"^case\s+\S+\s+in$")
     _ARM_TERMINATORS = (";;&", ";;", ";&")
 
-    # THE FOUR ANSWERS, AND THERE IS NO FIFTH. Every command this classifier
-    # extracts leaves it carrying one of these names, and a construct it
-    # cannot name raises instead of picking one. Three of the four EXEMPT a
+    # THE FOUR ANSWERS, AND THERE IS NO FIFTH - both halves of that asserted
+    # by test_every_command_gets_one_of_the_four_answers, because a count
+    # nothing checks reads as checked and this one names a closed vocabulary.
+    # Every command this classifier extracts leaves it carrying one of these
+    # names, and a construct it cannot name raises instead of picking one.
+    # All but `bare` EXEMPT a
     # command from the rule below, which is why none of them may be reached
     # by a heuristic: an exemption handed out by a rule of thumb is an
     # unguarded command the guard has stopped being able to see, and that is
@@ -2974,11 +2977,27 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     def test_every_command_gets_one_of_the_four_answers(self):
         """The vocabulary is closed, and closed is the whole point.
 
-        Three of `_BUCKETS` exempt a command from the rule below. A fourth
+        All but one of `_BUCKETS` exempt a command from the rule below. An
         answer invented in passing - or a bucket name misspelled at one
         `append` - would exempt whatever carries it, because the rule tests
         for `bare` and everything that is not `bare` walks free.
+
+        THE NUMBER IN THIS TEST'S NAME IS ASSERTED HERE, which is the only
+        reason it may be a number at all. The comment on `_BUCKETS` says
+        FOUR and says there is no fifth; this test's name says four; neither
+        was checked, so a fifth bucket would have left both reading as if
+        somebody had approved it. That is #120's shape in the prose #120's
+        own round wrote - see
+        test_no_comment_in_this_step_counts_its_own_echoes.
         """
+        assert len(self._BUCKETS) == 4 and "bare" in self._BUCKETS, (
+            f"`_BUCKETS` is {self._BUCKETS}. The comment above it and this "
+            f"test's name both say there are FOUR answers, all but `bare` "
+            f"exempting - so an answer added or `bare` renamed is a new "
+            f"exemption with two sentences still claiming it was reviewed. "
+            f"Decide it deliberately, then correct the comment, this test's "
+            f"name and this assertion together."
+        )
         for line, command, bucket in self._classified():
             assert bucket in self._BUCKETS, (
                 f"line {line} of the audit step was classified `{bucket}`, "
@@ -3143,33 +3162,41 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
 
     # AND THE SHAPES THAT COMMAND CANNOT SPEAK FOR. A sweep of one payload
     # finds a POSITION this guard is blind at; it cannot find a COMMAND the
-    # guard is blind to, because the payload's own text never changes. Two of
-    # round 5's four blocking defects were the second kind - a carve-out that
-    # admitted an assignment PREFIX, and one that admitted an extra redirect.
-    # Each is a command bash aborts the step on, so each is subject to the
-    # same rule at every position, and adding them here is what turns this
-    # from a test of the parser into a test of the carve-out list as well.
+    # guard is blind to, because the payload's own text never changes. The
+    # carve-out defects are all the second kind - a carve-out that admitted
+    # an assignment PREFIX, one that admitted an extra redirect, one that
+    # admitted a command name glued to a `{`. Each is a command bash aborts
+    # the step on, so each is subject to the same rule at every position, and
+    # adding them here is what turns this from a test of the parser into a
+    # test of the carve-out list as well.
     #
     # WHAT THAT DOES AND DOES NOT BUY, measured by restoring each defect one
     # at a time and running this file. Restoring the `^NAME=` prefix rule
-    # reds this test at `an-assignment-prefixed-command` and nowhere else in
-    # the sweep; restoring the `.*` redirect pattern the `$GITHUB_OUTPUT`
-    # write used to be recognised by reds it at
-    # `an-echo-with-an-extra-redirect` and nowhere else. The bare `mkdir`
-    # payload is CLEAN under both - which is the whole reason the other three
-    # are here.
+    # reds this test at `an-assignment-prefixed-command`; restoring the `.*`
+    # redirect pattern the `$GITHUB_OUTPUT` write used to be recognised by
+    # reds it at `an-echo-with-an-extra-redirect`; restoring the strip of a
+    # leading `{` reds it at `a-carve-out-glued-to-a-brace`. Each reds at its
+    # OWN row and at no other, and the bare `mkdir` payload is clean under
+    # every one of them - which is the whole reason the rows beside it are
+    # here.
     #
-    # The other two defects are invisible to any sweep of one-line payloads,
-    # and saying so is the point of writing this down. A guarded-blob
-    # splitter is caught by test_a_construct_this_classifier_cannot_place_
+    # NO COUNTS IN THIS PARAGRAPH, and there were two. They said how many
+    # sweeps and how many defects, nothing asserted either, and both would
+    # have gone stale on the row added below them - see #120 and
+    # test_no_comment_in_this_step_counts_its_own_echoes. "Each", "every" and
+    # "the rows below" survive an edit; "all four" does not.
+    #
+    # THE DEFECTS NO SWEEP OF ONE-LINE PAYLOADS CAN SEE, and saying so is the
+    # point of writing this down. A guarded-blob splitter is caught by
+    # test_a_construct_this_classifier_cannot_place_
     # is_never_a_pass, and a heredoc opener inside a quoted string needs TWO
     # spliced lines to express at all and is caught by
     # test_a_heredoc_opener_inside_a_string_opens_no_heredoc; restoring
-    # either leaves all four sweeps green. The one test that reds on all four
-    # is test_the_payloads_that_once_passed_silently_all_red_now, which holds
-    # the measured bytes. The sweep is the half that checks EVERY POSITION
-    # rather than the one above the `case`; it is not the half that checks
-    # every shape.
+    # either leaves every sweep below green. The test that reds on all of
+    # them is test_the_payloads_that_once_passed_silently_all_red_now, which
+    # holds the measured bytes. The sweep is the half that checks EVERY
+    # POSITION rather than the one above the `case`; it is not the half that
+    # checks every shape.
     _SWEEP_PAYLOADS = (
         ("a-bare-command", _SWEEP_PAYLOAD),
         ("an-assignment-prefixed-command", "FOO=bar " + _SWEEP_PAYLOAD),
@@ -3177,6 +3204,8 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
          'echo hi > ../scratch/zz >> "$GITHUB_OUTPUT"'),
         ("a-semicolon-list-whose-last-pair-is-guarded",
          _SWEEP_PAYLOAD + " ; echo hi || echo bye"),
+        ("a-carve-out-glued-to-a-brace",
+         '{echo "eval-results checked out"'),
     )
     # A SYNTAX ERROR, used to ask BASH whether a position is code or data. A
     # bare `if` at a command position makes `bash -n` red; the same `if`
