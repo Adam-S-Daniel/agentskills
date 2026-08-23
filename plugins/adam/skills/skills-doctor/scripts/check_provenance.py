@@ -834,18 +834,55 @@ def foreign_names(skills_dir: Path, names: List[str]) -> Dict[str, str]:
     return found
 
 
+def reported_foreign(foreign: Dict[str, str], record: Record,
+                     locked: Set[str]) -> Dict[str, str]:
+    """The name disagreements this run is entitled to reclassify, and no others.
+
+    `foreign_names` measures a property of a directory. Whether that property may
+    stand in for "no name-keyed channel here delivered it" depends on two things
+    the directory cannot say, and both gates are applied HERE — once — so the
+    row and the note can never disagree about one directory.
+
+    Gate one, the record. Reclassifying withholds the `untracked` finding, and
+    the only thing that makes that honest is a record which positively does not
+    name the directory. With no readable record there is nothing to be silent:
+    `untracked`'s own no-record text says even "the hook installed it" cannot be
+    ruled out, and a note asserting the opposite over the top of it would be the
+    report contradicting itself. (Its silence is still not proof — a hook that
+    fails to READ a record rewrites it from scratch and forgets what came
+    before, which the same finding already lists among its causes.
+    `foreign_notes` says so rather than claiming more than the record can carry.)
+
+    Gate two, the lock. `classify` already keeps `hand-placed-over-locked` ahead
+    of the label for a locked directory, because the hook is about to replace it
+    whatever its frontmatter says — but the note was emitted store-wide with no
+    such gate, so one directory got both "it will not survive the next session
+    start" and "the hook will never remove it". Store-wide is the right SCOPE
+    for the note (see `foreign_notes`); the fix is to make the gate store-wide
+    too. A name any readable lock declares is a name some bundle here delivers,
+    so the reclassification's premise fails for it under every lock, not just
+    the one that names it.
+    """
+    if record.state != PRESENT:
+        return {}
+    return {name: declared for name, declared in foreign.items()
+            if name not in locked}
+
+
 def foreign_notes(foreign: Dict[str, str]) -> List[Finding]:
     """One note per directory no name-keyed channel here could have produced.
 
     A NOTE and not a finding, for the reason `record_findings` gives about an
     absent record: this is the correct resting state of a whole class of
     sessions, and a doctor that calls the correct state a defect trains its
-    reader to skip the findings section. Measured on two independent hosted
-    cloud sessions (#123): the surface seeds `~/.claude/skills/
-    session-start-hook/` before the bootstrap hook runs at all, so leaving it as
-    an `untracked` FINDING makes exit 1 the permanent resting state of every
-    healthy session on that surface — an exit code that can never be green is
-    one that has stopped carrying information.
+    reader to skip the findings section. The hosted harness seeds
+    `~/.claude/skills/session-start-hook/` before the bootstrap hook runs at all
+    (#123), so leaving it an `untracked` FINDING makes exit 1 the permanent
+    resting state of every healthy session on that surface — an exit code that
+    can never be green is one that has stopped carrying information.
+
+    Takes the set `reported_foreign` passed to `classify` and not the raw
+    reading, so the note and the origin column are two views of one decision.
     """
     return [Finding(
         "foreign", name,
@@ -855,14 +892,19 @@ def foreign_notes(foreign: Dict[str, str]) -> List[Finding]:
         f"record names directories, the account manifest names directories — "
         f"and the registry's own CI refuses a skill whose frontmatter name "
         f"disagrees with its directory (scripts/check_skills.py, kind "
-        f"name-dir-mismatch). So no bundle here delivered it, and it is "
-        f"reported as a state rather than as something to fix: on a hosted "
-        f"surface the harness seeds directories under this HOME before the "
-        f"bootstrap hook runs, and none of those is a decision anyone here "
-        f"made. What this does NOT establish is WHO placed it — only that no "
-        f"name-keyed channel here did. It is still always-on context, and the "
-        f"hook will never remove it, because the hook removes only what its "
-        f"record proves it installed.")
+        f"name-dir-mismatch). No lock read here names it and the install record "
+        f"does not name it either, so nothing this script can see delivered it, "
+        f"and it is reported as a state rather than as something to fix: on a "
+        f"hosted surface the harness seeds directories under this HOME before "
+        f"the bootstrap hook runs, and none of those is a decision anyone here "
+        f"made. Two things this does NOT establish. WHO placed it — only that "
+        f"no name-keyed channel here names it. And that no bundle EVER "
+        f"delivered it: a hook that fails to read the record rewrites it from "
+        f"scratch, which forgets every install before that run, and a registry "
+        f"whose CI does not run the name-dir-mismatch check could have shipped "
+        f"this frontmatter. It is still always-on context, and the hook will "
+        f"not remove it, because the hook removes only what its record proves "
+        f"it installed.")
         for name, declared in sorted(foreign.items())]
 
 
@@ -931,12 +973,13 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
     "not delivered": both of those channels satisfy a locked name without the
     hook installing anything.
 
-    `foreign` is `foreign_names`' reading, passed in rather than measured here
-    because the note it carries is store-wide (see `foreign_notes`). It changes
-    the origin COLUMN only where the name is not in this lock: a lock that names
-    the directory is about to have the hook overwrite it, and that consequence
-    is real whatever the frontmatter says, so `hand-placed-over-locked` keeps
-    priority over the label.
+    `foreign` is `reported_foreign`'s reading, passed in rather than measured
+    here because both gates on it are store-wide (see `reported_foreign`) and
+    the note it carries is too (see `foreign_notes`). The two checks below can
+    only narrow it further, never widen it: a lock that names the directory is
+    about to have the hook overwrite it, and that consequence is real whatever
+    the frontmatter says, so `hand-placed-over-locked` keeps priority over the
+    label — and with no readable record there is no silence to read as evidence.
     """
     rows: List[Row] = []
     findings: List[Finding] = []
@@ -950,7 +993,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
         in_lock = name in lock.names
 
         if entry is None:
-            if name in foreign and not in_lock:
+            if name in foreign and not in_lock and attributable:
                 # The `untracked` finding this replaces is withheld rather than
                 # softened, and that is the whole change: the finding asks the
                 # reader to account for a directory, and there is no account to
@@ -1748,13 +1791,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     store_state, names = scan(skills_dir)
     account = skill_names(skills_dir / ACCOUNT_DIR)
     repo_owned = skill_names(project_dir / ".claude" / "skills")
-    foreign = foreign_names(skills_dir, names)
+    # Every lock is read BEFORE any of them is judged against, because the
+    # foreign gate is store-wide: "some bundle here delivers this name" is a
+    # question about all the locks at once, and asking it lock by lock is how the
+    # row and the note came to disagree about one directory.
+    locks = [(path, read_lock(path))
+             for path in discover_locks(args.lock, project_dir)]
+    foreign = reported_foreign(
+        foreign_names(skills_dir, names), record,
+        {name for _, lock in locks for name in lock.names})
 
     # One store, judged once per declared expectation. See `LockResult`: the
     # locks are deliberately not merged first.
     results: List[LockResult] = []
-    for lock_path in discover_locks(args.lock, project_dir):
-        lock = read_lock(lock_path)
+    for lock_path, lock in locks:
         rows, findings, notes = classify(
             skills_dir, names, record, lock, account=account,
             repo_owned=repo_owned, store_state=store_state, surface=surface[0],
