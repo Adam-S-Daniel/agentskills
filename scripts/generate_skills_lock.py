@@ -997,6 +997,50 @@ def repin_source_blocker(
     return None
 
 
+def repin_plan_blocker(
+    bundles: Sequence[str], extras: Sequence[dict], registry: str
+) -> Optional[str]:
+    """Why the document this lock declares cannot be PLANNED at all — or None.
+
+    `plan_sources` raises exactly these two, and it is the first thing
+    `build_lock` does — so both are refusals every `--repin` meets, and both
+    are decidable from the lock's own fields without a checkout. They lived as
+    raises inside `plan_sources` and were therefore invisible to the report,
+    which is one half of how a SCOPED `--check-current` came to print a
+    `--repin` this generator refuses: `_select_sources` narrows `extras` before
+    `plan_sources` sees them, so a scoped run plans one source, meets neither
+    condition, and reports a whole-document defect as repairable.
+
+    Measured on this branch before this predicate, on a three-source lock whose
+    second source was hand-edited to claim the first's bundle:
+    `--check-current` unscoped exited 1 with no command, while
+    `--check-current --only <the third source>` printed
+    `--repin --ref <sha> --repin-source '<third>@'` — which exited 1 with
+    "bundle 'cms-platform' is claimed by both ...". The nine-source lock did
+    the same with the cap.
+
+    Asked over the WHOLE document — the primary's bundles plus every entry in
+    `sources` — because that is the document any `--repin` rebuilds, whatever
+    the run that reported it was scoped to.
+    """
+    if len(extras) > MAX_SOURCES:
+        return (
+            f"'sources' lists {len(extras)} entries; at most {MAX_SOURCES} are allowed — "
+            "the bootstrap hook fetches every one of them before the session starts, and "
+            "refuses the WHOLE lock over the limit, installing nothing"
+        )
+    claimed: Dict[str, str] = {}
+    for source in [{"registry": registry, "bundles": list(bundles)}, *extras]:
+        for bundle in source["bundles"]:
+            if bundle in claimed:
+                return (
+                    f"bundle '{bundle}' is claimed by both {claimed[bundle]} and "
+                    f"{source['registry']}; a bundle has one registry and one layout"
+                )
+            claimed[bundle] = source["registry"]
+    return None
+
+
 def _per_bundle(skills: Mapping[str, str]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for key in skills:
@@ -1341,17 +1385,17 @@ def plan_sources(
     precisely so everything downstream — digesting, currency checking — has one
     code path rather than a special case that only the primary exercises.
     """
-    # Before anything is resolved or read: the cap is a property of the SPEC,
-    # so a lock over it must fail here rather than after a checkout lookup
-    # sends the reader chasing a missing sibling clone. `extras` (not `extras`
-    # + the primary) is what the hook counts, and the two must agree or the
-    # boundary case is a lock the generator writes and the hook refuses.
-    if len(extras) > MAX_SOURCES:
-        raise GeneratorError(
-            f"'sources' lists {len(extras)} entries; at most {MAX_SOURCES} are allowed — "
-            "the bootstrap hook fetches every one of them before the session starts, and "
-            "refuses the WHOLE lock over the limit, installing nothing"
-        )
+    # Before anything is resolved or read: both of these are properties of the
+    # SPEC, so a lock that trips one must fail here rather than after a
+    # checkout lookup sends the reader chasing a missing sibling clone. Read
+    # from `repin_plan_blocker` rather than raised inline, so the report that
+    # recommends a `--repin` can foresee them — see that predicate. (The cap
+    # counts `extras`, not `extras` + the primary, because that is what the
+    # hook counts, and the two must agree or the boundary case is a lock the
+    # generator writes and the hook refuses.)
+    blocker = repin_plan_blocker(bundles, extras, registry)
+    if blocker:
+        raise GeneratorError(blocker)
     primary = {
         # Labelled by FIELD, not by flag: on --check this value was inherited
         # from the lock, so blaming `--registry` would name something the
@@ -1376,16 +1420,6 @@ def plan_sources(
         # to record the resolution in, so a branch name left here would be the
         # one unpinned half of a lock whose whole purpose is pinning.
         sources.append({**source, "path": path, "ref": resolve_ref(path, source["ref"])})
-
-    claimed: Dict[str, str] = {}
-    for source in sources:
-        for bundle in source["bundles"]:
-            if bundle in claimed:
-                raise GeneratorError(
-                    f"bundle '{bundle}' is claimed by both {claimed[bundle]} and "
-                    f"{source['registry']}; a bundle has one registry and one layout"
-                )
-            claimed[bundle] = source["registry"]
     return sources
 
 
@@ -2115,9 +2149,14 @@ def report_drift(
     # reads `registry` and `bundles` straight off the lock once that guard has
     # passed), then the primary pin, then the sources. A report that quoted a
     # later reason would hand the reader a sentence the flag never says.
+    # `repin_plan_blocker` last of the four: build_lock is what runs
+    # plan_sources, and build_lock runs after the guards above it.
+    # `existing["bundles"]` is safe to read there because the inheritance
+    # blocker short-circuits the chain when it is not.
     blocked = (repin_inherit_blocker(existing, output)
                or repin_primary_blocker(existing, extras, registry, output)
-               or repin_unproven_sources_blocker(extras, output))
+               or repin_unproven_sources_blocker(extras, output)
+               or repin_plan_blocker(existing.get("bundles") or (), extras, registry))
     # Asked off what THIS run read, and scoped to the bundles it read: a
     # `--only` run reads one source and the command it prints holds every other
     # pin with --ref, so those are the only bundles whose content can move.
