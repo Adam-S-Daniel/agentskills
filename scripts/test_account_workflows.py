@@ -240,18 +240,37 @@ def _shell_scan(body):
 
     WHAT IT DELIBERATELY DOES NOT MODEL, so nobody reads more into it: a
     heredoc body is read as shell rather than as its own language, so quote
-    state carries through the Python heredoc in the audit step. Measured, by
-    splicing one line into that heredoc: a `#` comment holding an apostrophe
-    is handled, because the `#` is seen before any quote is entered; a line
-    that leaves a quote OPEN - `x = "unterminated` - swallows the rest of the
-    body, and the helper then cannot find the `case` opener at all.
+    state carries through the Python heredoc in the audit step. A `#` comment
+    holding an apostrophe is still handled, because the `#` is seen before any
+    quote is entered. A line that leaves a shell quote OPEN is not handled at
+    all: from there the mask is out of step with the body until some later
+    quote character resynchronises it, and where that lands is what decides
+    the outcome.
 
-    THAT IS THE DIRECTION TO FAIL IN. It RAISES, with the sentence its caller
-    passed, rather than returning a plausible slice of the wrong region.
-    Extglob patterns, an `esac` reached through a variable, and a `case` whose
-    word is built by expansion are all outside the model too, and all fail the
-    same loud way. Downstream helps: every assertion built on this compares a
-    whole SET, so even one lost arm reds rather than passing quietly.
+    THAT OUTCOME IS NOT RELIABLY LOUD, and this docstring claimed the opposite
+    until #120's own review caught it. Splicing such a line at every position
+    of the real step body: many positions resynchronise before the `case` and
+    the scan is UNAFFECTED - it passes, silently and correctly; many raise
+    with the sentence the caller passed; and a few land on a red whose message
+    is about something else, up to and including the cross-repo drift
+    accusation that names two files which agree.
+    test_an_unbalanced_quote_inside_a_heredoc_is_not_reliably_loud runs that
+    sweep and holds both of the first two directions, so this paragraph cannot
+    quietly become a promise again.
+
+    EXTGLOB IS OUTSIDE THE MODEL IN THE QUIET DIRECTION OUTRIGHT. `@(stale
+    |missing)` is not refused; it is split at the `|` into the literal tokens
+    `@(stale` and `missing`, and the caller then reds with that same drift
+    accusation about a rename nobody made. An `esac` reached through a
+    variable and a `case` whose word is built by expansion are outside the
+    model too, and nothing here promises how either fails.
+
+    Two things bound the damage, and neither is a promise of a loud failure.
+    A shape has to be valid bash to ship, and `bash -n` rejects `@(...)` in a
+    file that has not run `shopt -s extglob` first. And every assertion built
+    on this compares a whole SET, so a lost or mangled arm reds rather than
+    passing quietly - loud, but with a diagnosis that may point at the wrong
+    file.
     """
     text = list(body)
     mask = list(body)
@@ -1521,8 +1540,11 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         nesting-counted, and NOT a bash parser. It knows that a `;;`, an
         `esac` or a `|` inside a string or a comment is data, and that an
         `esac` inside a nested `case` closes the nested one. It does not know
-        heredocs, extglob, or an `esac` reached through a variable. Every one
-        of those fails loud - see `_shell_scan`.
+        heredocs, extglob, or an `esac` reached through a variable, and NONE
+        of those is reliably refused - an extglob arm is misread as two
+        literals and a heredoc desync is often invisible. `_shell_scan`'s
+        docstring says what each actually does; do not read "outside the
+        model" as "caught".
         """
         body = self._body()
         text, mask = _shell_scan(body)
@@ -1664,6 +1686,95 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
     _COUNT_WORD = (r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|"
                    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
                    r"seventeen|eighteen|nineteen|twenty)")
+
+    def test_an_unbalanced_quote_inside_a_heredoc_is_not_reliably_loud(self):
+        """`_shell_scan`'s stated limitation, executed rather than promised.
+
+        The docstring used to say a line leaving a shell quote open inside the
+        Python heredoc "swallows the rest of the body" and that the helper
+        "RAISES ... rather than returning a plausible slice of the wrong
+        region". Neither half held: swept over the whole step body, most
+        splice positions resynchronise before the `case` and pass silently,
+        and at least one reds with the cross-repo drift accusation instead.
+        Reading that paragraph, an author who put such a line in the heredoc
+        would expect to be told; they would not be.
+
+        SO BOTH DIRECTIONS ARE ASSERTED, and the point of asserting both is
+        that neither may be written up as the only one. If someone teaches
+        this scanner heredocs, the quiet half goes to zero and this test reds
+        - at which point the paragraph is the thing to update, not the
+        assertion.
+
+        A SWEEP RATHER THAN ONE POSITION, because a position number in the
+        step body is the most stale-prone thing this file could pin: any line
+        added above the heredoc moves it.
+        """
+        body = _audit_body()
+        lines = body.splitlines()
+        quiet = loud = 0
+        for pos in range(len(lines) + 1):
+            spliced = "\n".join(
+                lines[:pos] + ['x = "unterminated'] + lines[pos:]) + "\n"
+            text, mask = _shell_scan(spliced)
+            try:
+                _case_block(text, mask, _CASE_VERDICT, "opener not found")
+            except AssertionError:
+                loud += 1
+                continue
+            quiet += 1
+        assert loud, (
+            "an unbalanced quote spliced anywhere in the step body now always "
+            "leaves the `case` findable. That is a better scanner than the "
+            "one `_shell_scan`'s docstring describes - update the docstring."
+        )
+        assert quiet, (
+            "an unbalanced quote spliced anywhere in the step body now always "
+            "raises. That is the behaviour `_shell_scan`'s docstring used to "
+            "claim and did not have; if it is true now, say so there instead "
+            "of hedging."
+        )
+
+    def test_an_extglob_arm_is_misread_rather_than_refused(self):
+        """The other half of the same correction.
+
+        The docstring claimed extglob "fails the same loud way". It does not:
+        `@(stale|missing)` is split at the `|` like any other alternation, so
+        the scan returns the tokens `@(stale` and `missing` and the caller
+        reds about account_zip_selection.py having renamed a status - the
+        expensive false red this whole file exists to remove, arrived at
+        through a shape the docstring said was caught.
+
+        Pinned so the prose cannot drift back. Teaching `_case_statuses`
+        extglob would red this, and the fix then is to say so in
+        `_shell_scan`.
+        """
+        body = (
+            "shopt -s extglob\n"
+            'case "$verdict" in\n'
+            "  @(stale|missing)|unreadable) : ;;\n"
+            '  fresh|unavailable|"$drift") : ;;\n'
+            "  *) : ;;\n"
+            "esac\n"
+        )
+        text, mask = _shell_scan(body)
+        _, spans, _ = _case_block(text, mask, _CASE_VERDICT, "opener not found")
+        tokens = set()
+        for begin, end in spans:
+            arm, armmask = text[begin:end], mask[begin:end]
+            if not arm.strip():
+                continue
+            cut = armmask.find(")")
+            assert cut != -1, arm
+            tokens.update(tok.strip() for tok in arm[:cut].split("|"))
+        assert "@(stale" in tokens, (
+            f"an extglob arm is no longer split into literal tokens: {tokens}. "
+            f"If `_case_statuses` learned extglob, `_shell_scan`'s docstring "
+            f"still tells the reader it is misread - correct it there."
+        )
+        assert "stale" not in tokens, (
+            f"the scan recovered `stale` from an extglob arm: {tokens}. Same "
+            f"as above - the docstring is what needs correcting."
+        )
 
     def test_no_comment_in_this_step_counts_its_own_echoes(self):
         """#120, guarded rather than described.
