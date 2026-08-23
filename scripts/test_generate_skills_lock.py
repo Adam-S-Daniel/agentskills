@@ -826,12 +826,16 @@ def test_check_current_names_both_when_primary_and_source_both_drift(
 
 def test_every_failed_line_is_followed_by_its_own_remediation_command(
         federated_two, tmp_path):
-    """What makes the fleet bumper's 20-line PR-body cap safe.
+    """Adjacency in the stream the loop prints, which is where it is true.
 
-    It slices `sed -n '/^FAILED:/,$p' | head -20`. A truncation may drop a
-    whole trailing block; it must never separate a headline from the command
-    that fixes it, which is what a headline-then-note-then-command shape would
-    allow the moment a second block existed.
+    A headline-then-note-then-command shape would break this the moment a
+    second block existed, and a reader scanning for "what do I type" would find
+    the wrong line under the wrong registry.
+
+    This is deliberately NOT a claim about the fleet bumper's 20-line cap. The
+    two are different measurements and the comment at the report loop used to
+    conflate them; `test_the_bumper_cap_can_cut_a_later_headline_from_its_command`
+    is the one that slices.
     """
     primary, _, extra, _extra_sha, other, _other_sha = federated_two
     out = tmp_path / "skills.lock"
@@ -850,6 +854,90 @@ def test_every_failed_line_is_followed_by_its_own_remediation_command(
     for index in headlines:
         assert lines[index + 1].strip().startswith(
             "python3 scripts/generate_skills_lock.py --repin"), lines[index:index + 2]
+
+
+# The fleet bumper's PR-body slice, reproduced rather than described:
+# `sed -n '/^FAILED:/,$p' | head -20` in bump-consumer-locks.sh. Asserting
+# against the raw stdout measures something no reviewer reads.
+_BUMPER_CAP = 20
+
+
+def _bumper_slice(stdout: str, cap: int = _BUMPER_CAP) -> list:
+    lines = stdout.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("FAILED:"))
+    return lines[start:start + cap]
+
+
+def _drift_the_primary_by(primary: Path, count: int) -> None:
+    """`count` new skills in the working tree — one `added:` difference each."""
+    for index in range(count):
+        _write(primary / "plugins" / "adam" / "skills" / f"extra{index:02d}" / "SKILL.md",
+               f"---\nname: extra{index:02d}\n---\nbody\n")
+
+
+# 5 fixed lines in the primary's block (headline, remediation, three note
+# lines) + this many differences puts the FIRST federated headline on the last
+# line the cap keeps. Named rather than inlined because if the block's fixed
+# size ever changes both tests below go red together, which is the signal that
+# the arithmetic in the report loop's comment needs redoing.
+_DIFFERENCES_THAT_FILL_THE_CAP = _BUMPER_CAP - 5 - 1
+
+
+def test_the_bumper_cap_always_keeps_the_primary_headline_with_its_command(
+        federated, tmp_path):
+    """The one truncation property this report really does guarantee.
+
+    Fact (2) — the primary's block comes first — is what gives it: its headline
+    is line 1 of the slice and its remediation line 2, whatever else drifted.
+    That block is the one the bumper's path substitution names, and it is the
+    only pair any cap above two lines cannot split.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _drift_the_primary_by(primary, _DIFFERENCES_THAT_FILL_THE_CAP)
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    sliced = _bumper_slice(proc.stdout)
+    assert sliced[0].startswith("FAILED: the bundle has moved on since ")
+    assert sliced[1].strip() == "python3 scripts/generate_skills_lock.py --repin"
+
+
+def test_the_bumper_cap_can_cut_a_later_headline_from_its_command(
+        federated, tmp_path):
+    """The counterexample to the absolute the report loop used to assert.
+
+    It claimed a truncation "can never separate a headline from the command
+    that fixes it". With the primary's block filling the cap, the first
+    federated headline is the LAST line kept and its remediation is the first
+    line dropped — so the PR body a reviewer reads ends on a failure naming a
+    registry, with no command under it.
+
+    Pinned as a measurement, not as a wish: this test going red means the
+    report's shape changed, and the comment that now states the cap is unsafe
+    for a later block has to be re-derived rather than left standing.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _drift_the_primary_by(primary, _DIFFERENCES_THAT_FILL_THE_CAP)
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    sliced = _bumper_slice(proc.stdout)
+
+    assert len(sliced) == _BUMPER_CAP
+    assert sliced[-1].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles have moved")
+    # Its remediation exists — adjacency holds in the stream — and is exactly
+    # the line the cap drops.
+    first_cut = lines[lines.index(sliced[-1]) + 1]
+    assert first_cut.strip().startswith("python3 scripts/generate_skills_lock.py --repin")
 
 
 def test_check_current_verdict_still_starts_with_FAILED_at_column_zero(
