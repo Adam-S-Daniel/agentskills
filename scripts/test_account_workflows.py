@@ -424,6 +424,17 @@ def _shell_scan(body):
     index found in either indexes all three - which is what lets `_tail` and
     `_guard` go on returning slices of the raw body.
 
+    A BACKSLASH ESCAPE IS BLANKED IN THE MASK WITH THE CHARACTER IT ESCAPES,
+    AND A LINE CONTINUATION IS NOT. `\\` before a newline is an operator - it
+    joins two lines into one command - so it stays in the mask, and it is the
+    only backslash the mask ever carries. `\\\\` before a newline is an escaped
+    backslash, an ordinary word character that joins nothing, and both halves
+    of it are blanked. The distinction is the mask's alone: the TEXT of the
+    two shapes ends in a backslash either way, so a caller that reads the text
+    to find a continuation reads `echo \\\\` as continued and glues the next
+    command onto it. `_logical_lines` is that caller and
+    test_an_escaped_backslash_does_not_continue_a_line runs the pair.
+
     COMMENTS OPEN WHERE BASH OPENS THEM, which is `_COMMENT_OPENS_AFTER` plus
     the stateful `)` rule in `_WordParens`, and not merely after whitespace.
     `: ;;# note` is a comment; reading it as code made the `;;` inside the
@@ -511,10 +522,13 @@ def _shell_scan(body):
     while i < n:
         ch = body[i]
         if ch == "\\" and quote != "'":
-            mask[i] = " "
-            if i + 1 < n and body[i + 1] != "\n":
-                mask[i + 1] = " "
-                parens.saw(body, i + 1, True)
+            if i + 1 < n and body[i + 1] == "\n":
+                mask[i] = "\\"
+            else:
+                mask[i] = " "
+                if i + 1 < n:
+                    mask[i + 1] = " "
+                    parens.saw(body, i + 1, True)
             i += 2
             continue
         if quote:
@@ -746,6 +760,15 @@ def _logical_lines(body):
     `$( )` joined with it - which is the only reason the audit step's heredoc
     capture and its `|| verdict=""` end up in one entry rather than two.
 
+    A CONTINUATION IS FOUND IN THE MASK, NOT IN THE TEXT, and that is the
+    difference between joining two lines and swallowing one. The text of
+    `echo \\\\` ends in a backslash exactly like the text of `echo foo \\`, so
+    reading the text joined the NEXT command onto an `echo` and handed the
+    pair to the carve-out as one command called `echo` - the unguarded half
+    disappeared from the classification entirely. The mask carries a
+    backslash only where one continues a line, which is what `_shell_scan`'s
+    own backslash paragraph exists to provide.
+
     TEXT AND MASK STAY THE SAME LENGTH, so an index found in the mask - an
     operator that is not inside a `::warning::` - indexes the text. That is
     why nothing here is `.strip()`ed: the mask blanks quoted characters, so
@@ -765,8 +788,8 @@ def _logical_lines(body):
             start = number
         buf_t, buf_m = buf_t + line_t, buf_m + line_m
         depth += line_m.count("(") - line_m.count(")")
-        if buf_t.rstrip().endswith("\\"):
-            cut = buf_t.rindex("\\")
+        if buf_m.rstrip().endswith("\\"):
+            cut = buf_m.rindex("\\")
             buf_t, buf_m = buf_t[:cut], buf_m[:cut]
             continue
         if depth > 0:
@@ -2063,6 +2086,53 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             f"the guard reded on the armed control, but not about the bare "
             f"`mkdir` this control adds: {caught.value}"
         )
+
+    # TWO LINES THAT END IN A BACKSLASH, AND ONLY ONE OF THEM CONTINUES.
+    # Both columns are what bash prints for the script beside them, measured
+    # rather than reasoned: `echo one \\` is a command that prints a
+    # backslash and ENDS, and `echo one \` is half of a command that runs on
+    # into the next line.
+    _BACKSLASH_PAIR = (
+        ("an-escaped-backslash", "echo one \\\\\necho two\n",
+         ["one \\", "two"], 2),
+        ("a-line-continuation", "echo one \\\necho two\n",
+         ["one echo two"], 1),
+    )
+
+    def test_an_escaped_backslash_does_not_continue_a_line(self, tmp_path):
+        """The join that made an unguarded command disappear.
+
+        `_logical_lines` used to ask the TEXT whether a line continues, and
+        the text of both shapes above ends in a backslash. So `echo one \\\\`
+        swallowed the line under it, the pair arrived at `_carved_out` as one
+        command whose first word is `echo`, and the swallowed half was
+        exempted without ever being classified - a silent green, not a red.
+        Splicing `echo \\\\` and a bare `mkdir` into the real step left the
+        whole module passing.
+
+        Bash answers first, in a subprocess, because the difference between
+        the two shapes is a bash rule and not a preference of this file.
+        """
+        bash = require_bash()
+        for name, body, printed, commands in self._BACKSLASH_PAIR:
+            proc = subprocess.run(
+                [bash, _script(tmp_path, body, name="join.sh")],
+                capture_output=True, text=True)
+            assert proc.returncode == 0, (
+                f"the `{name}` script did not run, so what bash printed for "
+                f"it says nothing about the rule:\n{proc.stderr}"
+            )
+            assert proc.stdout.splitlines() == printed, (
+                f"bash disagrees with this table about `{name}`: it printed "
+                f"{proc.stdout!r}, and the table expects {printed!r}"
+            )
+            found = _logical_lines(body)
+            assert len(found) == commands, (
+                f"`_logical_lines` read `{name}` as {len(found)} command(s) "
+                f"and bash ran it as {commands}: {found!r}. A command joined "
+                f"onto another one is a command the guard below never "
+                f"classifies."
+            )
 
     def test_no_echo_in_this_step_redirects_except_the_output_write(self):
         """Redirection is what makes an `echo` failable.
