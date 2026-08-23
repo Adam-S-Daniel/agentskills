@@ -82,17 +82,18 @@ UPLOAD_SKIP_EXTS = frozenset({".pyc", ".pyo", ".b64"})
 
 # What every sentence about "the two copies" is a statement about, said in the
 # REPORT and not only in the docstrings here. Narrowing the comparison to the
-# filtered set above left four sentences claiming the copies were
-# "byte-identical" beside both absolute paths — false for any pair whose only
-# difference is a build artefact, and checkable in one `diff -r`, in a report
-# that three lines earlier could be calling the same directory edited since
-# install. The word carrying the narrowing is "instructions".
+# filtered set above left the sentence "The two copies are byte-identical"
+# standing beside both absolute paths — false for any pair whose only
+# difference is a build artefact, checkable with one `diff -r`, and printed in
+# a report that may be calling the same directory edited since install a few
+# lines above. The word carrying the narrowing is "instructions".
 PAYLOAD_SCOPE = (
     "\"Instructions\" here means the files an upload carries: the account copy "
     "is the ZIP zip_skill built out of a directory, never the directory, so "
-    "build artefacts — __pycache__, .pytest_cache, .pyc, .pyo, .b64, .venv, "
-    "node_modules — are excluded from both sides. A diff -r of the two paths "
-    "above can differ over those and change nothing about what the model reads.")
+    "what the upload filter drops is excluded from both sides — __pycache__, "
+    ".pytest_cache, .pyc, .b64 and node_modules among them. A diff -r of the "
+    "two paths above can differ over those and change nothing about what the "
+    "model reads.")
 
 # The hook's charsets, applied to the same fields on the way out of the same file.
 # An entry failing any of them is one the hook SKIPS, so it is invisible to the
@@ -114,8 +115,8 @@ PRESENT, ABSENT, UNREADABLE = "present", "absent", "unreadable"
 REJECTED = "rejected"
 
 UNCHANGED, EDITED, UNMEASURABLE = "unchanged", "edited", "unmeasurable"
-# The fourth integrity reading, and it exists because the third one reddened an
-# ordinary workflow. `digest_skill_dir` covers the whole directory, which is
+# The fourth integrity reading, and it exists because the whole-directory one
+# reddened an ordinary workflow. `digest_skill_dir` covers everything, which is
 # what the hook compares — so running a skill's own suite from the installed
 # copy at `~/.claude/skills/<skill>/scripts`, which `_walk_up`'s docstring
 # blesses, drops a `__pycache__` and a `.pytest_cache` beside the scripts and
@@ -362,9 +363,9 @@ def _observed(kind: str, origin: str, subject: str, detail: str) -> Finding:
     A raise and not a filter, because both failures it catches are programming
     errors rather than states of anyone's machine: a kind nobody registered in
     `OBSERVATION_KINDS`, or a kind raised about an origin its observation does
-    not cover. Deciding those pairs at the call sites is what let two of them
-    disagree about one directory, and a table nothing consults would drift the
-    same way — so every per-directory finding is built through here.
+    not cover. Deciding those pairs at the call sites is what let a note and a
+    finding disagree about one directory, and a table nothing consults would
+    drift the same way — so every per-directory finding is built through here.
     """
     observation = OBSERVATION_OF.get(kind)
     if observation is None:
@@ -985,8 +986,8 @@ def assign_origins(skills_dir: Path, names: List[str], record: Record,
     on. It replaces an arrangement in which `classify` decided the row,
     `reported_foreign` decided the note, and each re-applied its own subset of
     the gates — which is how one directory came to be described two ways in one
-    report, and how two of those subsets became unreachable without anything
-    noticing.
+    report, and how a gate that could no longer fire went on being described as
+    live.
 
     Store-wide, and computed BEFORE any lock is judged against, because the
     gates are questions about the whole session rather than about one
@@ -1265,7 +1266,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 "directory is replaced at the next session start and those go "
                 "with it. No instruction byte is at risk, which is why this is "
                 "a note rather than the edited-and-locked finding. Running a "
-                "test suite from inside an installed skill is one way here."))
+                "test suite from inside an installed skill gets you here."))
         elif in_lock:
             continue
         elif not in_scope:

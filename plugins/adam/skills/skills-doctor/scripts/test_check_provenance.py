@@ -2595,7 +2595,8 @@ def test_a_foreign_directory_the_account_store_also_names_is_not_a_shadow(
     assert "[foreign] session-start-hook" in out, out
     # Excluding it from the comparison is not licence to deny the collision:
     # the account manifest DOES name the basename, the report prints
-    # `synced/` five lines above, and a reader can check it with one `ls`.
+    # the account store's own path in the same run, and a reader can check it
+    # with one `ls`.
     assert f"The account store does hold a {prov.ACCOUNT_DIR}/session-start-hook/" \
         in flat(out), out
     assert "Nor does the account manifest" not in flat(out), out
@@ -3437,8 +3438,8 @@ def test_no_ordinary_session_reddens(tmp_path, capsys, ephemeral, build):
     correct, expected resting state of a class of machines this registry
     delivers into — so each may print as many NOTES as it likes and must exit 0.
     An exit code that can never be green has stopped carrying information, and
-    each of the last three rounds of this branch found one more way to hold it
-    at 1 forever. Adding a shape here is cheaper than rediscovering that.
+    every round of review on this branch has found one more way to hold it at 1
+    forever. Adding a shape here is cheaper than rediscovering that.
 
     Run on the EPHEMERAL surface deliberately: it is the one that promotes
     absences to findings, so a session that stays green here stays green
@@ -3498,12 +3499,12 @@ def test_the_shared_payload_digest_is_none_for_a_path_that_is_not_a_directory(
 # ---------------------------------------------------------------------------
 # the matrix: origin x observation x record x lock
 #
-# Rounds one and two of this branch closed fifteen defects between them and
-# opened six, and almost every one was a cross-product nobody had enumerated —
-# a `foreign` directory fed to the shadow comparison, a `_tally` branch made
-# unreachable by a gate added elsewhere, two guards in `classify` that could no
-# longer fire. Patching pairs does not converge on that, because the thing
-# going wrong is the absence of a list.
+# Earlier rounds on this branch fixed one pair at a time, and each round's
+# fixes opened defects of the same shape: a `foreign` directory fed to the
+# shadow comparison, a `_tally` branch made unreachable by a gate added
+# elsewhere, guards in `classify` that could no longer fire while their
+# docstrings said they were live. Patching pairs does not converge on that,
+# because what is missing is the list.
 #
 # So this is the list. `CELLS` is built from `prov.ORIGINS` and
 # `prov.OBSERVATION_ORIGINS`, so a fifth origin or a fifth observation grows it
