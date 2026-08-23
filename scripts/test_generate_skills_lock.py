@@ -3594,17 +3594,18 @@ _KNOWN_REPORT_PATHS = ("report_drift", "report_digest_format", "main")
 
 
 def _report_paths(functions: dict) -> list:
-    """Every module-level function that PRINTS — derived, never listed.
+    """Every function that WRITES TO THE PRINTED STREAM — derived, never listed.
 
     A written-down list is a list someone has to remember to widen, and the
     gate is only as total as the set it scans: a fourth verdict added beside
     these three and not added here would go unscanned, which is the same shape
     of hole the substring blacklist was. PRINTING is what makes a function a
-    verdict that tells a reader what to type, so that is what selects it.
+    verdict that tells a reader what to type, so that is what selects it —
+    where "printing" is `_print_calls`' two routes and not the single name
+    `print`, and where the functions it chooses from are `_module_functions`'
+    whole tree and not the module's top level.
     """
-    names = [name for name, node in functions.items()
-             if any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                    and call.func.id == "print" for call in ast.walk(node))]
+    names = [name for name, node in functions.items() if _print_calls(node)]
     for expected in _KNOWN_REPORT_PATHS:
         assert expected in names, (
             f"{expected} no longer prints, so the derivation has lost a verdict it "
@@ -3613,9 +3614,39 @@ def _report_paths(functions: dict) -> list:
 
 
 def _module_functions() -> dict:
-    tree = ast.parse(GENERATOR.read_text(encoding="utf-8"))
-    return {node.name: node for node in tree.body
-            if isinstance(node, ast.FunctionDef)}
+    """Every function defined in the module, at ANY nesting, by its dotted path.
+
+    `tree.body` filtered to `ast.FunctionDef` was three written-down node
+    shapes wearing a derivation's clothes, and each of the three reached the
+    printed stream with a self-built invocation and was scanned by nothing: a
+    module-level `async def`, a `def` inside a module-level `try:`, and a
+    method on a module-level class. Measured, each appended to the generator
+    on its own and the file restored byte-for-byte after: the gate stayed at
+    "1 passed" for all three.
+
+    A module-level function keeps its BARE name, so every name the other
+    checks resolve — the `*_blocker` predicates, `_REPIN_APPLY_PATH`,
+    `_KNOWN_REPORT_PATHS` — still finds its node. Anything nested is keyed by
+    its dotted path, which is also what a failure message has to say for the
+    reader to find it.
+    """
+    found = {}
+
+    def collect(body, prefix):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = prefix + node.name
+                if not isinstance(node, ast.ClassDef):
+                    found[name] = node
+                collect(node.body, name + ".")
+                continue
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                block = getattr(node, field, None)
+                if isinstance(block, list):
+                    collect(block, prefix)
+
+    collect(ast.parse(GENERATOR.read_text(encoding="utf-8")).body, "")
+    return found
 
 
 def _calls_by_name(node: ast.AST) -> set:
@@ -3817,10 +3848,21 @@ def _module_command_names() -> set:
     return banned
 
 
-def _print_calls(function: ast.FunctionDef) -> list:
+# The two spellings of "put this text on the stream a reader reads". `print`
+# is the one this file uses; a `.write` on a stream is the same act under
+# another name, and matching only the first left an existing report path free
+# to emit `sys.stdout.write(f"  {_SCRIPT} --repin ...")` unplaced — measured,
+# gate green. Both are PLACED rather than banned, so the channel stays usable
+# and the property travels with it.
+_STREAM_WRITES = frozenset({"write", "writelines"})
+
+
+def _print_calls(function) -> list:
     return [node for node in ast.walk(function)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id == "print"]
+            if isinstance(node, ast.Call)
+            and ((isinstance(node.func, ast.Name) and node.func.id == "print")
+                 or (isinstance(node.func, ast.Attribute)
+                     and node.func.attr in _STREAM_WRITES))]
 
 
 def _docstring_constants(function: ast.FunctionDef) -> set:
@@ -4212,6 +4254,69 @@ def test_the_placer_keeps_the_command_a_command():
     for label, printed in _RELAUNDERED.items():
         with pytest.raises(_Unplaceable, match="the command"):
             _place_one_report_path(printed)
+
+
+# The one function allowed to spell this script's own name. Everything else in
+# the module — report path, refusal predicate, helper, nested def, method —
+# must reach a runnable line by asking it.
+_THE_ONE_COMMAND_AUTHOR = "remediation"
+
+
+def test_only_remediation_can_spell_this_scripts_invocation():
+    """One choke point, asserted about the MODULE rather than about `print`.
+
+    Every gate before this one was a property of the printed stream: which
+    functions print, which expressions may sit in a printed line. That framing
+    has been wrong four times running, because the stream has more ways in than
+    anyone enumerates — a `.write` instead of a `print`, an `async def`, a
+    method on a class, a `*_blocker`'s reason string carried to `print` by
+    `remediation` itself as `.reason` and never placed at all. Each of those was
+    measured green against the placement gate.
+
+    So this asks the question one level up, where the answer does not depend on
+    how the text gets out: WHO CAN WRITE A RUNNABLE LINE AT ALL. `remediation`
+    can, because deciding the line is its whole job and every refusal is
+    composed there. Nothing else may, whatever it then does with the result —
+    print it, `.write` it, return it as a reason, hand it to a caller.
+
+    `_names_the_invocation` is the same reader `_invocation_capable` uses for
+    its roots, so "can spell it" means exactly what it means there: holds a
+    module-level name whose value carries `python` or `.py`, reads
+    `sys.argv`/`sys.executable` under any spelling, calls a dynamic lookup that
+    reaches any module-level name, or has a non-docstring literal spelling it.
+    Docstrings are exempt by construction — they cannot be printed — so the
+    reasoning in this file can go on quoting the commands it is about.
+
+    MEASURED, generator restored byte-for-byte after each and `git status
+    --short` empty: an early
+    `return ("try python3 scripts/generate_skills_lock.py --repin "
+             f"--registry evil/repo --bundles adam -o {output}")`
+    in `repin_unproven_sources_blocker` — a string both `report_drift` and
+    `report_digest_format` print inside a verdict headline — left the placement
+    gate at "1 passed" and fails here.
+    """
+    functions = _module_functions()
+    banned = _module_command_names()
+
+    author = functions[_THE_ONE_COMMAND_AUTHOR]
+    assert _names_the_invocation(author, banned), (
+        f"{_THE_ONE_COMMAND_AUTHOR} no longer spells this script's invocation, so "
+        "the one function allowed to build a command is not the one building it. "
+        "Find out what does, and point this at that — do not delete the check.")
+
+    offenders = {}
+    for name, function in sorted(functions.items()):
+        if name == _THE_ONE_COMMAND_AUTHOR or name.startswith(_THE_ONE_COMMAND_AUTHOR + "."):
+            continue
+        why = _names_the_invocation(function, banned)
+        if why:
+            offenders[name] = why
+    assert not offenders, (
+        "these can build this script's own invocation without asking "
+        f"`{_THE_ONE_COMMAND_AUTHOR}`, so a line they emit — printed, written, or "
+        "returned as a refusal's reason — meets none of the refusals every other "
+        "verdict's line meets: "
+        + "; ".join(f"{name} {why}" for name, why in offenders.items()))
 
 
 def _place_prints(function, name, functions, banned, capable) -> None:
