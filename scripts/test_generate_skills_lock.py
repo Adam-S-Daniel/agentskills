@@ -11,6 +11,7 @@ than no test suite. `_run_hook` is the only way these tests launch it, and it
 refuses to run without an explicit tmp home.
 """
 
+import ast
 import json
 import os
 import re
@@ -3413,6 +3414,123 @@ def _primary_drifted(primary: Path) -> str:
     _git(primary, "add", "-A")
     _git(primary, "commit", "-q", "-m", "the primary really moved")
     return _head(primary)
+
+
+# The two ends of the re-pin path, by name. `_repin_primary_guard` and
+# `_apply_repin_sources` are what REFUSE; `report_drift` is what RECOMMENDS.
+_REPIN_APPLY_PATH = ("_repin_primary_guard", "_apply_repin_sources")
+_REPIN_REPORT_PATH = ("report_drift",)
+
+
+def _module_functions() -> dict:
+    tree = ast.parse(GENERATOR.read_text(encoding="utf-8"))
+    return {node.name: node for node in tree.body
+            if isinstance(node, ast.FunctionDef)}
+
+
+def _calls_by_name(node: ast.AST) -> set:
+    return {call.func.id for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)}
+
+
+def _guarded_raises(statements, guards, found) -> None:
+    """Every `raise` under `statements`, paired with the `if` tests above it."""
+    for statement in statements:
+        if isinstance(statement, ast.If):
+            _guarded_raises(statement.body, guards + [statement.test], found)
+            _guarded_raises(statement.orelse, guards, found)
+            continue
+        if isinstance(statement, ast.Raise):
+            found.append((statement, list(guards)))
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(statement, field, None)
+            if isinstance(block, list):
+                _guarded_raises(block, guards, found)
+
+
+def _consults_the_filesystem(test: ast.AST) -> bool:
+    """Does this `if` decide on something outside the lock — git, or a path?"""
+    for call in ast.walk(test):
+        if not isinstance(call, ast.Call):
+            continue
+        if isinstance(call.func, ast.Name) and call.func.id == "_git":
+            return True
+        if isinstance(call.func, ast.Attribute) and call.func.attr in {"is_dir", "exists"}:
+            return True
+    return False
+
+
+def test_every_refusal_a_repin_can_give_is_one_both_paths_read():
+    """The structural half of the class fix, read off the module's own AST.
+
+    Behavioural tests catch a report that recommends a refused command for the
+    lock shapes somebody thought to write down; three rounds of that missed
+    three shapes. This one catches the EDIT: a refusal added to the apply path
+    and nowhere else cannot pass, because the only place a lock-decidable
+    refusal may live is a `*_blocker` predicate and every `*_blocker` must be
+    called from both ends of the path.
+
+    The one exemption is a refusal that decides on something the lock does not
+    contain — the clone in front of this process, probed with `_git` or
+    `Path.is_dir`. A report cannot foresee those and must not be asked to, so
+    they are identified by what their `if` consults rather than by a list a
+    later editor would have to remember to update.
+    """
+    functions = _module_functions()
+    blockers = sorted(name for name in functions if name.endswith("_blocker"))
+    assert blockers, "no *_blocker predicates found — has the naming changed?"
+
+    for name in _REPIN_APPLY_PATH + _REPIN_REPORT_PATH:
+        assert name in functions, name
+
+    apply_calls = set().union(*(_calls_by_name(functions[name])
+                                for name in _REPIN_APPLY_PATH))
+    report_calls = set().union(*(_calls_by_name(functions[name])
+                                 for name in _REPIN_REPORT_PATH))
+    for blocker in blockers:
+        assert blocker in apply_calls, (
+            f"{blocker} is never consulted by {' or '.join(_REPIN_APPLY_PATH)} — "
+            "a refusal nothing refuses")
+        assert blocker in report_calls, (
+            f"{blocker} is never consulted by {' or '.join(_REPIN_REPORT_PATH)} — "
+            "the report can recommend a command this refuses")
+
+    for name in _REPIN_APPLY_PATH:
+        function = functions[name]
+        from_a_blocker = {
+            target.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id in blockers
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        found = []
+        _guarded_raises(function.body, [], found)
+        for statement, guards in found:
+            exception = statement.exc
+            if not (isinstance(exception, ast.Call)
+                    and isinstance(exception.func, ast.Name)
+                    and exception.func.id == "GeneratorError"):
+                continue
+            names_in_guards = {node.id for test in guards
+                               for node in ast.walk(test) if isinstance(node, ast.Name)}
+            if names_in_guards & from_a_blocker:
+                continue
+            if any(_consults_the_filesystem(test) for test in guards):
+                continue
+            raise AssertionError(
+                f"{name}, line {statement.lineno}: this refusal is decidable from the "
+                "lock alone but does not come from a *_blocker, so the report that "
+                "recommends a re-pin cannot see it. Move the sentence into a blocker "
+                "both ends read.")
+
+    for blocker in blockers:
+        assert not [node for node in ast.walk(functions[blocker])
+                    if isinstance(node, ast.Raise)], (
+            f"{blocker} raises; a predicate two callers share must RETURN its "
+            "reason so each can frame it")
 
 
 def _drifted_plain(tmp_path):
