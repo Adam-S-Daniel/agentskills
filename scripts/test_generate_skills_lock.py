@@ -644,7 +644,7 @@ def test_check_inherits_the_locks_sources(federated, tmp_path):
 
 
 def test_check_current_reports_a_change_in_a_federated_source(federated, tmp_path):
-    primary, _, extra, extra_sha = federated
+    primary, primary_sha, extra, extra_sha = federated
     out = tmp_path / "skills.lock"
     assert _federated_lock(out, federated).returncode == 0
 
@@ -656,6 +656,14 @@ def test_check_current_reports_a_change_in_a_federated_source(federated, tmp_pat
     assert "changed" in proc.stdout
     # Named with ITS ref, not the primary's, so the message says what to re-pin.
     assert extra_sha in proc.stdout
+    # ...and the HEADLINE says so, not only a detail line under it. While the
+    # headline named the primary's ref, a reader (and a fleet bumper) was told
+    # to re-pin the half that had not moved.
+    headline = next(line for line in proc.stdout.splitlines() if line.startswith("FAILED:"))
+    assert extra.resolve().as_uri() in headline
+    assert extra_sha in headline
+    assert primary_sha not in headline
+    assert "--repin-source" in proc.stdout
 
 
 def test_check_current_ignores_a_build_artefact_in_a_federated_source(federated, tmp_path):
@@ -676,6 +684,115 @@ def test_check_current_ignores_a_build_artefact_in_a_federated_source(federated,
 
     proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_check_current_failure_attributes_a_federated_drift_to_its_own_registry(
+        federated, tmp_path):
+    """A drift in another registry is reported as that registry's, entirely.
+
+    The primary's sha appears nowhere, because the primary did not move and
+    nothing about it is the answer to why this run is red.
+    """
+    primary, primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert primary_sha not in proc.stdout
+    lines = proc.stdout.splitlines()
+    headlines = [line for line in lines if line.startswith("FAILED:")]
+    assert len(headlines) == 1, proc.stdout
+    assert headlines[0].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles have moved")
+    assert extra_sha in headlines[0]
+    remediation = lines[lines.index(headlines[0]) + 1]
+    assert remediation.strip() == (
+        "python3 scripts/generate_skills_lock.py --repin "
+        f"--repin-source '{extra.resolve().as_uri()}@'")
+
+
+def test_check_current_names_both_when_primary_and_source_both_drift(
+        federated, tmp_path):
+    """Two drifts are two verdicts, and the primary's comes first.
+
+    Order is the cross-repo contract's second fact: the fleet bumper slices
+    from the FIRST `^FAILED:` into a PR body, with a path substitution that
+    names the primary lock alone.
+    """
+    primary, primary_sha, extra, extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    headlines = [line for line in proc.stdout.splitlines() if line.startswith("FAILED:")]
+    assert len(headlines) == 2, proc.stdout
+    assert headlines[0] == (
+        f"FAILED: the bundle has moved on since {primary_sha}, which {out} still pins — "
+        "nothing added or changed since then reaches an ephemeral surface. Re-pin it "
+        "(after committing the content) with:")
+    assert headlines[1].startswith(f"FAILED: {extra.resolve().as_uri()}'s bundles")
+    assert "adam/alpha" in proc.stdout and "cms-platform/deploy" in proc.stdout
+
+
+def test_every_failed_line_is_followed_by_its_own_remediation_command(
+        federated_two, tmp_path):
+    """What makes the fleet bumper's 20-line PR-body cap safe.
+
+    It slices `sed -n '/^FAILED:/,$p' | head -20`. A truncation may drop a
+    whole trailing block; it must never separate a headline from the command
+    that fixes it, which is what a headline-then-note-then-command shape would
+    allow the moment a second block existed.
+    """
+    primary, _, extra, _extra_sha, other, _other_sha = federated_two
+    out = tmp_path / "skills.lock"
+    assert _federated_two_lock(out, federated_two).returncode == 0
+
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+    _write(other / "skills" / "publish" / "SKILL.md", "---\nname: publish\n---\nedited\n")
+
+    proc = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    headlines = [index for index, line in enumerate(lines) if line.startswith("FAILED:")]
+    assert len(headlines) == 3, proc.stdout
+    for index in headlines:
+        assert lines[index + 1].strip().startswith(
+            "python3 scripts/generate_skills_lock.py --repin"), lines[index:index + 2]
+
+
+def test_check_current_verdict_still_starts_with_FAILED_at_column_zero(
+        federated, tmp_path):
+    """The contract's first fact, asserted for a federated block too.
+
+    _agent-guidance's bump-consumer-locks.sh branches on `grep -q '^FAILED:'`
+    and routes anything else to a path that reports without rewriting. A
+    verdict indented by two spaces is not a softer message there — it is a
+    consumer lock that silently stops being maintained.
+    """
+    primary, _primary_sha, extra, _extra_sha = federated
+    out = tmp_path / "skills.lock"
+    assert _federated_lock(out, federated).returncode == 0
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\n---\nedited\n")
+    federated_drift = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert federated_drift.returncode == 1
+    assert federated_drift.stdout.startswith("FAILED: ")
+
+    _write(extra / "skills" / "deploy" / "SKILL.md", SKILL_B["SKILL.md"])
+    _write(primary / "plugins" / "adam" / "skills" / "alpha" / "SKILL.md",
+           "---\nname: alpha\n---\nedited\n")
+    primary_drift = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert primary_drift.returncode == 1
+    assert primary_drift.stdout.startswith("FAILED: ")
 
 
 # --------------------------------------------------------------------------
@@ -1272,6 +1389,11 @@ def test_check_current_failure_names_the_re_pin_command(registry, tmp_path):
     proc = run_generator("--repo", str(root), "--check-current", "-o", str(out))
     assert proc.returncode == 1
     assert "scripts/generate_skills_lock.py --repin" in proc.stdout
+    # The substring above is satisfied by a `--repin --repin-source 'X@'` line
+    # too, so without this the test is a green light wired to nothing: a bug
+    # that printed the federated remediation for a PRIMARY drift would keep it
+    # passing, and following that line advances the wrong pin.
+    assert "--repin-source" not in proc.stdout
 
 
 def test_check_current_failure_names_the_merge_cause(registry, tmp_path):
