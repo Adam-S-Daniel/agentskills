@@ -1138,8 +1138,8 @@ def foreign_notes(skills_dir: Path, origins: Dict[str, Origin],
     "a skill of its own", that "this one declares something else", and that "no
     re-upload could reconcile them" — off the directory's existence alone. All
     three are false for a byte-identical twin, and one `cat` shows it. So the
-    frontmatter is read, and the sentence says which of the three states was
-    found.
+    frontmatter is read, and the sentence says which of the four states below
+    was found.
     """
     notes: List[Finding] = []
     for name, origin in sorted(origins.items()):
