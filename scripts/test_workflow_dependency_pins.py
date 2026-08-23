@@ -165,6 +165,17 @@ DIRECTORY_CHANGERS = frozenset({"cd", "pushd", "popd"})
 # tokenised as ordinary words: no `pip` token, no `install` token, a silent
 # pass. The conditional tail keeps the quoted forms balanced — a closing quote
 # is required exactly when an opening one was found.
+#
+# THE PRICE, STATED RATHER THAN DISCOVERED: this widens the one false positive
+# split_heredocs already has. It runs before shlex — it must, or the heredoc
+# body is tokenised as shell before anything can lift it out — so it cannot
+# tell a `#` comment mentioning a heredoc from a real redirect, which
+# test_a_heredoc_that_never_ends_reports_what_it_swallowed already pins for
+# `<<PY`. `<<\d` in a comment about a regex is now a heredoc opener too, and
+# will swallow the compliant commands after it. That fails CLOSED — the
+# swallowed text names pip, so it is reported rather than passed — and the fix
+# is to reword the comment. Narrowing it would take a shell parser this file
+# deliberately does not have.
 HEREDOC = re.compile(
     r"<<-?\s*(?:\\|(['\"]))?([A-Za-z_][A-Za-z0-9_]*)(?(1)\1)")
 
@@ -361,8 +372,27 @@ def join_continuations(body: str) -> str:
     token, so an install split mid-word passed in silence. The next line's
     leading whitespace is left where it is; it already separates whatever bash
     separates.
+
+    A BACKSLASH THAT IS ITSELF ESCAPED CONTINUES NOTHING, which is why the run
+    is counted rather than matched. `echo hi\\\\` newline `pip install
+    pyyaml==6.0.1` is TWO commands to bash — the pair is one literal
+    backslash, and the newline still ends the line — but folding them glued
+    `hi` to `pip`, leaving a single `echo` command with no `pip` token and the
+    install never classified at all. Measured: `scan_shell_body` on that body
+    returned `([], [])`, a silent pass of an unpinned install, which is the
+    one outcome this file promises never to produce. The sibling scanner in
+    scripts/test_account_workflows.py already models the rule
+    (`test_an_escaped_backslash_does_not_continue_a_line`); this one did not.
+    Backslashes pair off, so an ODD run ends in a continuation and an even one
+    does not.
     """
-    return re.sub(r"\\\n", "", body)
+    def fold(match):
+        run = match.group(1)
+        if len(run) % 2 == 0:          # every backslash is paired: no continuation
+            return match.group(0)
+        return run[:-1]                # drop the continuing backslash and the newline
+
+    return re.sub(r"(\\+)\n", fold, body)
 
 
 def runs_a_command_line(shell) -> bool:
@@ -1279,7 +1309,48 @@ HEREDOC_INSTALLS = [
 HEREDOC_SWALLOWING_AN_INSTALL = [
     "cat <<EOF\nsome text\npython3 -m pip install pyyaml==6.0.1",
     "# see <<PY below\npython3 -m pip install pyyaml==6.0.1",
+    # The backslash delimiter widens this: `<<\d` in a comment about a regex
+    # is a heredoc opener to the splitter, where the old two-quote pattern saw
+    # nothing. Listed here so the widening is a checked property rather than a
+    # surprise the next reader meets in CI.
+    "# the pattern <<\\d matches one digit\npython3 -m pip install pyyaml==6.0.1",
 ]
+
+
+def test_a_comment_that_opens_a_heredoc_reds_a_compliant_install_too():
+    """The cost of the line above, priced honestly. `<<\\d` written in a
+    comment swallows the commands after it, and those commands can be
+    perfectly compliant — so the failure mode is a false RED on correct code,
+    not a silent pass. Asserted rather than described, because a boundary
+    nothing executes is a boundary that moves. Reword the comment to fix it;
+    narrowing the splitter would take the shell parser it deliberately runs
+    before."""
+    found, unplaceable = scan_shell_body(
+        "# the pattern <<\\d matches one digit\n"
+        "python3 -m pip install -r requirements-dev.txt")
+    assert found == []
+    assert len(unplaceable) == 1, unplaceable
+    assert "heredoc" in unplaceable[0][1]
+
+
+def test_an_escaped_backslash_does_not_continue_a_line():
+    """`echo hi\\\\` newline `pip install …` is TWO commands to bash: the pair
+    is one literal backslash and the newline still ends the line. Folding them
+    glued `hi` to `pip`, leaving one `echo` command with no `pip` token — so
+    an unpinned install was never classified. Measured before the fix:
+    `([], [])`, a silent pass. The bare `pip` spelling is load-bearing here;
+    write it `python3 -m pip` and the glue lands on `hi` + `python3`, leaving
+    the `pip` token intact and the payload caught either way."""
+    found, unplaceable = scan_shell_body(
+        "echo hi\\\\\npip install pyyaml==6.0.1")
+    assert not unplaceable, unplaceable
+    assert [install_operands(args) for _, args in found] == [
+        ([], ["pyyaml==6.0.1"], [])]
+
+    # And the ordinary direction: three backslashes are a pair plus a
+    # continuation, so the fold must still happen.
+    assert join_continuations("echo hi\\\\\\\npip install x") == (
+        "echo hi\\\\pip install x")
 
 
 @pytest.mark.parametrize("body", HEREDOC_SWALLOWING_AN_INSTALL)
