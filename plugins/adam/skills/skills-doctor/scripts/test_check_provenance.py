@@ -225,6 +225,58 @@ def test_the_digest_is_none_for_a_path_that_is_not_a_directory(tmp_path):
     assert prov.digest_skill_dir(plain) is None
 
 
+def _uploader():
+    """sync-skills' `sync_skills` module — the other end of the upload filter."""
+    _walk_up("plugins/adam-local/skills/sync-skills/sync_skills.py")
+    import sync_skills
+
+    return sync_skills
+
+
+def test_the_upload_filter_matches_the_uploaders(tmp_path):
+    """The binding that keeps `UPLOAD_SKIP_*` a copy of the uploader's rule.
+
+    The account copy of a skill is whatever `zip_skill` put in the ZIP, so the
+    only correct definition of "what both channels carry" is the uploader's own
+    `_include_in_zip`. This file cannot import it — it ships into a
+    `~/.claude/skills` with no sync-skills in it — so the sets are re-declared,
+    and a re-declaration that drifts does not fail loudly: it turns whichever
+    artefact stopped being skipped into a `shadow-copies-differ` FINDING about a
+    session where nothing is wrong.
+    """
+    up = _uploader()
+    assert prov.UPLOAD_SKIP_DIRS == up._SKIP_DIRS
+    assert prov.UPLOAD_SKIP_DIR_PREFIXES == up._SKIP_DIR_PREFIXES
+    assert prov.UPLOAD_SKIP_EXTS == up._SKIP_EXTS
+
+
+def test_the_shared_payload_selects_what_the_uploader_would_have_zipped(tmp_path):
+    """Bound to the uploader end to end, not just to its constant names.
+
+    Re-declaring the sets correctly and then applying them differently —
+    matching a directory name against the file's suffix, say, or testing only
+    the last path segment — passes the binding above and still digests a file
+    the account copy never held.
+    """
+    up = _uploader()
+    skill = tmp_path / "skill"
+    for relpath, data in (("SKILL.md", b"---\nname: skill\n---\nbody\n"),
+                          ("scripts/helper.py", b"x = 1\n"),
+                          ("scripts/__pycache__/helper.cpython-311.pyc", b"\x00c"),
+                          ("scripts/helper.pyo", b"\x00o"),
+                          ("payload.b64", b"AAAA"),
+                          (".pytest_cache/v/last", b"{}"),
+                          ("pytest-cache-files-abc/tmp", b"scratch"),
+                          ("node_modules/dep/index.js", b"x")):
+        target = skill / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    mine = {relpath for relpath, _ in prov.uploaded_files(skill)}
+    assert mine == set(up.skill_payload(skill)), (
+        "the doctor's upload filter has drifted from what a real upload carries")
+
+
 # ---------------------------------------------------------------------------
 # the record's three states
 # ---------------------------------------------------------------------------
@@ -2673,16 +2725,18 @@ def test_a_copy_that_cannot_be_read_is_not_reported_as_agreeing(
     """None means "not measured", and the note has to say that rather than pick.
 
     Reporting an unmeasurable pair as identical would be a guess dressed as a
-    measurement — `digest_skill_dir`'s own rule. Reporting it as differing would
+    measurement — `digest_skill_dir`'s own rule, which `digest_shared_payload`
+    keeps. Reporting it as differing would
     invent a defect. The digest is stubbed rather than the directory made
     unreadable, because this suite runs as root in some environments and a
     chmod-based test would silently stop testing anything there.
     """
     store, lock = shadowed_store(tmp_path)
-    real = prov.digest_skill_dir
-    monkeypatch.setattr(prov, "digest_skill_dir",
-                        lambda path: None if prov.ACCOUNT_DIR in Path(path).parts
-                        else real(path))
+    real = prov.digest_shared_payload
+    monkeypatch.setattr(
+        prov, "digest_shared_payload",
+        lambda path, fold=False: None if prov.ACCOUNT_DIR in Path(path).parts
+        else real(path, fold))
 
     code, out = run(store, lock, capsys)
     assert code == 0, out
@@ -2699,7 +2753,9 @@ def test_an_unmeasurable_normalised_digest_does_not_become_a_finding(
     different instructions on the strength of a comparison that never ran.
     """
     store, lock = shadowed_store(tmp_path)
-    monkeypatch.setattr(prov, "digest_skill_dir_normalised", lambda path: None)
+    real = prov.digest_shared_payload
+    monkeypatch.setattr(prov, "digest_shared_payload",
+                        lambda path, fold=False: None if fold else real(path))
 
     code, out = run(store, lock, capsys)
     assert code == 0, out
@@ -2755,7 +2811,75 @@ def test_a_shadow_is_attributed_to_no_lock_however_many_there_are(
     assert any("— declared by" in line for line in headers), out
 
 
-def test_the_normalised_digest_folds_crlf_and_the_exact_one_does_not(tmp_path):
+def _artefacts(skill: Path) -> None:
+    """Every shape the uploader drops, planted beside a skill's real files."""
+    for relpath, data in (("__pycache__/helper.cpython-311.pyc", b"\x00compiled"),
+                          ("scripts/helper.pyo", b"\x00optimised"),
+                          ("payload.b64", b"QUFB"),
+                          (".pytest_cache/v/cache/lastfailed", b"{}"),
+                          ("pytest-cache-files-xyz/tmp", b"scratch"),
+                          (".venv/lib/thing", b"x"),
+                          ("node_modules/dep/index.js", b"x")):
+        target = skill / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+
+def test_a_build_artefact_is_not_a_second_set_of_instructions(tmp_path, capsys,
+                                                              ephemeral):
+    """The healthy session this reporting exists to leave alone.
+
+    The account copy is not a copy of the directory — it is the ZIP `zip_skill`
+    uploaded, and `_include_in_zip` never put a `__pycache__` in it. Digesting
+    the personal directory whole therefore reads an ordinary build artefact as a
+    divergent set of instructions and exits 1 on a session where the SKILL.md
+    bytes on both sides are identical. That is the exact failure this reporting
+    forbids in its own rationale: reddening the ordinary case is how findings
+    come to be skipped. The checkout this suite runs from already carries
+    `__pycache__` directories under `plugins/`, and the installed copy at
+    `~/.claude/skills/skills-doctor/scripts` collects its own.
+    """
+    store, lock = shadowed_store(tmp_path)
+    _artefacts(store / "writing-adrs")
+    write_record(store, "adam-writing-style", "finding-unknowns", "writing-adrs")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "shadow-copies-differ" not in out, out
+    assert "[shadowed-by-the-account-store] writing-adrs" in out, out
+
+
+def test_a_file_the_uploader_would_have_carried_is_still_a_divergence(
+        tmp_path, capsys, ephemeral):
+    """The negative control on the filter: it must skip artefacts, not content.
+
+    A filter written too wide — comparing only SKILL.md, skipping every dotted
+    directory, or skipping everything below the top level — would turn
+    `shadow-copies-differ` off altogether while every test above stayed green,
+    because they all assert the quiet outcome.
+
+    Asserted twice, at the top level and one directory down, because the two
+    over-wide shapes fail differently: a comparison narrowed to SKILL.md misses
+    both, and one that stops at the top level misses only the second. A single
+    file at one depth leaves whichever half it does not stand on unguarded.
+    """
+    for depth, relpath in (("top level", "reference.md"),
+                           ("nested", "reference/deeper/guidance.md")):
+        here = tmp_path / depth.replace(" ", "-")
+        here.mkdir()
+        store, lock = shadowed_store(here)
+        extra = store / "writing-adrs" / relpath
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text("guidance\n", encoding="utf-8")
+        write_record(store, "adam-writing-style", "finding-unknowns",
+                     "writing-adrs")
+
+        code, out = run(store, lock, capsys)
+        assert code == 1, (depth, out)
+        assert "[shadow-copies-differ] writing-adrs" in out, (depth, out)
+
+
+def test_the_folded_digest_folds_crlf_and_the_unfolded_one_does_not(tmp_path):
     """The two digests must disagree on a CRLF pair, or normalising is a no-op.
 
     If these ever returned the same answer, every test above would still pass
@@ -2769,12 +2893,12 @@ def test_the_normalised_digest_folds_crlf_and_the_exact_one_does_not(tmp_path):
         path.mkdir()
         (path / "SKILL.md").write_bytes(data)
 
-    assert prov.digest_skill_dir(lf) != prov.digest_skill_dir(crlf)
-    assert prov.digest_skill_dir_normalised(lf) == \
-        prov.digest_skill_dir_normalised(crlf)
+    assert prov.digest_shared_payload(lf) != prov.digest_shared_payload(crlf)
+    assert prov.digest_shared_payload(lf, fold=True) == \
+        prov.digest_shared_payload(crlf, fold=True)
 
 
-def test_the_normalised_digest_still_separates_a_real_content_change(tmp_path):
+def test_the_folded_digest_still_separates_a_real_content_change(tmp_path):
     """Normalising must not be so eager that it hides an edit.
 
     A comparison that returned equal for everything would turn every divergent
@@ -2786,13 +2910,15 @@ def test_the_normalised_digest_still_separates_a_real_content_change(tmp_path):
         path.mkdir()
         (path / "SKILL.md").write_bytes(data)
 
-    assert prov.digest_skill_dir_normalised(one) is not None
-    assert prov.digest_skill_dir_normalised(one) != \
-        prov.digest_skill_dir_normalised(two)
+    assert prov.digest_shared_payload(one, fold=True) is not None
+    assert prov.digest_shared_payload(one, fold=True) != \
+        prov.digest_shared_payload(two, fold=True)
 
 
-def test_the_normalised_digest_is_none_for_a_path_that_is_not_a_directory(tmp_path):
+def test_the_shared_payload_digest_is_none_for_a_path_that_is_not_a_directory(
+        tmp_path):
     """Same contract as `digest_skill_dir`: None is "not measured"."""
     plain = tmp_path / "file"
     plain.write_text("x", encoding="utf-8")
-    assert prov.digest_skill_dir_normalised(plain) is None
+    assert prov.digest_shared_payload(plain) is None
+    assert prov.digest_shared_payload(plain, fold=True) is None
