@@ -54,7 +54,11 @@ re-reads the SAME parsed document as a tree of scalars, with no notion of what
 a job or a step is, and fails when a pip install turns up in a scalar the
 `jobs -> steps -> run` walk never visited.
 
-Scope is .github/workflows/ only. Skills SHIP workflow YAML as assets
+Scope is the YAML this repo runs its own CI from: .github/workflows/*.yml and
+the composite actions at .github/actions/**/action.yml. A composite action's
+`runs.steps[].run` is shell this repo's jobs execute exactly as a workflow step
+is, so leaving it out would have left a place a pin could drift back into with
+nothing looking. Skills SHIP workflow YAML as assets
 (plugins/adam/skills/github-actions-repo-settings/assets/workflows/) that runs
 in other people's repositories; their dependencies are not ours to pin, and
 sweeping them in here would fail this repo's CI over a template.
@@ -70,7 +74,6 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 REQUIREMENTS = REPO_ROOT / "requirements-dev.txt"
 
 # Characters shlex hands back as their own tokens rather than folding into a
@@ -179,8 +182,20 @@ def declared_requirements() -> dict:
     return declared
 
 
-def workflow_files():
-    return sorted(WORKFLOW_DIR.glob("*.yml")) + sorted(WORKFLOW_DIR.glob("*.yaml"))
+def governed_files(root=REPO_ROOT):
+    """Every YAML file under .github/ whose `run:` bodies this repo executes.
+
+    `root` is a parameter so the walk can be pointed at a fixture tree; the
+    tests that check what it reaches would otherwise have to write into
+    .github/ to say anything.
+    """
+    base = Path(root) / ".github"
+    return sorted(
+        set(base.glob("workflows/*.yml"))
+        | set(base.glob("workflows/*.yaml"))
+        | set(base.glob("actions/**/action.yml"))
+        | set(base.glob("actions/**/action.yaml"))
+    )
 
 
 def join_continuations(body: str) -> str:
@@ -297,23 +312,41 @@ def scan_shell_body(body: str):
     return found, unplaceable
 
 
-def parsed_run_steps():
-    """(workflow, job id, step index, step name, run body) for every step."""
-    for path in workflow_files():
+def step_containers(doc):
+    """(label, key path prefix, steps) for each place a document holds steps.
+
+    A workflow keeps them under `jobs.<id>.steps`; a composite action keeps
+    them under `runs.steps`. Both are shell this repo runs.
+    """
+    for job_id, job in (doc.get("jobs") or {}).items():
+        if isinstance(job, dict):
+            yield f"job `{job_id}`", f".jobs.{job_id}.steps", job.get("steps")
+    runs = doc.get("runs")
+    if isinstance(runs, dict):
+        yield "composite action", ".runs.steps", runs.get("steps")
+
+
+def parsed_run_steps(root=REPO_ROOT):
+    """(path, container label, step index, step name, run body) per step."""
+    for path in governed_files(root):
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        for job_id, job in (doc.get("jobs") or {}).items():
-            for index, step in enumerate(job.get("steps") or []):
+        if not isinstance(doc, dict):
+            continue
+        for label, _, steps in step_containers(doc):
+            for index, step in enumerate(steps or []):
+                if not isinstance(step, dict):
+                    continue
                 run = step.get("run")
                 if isinstance(run, str):
-                    yield path, job_id, index, step.get("name"), run
+                    yield path, label, index, step.get("name"), run
 
 
-def scan_workflows():
-    """(installs, unplaceable) over every step body in .github/workflows/."""
+def scan_workflows(root=REPO_ROOT):
+    """(installs, unplaceable) over every governed step body under .github/."""
     found, unplaceable = [], []
-    for path, job_id, index, name, body in parsed_run_steps():
+    for path, label, index, name, body in parsed_run_steps(root):
         where = (
-            f"{path.relative_to(REPO_ROOT).as_posix()} job `{job_id}` "
+            f"{path.relative_to(root).as_posix()} {label} "
             f"step {index}" + (f" ({name})" if name else "")
         )
         commands, strays = scan_shell_body(body)
@@ -494,14 +527,15 @@ def scalars(node, path=""):
 
 def step_run_paths(doc):
     return {
-        f".jobs.{job_id}.steps[{index}].run"
-        for job_id, job in (doc.get("jobs") or {}).items()
-        for index, step in enumerate(job.get("steps") or [])
-        if isinstance(step.get("run"), str)
+        f"{prefix}[{index}].run"
+        for _, prefix, steps in step_containers(doc)
+        for index, step in enumerate(steps or [])
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
     }
 
 
-@pytest.mark.parametrize("path", workflow_files(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", governed_files(),
+                         ids=lambda p: p.relative_to(REPO_ROOT).as_posix())
 def test_no_pip_install_hides_where_the_parsed_walk_cannot_see_it(path):
     """The checks above read `jobs -> steps -> run`. A pip install anywhere
     else in the document — a `defaults:` block, an `env:` default, a `with:`
@@ -670,3 +704,43 @@ def test_the_whitelist_still_admits_an_install_that_changes_no_version(body):
     assert not unplaceable and len(found) == 1, (found, unplaceable)
     files, packages, rejected = install_operands(found[0][1])
     assert (files, packages, rejected) == (["requirements-dev.txt"], [], [])
+
+
+COMPOSITE_ACTION_WITH_A_DRIFTED_PIN = """\
+name: Set up
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python3 -m pip install pyyaml==6.0.1
+"""
+
+
+def test_a_composite_action_is_governed_like_a_workflow_step(tmp_path):
+    """.github/actions/**/action.yml runs shell in this repo's own jobs, so a
+    pin can drift back in there. The walk used to read `jobs -> steps -> run`
+    in .github/workflows/ only, and a composite action has neither the
+    directory nor the `jobs` key."""
+    action = tmp_path / ".github" / "actions" / "setup" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text(COMPOSITE_ACTION_WITH_A_DRIFTED_PIN, encoding="utf-8")
+
+    assert governed_files(tmp_path) == [action]
+    found, unplaceable = scan_workflows(tmp_path)
+    assert not unplaceable
+    assert [(where, command) for where, command, _ in found] == [
+        (".github/actions/setup/action.yml composite action step 0",
+         "python3 -m pip install pyyaml==6.0.1")
+    ]
+    assert install_operands(found[0][2]) == ([], ["pyyaml==6.0.1"], [])
+
+
+def test_the_second_pair_of_eyes_reaches_a_composite_action_too(tmp_path):
+    """The stray-scalar walk has to know where a composite action's steps
+    live, or every one of its `run:` bodies reads as a place the step walk
+    never visited and the file fails on its own governed shell."""
+    doc = yaml.safe_load(COMPOSITE_ACTION_WITH_A_DRIFTED_PIN)
+    assert step_run_paths(doc) == {".runs.steps[0].run"}
+    stray = [key for key, text in scalars(doc)
+             if key not in step_run_paths(doc) and any(scan_shell_body(text))]
+    assert stray == []
