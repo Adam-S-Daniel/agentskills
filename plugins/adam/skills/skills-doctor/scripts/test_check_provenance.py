@@ -3777,7 +3777,7 @@ def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory
 
 
 # ---------------------------------------------------------------------------
-# the matrix: origin x observation x record x lock
+# the matrix: origin x record x lock x (observation, outcome)
 #
 # Earlier rounds on this branch fixed one pair at a time, and each round's
 # fixes opened defects of the same shape: a `foreign` directory fed to the
@@ -3791,17 +3791,55 @@ def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory
 # by itself and `test_the_matrix_is_complete` fails until `MATRIX` accounts for
 # the new cells. Each reachable cell asserts the origin assigned, the exact
 # kinds reported about the directory, whether each is a FINDING or a NOTE, and
-# the exit code. Each unreachable one asserts that the ladder cannot produce
+# the exit code.
+#
+# The last axis is an observation's OUTCOME, not its name. Round 3's table had
+# only the names, and that is a weaker thing than it reads as: the fixture
+# planted one shadow, one integrity state and one lock scope, so three
+# observations fired in twenty-eight cells and between them could not produce
+# `shadow-copies-differ`, `artefacts-and-*` or `stale-out-of-scope` anywhere at
+# all. `OBSERVATION_VARIANTS` below is where a new observation declares what its
+# outcomes are, and `test_the_matrix_is_complete` will not let one be added
+# without them. Each unreachable one asserts that the ladder cannot produce
 # that origin from those inputs at all — which is how a dead branch shows up
 # here as a fact rather than as a comment claiming it is live.
 # ---------------------------------------------------------------------------
 
 TARGET = "target"
 BODY = "line one\nline two\n"
-OBSERVATIONS = tuple(sorted(prov.OBSERVATION_ORIGINS))
+
+# Each observation's distinguishable OUTCOMES, and the axis the round-3 table
+# was missing. `shadow` fired in six cells and produced
+# `shadowed-by-the-account-store` in all six, because the fixture always planted
+# a byte-identical account copy — so the divergent kind, the one at the centre
+# of the defect the table was built to stop recurring, was in no cell at all. A
+# cross-product over observation NAMES covers the names; this covers the
+# behaviour.
+#
+# The same audit over the other three: `integrity` always edited, so
+# `artefacts-and-*` was likewise unreachable from the table, and
+# `lock-expectation` always wrote a lock claiming the bundle the record names,
+# so `stale-out-of-scope` was. `foreign` genuinely has one outcome — the kind is
+# raised or the origin is not FOREIGN.
+#
+# Still not covered, and named rather than left to be discovered again:
+# `unmeasurable-and-*` has no variant here, because making `digest_skill_dir`
+# fail needs an unreadable path and this suite runs as root in CI, where a
+# chmod is not a refusal.
+OBSERVATION_VARIANTS = {
+    "lock-expectation": ("in-scope", "out-of-scope"),
+    "integrity": ("edited", "artefacts"),
+    "shadow": ("identical", "divergent"),
+    "foreign": ("declares-another-name",),
+}
+
+OBSERVATIONS = tuple((observation, variant)
+                     for observation in sorted(prov.OBSERVATION_ORIGINS)
+                     for variant in OBSERVATION_VARIANTS.get(observation, ()))
 
 
-def matrix_store(tmp_path, origin, observation, record_present, lock_declares):
+def matrix_store(tmp_path, origin, observation, variant, record_present,
+                 lock_declares):
     """The smallest store in which `target` has `origin` and `observation` fires.
 
     Never refuses a combination. An unreachable cell is one this builds
@@ -3817,17 +3855,23 @@ def matrix_store(tmp_path, origin, observation, record_present, lock_declares):
     (skill / "SKILL.md").write_text(f"---\nname: {declared}\n---\n{BODY}",
                                     encoding="utf-8")
     if observation == "shadow":
-        # Byte-for-byte what the personal copy holds, so the benign NOTE is what
-        # a shadow produces here and a divergence never masquerades as one.
-        account_copy(store, TARGET, body=BODY, crlf=False)
+        account_copy(store, TARGET, crlf=False,
+                     body=BODY if variant == "identical" else BODY + "theirs\n")
     if record_present:
         write_record(store, *( [TARGET] if origin == prov.HOOK else [] ))
     if observation == "integrity":
-        # After the record, so the recorded digest is the pre-edit one.
-        (skill / "SKILL.md").write_text(
-            f"---\nname: {declared}\n---\n{BODY}edited\n", encoding="utf-8")
+        # After the record, so the recorded digest is the pre-change one.
+        if variant == "edited":
+            (skill / "SKILL.md").write_text(
+                f"---\nname: {declared}\n---\n{BODY}edited\n", encoding="utf-8")
+        else:
+            _artefacts(skill)
     lock = tmp_path / "skills.lock"
-    write_lock(lock, store, *([TARGET] if lock_declares else []))
+    # `claims` comes from the lock's `bundles`, not from its skill keys, so an
+    # out-of-scope lock is one naming a bundle the record's entry did not come
+    # from — which is what routes a stale skill away from removal entirely.
+    write_lock(lock, store, *([TARGET] if lock_declares else []),
+               bundle="adam" if variant != "out-of-scope" else "other")
     return store, lock
 
 
@@ -3867,57 +3911,80 @@ _H, _U, _F, _K = prov.HOOK, prov.UNATTRIBUTED, prov.FOREIGN, prov.UNKNOWN
 # (origin, record present, lock declares, observation) ->
 #     (finding kinds, note kinds, exit code)
 # Every triple absent from the keys is unreachable and asserted to be.
+# (origin, record present, lock declares, observation, variant) ->
+#     (finding kinds, note kinds, exit code)
+# Every key absent from this table is unreachable and asserted to be. 49 of the
+# 112 cells are reachable: seven (origin, record, lock) triples the ladder can
+# produce, times the seven observation outcomes.
 MATRIX = {
-    (_H, True, True, "lock-expectation"): (set(), set(), 0),
-    (_H, True, True, "integrity"): ({"edited-and-locked"}, set(), 1),
-    (_H, True, True, "shadow"): (set(), {"shadowed-by-the-account-store"}, 0),
-    (_H, True, True, "foreign"): (set(), set(), 0),
+    ('hook', True, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
+    ('hook', True, True, 'integrity', 'edited'): ({'edited-and-locked'}, set(), 1),
+    ('hook', True, True, 'integrity', 'artefacts'): ({'artefacts-and-locked'}, set(), 1),
+    ('hook', True, True, 'lock-expectation', 'in-scope'): (set(), set(), 0),
+    ('hook', True, True, 'lock-expectation', 'out-of-scope'): (set(), set(), 0),
+    ('hook', True, True, 'shadow', 'identical'): (set(), {'shadowed-by-the-account-store'}, 0),
+    ('hook', True, True, 'shadow', 'divergent'): ({'shadow-copies-differ'}, set(), 1),
 
-    (_H, True, False, "lock-expectation"): (set(), {"stale"}, 0),
-    (_H, True, False, "integrity"): ({"edited-and-stale"}, set(), 1),
-    (_H, True, False, "shadow"): (set(),
-                                  {"stale", "shadowed-by-the-account-store"}, 0),
-    (_H, True, False, "foreign"): (set(), {"stale"}, 0),
-
-    (_U, True, True, "lock-expectation"): ({"hand-placed-over-locked"}, set(), 1),
-    (_U, True, True, "integrity"): ({"hand-placed-over-locked"}, set(), 1),
-    (_U, True, True, "shadow"): ({"hand-placed-over-locked"},
-                                 {"shadowed-by-the-account-store"}, 1),
-    (_U, True, True, "foreign"): ({"hand-placed-over-locked"}, set(), 1),
-
-    (_U, True, False, "lock-expectation"): ({"untracked"}, set(), 1),
-    (_U, True, False, "integrity"): ({"untracked"}, set(), 1),
-    (_U, True, False, "shadow"): ({"untracked"},
-                                  {"shadowed-by-the-account-store"}, 1),
-    (_U, True, False, "foreign"): ({"untracked"}, set(), 1),
+    ('hook', True, False, 'foreign', 'declares-another-name'): (set(), {'stale'}, 0),
+    ('hook', True, False, 'integrity', 'edited'): ({'edited-and-stale'}, set(), 1),
+    ('hook', True, False, 'integrity', 'artefacts'): ({'artefacts-and-stale'}, set(), 1),
+    ('hook', True, False, 'lock-expectation', 'in-scope'): (set(), {'stale'}, 0),
+    ('hook', True, False, 'lock-expectation', 'out-of-scope'): ({'stale-out-of-scope'}, set(), 1),
+    ('hook', True, False, 'shadow', 'identical'): (set(), {'shadowed-by-the-account-store', 'stale'}, 0),
+    ('hook', True, False, 'shadow', 'divergent'): ({'shadow-copies-differ'}, {'stale'}, 1),
 
     # The pair that made this table. A FOREIGN directory whose basename the
     # account store also holds emitted `shadow-copies-differ` at exit 1 beside
     # its own note saying there was nothing to fix, and no upload could have
-    # cleared it. Its shadow cell is now the same as its other three.
-    (_F, True, False, "lock-expectation"): (set(), {"foreign"}, 0),
-    (_F, True, False, "integrity"): (set(), {"foreign"}, 0),
-    (_F, True, False, "shadow"): (set(), {"foreign"}, 0),
-    (_F, True, False, "foreign"): (set(), {"foreign"}, 0),
+    # cleared it. Both shadow outcomes now sit here, and the DIVERGENT one is
+    # the shape that defect actually had — round 3's table could not express it.
+    ('foreign', True, False, 'foreign', 'declares-another-name'): (set(), {'foreign'}, 0),
+    ('foreign', True, False, 'integrity', 'edited'): (set(), {'foreign'}, 0),
+    ('foreign', True, False, 'integrity', 'artefacts'): (set(), {'foreign'}, 0),
+    ('foreign', True, False, 'lock-expectation', 'in-scope'): (set(), {'foreign'}, 0),
+    ('foreign', True, False, 'lock-expectation', 'out-of-scope'): (set(), {'foreign'}, 0),
+    ('foreign', True, False, 'shadow', 'identical'): (set(), {'foreign'}, 0),
+    ('foreign', True, False, 'shadow', 'divergent'): (set(), {'foreign'}, 0),
 
-    (_K, False, True, "lock-expectation"): (set(), set(), 0),
-    (_K, False, True, "integrity"): (set(), set(), 0),
-    (_K, False, True, "shadow"): (set(), {"shadowed-by-the-account-store"}, 0),
-    (_K, False, True, "foreign"): (set(), set(), 0),
+    ('unattributed', True, True, 'foreign', 'declares-another-name'): ({'hand-placed-over-locked'}, set(), 1),
+    ('unattributed', True, True, 'integrity', 'edited'): ({'hand-placed-over-locked'}, set(), 1),
+    ('unattributed', True, True, 'integrity', 'artefacts'): ({'hand-placed-over-locked'}, set(), 1),
+    ('unattributed', True, True, 'lock-expectation', 'in-scope'): ({'hand-placed-over-locked'}, set(), 1),
+    ('unattributed', True, True, 'lock-expectation', 'out-of-scope'): ({'hand-placed-over-locked'}, set(), 1),
+    ('unattributed', True, True, 'shadow', 'identical'): ({'hand-placed-over-locked'}, {'shadowed-by-the-account-store'}, 1),
+    ('unattributed', True, True, 'shadow', 'divergent'): ({'hand-placed-over-locked', 'shadow-copies-differ'}, set(), 1),
 
-    (_K, False, False, "lock-expectation"): ({"untracked"}, set(), 1),
-    (_K, False, False, "integrity"): ({"untracked"}, set(), 1),
-    (_K, False, False, "shadow"): ({"untracked"},
-                                   {"shadowed-by-the-account-store"}, 1),
-    (_K, False, False, "foreign"): ({"untracked"}, set(), 1),
+    ('unattributed', True, False, 'foreign', 'declares-another-name'): ({'untracked'}, set(), 1),
+    ('unattributed', True, False, 'integrity', 'edited'): ({'untracked'}, set(), 1),
+    ('unattributed', True, False, 'integrity', 'artefacts'): ({'untracked'}, set(), 1),
+    ('unattributed', True, False, 'lock-expectation', 'in-scope'): ({'untracked'}, set(), 1),
+    ('unattributed', True, False, 'lock-expectation', 'out-of-scope'): ({'untracked'}, set(), 1),
+    ('unattributed', True, False, 'shadow', 'identical'): ({'untracked'}, {'shadowed-by-the-account-store'}, 1),
+    ('unattributed', True, False, 'shadow', 'divergent'): ({'shadow-copies-differ', 'untracked'}, set(), 1),
+
+    ('unknown', False, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
+    ('unknown', False, True, 'integrity', 'edited'): (set(), set(), 0),
+    ('unknown', False, True, 'integrity', 'artefacts'): (set(), set(), 0),
+    ('unknown', False, True, 'lock-expectation', 'in-scope'): (set(), set(), 0),
+    ('unknown', False, True, 'lock-expectation', 'out-of-scope'): (set(), set(), 0),
+    ('unknown', False, True, 'shadow', 'identical'): (set(), {'shadowed-by-the-account-store'}, 0),
+    ('unknown', False, True, 'shadow', 'divergent'): ({'shadow-copies-differ'}, set(), 1),
+
+    ('unknown', False, False, 'foreign', 'declares-another-name'): ({'untracked'}, set(), 1),
+    ('unknown', False, False, 'integrity', 'edited'): ({'untracked'}, set(), 1),
+    ('unknown', False, False, 'integrity', 'artefacts'): ({'untracked'}, set(), 1),
+    ('unknown', False, False, 'lock-expectation', 'in-scope'): ({'untracked'}, set(), 1),
+    ('unknown', False, False, 'lock-expectation', 'out-of-scope'): ({'untracked'}, set(), 1),
+    ('unknown', False, False, 'shadow', 'identical'): ({'untracked'}, {'shadowed-by-the-account-store'}, 1),
+    ('unknown', False, False, 'shadow', 'divergent'): ({'shadow-copies-differ', 'untracked'}, set(), 1),
 }
 
-REACHABLE = {(origin, record, lock) for origin, record, lock, _ in MATRIX}
-CELLS = [(origin, record, lock, observation)
+REACHABLE = {(origin, record, lock) for origin, record, lock, _, _ in MATRIX}
+CELLS = [(origin, record, lock, observation, variant)
          for origin in prov.ORIGINS
          for record in (True, False)
          for lock in (True, False)
-         for observation in OBSERVATIONS]
+         for observation, variant in OBSERVATIONS]
 
 
 def test_the_matrix_is_complete():
@@ -3929,13 +3996,18 @@ def test_the_matrix_is_complete():
     accounts for it — either as a reachable cell with an expected outcome, or by
     being absent and therefore claimed unreachable.
     """
+    # And a new observation must declare its OUTCOMES rather than inheriting
+    # one, which is the hole the round-3 table had: `shadow` was in every cell
+    # and could only ever produce one of its two kinds.
+    assert set(OBSERVATION_VARIANTS) == set(prov.OBSERVATION_ORIGINS)
+    assert all(variants for variants in OBSERVATION_VARIANTS.values())
     assert set(MATRIX) <= set(CELLS)
-    assert set(MATRIX) == {(origin, record, lock, observation)
+    assert set(MATRIX) == {(origin, record, lock, observation, variant)
                            for origin, record, lock in REACHABLE
-                           for observation in OBSERVATIONS}
+                           for observation, variant in OBSERVATIONS}
     # And every origin the code names is REACHED by some cell. Without this the
-    # table absorbs a new origin silently: nothing assigns it, so all sixteen of
-    # its cells land in the unreachable branch and pass by saying nothing.
+    # table absorbs a new origin silently: nothing assigns it, so all of its
+    # cells land in the unreachable branch and pass by saying nothing.
     assert {origin for origin, _, _ in REACHABLE} == set(prov.ORIGINS)
 
 
@@ -3951,7 +4023,8 @@ def test_every_origin_an_observation_declares_is_exercised():
         for origin in origins:
             exercised = any(
                 (findings | notes) & kinds
-                for (cell_origin, _, _, cell_observation), (findings, notes, _)
+                for (cell_origin, _, _, cell_observation, _),
+                (findings, notes, _)
                 in MATRIX.items()
                 if cell_origin == origin and cell_observation == observation)
             assert exercised, (observation, origin)
@@ -3960,16 +4033,16 @@ def test_every_origin_an_observation_declares_is_exercised():
 @pytest.mark.parametrize(
     "cell", CELLS,
     ids=[f"{origin}-{'record' if record else 'norecord'}"
-         f"-{'locked' if lock else 'unlocked'}-{observation}"
-         for origin, record, lock, observation in CELLS])
+         f"-{'locked' if lock else 'unlocked'}-{observation}-{variant}"
+         for origin, record, lock, observation, variant in CELLS])
 def test_the_origin_observation_matrix(tmp_path, capsys, ephemeral, cell):
     """One cell of the cross-product, on the surface that raises the most.
 
     Ephemeral deliberately: it is the surface that promotes absences to
     findings, so an exit code recorded here is the worst case for that cell.
     """
-    origin, record_present, lock_declares, observation = cell
-    store, lock = matrix_store(tmp_path, origin, observation,
+    origin, record_present, lock_declares, observation, variant = cell
+    store, lock = matrix_store(tmp_path, origin, observation, variant,
                                record_present, lock_declares)
     code, out = run(store, lock, capsys)
     assigned = matrix_origin(out)
