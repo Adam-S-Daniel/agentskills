@@ -512,11 +512,37 @@ def materialize(repo: Path, ref: str, dest: Path) -> None:
         raise GeneratorError(
             f"git archive {ref} failed: {proc.stderr.decode('utf-8', 'replace').strip()}"
         )
-    with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as archive:
-        try:
-            archive.extractall(dest, filter="data")
-        except TypeError:  # Python < 3.11.4 has no extraction filters
-            archive.extractall(dest)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as archive:
+            try:
+                archive.extractall(dest, filter="data")
+            except TypeError:  # Python < 3.11.4 has no extraction filters
+                archive.extractall(dest)
+    except tarfile.TarError as exc:
+        # A commit whose tree has NO ENTRIES is the reachable case, and it is
+        # not the "no bytes at all" it looks like: git still writes its
+        # `pax_global_header` plus the usual padding (measured: 10240 bytes,
+        # first bytes `pax_global_header\0...`), and python's tarfile refuses
+        # that stream because a pax global header must be followed by a member
+        # header — `ReadError('end of file header')`.
+        #
+        # GeneratorError rather than the traceback that used to escape here:
+        # every other unusable input in this module is reported as a message,
+        # and _agent-guidance's bumper reads this tool's failures by shape —
+        # `^FAILED:` at column 0 for drift, an exit code for everything else. A
+        # traceback is neither, so a registry that emptied a source tree
+        # arrived there as an unclassifiable run.
+        empty = _git(repo, "ls-tree", "-r", "--name-only", ref)
+        if empty.returncode == 0 and not empty.stdout.strip():
+            raise GeneratorError(
+                f"{repo}: the tree at {ref} has no files in it at all, so there is "
+                "nothing to read skills from. Check the ref, and check that this clone "
+                "is the repository you meant — an emptied registry is a registry-side "
+                "decision, not something a lock can be re-pinned through."
+            ) from None
+        raise GeneratorError(
+            f"cannot read `git archive {ref}` in {repo}: {exc}"
+        ) from None
 
 
 def ignored_paths(repo: Path) -> frozenset:
