@@ -1015,6 +1015,37 @@ def read_lock(path: Path) -> Lock:
 
     `digests` is what decides whether a directory nothing attributes to the hook
     gets overwritten anyway — `may_replace`'s second clause. See `Lock`.
+
+    THE WHOLE-LOCK GATE COMES FIRST, and every check below that can return
+    REJECTED is part of it. The hook validates the entire lock and `sys.exit`s
+    BEFORE the install loop exists, so a lock failing one of these is not a lock
+    with one bad row: it is a lock that installs NOTHING, on every session start,
+    while `$LEFT_IN_PLACE` keeps whatever the store already had. Anything this
+    function reported about such a lock — a name declared, a digest expected, a
+    skill "missing" — would describe a run that does not happen.
+
+    That is why a bad row is REJECTED here and not skipped. Round 5 parsed each
+    digest and `continue`d past a malformed one, then returned PRESENT and let
+    the whole report proceed: measured end to end, one digest hand-edited to
+    `"not-a-digest"` gave `skills: DEGRADED — could not read …/skills.lock` at
+    every session start and an empty store, and the doctor answered exit 0,
+    `FINDINGS (0)`, `2 skill(s) declared`. Skipping the row is the one answer
+    that cannot be right, because the row is not what the hook refused.
+
+    THE ORDER IS THE HOOK'S OWN, so the reason this reports is the reason the
+    hook's `$LOG` carries: `'skills'` shape, then routing, then a pass over
+    `sorted(skills)` doing key shape, digest, the `synced` refusal and the
+    unclaimed bundle. A lock failing two of them is refused for the first,
+    exactly as the hook exits on the first.
+
+    Still a SUBSET, and deliberately: `ref`, `layout`, the `sources` cap and a
+    source's unknown keys are refusals this does not model, so a lock carrying
+    only one of those still reads PRESENT here while the hook refuses it. Each
+    of those is a field this script never judges anything against, so modelling
+    it would add a second copy of the hook's parser without changing a sentence.
+    `test_a_lock_this_rejects_is_one_the_hook_rejects_too` binds the direction
+    that can lie — everything called REJECTED here is refused by the real hook —
+    and the skill's known limitations carry the other.
     """
     try:
         lock = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -1025,28 +1056,12 @@ def read_lock(path: Path) -> Lock:
     if not isinstance(lock, dict):
         return Lock(UNREADABLE, set(), set())
 
-    skills = lock.get("skills")
+    # `lock.get("skills") or {}` is the hook's own line: absent, null and empty
+    # are all "no skills", and only a truthy non-object is the error.
+    skills = lock.get("skills") or {}
     if not isinstance(skills, dict):
-        skills = {}
-    # The destination is the key's LAST segment, the same reading the hook
-    # installs by — `adam/foo` and `other/foo` are one directory, not two.
-    names = {key.rsplit("/", 1)[-1] for key in skills if isinstance(key, str)}
-
-    # The digest each destination is expected to end up holding, normalised the
-    # way the hook normalises it before writing `skills.nul` — a `sha256:` prefix
-    # is stripped there, and `digest_dir`'s answer, which `may_replace` compares
-    # against, is always bare hex. A value that is neither shape is skipped here
-    # rather than rejected: the hook exits the whole lock over one, so nothing
-    # this function could return about such a lock would describe a run that
-    # happens. What that leaves open is recorded in the skill's own known
-    # limitations, not papered over with a guess.
-    digests: Dict[str, Set[str]] = {}
-    for key, digest in skills.items():
-        if not isinstance(key, str) or not isinstance(digest, str):
-            continue
-        matched = re.fullmatch(r"(?:sha256:)?([0-9a-f]{64})", digest)
-        if matched:
-            digests.setdefault(key.rsplit("/", 1)[-1], set()).add(matched.group(1))
+        return Lock(REJECTED, set(), set(),
+                    "'skills' must be an object")
 
     # The subset of the hook's lock validation that changes what this reports.
     # Not the whole of it — but a lock failing any of these is one the hook
@@ -1075,10 +1090,40 @@ def read_lock(path: Path) -> Lock:
                             f"bundle has one registry and one layout")
             claims.add((url, bundle))
 
-    for key in skills:
-        if isinstance(key, str) and "/" in key and key.split("/", 1)[0] not in owner:
+    # `sorted(skills)`, the hook's own iteration order, so that a lock with two
+    # bad rows is refused for the row the hook's log names.
+    names: Set[str] = set()
+    digests: Dict[str, Set[str]] = {}
+    for key in sorted(skills):
+        if not isinstance(key, str) or not re.fullmatch(
+                NAME.pattern + "/" + NAME.pattern, key):
+            return Lock(REJECTED, set(), set(),
+                        f"skill key {key!r} is not '<bundle>/<skill>'")
+        bundle, name = key.split("/", 1)
+        # BOTH shapes, normalised to bare hex exactly as the hook normalises
+        # before it writes `skills.nul` — `digest_dir`'s answer, which
+        # `may_replace` compares against, is always bare hex. Neither shape is
+        # the whole-lock refusal the round-5 comment here called a skipped row.
+        digest = skills[key]
+        matched = (re.fullmatch(r"(?:sha256:)?([0-9a-f]{64})", digest)
+                   if isinstance(digest, str) else None)
+        if matched is None:
+            return Lock(REJECTED, set(), set(),
+                        f"skill {key!r} has no sha256 digest")
+        if name == ACCOUNT_DIR:
+            return Lock(REJECTED, set(), set(),
+                        f"skill {key!r} would install over ~/.claude/skills/"
+                        f"{ACCOUNT_DIR}, the claude.ai account-sync directory, "
+                        f"which this hook never installs into and is not its to "
+                        f"replace or delete")
+        if bundle not in owner:
             return Lock(REJECTED, set(), set(),
                         f"skill {key!r} names a bundle no source claims")
+        # The destination is the key's LAST segment, the same reading the hook
+        # installs by — `adam/foo` and `other/foo` are one directory, not two.
+        names.add(name)
+        digests.setdefault(name, set()).add(matched.group(1))
+
     return Lock(PRESENT, names, claims,
                 digests={name: frozenset(values)
                          for name, values in digests.items()})

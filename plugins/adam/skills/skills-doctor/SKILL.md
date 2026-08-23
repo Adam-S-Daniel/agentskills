@@ -229,9 +229,18 @@ collapse them into "no record":
 The lock has states of its own, and one of them is not a shade of "no lock":
 a file that parses as JSON but that the hook's reader **refuses** — no
 `bundles`, a bundle no source claims, a registry that is not `OWNER/REPO` or a
-URL. It installs nothing at all from such a lock, so every skill judgement made
-against one names a cause that never happened. `check_provenance.py` reports it
-as `lock-rejected` and withholds the rest.
+URL, a `skills` value that is not an object, a key that is not
+`<bundle>/<skill>`, a digest that is not 64 hex (with or without a `sha256:`
+prefix), or a key whose skill part is `synced`. The refusal is the WHOLE LOCK
+and it happens **before** the install loop exists: it installs nothing at all
+from such a lock, so every skill judgement made against one names a cause that
+never happened. `check_provenance.py` reports it as `lock-rejected` and
+withholds the rest — no declared count, no `missing`.
+
+One bad row is therefore never one bad skill. A single hand-edited digest stops
+delivery of every skill in that lock, and the session-start verdict says only
+`DEGRADED — could not read …/skills.lock`; the reason is in the hook's `$LOG`,
+and `lock-rejected` names it.
 
 Only when the record cannot answer — absent, or unreadable — does the old
 heuristic apply: directories the hook wrote in one run share an mtime, because
