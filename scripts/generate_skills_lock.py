@@ -390,6 +390,9 @@ _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _REF_RE = re.compile(r"[A-Za-z0-9._/+:@-]+")
 _URL_RE = re.compile(r"(?:https|file)://[A-Za-z0-9._~:/?#@%!$&()*+,;=\[\]-]+")
 _CONTROL_RE = re.compile(r"[\s\x00-\x1f\x7f]")
+# The same set MINUS the space, for a caller-supplied local path — which may
+# legitimately contain one. See `_reject_line_breaks`.
+_LINE_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
 # A ref that IDENTIFIES a commit, as against `_REF_RE`, which only says a ref
 # is safe to hand to git and the hook. What it decides: whether a --repin may
 # treat the lock's own pin as proof that the clone in front of it is the
@@ -606,6 +609,33 @@ def _reject_control(value: str, where: str) -> None:
         raise GeneratorError(f"{where}: must not contain whitespace or control characters")
 
 
+def _reject_line_breaks(value: str, where: str) -> str:
+    """The same guard for a caller-supplied PATH, minus the space.
+
+    Every value `_addressing` echoes — `--repo`, `--source-repo`, `-o` — lands
+    inside a line this file tells a reader to run, on the stream
+    _agent-guidance's scripts/bump-consumer-locks.sh greps for `^FAILED:` and
+    slices into a PR body. A newline in one of them writes a second line into
+    that stream: a fabricated `FAILED:` headline at column 0, or a second
+    `python3 ...` under a headline that did not produce it, which is exactly
+    what `report_drift`'s cross-repo contract says cannot happen.
+    `shlex.quote` does not help — it preserves a newline inside single quotes
+    rather than rejecting it.
+
+    Separate from `_reject_control` for ONE reason, and it is the reason this
+    is not simply that function: a local path may legitimately contain a
+    SPACE, and `_CONTROL_RE` rejects one. A registry, ref or layout may not,
+    which is why those keep the stricter guard. Everything else about the two
+    is the same, deliberately — TAB, LF, CR, NUL and DEL are refused here too.
+    """
+    if _LINE_UNSAFE_RE.search(value):
+        raise GeneratorError(
+            f"{where}: must not contain control characters. This value is echoed "
+            "into a command this tool prints, and a line break there forges a "
+            "second line in a stream other tools read by line.")
+    return value
+
+
 def validate_registry(registry: str, where: str) -> str:
     """Reject a registry the bootstrap hook would refuse at session start.
 
@@ -810,11 +840,18 @@ def parse_source(spec: str) -> dict:
 
 
 def parse_source_repo(spec: str) -> Tuple[str, str]:
-    """Parse `--source-repo '<key>=<local path>'`."""
+    """Parse `--source-repo '<key>=<local path>'`.
+
+    Both halves are line-checked for the reason `_reject_line_breaks` gives:
+    this spec is restated verbatim in every command a report prints, and the
+    fleet bumper slices that stream by line.
+    """
     key, sep, path = spec.partition("=")
     if not sep or not key.strip() or not path.strip():
         raise GeneratorError(f"--source-repo {spec!r}: expected '<key>=<local path>'")
-    return key.strip(), path.strip()
+    where = f"--source-repo {spec!r}"
+    return (_reject_line_breaks(key.strip(), where),
+            _reject_line_breaks(path.strip(), where))
 
 
 def parse_repin_source(spec: str) -> Tuple[str, str]:
@@ -2811,8 +2848,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(digest_skill_dir(Path(args.digest)))
         return 0
 
-    repo = Path(args.repo) if args.repo else REPO_ROOT
-    output = Path(args.output) if args.output else DEFAULT_LOCK
+    # Line-checked before anything is printed, because both are echoed into
+    # every command a verdict prints (`_addressing`). The third such value,
+    # `--source-repo`, is checked by its own parser below.
+    repo = Path(_reject_line_breaks(args.repo, "--repo")) if args.repo else REPO_ROOT
+    output = (Path(_reject_line_breaks(args.output, "-o")) if args.output
+              else DEFAULT_LOCK)
     # Parsed HERE, above --check-format's early return, although only the paths
     # below the return consult the map: every verdict now restates these specs
     # in the command it prints (see `_addressing`), and a malformed one echoed
