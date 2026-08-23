@@ -348,7 +348,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Collection, Dict, Iterable, List, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY = "Adam-S-Daniel/agentskills"
@@ -793,7 +793,7 @@ def parse_repin_source(spec: str) -> Tuple[str, str]:
     return registry, (validate_ref(ref, f"--repin-source {spec!r}") if ref else "")
 
 
-def restated_sources(extras: Sequence[dict], unproven: str = "") -> str:
+def restated_sources(extras: Sequence[dict], unproven: Collection[str] = ()) -> str:
     """The `--source` flags a plain generate needs to leave this lock federated.
 
     Appended to every refusal that sends a reader to a plain generate, because
@@ -812,15 +812,18 @@ def restated_sources(extras: Sequence[dict], unproven: str = "") -> str:
     reason, and the dup-registry refusal says "the whole array" — but each new
     refusal had to remember, and the third one did not.
 
-    `unproven` names a registry whose recorded ref is the thing being refused;
-    it is rendered `<sha>` rather than echoed back, since echoing it would
-    advise restating the pin as the string that is not a pin.
+    `unproven` names registries whose recorded ref is the thing being refused;
+    each is rendered `<sha>` rather than echoed back, since echoing one would
+    advise restating the pin as the string that is not a pin. A plain `str`
+    would be a Collection of its own characters and match nothing, so callers
+    pass a tuple or a set.
     """
+    assert not isinstance(unproven, str), "unproven is a collection of registries"
     if not extras:
         return ""
     flags = " ".join(
         "--source '{}'".format(_source_spec(
-            {**source, "ref": "<sha>"} if source["registry"] == unproven else source))
+            {**source, "ref": "<sha>"} if source["registry"] in unproven else source))
         for source in extras
     )
     return (
@@ -937,9 +940,47 @@ def repin_source_blocker(
             "resolves in any clone, so re-pinning against one would write whatever some "
             "unverified directory is sitting on. Restate that source at the commit it is "
             "actually on with a plain generate, then advance it."
-            + restated_sources(extras, unproven=registry)
+            + restated_sources(extras, unproven=(registry,))
         )
     return None
+
+
+def repin_unproven_sources_blocker(extras: Sequence[dict], output: Path) -> Optional[str]:
+    """Why NO --repin of this lock can be trusted — a source pinned at a branch.
+
+    Scoped to the whole invocation rather than to one registry, because that is
+    the scope of the damage: plan_sources resolves EVERY source's ref before
+    build_lock writes it, whether or not `--repin-source` named that source, so
+    a `"ref": "main"` anywhere in the array is re-pinned to whatever the sibling
+    clone is sitting on. The per-source identity probe cannot help — it asks
+    whether the checkout contains the commit the lock pins, and `main^{commit}`
+    resolves in any clone with a main branch, which is the whole reason a branch
+    name is refused rather than resolved-and-hoped.
+
+    Measured before this refusal, with srcB hand-pinned at 'main' and its
+    sibling clone replaced by a wholly unrelated repository: a BARE `--repin`
+    naming nothing wrote the impostor's HEAD under srcB's registry at exit 0.
+
+    `validate_ref` accepts a branch name in a source's ref and this generator
+    never writes one — a `--source 'b=reg@main:skills'` lands as a 40-hex sha —
+    so the only route in is a hand-edited lock. That makes the shape rare and
+    not unreachable, which is the same standing the primary's branch pin has.
+    """
+    unproven = [source for source in extras
+                if not _COMMIT_SHA_RE.fullmatch(source["ref"])]
+    if not unproven:
+        return None
+    named = ", ".join(f"{source['registry']} at {source['ref']!r}" for source in unproven)
+    return (
+        f"{output} pins a federated source at something that is not a commit sha "
+        f"({named}). EVERY --repin re-resolves EVERY source's ref, named on "
+        "--repin-source or not, so a branch name there is re-pinned to whatever some "
+        "sibling clone is sitting on — and the commit the lock pins is the only thing "
+        "that proves that clone is the registry at all. Restate those sources at the "
+        "commits they are actually on with a plain generate, then advance them."
+        + restated_sources(extras,
+                           unproven={source["registry"] for source in unproven})
+    )
 
 
 def repin_primary_blocker(
@@ -980,7 +1021,7 @@ def repin_primary_blocker(
 def _repin_primary_guard(
     existing: dict, extras: Sequence[dict], registry: str, output: Path, repo: Path
 ) -> None:
-    """Refuse a --repin whose primary pin cannot be advanced from this clone.
+    """Refuse a --repin this lock and this clone cannot support.
 
     The lock names a registry; --repo names a clone. Nothing else ties the two
     together, and when they are different repositories the re-pin writes a
@@ -998,7 +1039,8 @@ def _repin_primary_guard(
     foresee: it depends on the clone in front of this process, which is not in
     the lock.
     """
-    blocker = repin_primary_blocker(existing, extras, registry, output)
+    blocker = (repin_primary_blocker(existing, extras, registry, output)
+               or repin_unproven_sources_blocker(extras, output))
     if blocker:
         raise GeneratorError(blocker)
     pinned = existing["ref"]
@@ -1051,14 +1093,17 @@ def _apply_repin_sources(
     nothing here rewrites it, reorders it or drops it.
 
     That is a promise about this function and NOT about the bytes that reach
-    disk, and the two part company for a ref this generator would never have
-    written: `validate_ref` accepts a BRANCH name in a source's ref, so a lock
-    can carry `"ref": "main"`, and plan_sources resolves every source's ref
-    downstream — so such a source is re-resolved, and can advance, under any
-    --repin at all, this flag or a bare one. For a ref that is already a 40-hex
-    sha, which is all this generator writes, by-reference and byte-identical
-    are the same thing. `test_an_unnamed_source_with_a_branch_ref_is_re_resolved`
-    is the measurement.
+    disk, and the two used to part company for a ref this generator would never
+    have written: `validate_ref` accepts a BRANCH name in a source's ref, so a
+    lock can carry `"ref": "main"`, and plan_sources resolves every source's
+    ref downstream — so such a source was re-resolved, and could advance,
+    under any --repin at all, this flag or a bare one. `--repin` now refuses
+    that lock outright (`repin_unproven_sources_blocker`), which closes the gap
+    rather than narrowing this promise around it. For a ref that is already a
+    40-hex sha, which is all this generator writes and now all a --repin will
+    read, by-reference and byte-identical are the same thing.
+    `test_an_unnamed_source_pinned_at_a_branch_refuses_the_whole_repin` is the
+    measurement.
 
     ADDING a source is refused rather than allowed as a convenience — it
     changes what the lock means, which is a plain generate's decision — and so
@@ -1097,20 +1142,21 @@ def _apply_repin_sources(
         # green afterwards because it re-derives from that same wrong clone.
         # The pin the lock ALREADY carries is the proof: a checkout that is
         # this registry has that commit. That sentence is only true because
-        # repin_source_blocker has already refused a source whose pin is not a
-        # commit sha — `main^{commit}` resolves in any clone with a main
-        # branch, so a branch-name pin proves nothing and this probe would pass
-        # an impostor. The two belong together; neither is the guard alone.
+        # `repin_unproven_sources_blocker` has already refused a lock any of
+        # whose sources is pinned at something other than a commit sha —
+        # `main^{commit}` resolves in any clone with a main branch, so a
+        # branch-name pin proves nothing and this probe would pass an impostor.
+        # The two belong together; neither is the guard alone.
         #
         # Every source this flag does NOT name is probed the same way by
-        # accident downstream, for a sha pin: plan_sources resolves its
-        # inherited ref in this same clone and fails there. That accident does
-        # NOT extend to a branch-name pin, which resolves anywhere — an unnamed
-        # source carrying one is re-resolved and can advance against an
-        # unproven clone, which is pre-existing behaviour this flag neither
-        # introduces nor repairs
-        # (`test_an_unnamed_source_with_a_branch_ref_is_re_resolved`). The
-        # NAMED source is what loses even the sha half of that accident,
+        # accident downstream: plan_sources resolves its inherited ref in this
+        # same clone and fails there. That accident holds for a sha pin only,
+        # which is why the blocker above refuses the whole invocation rather
+        # than the named registry — a branch name resolves anywhere, so an
+        # unnamed source carrying one used to advance against an unproven clone
+        # (`test_an_unnamed_source_pinned_at_a_branch_refuses_the_whole_repin`
+        # is the measurement, and was written the other way round in round 3).
+        # The NAMED source is what loses even the sha half of that accident,
         # because its ref is replaced before plan_sources sees it. This
         # restores the guard rather than adding one.
         if _git(path, "cat-file", "-e", f"{source['ref']}^{{commit}}").returncode != 0:
@@ -1905,14 +1951,15 @@ def report_drift(
     # Asked once, up here, and consulted by both branches: asking it only in
     # the branch it was written for is precisely how the source-side fix left
     # the primary side printing a command the generator refuses.
-    primary_blocked = repin_primary_blocker(existing, extras, registry, output)
+    blocked = (repin_primary_blocker(existing, extras, registry, output)
+               or repin_unproven_sources_blocker(extras, output))
     for source, differences in drifted:
         if source["is_primary"]:
-            if primary_blocked:
+            if blocked:
                 print(f"FAILED: the bundle has moved on since {ref}, which {output} "
                       "still pins — nothing added or changed since then reaches an "
                       "ephemeral surface. No re-pin command is printed for it "
-                      f"because this generator would refuse one: {primary_blocked}")
+                      f"because this generator would refuse one: {blocked}")
                 for line in differences:
                     print(f"  - {line}")
                 continue
@@ -1943,7 +1990,11 @@ def report_drift(
             # verbatim and in the headline itself, so the block
             # carries its own answer instead of a command that has
             # none.
-            blocker = primary_blocked or repin_source_blocker(
+            # Same precedence as `_repin_primary_guard`, deliberately: the
+            # command this block would print is a --repin, so it meets those
+            # refusals first, and a report that named a later reason would be
+            # handing the reader a sentence the flag never says.
+            blocker = blocked or repin_source_blocker(
                 extras, source["registry"], registry)
             if blocker:
                 print(f"FAILED: {source['registry']}'s bundles have moved on "
