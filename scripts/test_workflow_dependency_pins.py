@@ -81,18 +81,19 @@ REQUIREMENTS = REPO_ROOT / "requirements-dev.txt"
 
 # Characters shlex hands back as their own tokens rather than folding into a
 # word. The shell's own command separators, plus `\n` — which shlex counts as
-# whitespace by default, and which has to stop a command here because a `run:`
-# body is many commands one per line.
+# whitespace by default, and which has to end a command here, because a `run:`
+# body separates its commands by line as much as by `;`.
 PUNCTUATION = "();<>|&\n"
-# `{` and `}` are not shell operators, but `{ cmd; }` puts one against a
-# command with no space, and neither ever starts a command.
+# `{` and `}` are not shell operators, but a `{ ...; }` group puts them where a
+# command begins and ends, and neither is ever the program being run.
 BRACES = {"{", "}"}
 
-# Cheap pre-filter. Tokenising is only attempted on text that could hold a pip
-# install at all, which keeps shlex away from scalars that are prose rather
-# than shell: an apostrophe is an unbalanced quote to shlex, and this repo has
-# a step `name:` with one in it. Text that gets past this filter and still
-# cannot be tokenised is reported, not skipped.
+# Cheap pre-filter, and a sound one: every rule below needs either the letters
+# `pip` or the word `install` present, so nothing the scanner could have
+# flagged is dropped here. What it buys is keeping shlex away from scalars that
+# are prose rather than shell — an apostrophe is an unbalanced quote to shlex,
+# and this repo has a step `name:` with one in it. Text that gets past the
+# filter and still cannot be tokenised is reported, not skipped.
 PIP_HINT = re.compile(r"pip|install", re.IGNORECASE)
 
 # A token that names the pip program: `pip`, `pip3`, `pip3.11`, and the same
