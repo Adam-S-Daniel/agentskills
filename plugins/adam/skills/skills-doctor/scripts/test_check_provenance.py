@@ -179,7 +179,8 @@ def _walk_up(relpath: str):
     `__pycache__` and a `.pytest_cache` in the installed directory, which the
     bootstrap hook then refuses to overwrite; the doctor reports
     `artefacts-and-locked` and names the files to delete, rather than calling
-    the directory edited and asking for a restore nobody can perform.) Inside a registry checkout
+    the directory edited and asking for a restore nobody can perform.) Inside
+    a registry checkout
     it is not: the tests that use this are the only ones binding the digest, the
     record format and the hook's own refusal rule to the real hook, and a skip
     would retire them silently at exactly the moment they broke. So a
@@ -532,7 +533,8 @@ def test_a_skill_in_neither_the_lock_nor_the_record_is_a_finding(store, capsys):
     "the hook will never update it and never remove it", is then false on its
     face: lock A's judgement of the same directory is `hand-placed-over-locked`,
     which says the hook is holding that lock's delivery back over it. Two
-    findings, one directory, flatly contradicting each other. Only one lock was ever observed to be in
+    findings, one directory, flatly contradicting each other. Only one lock
+    was ever observed to be in
     play when the sentence was written, so it now says only what that one lock
     can support.
     """
@@ -3518,7 +3520,8 @@ ORDINARY_SESSIONS = (
     # refuses the directory, the skill stops receiving updates, and that run's
     # `skills:` verdict is DEGRADED. Sitting here it forced exit 0, which is how
     # a false green got written into the note that replaced the finding. Its
-    # test is `test_running_a_suite_inside_an_installed_skill_does_not_make_it_edited`.
+    # test is
+    # `test_running_a_suite_inside_an_installed_skill_does_not_make_it_edited`.
     _ordinary_harness_seeded_a_directory,
     _ordinary_seeded_name_the_account_store_also_holds,
     _ordinary_skill_left_the_lock,
@@ -3665,7 +3668,8 @@ def hook_may_replace(dest: Path, name: str, locked: str,
         'while [ "$#" -gt 0 ]; do REC_NAME+=("$1"); REC_DIGEST+=("$2"); shift 2; done\n'
         + _bash_function(source, "digest_dir")
         + _bash_function(source, "may_replace")
-        + 'if may_replace "$subject" "$want"; then echo REPLACE; else echo REFUSE; fi\n',
+        + 'if may_replace "$subject" "$want"; then echo REPLACE; '
+          'else echo REFUSE; fi\n',
         encoding="utf-8")
     flat_record = [field for row in recorded for field in row]
     done = subprocess.run(
@@ -3853,9 +3857,9 @@ def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory
 # planted one shadow, one integrity state and one lock scope, so three of the
 # four observations were in every reachable cell and between them could not
 # produce `shadow-copies-differ`, `artefacts-and-*` or `stale-out-of-scope`
-# anywhere at all. `OBSERVATION_VARIANTS` below is where a new observation declares what its
-# outcomes are, and `test_the_matrix_is_complete` will not let one be added
-# without them. Each unreachable one asserts that the ladder cannot produce
+# anywhere at all. `OBSERVATION_VARIANTS` below is where a new observation
+# declares what its outcomes are, and `test_the_matrix_is_complete` will not let
+# one be added without them. Each unreachable one asserts that the ladder cannot produce
 # that origin from those inputs at all — which is how a dead branch shows up
 # here as a fact rather than as a comment claiming it is live.
 # ---------------------------------------------------------------------------
@@ -3973,66 +3977,95 @@ _H, _U, _F, _K = prov.HOOK, prov.UNATTRIBUTED, prov.FOREIGN, prov.UNKNOWN
 # shape: 49 of 112 cells reachable, being the seven (origin, record, lock)
 # triples the ladder can produce times the seven observation outcomes.
 MATRIX = {
-    ('hook', True, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
-    ('hook', True, True, 'integrity', 'edited'): ({'edited-and-locked'}, set(), 1),
-    ('hook', True, True, 'integrity', 'artefacts'): ({'artefacts-and-locked'}, set(), 1),
-    ('hook', True, True, 'lock-expectation', 'in-scope'): (set(), set(), 0),
-    ('hook', True, True, 'lock-expectation', 'out-of-scope'): (set(), set(), 0),
-    ('hook', True, True, 'shadow', 'identical'): (set(), {'shadowed-by-the-account-store'}, 0),
-    ('hook', True, True, 'shadow', 'divergent'): ({'shadow-copies-differ'}, set(), 1),
+    (_H, True, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
+    (_H, True, True, 'integrity', 'edited'): ({'edited-and-locked'}, set(), 1),
+    (_H, True, True, 'integrity', 'artefacts'):
+        ({'artefacts-and-locked'}, set(), 1),
+    (_H, True, True, 'lock-expectation', 'in-scope'): (set(), set(), 0),
+    (_H, True, True, 'lock-expectation', 'out-of-scope'): (set(), set(), 0),
+    (_H, True, True, 'shadow', 'identical'):
+        (set(), {'shadowed-by-the-account-store'}, 0),
+    (_H, True, True, 'shadow', 'divergent'):
+        ({'shadow-copies-differ'}, set(), 1),
 
-    ('hook', True, False, 'foreign', 'declares-another-name'): (set(), {'stale'}, 0),
-    ('hook', True, False, 'integrity', 'edited'): ({'edited-and-stale'}, set(), 1),
-    ('hook', True, False, 'integrity', 'artefacts'): ({'artefacts-and-stale'}, set(), 1),
-    ('hook', True, False, 'lock-expectation', 'in-scope'): (set(), {'stale'}, 0),
-    ('hook', True, False, 'lock-expectation', 'out-of-scope'): ({'stale-out-of-scope'}, set(), 1),
-    ('hook', True, False, 'shadow', 'identical'): (set(), {'shadowed-by-the-account-store', 'stale'}, 0),
-    ('hook', True, False, 'shadow', 'divergent'): ({'shadow-copies-differ'}, {'stale'}, 1),
+    (_H, True, False, 'foreign', 'declares-another-name'):
+        (set(), {'stale'}, 0),
+    (_H, True, False, 'integrity', 'edited'): ({'edited-and-stale'}, set(), 1),
+    (_H, True, False, 'integrity', 'artefacts'):
+        ({'artefacts-and-stale'}, set(), 1),
+    (_H, True, False, 'lock-expectation', 'in-scope'): (set(), {'stale'}, 0),
+    (_H, True, False, 'lock-expectation', 'out-of-scope'):
+        ({'stale-out-of-scope'}, set(), 1),
+    (_H, True, False, 'shadow', 'identical'):
+        (set(), {'shadowed-by-the-account-store', 'stale'}, 0),
+    (_H, True, False, 'shadow', 'divergent'):
+        ({'shadow-copies-differ'}, {'stale'}, 1),
 
     # The pair that made this table. A FOREIGN directory whose basename the
     # account store also holds emitted `shadow-copies-differ` at exit 1 beside
     # its own note saying there was nothing to fix, and no upload could have
     # cleared it. Both shadow outcomes now sit here, and the DIVERGENT one is
     # the shape that defect actually had — round 3's table could not express it.
-    ('foreign', True, False, 'foreign', 'declares-another-name'): (set(), {'foreign'}, 0),
-    ('foreign', True, False, 'integrity', 'edited'): (set(), {'foreign'}, 0),
-    ('foreign', True, False, 'integrity', 'artefacts'): (set(), {'foreign'}, 0),
-    ('foreign', True, False, 'lock-expectation', 'in-scope'): (set(), {'foreign'}, 0),
-    ('foreign', True, False, 'lock-expectation', 'out-of-scope'): (set(), {'foreign'}, 0),
-    ('foreign', True, False, 'shadow', 'identical'): (set(), {'foreign'}, 0),
-    ('foreign', True, False, 'shadow', 'divergent'): (set(), {'foreign'}, 0),
+    (_F, True, False, 'foreign', 'declares-another-name'):
+        (set(), {'foreign'}, 0),
+    (_F, True, False, 'integrity', 'edited'): (set(), {'foreign'}, 0),
+    (_F, True, False, 'integrity', 'artefacts'): (set(), {'foreign'}, 0),
+    (_F, True, False, 'lock-expectation', 'in-scope'): (set(), {'foreign'}, 0),
+    (_F, True, False, 'lock-expectation', 'out-of-scope'):
+        (set(), {'foreign'}, 0),
+    (_F, True, False, 'shadow', 'identical'): (set(), {'foreign'}, 0),
+    (_F, True, False, 'shadow', 'divergent'): (set(), {'foreign'}, 0),
 
-    ('unattributed', True, True, 'foreign', 'declares-another-name'): ({'hand-placed-over-locked'}, set(), 1),
-    ('unattributed', True, True, 'integrity', 'edited'): ({'hand-placed-over-locked'}, set(), 1),
-    ('unattributed', True, True, 'integrity', 'artefacts'): ({'hand-placed-over-locked'}, set(), 1),
-    ('unattributed', True, True, 'lock-expectation', 'in-scope'): ({'hand-placed-over-locked'}, set(), 1),
-    ('unattributed', True, True, 'lock-expectation', 'out-of-scope'): ({'hand-placed-over-locked'}, set(), 1),
-    ('unattributed', True, True, 'shadow', 'identical'): ({'hand-placed-over-locked'}, {'shadowed-by-the-account-store'}, 1),
-    ('unattributed', True, True, 'shadow', 'divergent'): ({'hand-placed-over-locked', 'shadow-copies-differ'}, set(), 1),
+    (_U, True, True, 'foreign', 'declares-another-name'):
+        ({'hand-placed-over-locked'}, set(), 1),
+    (_U, True, True, 'integrity', 'edited'):
+        ({'hand-placed-over-locked'}, set(), 1),
+    (_U, True, True, 'integrity', 'artefacts'):
+        ({'hand-placed-over-locked'}, set(), 1),
+    (_U, True, True, 'lock-expectation', 'in-scope'):
+        ({'hand-placed-over-locked'}, set(), 1),
+    (_U, True, True, 'lock-expectation', 'out-of-scope'):
+        ({'hand-placed-over-locked'}, set(), 1),
+    (_U, True, True, 'shadow', 'identical'):
+        ({'hand-placed-over-locked'}, {'shadowed-by-the-account-store'}, 1),
+    (_U, True, True, 'shadow', 'divergent'):
+        ({'hand-placed-over-locked', 'shadow-copies-differ'}, set(), 1),
 
-    ('unattributed', True, False, 'foreign', 'declares-another-name'): ({'untracked'}, set(), 1),
-    ('unattributed', True, False, 'integrity', 'edited'): ({'untracked'}, set(), 1),
-    ('unattributed', True, False, 'integrity', 'artefacts'): ({'untracked'}, set(), 1),
-    ('unattributed', True, False, 'lock-expectation', 'in-scope'): ({'untracked'}, set(), 1),
-    ('unattributed', True, False, 'lock-expectation', 'out-of-scope'): ({'untracked'}, set(), 1),
-    ('unattributed', True, False, 'shadow', 'identical'): ({'untracked'}, {'shadowed-by-the-account-store'}, 1),
-    ('unattributed', True, False, 'shadow', 'divergent'): ({'shadow-copies-differ', 'untracked'}, set(), 1),
+    (_U, True, False, 'foreign', 'declares-another-name'):
+        ({'untracked'}, set(), 1),
+    (_U, True, False, 'integrity', 'edited'): ({'untracked'}, set(), 1),
+    (_U, True, False, 'integrity', 'artefacts'): ({'untracked'}, set(), 1),
+    (_U, True, False, 'lock-expectation', 'in-scope'):
+        ({'untracked'}, set(), 1),
+    (_U, True, False, 'lock-expectation', 'out-of-scope'):
+        ({'untracked'}, set(), 1),
+    (_U, True, False, 'shadow', 'identical'):
+        ({'untracked'}, {'shadowed-by-the-account-store'}, 1),
+    (_U, True, False, 'shadow', 'divergent'):
+        ({'shadow-copies-differ', 'untracked'}, set(), 1),
 
-    ('unknown', False, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
-    ('unknown', False, True, 'integrity', 'edited'): (set(), set(), 0),
-    ('unknown', False, True, 'integrity', 'artefacts'): (set(), set(), 0),
-    ('unknown', False, True, 'lock-expectation', 'in-scope'): (set(), set(), 0),
-    ('unknown', False, True, 'lock-expectation', 'out-of-scope'): (set(), set(), 0),
-    ('unknown', False, True, 'shadow', 'identical'): (set(), {'shadowed-by-the-account-store'}, 0),
-    ('unknown', False, True, 'shadow', 'divergent'): ({'shadow-copies-differ'}, set(), 1),
+    (_K, False, True, 'foreign', 'declares-another-name'): (set(), set(), 0),
+    (_K, False, True, 'integrity', 'edited'): (set(), set(), 0),
+    (_K, False, True, 'integrity', 'artefacts'): (set(), set(), 0),
+    (_K, False, True, 'lock-expectation', 'in-scope'): (set(), set(), 0),
+    (_K, False, True, 'lock-expectation', 'out-of-scope'): (set(), set(), 0),
+    (_K, False, True, 'shadow', 'identical'):
+        (set(), {'shadowed-by-the-account-store'}, 0),
+    (_K, False, True, 'shadow', 'divergent'):
+        ({'shadow-copies-differ'}, set(), 1),
 
-    ('unknown', False, False, 'foreign', 'declares-another-name'): ({'untracked'}, set(), 1),
-    ('unknown', False, False, 'integrity', 'edited'): ({'untracked'}, set(), 1),
-    ('unknown', False, False, 'integrity', 'artefacts'): ({'untracked'}, set(), 1),
-    ('unknown', False, False, 'lock-expectation', 'in-scope'): ({'untracked'}, set(), 1),
-    ('unknown', False, False, 'lock-expectation', 'out-of-scope'): ({'untracked'}, set(), 1),
-    ('unknown', False, False, 'shadow', 'identical'): ({'untracked'}, {'shadowed-by-the-account-store'}, 1),
-    ('unknown', False, False, 'shadow', 'divergent'): ({'shadow-copies-differ', 'untracked'}, set(), 1),
+    (_K, False, False, 'foreign', 'declares-another-name'):
+        ({'untracked'}, set(), 1),
+    (_K, False, False, 'integrity', 'edited'): ({'untracked'}, set(), 1),
+    (_K, False, False, 'integrity', 'artefacts'): ({'untracked'}, set(), 1),
+    (_K, False, False, 'lock-expectation', 'in-scope'):
+        ({'untracked'}, set(), 1),
+    (_K, False, False, 'lock-expectation', 'out-of-scope'):
+        ({'untracked'}, set(), 1),
+    (_K, False, False, 'shadow', 'identical'):
+        ({'untracked'}, {'shadowed-by-the-account-store'}, 1),
+    (_K, False, False, 'shadow', 'divergent'):
+        ({'shadow-copies-differ', 'untracked'}, set(), 1),
 }
 
 REACHABLE = {(origin, record, lock) for origin, record, lock, _, _ in MATRIX}
