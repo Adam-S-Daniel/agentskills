@@ -2222,6 +2222,30 @@ def _override_spec(source: dict,
     return None
 
 
+def _is_a_checkout(path: Path) -> bool:
+    """Is there a git checkout here? Answered without opening one.
+
+    `source_checkout`'s own locator is `path.is_dir()`, and that is the
+    question a REBUILD asks — but it is not the question a PRINTED LINE needs
+    answered. An empty `../cms-platform` directory passes `is_dir` and then
+    fails the rebuild at `resolve_ref`'s "fatal: not a git repository", so
+    addressing off `is_dir` alone printed a plain command that silently does
+    not run. Measured on one lock with one fixed `--check-format -o <lock>`,
+    changing only whether that directory exists: absent, a TEMPLATE naming the
+    registry; present and empty, a bare `--repin` that exits 1.
+
+    So git's own marker is asked for too — `.git`, which is a directory in a
+    clone and a FILE in a worktree, hence `exists`; or the two entries a BARE
+    repository always has at its root. Still no clone opened, no file read and
+    no process spawned, which is what keeps `--check-format`'s "TOUCHES NO
+    CLONE" convention.
+    """
+    if not path.is_dir():
+        return False
+    return ((path / ".git").exists()
+            or ((path / "HEAD").is_file() and (path / "objects").is_dir()))
+
+
 def _addressing(output: Path, repo: Path, source_repos: Sequence[str] = (),
                 sources: Sequence[dict] = ()) -> Addressing:
     """The flags a printed line needs to reach the same lock and clones.
@@ -2249,20 +2273,33 @@ def _addressing(output: Path, repo: Path, source_repos: Sequence[str] = (),
     So each source is addressed from what can be derived about IT:
 
       * this run's own spec for it, if it was given one (`_override_spec`);
-      * nothing, if `source_checkout`'s default sibling `../<repo-name>` is a
-        directory — the line finds it there exactly as this run would;
+      * nothing, if a checkout is already at `source_checkout`'s default
+        sibling `../<repo-name>` — the line finds it there exactly as this run
+        would (`_is_a_checkout`);
       * otherwise a `<...>` placeholder naming the registry, and the caller
         marks the whole line a template. A line a reader is told to run is
         runnable as printed or visibly not a command; it is never a command
         that silently does not run.
 
-    The `is_dir` probe is the one filesystem question here, and it is
-    compatible with `--check-format`'s "TOUCHES NO CLONE" convention: it opens
-    no checkout, reads no file, spawns no git and reaches no network — it asks
-    whether a directory is there, and answers the same either way, which is
-    what "the verdict cannot depend on which clone, or no clone, is at hand"
-    means. `test_check_format_asks_no_git_even_to_address_its_own_line`
-    pins that with a `git` on PATH that fails the run if it is ever spawned.
+    WHAT THE PROBE MAY AND MAY NOT DECIDE, since the two halves of a verdict
+    are not alike and one earlier draft of this paragraph claimed they were.
+    The VERDICT — which digests are judged, the headline, the exit code — is
+    decided off the lock's own bytes and cannot depend on which clone, or no
+    clone, is at hand; that is `--check-format`'s contract and it is intact.
+    The ADDRESSING is the opposite by construction: "where will this line find
+    its clones" is a question ABOUT this machine, so its answer moves when the
+    machine does, and a run beside a checkout rightly prints a shorter line
+    than the same run without one. What must hold across every such answer is
+    the bullet above — command or visibly a template, never a command that
+    fails. All three states of the sibling are measured for exactly that by
+    `test_the_addressing_moves_with_the_machine_and_the_verdict_does_not`.
+
+    The probe is still compatible with `--check-format`'s "TOUCHES NO CLONE"
+    convention, which is about what the run may DO and not about what its
+    answer may depend on: it opens no checkout, reads no file, spawns no git
+    and reaches no network. That is pinned by
+    `test_check_format_asks_no_git_even_to_address_its_own_line`, with a `git`
+    on PATH that fails the run if it is ever spawned.
     """
     flags = ""
     if repo.resolve() != REPO_ROOT:
@@ -2276,7 +2313,7 @@ def _addressing(output: Path, repo: Path, source_repos: Sequence[str] = (),
     for source in sources:
         spec = _override_spec(source, spec_by_key)
         if spec is None:
-            if source_checkout(repo, source, {}).is_dir():
+            if _is_a_checkout(source_checkout(repo, source, {})):
                 continue
             unlocated.append(source["registry"])
             spec = (f"{','.join(source['bundles'])}="
