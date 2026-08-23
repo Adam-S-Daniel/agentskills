@@ -2147,6 +2147,7 @@ def remediation(
     source_registry: Optional[str] = None,
     working: Optional[Mapping[str, str]] = None,
     primary_drifted: bool = False,
+    primary_read: bool = True,
 ) -> Remediation:
     """THE one place a remediation command is decided, for every report path.
 
@@ -2190,6 +2191,9 @@ def remediation(
     verify path). `working` is `--check-current`'s reading of the working tree,
     and its absence is what tells the shrink question there is nothing to
     predict — `format`'s line holds the pin, so it moves no content.
+    `primary_read` is whether that reading covers the primary's bundles at all;
+    see the anchor below for why a command may not move a pin whose content the
+    run asking has not looked at.
     """
     assert kind in REMEDIATION_KINDS, kind
     addressing = _addressing(output, repo)
@@ -2263,12 +2267,23 @@ def remediation(
     # `--check-current --ref <some other commit>`, where the two would
     # otherwise part company and the report would recommend a line the guard
     # refuses.
+    #
+    # WHICH ref it anchors to is the run's own only when that run READ the
+    # primary. `--check-current --only <source>` never does: `_select_sources`
+    # drops the primary before anything is materialised, so a `--ref` there
+    # names a commit the verdict looked at nothing from. Anchoring the printed
+    # line at it advances a pin on the strength of content nobody read, and the
+    # shrink question below then compares the whole lock against a `working`
+    # map covering one source — reporting the PRIMARY's bundle as emptied and
+    # withholding a command the generator accepts. Anchored at the lock's own
+    # pin instead, so a scoped line moves exactly the source it is about.
+    anchoring_ref = ref if primary_read else existing["ref"]
     primary_moves = (kind == "primary" or primary_drifted
-                     or ref != existing.get("ref"))
+                     or anchoring_ref != existing.get("ref"))
     if kind == "primary":
         command = f"{_SCRIPT} --repin{addressing}"
     else:
-        anchor = "" if primary_drifted else f"--ref {ref} "
+        anchor = "" if primary_drifted else f"--ref {anchoring_ref} "
         command = (f"{_SCRIPT} --repin {anchor}"
                    f"--repin-source '{source_registry}@'{addressing}")
 
@@ -2295,6 +2310,7 @@ def report_drift(
     registry: str,
     repo: Path,
     working: Mapping[str, str],
+    primary_read: bool,
 ) -> None:
     """Print one FAILED block per drifted source, with its repair or its reason.
 
@@ -2407,7 +2423,7 @@ def report_drift(
             existing=existing, output=output, repo=repo, registry=registry,
             extras=extras, ref=ref, working=working,
             source_registry=None if source["is_primary"] else source["registry"],
-            primary_drifted=primary_drifted)
+            primary_drifted=primary_drifted, primary_read=primary_read)
         if source["is_primary"]:
             headline = (f"the bundle has moved on since {ref}, which {output} "
                         "still pins — nothing added or changed since then reaches "
@@ -2787,7 +2803,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 report_drift(drifted, ref=ref, output=output, existing=existing,
                              extras=extras, registry=registry, repo=repo,
-                             working=working)
+                             working=working, primary_read=include_primary)
                 status = 1
         return status
 
