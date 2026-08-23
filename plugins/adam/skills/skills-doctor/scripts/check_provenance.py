@@ -344,9 +344,9 @@ class Record(NamedTuple):
 class Lock(NamedTuple):
     """A lock file's expectation, as much of it as changes what is reported.
 
-    `digests` is the `locked` argument `may_replace` takes, which this file
-    spent three rounds not carrying: a destination name maps to the digests the
-    lock itself names for it, and a directory whose bytes are one of them is a
+    `digests` is the `locked` argument `may_replace` takes, and the one this
+    file did not carry: a destination name maps to the digests the lock itself
+    names for it, and a directory whose bytes are one of them is a
     directory the hook overwrites no matter who put it there. A SET per name
     because `names` folds `bundle/skill` keys to their last segment — two keys
     can land on one directory, and the hook asks `may_replace` once per key.
@@ -720,7 +720,7 @@ def when_the_hook_runs(surface: str) -> str:
     authoritative` and returns. Nothing is installed, nothing is refused, no
     `skills:` verdict exists to read `DEGRADED`.
 
-    Printing the surface in its own block two screens up is not the fix: that is
+    Printing the surface in its own block further up is not the fix: that is
     what the report already did while a finding below it promised a run. The
     caveat goes on the sentence that needs it.
 
