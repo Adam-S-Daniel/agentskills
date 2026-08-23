@@ -224,7 +224,9 @@ What that left with no command at all was the legitimate half of the operator's
 intent: a federated source whose registry really has moved. Inheritance is
 still the only thing that carries a source's ref forward, and a bare `--repin`
 still brings every source through verbatim. `--repin-source
-'<REGISTRY>@[<ref>]'` is now the one way to advance ONE of them, and it merges
+'<REGISTRY>@[<ref>]'` is now the one way to advance ONE of them — literally one:
+a registry the lock happens to federate twice is REFUSED rather than fanned
+out, because one spec cannot say which of the two entries it means. It merges
 by registry KEY into the inherited array — an empty ref meaning that source's
 HEAD, resolved before it is written — so it can never add, drop or reorder a
 source. Bundles and layout are not expressible on it, because they are the
@@ -786,6 +788,10 @@ def _apply_repin_sources(
 ) -> List[dict]:
     """Merge --repin-source pins into the INHERITED array. Never adds, never drops.
 
+    Never advances a source the caller did not name either: a registry this
+    lock federates TWICE is refused below rather than fanned out, so one spec
+    moves exactly one pin or none.
+
     Merge by registry KEY, never replace the array: that distinction is the
     whole difference between this flag and `--source`, which took precedence
     over the inherited `sources` and dropped every registry the command line
@@ -803,7 +809,9 @@ def _apply_repin_sources(
         if reg in wanted:
             raise GeneratorError(f"--repin-source names {reg} twice; one pin per source")
         wanted[reg] = ref
-    known = {source["registry"] for source in extras}
+    known: Dict[str, List[dict]] = {}
+    for source in extras:
+        known.setdefault(source["registry"], []).append(source)
     for reg in wanted:
         if reg == primary_registry:
             raise GeneratorError(
@@ -815,6 +823,32 @@ def _apply_repin_sources(
                 f"--repin-source {reg} is not a source this lock federates "
                 f"({', '.join(sorted(known)) or 'none'}); ADDING a source changes what the "
                 "lock means and is a plain generate, not a re-pin"
+            )
+        # A registry the lock federates TWICE is representable and --check
+        # green: plan_sources' uniqueness check is keyed on BUNDLE, so two
+        # entries may share a registry while carrying different bundles, a
+        # different layout and independent pins. Merging by registry key would
+        # then advance BOTH from one spec — moving a pin nobody named, with its
+        # digests rewritten to content nobody reviewed, at exit 0. This flag
+        # cannot say which one is meant: bundles are the lock's identity and
+        # are deliberately not expressible here.
+        #
+        # So it refuses, which is the answer _select_sources already gives to
+        # the analogous ambiguity on the read-only path — "scoping to it has
+        # two answers, so it gets none". Refusing in one place and guessing in
+        # the other, in the direction that moves MORE pins, is the asymmetry
+        # worth not having.
+        if len(known[reg]) > 1:
+            claimed = "; ".join(
+                ", ".join(source["bundles"]) or "no bundles" for source in known[reg]
+            )
+            raise GeneratorError(
+                f"--repin-source {reg}: this lock federates that registry twice, under "
+                f"[{claimed}], each with its own pin — so one spec names two sources and "
+                "advancing 'it' has two answers. Bundles are the lock's identity and are "
+                "not expressible on this flag, so it will not pick one for you: give that "
+                "registry a single 'sources' entry, or restate the whole array with a "
+                "plain generate, which is where identity is decided."
             )
     merged: List[dict] = []
     for source in extras:
