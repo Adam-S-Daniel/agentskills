@@ -266,6 +266,7 @@ _CASE_TOKEN = re.compile(r'(?<![\w.-])(?:case|esac)(?![\w.-])|;;&|;;|;&')
 # load-bearing and `_unquote` keeps them on anything glob-like.)
 _CASE_VERDICT = re.compile(r'(?<![\w.-])case\s+"?\$verdict"?\s+in(?![\w.-])')
 _CASE_SKILL = re.compile(r'(?<![\w.-])case\s+"?\$SKILL"?(?![\w.-])')
+_CASE_FROM_RUN = re.compile(r'(?<![\w.-])case\s+"?\$FROM_RUN"?(?![\w.-])')
 
 
 def _shell_scan(body):
@@ -3354,11 +3355,15 @@ class TestSkillInputIsValidatedBeforeUse:
     work. These run the exact `case` block out of the YAML.
     """
 
-    def _guard(self):
-        body = next(
+    def _step_body(self):
+        """The `run:` body holding both input guards, read through `yaml`."""
+        return next(
             s["run"] for s in load(RECORD)["jobs"]["record"]["steps"]
             if s.get("name") == "Resolve the run that built the artifact"
         )
+
+    def _guard(self):
+        body = self._step_body()
         # THE SAME BOUNDARY RULE, because this slice is EXECUTED and a wrong
         # boundary here fails in the direction that hides itself. A truncated
         # slice is broken bash: it returns non-zero for EVERY input, so
@@ -3380,7 +3385,7 @@ class TestSkillInputIsValidatedBeforeUse:
         )
         return body[opener.start():closer.end()]
 
-    def _bash(self, script, value):
+    def _bash(self, script, value, name="SKILL"):
         bash = require_bash()
         # Delivered through the ENVIRONMENT, which is how the workflow supplies
         # it (`env: SKILL: ${{ inputs.skill }}`) - and the only way that
@@ -3393,13 +3398,50 @@ class TestSkillInputIsValidatedBeforeUse:
         # inputs still refused, which is what made it look like a guard bug
         # rather than a harness one. An environment block is NUL-delimited and
         # carries a newline intact.
+        #
+        # NO `-e`, AND THAT IS ESTABLISHED RATHER THAN ASSUMED. The runner
+        # hands a `run:` BODY to `/usr/bin/bash -e {0}`, and
+        # test_both_harnesses_hand_the_step_to_the_runner_s_shell locks the
+        # audit-step harnesses to that. This is not a `run:` body: it is a
+        # `case` fragment lifted out of one, so the same argument does not
+        # carry over by itself. It is errexit-NEUTRAL instead -
+        # test_the_extracted_fragments_behave_the_same_under_errexit runs
+        # every input this class uses through both fragments with and without
+        # `-e` and requires the same status, stdout and stderr - which is why
+        # the flag is absent rather than merely missing. A fragment that grows
+        # a command errexit can act on reds there.
         return subprocess.run(
-            [bash, "-c", script], env={**os.environ, "SKILL": value},
+            [bash, "-c", script], env={**os.environ, name: value},
             capture_output=True, text=True,
         )
 
-    def _run(self, snippet, value):
-        return self._bash(snippet, value).returncode
+    def _run(self, snippet, value, name="SKILL"):
+        return self._bash(snippet, value, name).returncode
+
+    def _from_run_guard(self):
+        """The SIBLING guard, sliced by the same machinery.
+
+        `case "$FROM_RUN" in ''|*[!0-9]*)` validates the other value this step
+        reads from `inputs`, and it is the one that goes straight into an API
+        path. Nothing in `scripts/` executed it while its neighbour was run
+        against a list of real evil inputs; see #126.
+        The boundary rule and the vacuous-slice hazard are the SKILL guard's,
+        unchanged - an empty slice exits 0 and admits everything, so
+        test_the_extracted_from_run_guard_admits_and_refuses pairs an admit
+        with a refusal in one body.
+
+        Its opener and its first pattern share a line, which is the shape
+        `_case_block` was taught to stop requiring.
+        """
+        body = self._step_body()
+        text, mask = _shell_scan(body)
+        opener, _, closer = _case_block(
+            text, mask, _CASE_FROM_RUN,
+            "the run-ID guard's `case \"$FROM_RUN\"` is no longer a command "
+            "this test can find; an empty snippet exits 0 and ADMITS "
+            "everything",
+        )
+        return body[opener.start():closer.end()]
 
     def test_the_extracted_guard_is_the_one_that_reads_SKILL(self):
         """The slice is the SKILL guard, and it both admits and refuses.
@@ -3449,10 +3491,7 @@ class TestSkillInputIsValidatedBeforeUse:
         claimed is a runtime one, so the proof is that the unquoted slice still
         admits a real name and still refuses a command separator.
         """
-        body = next(
-            s["run"] for s in load(RECORD)["jobs"]["record"]["steps"]
-            if s.get("name") == "Resolve the run that built the artifact"
-        )
+        body = self._step_body()
         unquoted = body.replace('case "$SKILL"', "case $SKILL")
         assert unquoted != body, (
             "the guard no longer spells its word `case \"$SKILL\"`, so this "
@@ -3497,6 +3536,114 @@ class TestSkillInputIsValidatedBeforeUse:
             f"below would have passed for the wrong reason."
         )
         assert self._run(self._guard(), evil) != 0, why
+
+    # THE RUN IDS THIS STEP HAS TO ADMIT. `from_run` reaches
+    # `gh api /repos/.../actions/runs/$FROM_RUN/artifacts`, so the guard is the
+    # only thing between a dispatch input and an API path.
+    _REAL_RUN_IDS = ["32414713598", "1", "0", "007"]
+
+    def test_the_extracted_from_run_guard_admits_and_refuses(self):
+        """The vacuous-slice control, on the sibling guard - #126.
+
+        Same hazard as its neighbour and the same shape of answer: an empty
+        or truncated slice passes every refusal below for the wrong reason, so
+        one admit and one refusal are paired in a single body. `bash -n` would
+        not do it - `case "$FROM_RUN" in *) exit 1 ;; esac` is valid bash that
+        refuses everything.
+        """
+        snippet = self._from_run_guard()
+        assert len(_CASE_FROM_RUN.findall(snippet)) == 1, (
+            f"the extracted snippet is not one FROM_RUN guard:\n{snippet}"
+        )
+        assert snippet.rstrip().endswith("esac"), (
+            f"the extracted snippet does not close its `case`:\n{snippet}"
+        )
+        assert self._run(snippet, "32414713598", "FROM_RUN") == 0, (
+            "the extracted snippet refuses a real run ID, so every refusal "
+            "test below is passing vacuously"
+        )
+        assert self._run(snippet, "1;id", "FROM_RUN") != 0, (
+            "the extracted snippet admits a command separator, so it is not "
+            "the guard"
+        )
+
+    @pytest.mark.parametrize("run_id", _REAL_RUN_IDS)
+    def test_the_run_id_guard_admits_a_run_id(self, run_id):
+        assert self._run(self._from_run_guard(), run_id, "FROM_RUN") == 0, run_id
+
+    @pytest.mark.parametrize("evil, why", [
+        ("", "empty - the dispatch input was left blank"),
+        ("1;id", "command separator"),
+        ("1 2", "space splits it into two argv words"),
+        ("1\nfoo=bar", "newline injects a line into $GITHUB_ENV"),
+        ("../../../orgs/x/actions", "traversal out of the runs path"),
+        ("-1", "leading dash reads as an option"),
+        ("1e5", "scientific notation is not a run ID"),
+        ("0x10", "hex is not a run ID"),
+        (" 1", "leading space"),
+        ("1 ", "trailing space"),
+        ("١٢", "Arabic-Indic digits are digits and are not [0-9]"),
+        ("$(id)", "command substitution, unexpanded by the guard"),
+    ])
+    def test_the_run_id_guard_refuses_anything_that_is_not_digits(
+            self, evil, why):
+        # Delivery first, for the reason `_bash` gives: a refusal test passes
+        # vacuously if the harness never handed the shell the dangerous value.
+        got = self._bash('printf %s "$FROM_RUN" | wc -c', evil,
+                         "FROM_RUN").stdout.strip()
+        assert int(got) == len(evil.encode()), (
+            f"harness mangled the input before the guard saw it: sent "
+            f"{len(evil.encode())} bytes, shell received {got}. The refusal "
+            f"below would have passed for the wrong reason."
+        )
+        assert self._run(self._from_run_guard(), evil, "FROM_RUN") != 0, why
+
+    def test_the_extracted_fragments_behave_the_same_under_errexit(self):
+        """Why `_bash` spawns without `-e`, measured rather than assumed - #126.
+
+        The runner gives a `run:` body `/usr/bin/bash -e {0}` and
+        record-account-upload.yml declares no `shell:` and no `defaults:`, so
+        its body gets that shell like every other. What `_bash` runs is not
+        that body: it is a `case` fragment lifted out of it, delivered through
+        the environment. So the fidelity argument #120 settled for the audit
+        step does not carry over on its own, and the question is whether the
+        fragment behaves differently under errexit.
+
+        It does not, and this is where that is established: every input this
+        class uses, through both fragments, with and without `-e`, compared on
+        exit status, stdout and stderr. There is nothing for errexit to act
+        on - a `case` with no matching arm returns 0, `echo` succeeds, and
+        `exit 1` exits the same way under either shell.
+
+        So the flag is absent because it changes nothing, not because nobody
+        looked. A fragment that grows a command which can fail - a `grep`, a
+        `[` outside a condition - reds here, and the answer then is to make
+        the harness match the runner rather than to update this docstring.
+        """
+        bash = require_bash()
+        fragments = {"SKILL": self._guard(), "FROM_RUN": self._from_run_guard()}
+        values = {
+            "SKILL": ["sync-skills", "sync-skills;id", "-rf", "",
+                      "sync-skills\nfoo=bar"],
+            "FROM_RUN": self._REAL_RUN_IDS + ["", "1;id", "1\nfoo=bar", "-1"],
+        }
+        for name, fragment in fragments.items():
+            for value in values[name]:
+                answers = []
+                for flags in (["-c"], ["-ec"]):
+                    proc = subprocess.run(
+                        [bash, *flags, fragment],
+                        env={**os.environ, name: value},
+                        capture_output=True, text=True)
+                    answers.append(
+                        (proc.returncode, proc.stdout, proc.stderr))
+                assert answers[0] == answers[1], (
+                    f"the {name} fragment is NOT errexit-neutral on "
+                    f"{value!r}: without `-e` it answered {answers[0]}, with "
+                    f"`-e` {answers[1]}. `_bash` spawns without the flag the "
+                    f"runner uses, which is now a fidelity gap rather than a "
+                    f"measured no-op - give it the runner's shell."
+                )
 
     def test_the_grep_check_alone_would_have_let_the_newline_through(self):
         """The negative control, and the reason the guard above exists.
