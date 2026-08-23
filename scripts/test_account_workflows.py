@@ -523,6 +523,19 @@ def _model_mask_then_strip(body):
     return "".join(text), "".join(mask)
 
 
+# A HEREDOC OPENER IS `<<` OR `<<-`, AND `<<<` IS NOT ONE. A here-string has
+# no body - it feeds one word to stdin - so reading its word as a delimiter
+# blanks every line from there to the end of the step. That is not a false
+# red; it is a silent green, because every rule downstream iterates commands
+# and a blanked line produces none. `if grep -q fresh <<<yes; then` above the
+# `case` was enough to hide a bare `mkdir` from the guard below with the whole
+# file still at 289 passed. So the `<<` may not touch a third `<` on either
+# side, and test_a_here_string_does_not_blank_the_rest_of_the_step runs that
+# exact shape.
+_HEREDOC_OPENER = re.compile(
+    r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
 def _strip_heredocs(body):
     """`body` with every heredoc BODY blanked, line for line.
 
@@ -537,19 +550,36 @@ def _strip_heredocs(body):
     The delimiter line goes too: it is the heredoc's punctuation, not a
     command. The opener is read off `_uncomment`'s output so a `<<` inside a
     comment cannot start one.
+
+    AN OPENER WHOSE DELIMITER NEVER ARRIVES RAISES, and that is the second
+    half of the fix above rather than tidiness. `_HEREDOC_OPENER` closes the
+    one misreading that has been demonstrated; the assertion closes the
+    CONSEQUENCE of any other, because every misreading of this kind ends the
+    same way - a delimiter that no later line equals, and a tail blanked to
+    the end of the body. An arithmetic `$(( x<<n ))` is the next candidate and
+    is NOT excluded by the regex: `n` reads as a delimiter. It reds here
+    instead, loudly, naming the line. A `run:` body with a genuinely
+    unterminated heredoc reds here too, which is correct - bash warns about
+    that one as well.
     """
-    out, delim = [], None
-    for line in body.split("\n"):
+    out, delim, opened_at = [], None, None
+    for number, line in enumerate(body.split("\n"), 1):
         if delim is None:
             out.append(line)
-            opener = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1",
-                               _uncomment(line))
+            opener = _HEREDOC_OPENER.search(_uncomment(line))
             if opener:
-                delim = opener.group(2)
+                delim, opened_at = opener.group(2), number
             continue
         out.append(" " * len(line))
         if line.strip() == delim:
             delim = None
+    assert delim is None, (
+        f"line {opened_at} of this `run:` body reads as a heredoc opening on "
+        f"`{delim}`, and no later line is that delimiter. Either the heredoc "
+        f"is unterminated, or this is not an opener at all and the rest of "
+        f"the body has just been blanked - which would leave every rule built "
+        f"on this classifying nothing and passing."
+    )
     return "\n".join(out)
 
 
@@ -1713,6 +1743,84 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             start for start, _, _ in self._classified()}, (
             "a command came out of `_logical_lines` and produced no "
             "classified segment, so the rules below never see it"
+        )
+
+    def _with_lines_before_the_case(self, extra):
+        """The real body with `extra` inserted above `case "$verdict" in`.
+
+        Above the `case` on purpose: it is the position that maximises what a
+        mis-blanked tail would swallow, and it is where 58cfab6's `mkdir`
+        actually sat.
+        """
+        real = _audit_body()
+        lines = real.split("\n")
+        at = [i for i, l in enumerate(lines) if 'case "$verdict" in' in l]
+        assert len(at) == 1, (
+            f"this control inserts above the audit step's "
+            f"`case \"$verdict\" in`, and the body has {len(at)} of them"
+        )
+        pad = " " * (len(lines[at[0]]) - len(lines[at[0]].lstrip()))
+        return "\n".join(
+            lines[:at[0]] + [pad + l for l in extra] + lines[at[0]:])
+
+    _HERE_STRING_LINES = [
+        "if grep -q fresh <<<yes; then",
+        "  echo matched",
+        "fi",
+    ]
+
+    def test_a_here_string_does_not_blank_the_rest_of_the_step(
+            self, monkeypatch, tmp_path):
+        """The negative control for `_strip_heredocs`, run both ways.
+
+        A guard that stops seeing the step does not red - it passes, having
+        asserted nothing, which is #120's whole subject wearing this file's
+        own clothes. `_strip_heredocs` read `<<<yes` as a heredoc opening on
+        `yes`, found no line equal to `yes`, and blanked everything after it;
+        the step's `case`, its `$GITHUB_OUTPUT` write and a bare `mkdir`
+        spliced beside them all vanished from `_classified()` and the file
+        stayed at 289 passed.
+
+        `test_the_classifier_reads_every_line_of_the_step` cannot catch that
+        and never could: its check is `not line.strip() or number in covered`
+        against `_shell_scan(_strip_heredocs(body))`, and an over-blanked line
+        IS blank. So the control has to be a command the guard must still
+        find, not a count of lines the classifier admits it saw.
+
+        Both directions, because only the pair says the fix is the right one.
+        With the here-string alone the step is still clean - no false red -
+        and the classifier still reaches the write on the last line. With a
+        bare `mkdir` beside it the guard reds and names that `mkdir`.
+        """
+        bash = require_bash()
+        clean = self._with_lines_before_the_case(self._HERE_STRING_LINES)
+        armed = self._with_lines_before_the_case(
+            self._HERE_STRING_LINES + ["mkdir -p ../scratch"])
+        for name, body in (("clean", clean), ("armed", armed)):
+            syntax = subprocess.run(
+                [bash, "-n", _script(tmp_path, body, name=f"{name}.sh")],
+                capture_output=True, text=True)
+            assert syntax.returncode == 0, (
+                f"the `{name}` control body is not valid bash, so what the "
+                f"guard says about it is about the fixture:\n{syntax.stderr}"
+            )
+
+        monkeypatch.setitem(globals(), "_audit_body", lambda: clean)
+        self.test_the_classifier_reads_every_line_of_the_step()
+        self.test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+        assert any(self._OUTPUT_WRITE.match(command)
+                   for _, command, _ in self._classified()), (
+            "a here-string above the `case` cost the classifier the step's "
+            "`$GITHUB_OUTPUT` write, so everything below it was blanked and "
+            "the rules certified an empty set"
+        )
+
+        monkeypatch.setitem(globals(), "_audit_body", lambda: armed)
+        with pytest.raises(AssertionError) as caught:
+            self.test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+        assert "mkdir -p ../scratch" in str(caught.value), (
+            f"the guard reded on the armed control, but not about the bare "
+            f"`mkdir` this control adds: {caught.value}"
         )
 
     def test_no_echo_in_this_step_redirects_except_the_output_write(self):
