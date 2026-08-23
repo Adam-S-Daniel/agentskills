@@ -1456,7 +1456,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "nothing establishes it as the hook's. " + HOOK_REFUSAL +
                     " The one state that would be overwritten anyway — bytes "
                     "that already digest to exactly what the lock names — was "
-                    "measured here and is not this directory. So it is not "
+                    "tested here and does not hold. So it is not "
                     "this copy that is at risk, it is the locked skill's "
                     "delivery — including the project-collision path, which "
                     "the hook reaches only after deciding it may replace this "
@@ -1471,10 +1471,12 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 # note does NOT already say — it says nothing about delivery.
                 findings.append(_observed(
                     "unattributable-over-locked", origin, name,
-                    "the lock names it, the bytes here are not the bytes the "
-                    "lock names, and there is no readable record to say the "
-                    "hook installed them — so neither of the two clauses that "
-                    "let the hook overwrite a directory is satisfied. " +
+                    "the lock names it, and neither of the two clauses that "
+                    "let the hook overwrite a directory holds: what is here "
+                    "does not digest to the digest the lock names — a "
+                    "directory that cannot be measured at all fails that the "
+                    "same way, and the hook refuses both — and there is no "
+                    "readable record to say the hook installed it. " +
                     HOOK_REFUSAL + " Who put it here is exactly what the "
                     "unreadable record cannot say, so this is not an "
                     "accusation: it is the delivery consequence, which holds "
