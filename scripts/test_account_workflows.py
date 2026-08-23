@@ -2099,55 +2099,125 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             i += 1
         return None
 
-    def _classify_region(self, start, text, mask, classified):
+    # `then` and `do` AS WORDS, which is how a compound head says where its
+    # condition stops. Searched in the MASK, so a `do` inside a `::warning::`
+    # is not one.
+    _COMPOUND_KEYWORD = re.compile(r"(?<![\w.-])(?:then|do)(?![\w.-])")
+
+    # THE OPERATORS THIS CLASSIFIER MODELS, and the only ones it may split a
+    # region at. `;` ends an AND-OR list; `&&` and `||` separate the commands
+    # inside one. `|` and `&` are deliberately NOT here: a pipeline is one
+    # command as far as errexit is concerned, and an `&` list is a shape no
+    # carve-out admits, so both stay inside whatever segment they land in and
+    # red there.
+    _LIST_OPERATORS = ("||", "&&", ";")
+
+    def _place(self, start, segment, mask, bucket, classified, consumed):
+        """Put ONE command in a bucket, or raise rather than guess.
+
+        Every command reaches its bucket through here - `guarded` included -
+        which is the half of "a command is exempt because a recogniser said
+        what it IS" that the previous version left undone. The guarded blob
+        went straight into the list, so the two raises below never ran on it
+        and a `case` opener or a function definition to the left of a `||`
+        was silently exempt.
+
+        THE FIRST ASSERTION IS THE DECOMPOSITION'S OWN. A command that still
+        carries a modelled operator is a LIST that has been placed as one
+        command, and every bucket except `bare` would then exempt everything
+        in it. That is exactly what happened to `A ; B || C`: the whole of
+        `A ; B` went in as one `guarded` blob because the split at `;` ran
+        only on what was left AFTER the guard. The caller cuts at every
+        modelled operator now, so this cannot be reached without a bug - and
+        an assertion that cannot be reached without a bug is the cheapest
+        place to find one.
+        """
+        assert not _top_level(mask, self._LIST_OPERATORS), (
+            f"line {start} of the audit step was placed in `{bucket}` as one "
+            f"command while still carrying a `;`, `&&` or `||` this "
+            f"classifier models - so it is a LIST, and everything in it "
+            f"would ride on one answer: {segment!r}"
+        )
+        for shape, what in self._UNMODELLED:
+            assert not shape.match(segment), (
+                f"line {start} of the audit step is {what}. This "
+                f"classifier has no answer for it, and every answer it "
+                f"does have would be wrong: {segment!r}"
+            )
+        assert not self._CASE_OPEN.match(segment) and segment != "esac", (
+            f"line {start} of the audit step writes a `case` construct "
+            f"inside another command, which the classifier's `case` "
+            f"state machine never sees - so its arms would be read as "
+            f"ordinary commands and its patterns as failures: "
+            f"{segment!r}"
+        )
+        if bucket is None:
+            if self._STRUCTURE.match(segment):
+                bucket = "punctuation"
+            else:
+                bucket = ("carved-out" if self._carved_out(segment)
+                          else "bare")
+        classified.append((start, segment, bucket))
+        consumed.append(segment)
+
+    def _classify_region(self, start, text, mask, classified, consumed):
         """One command region - a line, or an arm body after its pattern.
 
-        Splits at the final `&&`/`||` and then at every top-level `;`, and
-        gives each piece one of `_BUCKETS`. A `case` opener or an `esac`
-        reaching here is a `case` written in a shape `_classified`'s state
-        machine never saw, so it raises rather than being counted as
-        punctuation by a regex that cannot tell which block it belongs to.
+        CUT AT EVERY MODELLED OPERATOR, IN ONE PASS, and that ordering is the
+        rule rather than a tidiness. Errexit exempts a command that is in an
+        AND-OR list and is not the LAST element of it - one command, not a
+        list. Splitting at the final `&&`/`||` first and calling everything
+        to its left `guarded` gets that wrong for any `;` list: measured on
+        the real step, `mkdir -p ../scratch ; echo hi || echo bye` spliced
+        above the `case` is valid bash, aborts under `set -uo pipefail` plus
+        `bash -e` with `reached` never printed, and came back from here as
+        two entries - `mkdir -p ../scratch ; echo hi` marked `guarded`, and
+        `echo bye`. So the region is cut at every top-level `;`, `&&` and
+        `||` first; each `;` closes an AND-OR list, and inside a list every
+        command but the last is where errexit does not act.
+
+        A COMPOUND HEAD IS THE ONE REGION THAT IS NOT CUT, because all of it
+        is a CONDITION and errexit acts nowhere inside one. Which means this
+        classifier has to be sure the whole region IS the condition: a head
+        whose `then`/`do` is followed by more on the same line is a head plus
+        a body, and exempting the body is the silent green. It is refused,
+        not guessed at. A head with no `then`/`do` at all is a condition
+        continued on the NEXT line - ordinary bash, and the shape the
+        previous assertion reded on with a sentence that said the opposite of
+        what it had found.
         """
         head = text.strip()
         if self._COMPOUND_HEAD.match(head):
-            assert head.endswith("then") or head.endswith("do"), (
+            keywords = list(self._COMPOUND_KEYWORD.finditer(mask))
+            assert not keywords or not mask[keywords[-1].end():].strip(), (
                 f"line {start} of the audit step opens a compound command "
-                f"and puts something after its `then`/`do` on the same "
-                f"line; this classifier would read the whole line as a "
-                f"condition and exempt it: {head!r}"
+                f"and writes more after its `then`/`do` on the same line. "
+                f"This classifier reads a compound head as a condition, "
+                f"which errexit does not act inside - so it would exempt "
+                f"that body along with the condition: {head!r}"
             )
             classified.append((start, head, "guarded"))
+            consumed.append(head)
             return
-        if self._STRUCTURE.match(head):
-            classified.append((start, head, "punctuation"))
-            return
-        guards = _top_level(mask, ("||", "&&"))
-        if guards:
-            at, token = guards[-1]
-            classified.append((start, text[:at].strip(), "guarded"))
-            text, mask = text[at + len(token):], mask[at + len(token):]
-        previous = 0
-        for at, _token in _top_level(mask, (";",)) + [(len(mask), ";")]:
-            segment = text[previous:at].strip()
-            previous = at + 1
-            if not segment:
+        previous, run = 0, []
+        for at, token in (_top_level(mask, self._LIST_OPERATORS)
+                          + [(len(mask), "")]):
+            run.append((text[previous:at], mask[previous:at], token))
+            previous = at + len(token)
+            if token not in (";", ""):
                 continue
-            for shape, what in self._UNMODELLED:
-                assert not shape.match(segment), (
-                    f"line {start} of the audit step is {what}. This "
-                    f"classifier has no answer for it, and every answer it "
-                    f"does have would be wrong: {segment!r}"
-                )
-            assert not self._CASE_OPEN.match(segment) and segment != "esac", (
-                f"line {start} of the audit step writes a `case` construct "
-                f"inside another command, which the classifier's `case` "
-                f"state machine never sees - so its arms would be read as "
-                f"ordinary commands and its patterns as failures: "
-                f"{segment!r}"
-            )
-            classified.append(
-                (start, segment,
-                 "carved-out" if self._carved_out(segment) else "bare"))
+            # An AND-OR list ends here, and errexit does not act on any
+            # command in one except the LAST. Emitted in source order,
+            # operators included, because `_reassemble` reads what came out
+            # of here as the step's own bytes.
+            real = [i for i, piece in enumerate(run) if piece[0].strip()]
+            for index, (piece_t, piece_m, piece_token) in enumerate(run):
+                if index in real:
+                    self._place(start, piece_t.strip(), piece_m,
+                                None if index == real[-1] else "guarded",
+                                classified, consumed)
+                consumed.append(piece_token)
+            run = []
 
     def _classified(self):
         """Every command in the step as (first line, text, bucket).
@@ -2155,10 +2225,13 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         `bucket` is one of `_BUCKETS`, and getting there is POSITIVE
         throughout: a command is exempt because a recogniser said what it is,
         never because no recogniser objected. `guarded` is where errexit is
-        defined not to act - an `if`/`elif`/`while`/`until` condition and the
-        left of the final `&&`/`||`. `punctuation` is the shell's own
-        skeleton, including a `case` pattern list. `carved-out` is the list
-        above. Everything else is `bare`, and `bare` is what reds.
+        defined not to act - an `if`/`elif`/`while`/`until` condition, and
+        every command in an AND-OR list except the LAST one, which is a
+        narrower thing than "the left of the final `&&`/`||`" and is why
+        `_classify_region` cuts at `;` in the same pass. `punctuation` is the
+        shell's own skeleton, including a `case` pattern list. `carved-out`
+        is the list above. Everything else is `bare`, and `bare` is what
+        reds.
 
         THE `case` BLOCK IS PARSED, NOT SNIFFED, and that is this method's
         whole shape. The heuristic it replaces called a line punctuation
@@ -2175,8 +2248,9 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         open at the end of the step - raises, naming the text. An
         unrecognised construct must not become an exemption.
         """
-        classified, cases = [], []
-        for start, _, text, mask in _logical_lines(_audit_body()):
+        body = _audit_body()
+        classified, cases, consumed = [], [], []
+        for start, _, text, mask in _logical_lines(body):
             ended_arm = None
             for terminator in self._ARM_TERMINATORS:
                 if text.rstrip().endswith(terminator):
@@ -2196,6 +2270,11 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 )
                 cases.pop()
                 classified.append((start, head, "punctuation"))
+                consumed.append(head)
+                if ended_arm is not None:
+                    classified.append((start, ended_arm, "punctuation"))
+                    consumed.append(ended_arm)
+                    cases[-1] = True
                 continue
             if cases and cases[-1]:
                 end = self._pattern_end(mask)
@@ -2207,23 +2286,71 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                     f"{head!r}"
                 )
                 classified.append((start, text[:end].strip(), "punctuation"))
+                consumed.append(text[:end].strip())
                 text, mask = text[end:], mask[end:]
                 cases[-1] = False
                 head = text.strip()
             if self._CASE_OPEN.match(head):
                 cases.append(True)
                 classified.append((start, head, "punctuation"))
+                consumed.append(head)
             elif head:
-                self._classify_region(start, text, mask, classified)
-            elif ended_arm is not None:
-                classified.append((start, ended_arm, "punctuation"))
+                self._classify_region(start, text, mask, classified, consumed)
             if ended_arm is not None:
+                classified.append((start, ended_arm, "punctuation"))
+                consumed.append(ended_arm)
                 cases[-1] = True
         assert not cases, (
             "the audit step opens a `case` block it never closes, so every "
             "line after it was classified as an arm of a block with no end"
         )
+        self._reassemble(body, consumed)
         return classified
+
+    @staticmethod
+    def _reassemble(body, consumed):
+        """Every byte of the step is a command, an operator, or whitespace.
+
+        THE DECOMPOSITION IS LOSSLESS OR IT IS NOTHING, and that is a
+        different claim from "every line reached the classifier".
+        test_the_classifier_reads_every_line_of_the_step reads the BLANKED
+        body, so a splitter that swallowed a command into the one above it -
+        or a heredoc scan that blanked four real commands - left a line that
+        is blank, in a command that covers it, and the control passed. Here
+        the step's own bytes are the reference: everything `_classified`
+        placed, plus every operator it cut at, with whitespace removed, has
+        to BE the step with its comments, its heredoc bodies and its line
+        continuations removed. A `;` list riding into one bucket cannot
+        survive it either - the blob would carry an operator, and `_place`
+        refuses to place one.
+
+        WHAT IS ALLOWED TO GO MISSING IS ENUMERATED, not left to whatever the
+        helpers happen to drop. Comments and heredoc bodies are not shell the
+        runner executes. A line-continuation backslash is an operator that
+        joins two lines and is the one backslash `_shell_scan`'s mask keeps,
+        which is what makes it findable rather than guessed at. Whitespace is
+        dropped on both sides because `_logical_lines` joins a continued
+        command without its indentation and every placement is `.strip()`ed.
+
+        This runs inside the classifier rather than beside it so that every
+        caller gets it - including the spliced fixtures, where a construct
+        this file has never seen is most likely to fall out of the
+        decomposition.
+        """
+        text, mask = _shell_scan(_strip_heredocs(body))
+        expected = "".join(ch for ch, m in zip(text, mask)
+                           if m != "\\" and not ch.isspace())
+        placed = "".join("".join(consumed).split())
+        at = next((k for k in range(min(len(placed), len(expected)))
+                   if placed[k] != expected[k]),
+                  min(len(placed), len(expected)))
+        assert placed == expected, (
+            f"the classifier did not account for every byte of the audit "
+            f"step. From the same point, the step reads "
+            f"{expected[at:at + 70]!r} and what the classifier placed reads "
+            f"{placed[at:at + 70]!r}. Text the step runs and this "
+            f"decomposition never placed is text no rule below can see."
+        )
 
     def test_the_classifier_reads_every_line_of_the_step(self):
         """A classifier that sees nothing certifies everything.
@@ -2699,6 +2826,11 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
          ["harness_ok=yes & mkdir -p ../scratch"], "mkdir -p ../scratch"),
         ("a-function-definition",
          ["zzz() { mkdir -p ../scratch; }"], "a function definition"),
+        ("a-list-whose-last-pair-is-guarded",
+         ["mkdir -p ../scratch ; echo hi || echo bye"],
+         "mkdir -p ../scratch"),
+        ("a-one-line-if-with-its-body",
+         ["if true; then mkdir -p ../scratch; fi"], "mkdir -p ../scratch"),
     )
 
     def test_a_construct_this_classifier_cannot_place_is_never_a_pass(
@@ -2740,6 +2872,51 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"the guard reded on a step carrying `{name}`, but not about "
                 f"{names!r}: {caught.value}"
             )
+
+    _TWO_LINE_HEAD = ["if true", "then", "  :", "fi"]
+    _TWO_LINE_HEAD_ARMED = ["if true", "then", "  mkdir -p ../scratch", "fi"]
+
+    def test_a_compound_head_continued_on_the_next_line_is_ordinary_bash(
+            self, monkeypatch, tmp_path):
+        """The red whose explanation was checkably false.
+
+        `if true` with its `then` on the next line is bash a great many people
+        write, and `bash -n` accepts it. The previous assertion required a
+        compound head to END in `then` or `do`, so it reded on that shape with
+        "puts something after its `then`/`do` on the same line" - about a line
+        that has no `then` at all. A maintainer cannot act on a message that
+        describes something the code did not find.
+
+        A head with NO `then`/`do` is a condition continued below, and the
+        whole line is condition, which is what `guarded` means. A head that
+        has one and writes more after it is the shape that must still be
+        refused, because exempting a body along with its condition is the
+        silent green - `_UNMODELLED_CONSTRUCTS` carries that half.
+
+        Both directions here: the clean form must not red at all, and the same
+        form with a bare `mkdir` in its body must red naming the `mkdir`.
+        """
+        bash = require_bash()
+        clean = self._with_lines_before_the_case(self._TWO_LINE_HEAD)
+        armed = self._with_lines_before_the_case(self._TWO_LINE_HEAD_ARMED)
+        for name, body in (("clean", clean), ("armed", armed)):
+            syntax = subprocess.run(
+                [bash, "-n", _script(tmp_path, body, name=f"{name}-head.sh")],
+                capture_output=True, text=True)
+            assert syntax.returncode == 0, (
+                f"the `{name}` control body is not valid bash, so what the "
+                f"guard says about it is about the fixture:\n{syntax.stderr}"
+            )
+        monkeypatch.setitem(globals(), "_audit_body", lambda: clean)
+        self.test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+
+        monkeypatch.setitem(globals(), "_audit_body", lambda: armed)
+        with pytest.raises(AssertionError) as caught:
+            self.test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+        assert "mkdir -p ../scratch" in str(caught.value), (
+            f"the guard reded on a two-line compound head carrying a bare "
+            f"`mkdir`, but not about the `mkdir`: {caught.value}"
+        )
 
     def test_every_command_that_can_fail_sits_in_an_if_or_an_or_list(self):
         """The rule the tolerance paragraph states and nothing held.
