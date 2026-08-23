@@ -3087,10 +3087,13 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     #
     # Two of them are also held elsewhere, and deliberately twice: the `;`
     # list by `_UNMODELLED_CONSTRUCTS`' `a-list-whose-last-pair-is-guarded`
-    # row, the quoted `<<PY` by
-    # test_a_quoted_heredoc_opener_does_not_blank_the_rest_of_the_step. Those
-    # two tests hold a mechanism; this table holds the exact bytes that were
-    # measured, which is the thing a re-run of the review compares against.
+    # row, which test_a_construct_this_classifier_cannot_place_is_never_a_
+    # pass runs, and the quoted `<<PY` by
+    # test_a_heredoc_opener_inside_a_string_opens_no_heredoc. Those two hold
+    # a mechanism; this table holds the exact bytes that were measured, which
+    # is the thing a re-run of the review compares against. Measured: those
+    # two tests are what red when their defect is restored, and no sweep
+    # payload sees either - while this table reds on all four.
     #
     # `benign` is the row's own scaffolding, as in `_UNMODELLED_CONSTRUCTS`.
     _MEASURED_SILENT_PASSES = (
@@ -3139,6 +3142,243 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"the payload `{name}` no longer reds about {names!r}, so "
                 f"whatever closed it has come undone: {caught.value}"
             )
+
+    # THE SWEEP'S PAYLOAD - 58cfab6's own fault, and a command that fails on
+    # any runner where `../scratch` is not writable. What matters is only
+    # that it is a command with no guard.
+    _SWEEP_PAYLOAD = "mkdir -p ../scratch"
+
+    # AND THE SHAPES THAT COMMAND CANNOT SPEAK FOR. A sweep of one payload
+    # finds a POSITION this guard is blind at; it cannot find a COMMAND the
+    # guard is blind to, because the payload's own text never changes. Two of
+    # round 5's four blocking defects were the second kind - a carve-out that
+    # admitted an assignment PREFIX, and one that admitted an extra redirect.
+    # Each is a command bash aborts the step on, so each is subject to the
+    # same rule at every position, and adding them here is what turns this
+    # from a test of the parser into a test of the carve-out list as well.
+    #
+    # WHAT THAT DOES AND DOES NOT BUY, measured by restoring each defect one
+    # at a time and running this file. Restoring the `^NAME=` prefix rule
+    # reds this test at `an-assignment-prefixed-command` and nowhere else in
+    # the sweep; restoring the `_OUTPUT_WRITE` `.*` pattern reds it at
+    # `an-echo-with-an-extra-redirect` and nowhere else. The bare `mkdir`
+    # payload is CLEAN under both - which is the whole reason the other three
+    # are here.
+    #
+    # The other two defects are invisible to any sweep of one-line payloads,
+    # and saying so is the point of writing this down. A guarded-blob
+    # splitter is caught by test_a_construct_this_classifier_cannot_place_
+    # is_never_a_pass, and a heredoc opener inside a quoted string needs TWO
+    # spliced lines to express at all and is caught by
+    # test_a_heredoc_opener_inside_a_string_opens_no_heredoc; restoring
+    # either leaves all four sweeps green. The one test that reds on all four
+    # is test_the_payloads_that_once_passed_silently_all_red_now, which holds
+    # the measured bytes. The sweep is the half that checks EVERY POSITION
+    # rather than the one above the `case`; it is not the half that checks
+    # every shape.
+    _SWEEP_PAYLOADS = (
+        ("a-bare-command", _SWEEP_PAYLOAD),
+        ("an-assignment-prefixed-command", "FOO=bar " + _SWEEP_PAYLOAD),
+        ("an-echo-with-an-extra-redirect",
+         'echo hi > ../scratch/zz >> "$GITHUB_OUTPUT"'),
+        ("a-semicolon-list-whose-last-pair-is-guarded",
+         _SWEEP_PAYLOAD + " ; echo hi || echo bye"),
+    )
+    # A SYNTAX ERROR, used to ask BASH whether a position is code or data. A
+    # bare `if` at a command position makes `bash -n` red; the same `if`
+    # inside a heredoc body is a line of text and `bash -n` never sees it.
+    # That answer comes from bash and not from this classifier, which is the
+    # entire point: the classifier's own opinion about where a heredoc ends
+    # is the thing being audited.
+    _SWEEP_PROBE = "if"
+
+    def _sweep(self, tmp_path, payload):
+        """Splice `payload` at every line boundary; return {position: verdict}.
+
+        WHY A SWEEP AND NOT A LIST OF CASES. Every blocking defect of the
+        last two rounds was a position where this guard said nothing about an
+        unguarded command - and each was found by someone thinking of the
+        shape, which is a search that stops when the reviewer runs out of
+        ideas. Splicing a failing command at every boundary in the real body
+        does not depend on anyone's imagination. What it covers and what it
+        does not is in `_SWEEP_PAYLOADS`, measured rather than claimed.
+
+        The verdicts, and each is a POSITIVE answer rather than an absence:
+
+        `red` - the guard named an unguarded command. What almost every
+            position must be.
+        `invalid` - `bash -n` rejects the spliced body, so it is not an edit
+            this step could carry: mid-way through a line continuation, or
+            between a `case` and its first pattern. Nothing to guard.
+        `data` - bash agrees the position is not code. `_SWEEP_PROBE` is a
+            syntax error, so `bash -n` staying clean means bash never parsed
+            the spliced line as code at all - it is heredoc body. Bash will
+            not run the payload there either, so silence is right. This is
+            deliberately BASH'S answer: a classifier that
+            wrongly blanks real commands - #120 round 5's defect 3, a `<<PY`
+            inside a `::warning::` swallowing the rest of the step - is
+            silent at code positions, and bash calls those positions code.
+        `guarded` - the classifier SAW the payload and put it inside a
+            command errexit does not act on. Such a position exists between
+            the Python heredoc's `PY` and the `)` that closes
+            `verdict=$(...)`: the payload runs inside the substitution, whose
+            status the `|| verdict=""` guards. Not blindness - coverage, and
+            the distinction is the whole reason this verdict requires the
+            classifier to have the payload's text in hand.
+        `unjustified` - silent, and none of the above. The failure.
+        """
+        bash = require_bash()
+        lines = _audit_body().split("\n")
+        every = range(len(lines) + 1)
+
+        def splice(pos, text):
+            after = lines[pos] if pos < len(lines) and lines[pos].strip() else ""
+            before = lines[pos - 1] if pos else ""
+            ref = after or before
+            pad = " " * (len(ref) - len(ref.lstrip()))
+            return "\n".join(lines[:pos] + [pad + text] + lines[pos:])
+
+        def rejected(positions, text, tag):
+            """The subset of `positions` whose spliced body `bash -n` refuses.
+
+            ONE bash invocation for the whole batch, which is worth a line of
+            explanation because it is the difference between this sweep
+            costing seconds and costing a minute. Python's per-`subprocess`
+            overhead dominates a `bash -n` on a 300-line file, and the sweep
+            wants one per position twice over; the loop below moves that
+            overhead inside a single shell. Each file is still parsed by its
+            own `bash -n`, so the answer per position is unchanged.
+            """
+            paths = {}
+            for pos in positions:
+                paths[_script(tmp_path,
+                              "set -uo pipefail\n" + splice(pos, text) + "\n",
+                              name=f"sweep-{tag}-{pos}.sh")] = pos
+            if not paths:
+                return set()
+            done = subprocess.run(
+                [bash, "-c",
+                 'for f in "$@"; do bash -n "$f" 2>/dev/null '
+                 '|| printf "%s\\n" "$f"; done', "_"] + list(paths),
+                capture_output=True, text=True)
+            assert done.returncode == 0, (
+                f"the batched `bash -n` runner itself failed, so nothing it "
+                f"reported about the step can be trusted:\n{done.stderr}"
+            )
+            return {paths[line] for line in done.stdout.splitlines() if line}
+
+        verdicts = {pos: "invalid" for pos in rejected(every, payload, "pay")}
+        silent = []
+        for pos in every:
+            if pos in verdicts:
+                continue
+            body = splice(pos, payload)
+            saved = globals()["_audit_body"]
+            globals()["_audit_body"] = lambda b=body: b
+            try:
+                self.\
+                    test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+            except AssertionError:
+                verdicts[pos] = "red"
+            else:
+                silent.append(pos)
+            finally:
+                globals()["_audit_body"] = saved
+        # BASH IS ASKED FIRST, and only the positions it calls code cost a
+        # second parse. Most silent positions are heredoc data, and asking
+        # the classifier to re-read the step for each of those would double
+        # the sweep's cost to answer a question already settled.
+        code = rejected(silent, self._SWEEP_PROBE, "probe")
+        for pos in silent:
+            if pos not in code:
+                verdicts[pos] = "data"
+                continue
+            saved = globals()["_audit_body"]
+            globals()["_audit_body"] = lambda b=splice(pos, payload): b
+            try:
+                covered = any(payload in command and bucket == "guarded"
+                              for _, command, bucket in self._classified())
+            finally:
+                globals()["_audit_body"] = saved
+            verdicts[pos] = "guarded" if covered else "unjustified"
+        return verdicts
+
+    @pytest.mark.parametrize("shape,payload", _SWEEP_PAYLOADS,
+                             ids=[name for name, _ in _SWEEP_PAYLOADS])
+    def test_a_failing_command_spliced_anywhere_in_the_step_is_never_silent(
+            self, tmp_path, shape, payload):
+        """The sweep, as a gate rather than a thing a reviewer once ran.
+
+        A review ran this by hand out of a scratch directory, and a sweep in
+        a scratchpad protects the one tree it was run against; committed, it
+        protects every tree after. That is the whole argument for its
+        existence, and it is worth separating from the stronger claim the
+        review made for it - see `_SWEEP_PAYLOADS` for which of that round's
+        defects this actually catches and which it cannot see.
+
+        Every position, rather than the position a reviewer thought of. The
+        rest of this class splices above the `case`, which is where 58cfab6's
+        `mkdir` sat; nothing else asks what happens inside the `else` of the
+        second clone, between a heredoc's terminator and the `)` that closes
+        its capture, or on the last line of the step.
+
+        NO COUNTS ASSERTED HERE, and none written down either - see #120 and
+        test_no_comment_in_this_step_counts_its_own_echoes. The number of
+        positions moves with every line added to the step, so a number would
+        be stale on the next edit and would red for a reason that is not a
+        fault. The PROPERTY does not move: no position may be silent without
+        one of `_sweep`'s named justifications.
+        """
+        verdicts = self._sweep(tmp_path, payload)
+        lines = _audit_body().split("\n")
+        unjustified = [pos for pos, v in verdicts.items() if v == "unjustified"]
+        assert not unjustified, (
+            f"`{payload}` - a command bash aborts the step on - was spliced "
+            f"into the audit step at each position below and left this guard "
+            f"SILENT, with neither bash nor the classifier accounting for "
+            f"the silence ({shape}):\n" + "\n".join(
+                f"  before line {pos}: "
+                f"{(lines[pos] if pos < len(lines) else '<end of step>')!r}"
+                for pos in unjustified
+            ) + f"\nEach is an unguarded command this step could carry today "
+            f"without anything reding. Either the classifier is blind there, "
+            f"or the position deserves a justification `_sweep` does not yet "
+            f"have - and adding one is a decision to review, not a formality."
+        )
+        # THE SWEEP HAS TO BE WIRED TO SOMETHING. Every assertion above is
+        # satisfied by a sweep that finds nothing, so the negative control is
+        # not optional: a classifier that carves the payload out has to make
+        # this sweep report the failure it exists to report.
+        assert "red" in verdicts.values(), (
+            f"no position in the step reds when `{payload}` is spliced "
+            f"there, so this sweep is measuring nothing"
+        )
+
+    def test_the_sweep_reds_when_the_guard_stops_seeing_the_payload(
+            self, monkeypatch, tmp_path):
+        """The sweep's own negative control, run rather than argued.
+
+        A gate is evidence only if a broken tree makes it fail. Carving the
+        payload out is the smallest way to break exactly what the sweep
+        measures: the guard then says nothing at every code position, bash
+        still calls those positions code, and no command containing the
+        payload is `guarded` - so they come back `unjustified`.
+
+        One position would do; the whole sweep is run because the assertion
+        is about the sweep, and a control that exercises a different code
+        path from the gate is a control for something else.
+        """
+        real = type(self)._carved_out
+        monkeypatch.setattr(
+            type(self), "_carved_out",
+            lambda s, command: (command.strip() == self._SWEEP_PAYLOAD
+                                or real(s, command)))
+        verdicts = self._sweep(tmp_path, self._SWEEP_PAYLOAD)
+        assert "unjustified" in verdicts.values(), (
+            "the payload was carved out and the sweep still found every "
+            "position accounted for, so the sweep cannot see a guard that "
+            "has gone blind - which is the only thing it is for"
+        )
 
     _TWO_LINE_HEAD = ["if true", "then", "  :", "fi"]
     _TWO_LINE_HEAD_ARMED = ["if true", "then", "  mkdir -p ../scratch", "fi"]
@@ -4042,6 +4282,62 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         assert "stale" not in tokens, (
             f"the scan recovered `stale` from an extglob arm: {tokens}. Same "
             f"as above - the docstring is what needs correcting."
+        )
+
+    def test_every_test_this_file_names_in_its_prose_exists(self):
+        """#120's rule, applied to this file's own favourite kind of claim.
+
+        The prose here argues by pointing: an exemption is defended by naming
+        the test that holds the other half, a docstring says which test runs
+        the shape it describes. That is the right way to write it - and every
+        one of those names is a claim a reader can check, so an unchecked one
+        is exactly the comment #120 is about. A renamed or deleted test
+        leaves the sentence reading as if the coverage were still there, and
+        it is the sentence a reviewer trusts instead of going to look.
+
+        It has already happened twice in this file's own history and once in
+        the round that added this test, which is why it is a test and not a
+        resolution.
+
+        A NAME WRAPPED ACROSS TWO COMMENT LINES BREAKS AT AN UNDERSCORE, and
+        that is the only join rule. A line ending in `_` continues into the
+        next; anything else ends the name. Joining unconditionally would glue
+        the next word on - `..._as_it_did` followed by `is ...` reads as
+        `..._as_it_didis`, a name that exists nowhere and would red this test
+        about nothing.
+        """
+        source = Path(__file__).resolve().read_text(encoding="utf-8")
+        defined = set(re.findall(r"^\s*def (test_\w+)", source, re.M))
+        prose, pending = [], ""
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                stripped = stripped.lstrip("#").strip()
+            elif pending:
+                prose.append(pending)
+                pending = ""
+                continue
+            if pending:
+                stripped = pending + stripped
+                pending = ""
+            if stripped.endswith("_"):
+                pending = stripped
+            else:
+                prose.append(stripped)
+        prose.append(pending)
+        named = set()
+        for line in prose:
+            named.update(re.findall(r"\btest_\w+", line))
+        # Names of FILES, which live in this repo's `scripts/` beside this
+        # one and are not functions here.
+        named -= {"test_account_zip_selection", "test_ci_workflow",
+                  "test_account_workflows"}
+        missing = sorted(name for name in named if name not in defined)
+        assert not missing, (
+            f"the prose in this file names {len(missing)} test(s) that do "
+            f"not exist: {missing}. A sentence that defends a decision by "
+            f"pointing at a test is only worth the pointer being real - "
+            f"rename the reference, or write what actually holds the claim."
         )
 
     def test_no_comment_in_this_step_counts_its_own_echoes(self):
