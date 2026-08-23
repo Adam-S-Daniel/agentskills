@@ -437,8 +437,9 @@ figure. No remediation is performed — recommend, do not do.
   moves.
 - **`may_replace` saying yes is not the end of the story, and the doctor walks
   the rest of the ladder before it says delivery is unaffected.** The install
-  loop asks several more questions after that gate, and two of them end in
-  `rm -rf` on the very directory it just agreed it could replace: two lock rows
+  loop asks several more questions after that gate, and seven of its arms end in
+  `rm -rf` on the very directory it just agreed it could replace. The doctor
+  models the two that a reading of your own disk can answer: two lock rows
   folding onto one destination name (`deleted-by-the-dup-guard`, a finding —
   neither row installs) and the project shipping a `.claude/skills/<name>` of
   its own (`deleted-by-the-collision-guard`, a note — repo-owned is supposed to

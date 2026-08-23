@@ -5002,6 +5002,68 @@ def test_every_kind_that_quotes_the_refusal_is_exercised_or_declared_not():
     assert not set(REFUSAL_STATES.values()) & UNEXERCISED_REFUSAL_KINDS
 
 
+# English for the small integers, so a count in prose can be READ back out of
+# the prose and compared. Nine is where the hook's own arms could plausibly get
+# to; past that the sentence should be rewritten, not extended.
+NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven",
+                "eight", "nine")
+
+
+def _arms_that_delete_below_the_gate():
+    """The `rm -rf "${DEST:?}/$name"` arms between the gate and the loop's end.
+
+    Read out of the hook rather than counted once by a person and copied, which
+    is how the number in SKILL.md came to say two when there are seven.
+    """
+    lines = _hook_path().read_text(encoding="utf-8").splitlines()
+    gate = [n for n, line in enumerate(lines)
+            if 'if ! may_replace "$name" "$want"; then' in line]
+    end = [n for n, line in enumerate(lines)
+           if line.startswith('done < "$tmp/skills.nul"')]
+    assert len(gate) == 1 and len(end) == 1 and gate[0] < end[0], (gate, end)
+    return [line for line in lines[gate[0]:end[0]]
+            if 'rm -rf "${DEST:?}/$name"' in line]
+
+
+def test_the_document_counts_the_deleting_arms_the_hook_actually_has():
+    """agentskills#120's subject, in the sentence a reader acts on.
+
+    SKILL.md said "two of them end in `rm -rf`" — written in the same commit
+    whose own `hook_fate` docstring names five NOT-MODELLED arms and says every
+    one of them also removes the destination. Neither number was asserted by
+    anything, and this is the third consecutive round to reintroduce a count of
+    this exact family.
+
+    So the number is derived from the hook and read back out of the document.
+    Add an arm to the install loop and this fails until the sentence is updated,
+    which is the only arrangement under which a count in prose is worth writing.
+    """
+    arms = len(_arms_that_delete_below_the_gate())
+    assert 0 < arms < len(NUMBER_WORDS), arms
+    text = (Path(prov.__file__).parent.parent / "SKILL.md").read_text(
+        encoding="utf-8")
+    claim = f"{NUMBER_WORDS[arms]} of its arms end in\n  `rm -rf`"
+    assert claim in text, (arms, [line for line in text.splitlines()
+                                  if "end in" in line])
+
+
+def test_no_finding_calls_the_collision_the_last_thing_in_the_way():
+    """The same family, in text the reader is SHOWN rather than in a comment.
+
+    `collision-guard-unmeasured` said the collision was "the one question left
+    between this directory and the hook's copy", while `hook_fate`'s own
+    NOT-MODELLED paragraph lists five further rungs between the collision guard
+    and a surviving copy and says every one of them ALSO removes the
+    destination. The retired sentence is pinned rather than the replacement
+    wording, for `test_the_shared_payload_docstring_admits_the_use_its_caller_makes`'
+    reason: what is wrong is the claim, not the phrasing around it.
+    """
+    assert len(_arms_that_delete_below_the_gate()) > 2, "the premise has changed"
+    retired = "the one question left between this directory and the hook"
+    assert retired not in prov.COLLISION_GUARD_UNMEASURED
+    assert retired not in Path(prov.__file__).read_text(encoding="utf-8")
+
+
 def test_the_skill_document_names_every_refusal_finding():
     """SKILL.md's list of them, bound to the set the module closes.
 
