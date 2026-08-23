@@ -845,7 +845,11 @@ def reported_foreign(foreign: Dict[str, str], record: Record,
 
     Gate one, the record. Reclassifying withholds the `untracked` finding, and
     the only thing that makes that honest is a record which positively does not
-    name the directory. With no readable record there is nothing to be silent:
+    name the directory — so a record that DOES name it disqualifies the label
+    outright. That entry is the hook saying it installed this directory, which
+    is the one thing "no name-keyed channel here delivered it" denies, and the
+    row already reads `hook` next to a note claiming the record is silent.
+    With no readable record there is nothing to be silent:
     `untracked`'s own no-record text says even "the hook installed it" cannot be
     ruled out, and a note asserting the opposite over the top of it would be the
     report contradicting itself. (Its silence is still not proof — a hook that
@@ -866,7 +870,7 @@ def reported_foreign(foreign: Dict[str, str], record: Record,
     if record.state != PRESENT:
         return {}
     return {name: declared for name, declared in foreign.items()
-            if name not in locked}
+            if name not in locked and name not in record.entries}
 
 
 def foreign_notes(foreign: Dict[str, str]) -> List[Finding]:
