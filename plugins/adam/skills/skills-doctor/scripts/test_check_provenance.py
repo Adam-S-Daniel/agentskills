@@ -20,7 +20,9 @@ only because this repo happens not to have one.
 """
 
 import ast
+import errno
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -28,6 +30,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import NamedTuple, Tuple
+from unittest import mock
 
 import pytest
 
@@ -1915,40 +1918,112 @@ def test_a_row_the_hook_accepts_and_the_planner_skips_still_lets_it_overwrite(
     assert before != after and "v2" in after, (before, after)
 
 
-def test_a_project_skills_dir_that_cannot_be_listed_is_not_read_as_empty(
-        tmp_path, capsys):
-    """The collision rung with no answer, which used to round to the benign one.
+@pytest.mark.parametrize("build", [
+    lambda project: (project / ".claude" / "skills").write_text(
+        "not a directory\n", encoding="utf-8"),
+    lambda project: (project / ".claude" / "skills").symlink_to(
+        project / ".claude" / "skills"),
+], ids=["a-plain-file", "a-symlink-loop"])
+def test_a_project_path_the_hook_can_answer_is_not_reported_unmeasured(
+        tmp_path, capsys, build):
+    """The false RED the listing measurement produced, measured against the hook.
 
-    `skill_names` swallowed every OSError into the empty set, so an unlistable
-    `.claude/skills` said "the project ships nothing" — the reading under which
-    the ladder hands back `bytes-are-the-locked-ones` and the report says
-    delivery is unaffected. A plain FILE where the directory belongs is how this
-    is reproduced deterministically: the suite runs as root in CI, where a chmod
-    is not a refusal, and `iterdir` on a file raises NotADirectoryError anywhere.
+    The hook never lists the project's skills directory. It runs one stat per
+    name — `[ -f "$PROJECT_DIR/.claude/skills/$name/SKILL.md" ]` — and `-f`
+    through a plain file or a symlink loop is definitively false, so the hook
+    installs and deletes nothing. `iterdir` raises on both, which the doctor read
+    as "nobody knows", and it raised `collision-guard-unmeasured` at exit 1 over
+    a healthy store while prescribing a readability fix for something that is not
+    a readability problem.
+
+    Both halves are measured: the report, and then the real hook's next run.
     """
-    suite, root, project, home, store, lock_path = _installed(tmp_path)
+    suite, _root, project, home, store, lock_path = _installed(tmp_path)
     (project / ".claude").mkdir(exist_ok=True)
-    (project / ".claude" / "skills").write_text("not a directory\n",
-                                                encoding="utf-8")
+    build(project)
 
-    assert prov.readable_skill_names(project / ".claude" / "skills") is None
+    assert prov.project_ships(project / ".claude" / "skills",
+                              {"alpha", "beta"}) == set()
     code, out = run(store, lock_path, capsys, project_dir=project)
     text = flat(out)
+    assert "collision-guard-unmeasured" not in text, text
+    assert code == 0, text
+
+    proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert suite._verdict(proc).startswith("skills: 2/2 "), suite._verdict(proc)
+    assert (store / "alpha").is_dir() and (store / "beta").is_dir()
+
+
+def test_which_stat_failures_settle_the_hooks_question_and_which_do_not(tmp_path):
+    """`hook_sees_a_file`'s rule, one errno at a time.
+
+    The line matters in both directions. Too wide and every unlistable project
+    directory is a finding on a healthy machine; too narrow and a refusal that
+    THIS process hit — but the session's own process may not — is reported as a
+    measured "the project ships nothing", which is the benign reading the whole
+    ladder exists to stop assuming.
+
+    The four settled errnos are also built for real by the tests above and
+    below; they are driven here as errnos so the rule itself is what is asserted
+    rather than four paths that happen to produce it. EACCES and friends cannot
+    be built at all as root, which is why they are the simulated half.
+    """
+    real_stat = os.stat
+
+    def raising(code):
+        def stub(path, *args, **kwargs):
+            if str(path).endswith("probe"):
+                raise OSError(code, "simulated")
+            return real_stat(path, *args, **kwargs)
+        return stub
+
+    for code in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG):
+        with mock.patch.object(prov.os, "stat", raising(code)):
+            assert prov.hook_sees_a_file(tmp_path / "probe") is False, code
+    for code in (errno.EACCES, errno.EIO, errno.EMFILE):
+        with mock.patch.object(prov.os, "stat", raising(code)):
+            assert prov.hook_sees_a_file(tmp_path / "probe") is None, code
+    # And the two answers that need no simulation at all.
+    (tmp_path / "real").write_text("x", encoding="utf-8")
+    assert prov.hook_sees_a_file(tmp_path / "real") is True
+    assert prov.hook_sees_a_file(tmp_path) is False        # a directory is not -f
+
+
+def test_a_stat_that_does_not_settle_the_question_is_still_unmeasured(
+        tmp_path, capsys):
+    """The rung's other half, which narrowing it must not delete.
+
+    EACCES on a component of the path is the case the hook's `-f` answers false
+    for THIS process while the session's own process may answer differently, so
+    the doctor declines to guess. Simulated at `hook_sees_a_file` rather than at
+    `os.stat`, which the rest of the run also calls: what this measures is the
+    wiring from an unresolved stat through `project_ships` and the ladder to the
+    rendered finding.
+    """
+    _suite_, _root, project, _home, store, lock_path = _installed(tmp_path)
+    (project / ".claude" / "skills").mkdir(parents=True, exist_ok=True)
+
+    with mock.patch.object(prov, "hook_sees_a_file",
+                           lambda path: None if path.parent.name == "alpha"
+                           else False):
+        assert prov.project_ships(project / ".claude" / "skills",
+                                  {"alpha", "beta"}) is None
+        code, out = run(store, lock_path, capsys, project_dir=project)
+    text = flat(out)
     assert "[collision-guard-unmeasured] alpha" in text, text
-    assert "[collision-guard-unmeasured] beta" in text, text
     assert "delivery is unaffected" not in text, text
     assert code == 1, text
 
 
 def test_an_absent_project_skills_dir_is_measured_and_not_unmeasured(tmp_path):
-    """The negative control for the test above, and the common case.
+    """The negative control, and the common case.
 
     Almost no project has a `.claude/skills`, and reporting every one of them as
     unmeasured would be the same defect pointing the other way — a finding on
-    every healthy machine. FileNotFoundError is the one OSError that IS an
-    answer: a project with no such directory ships no skill of any name.
+    every healthy machine. ENOENT is an answer, not a failure to get one.
     """
-    assert prov.readable_skill_names(tmp_path / "nothing" / "here") == set()
+    assert prov.project_ships(tmp_path / "nothing" / "here",
+                              {"alpha"}) == set()
 
 
 @pytest.mark.parametrize("fate", prov.FATES)
