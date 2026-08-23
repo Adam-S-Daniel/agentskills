@@ -3621,8 +3621,8 @@ def _module_functions() -> dict:
     printed stream with a self-built invocation and was scanned by nothing: a
     module-level `async def`, a `def` inside a module-level `try:`, and a
     method on a module-level class. Measured, each appended to the generator
-    on its own and the file restored byte-for-byte after: the gate stayed at
-    "1 passed" for all three.
+    on its own and the file restored byte-for-byte after: the gate stayed
+    green for all three.
 
     A module-level function keeps its BARE name, so every name the other
     checks resolve — the `*_blocker` predicates, `_REPIN_APPLY_PATH`,
@@ -4247,7 +4247,7 @@ def test_the_placer_keeps_the_command_a_command():
     ordinary prose that anything could be appended to. Measured on the
     generator before the fix, restored byte-for-byte between each case:
     `print(f"  {str(answer.command)} --ref HEAD")` in `report_digest_format`
-    left the gate at "1 passed".
+    left the gate green.
     """
     for label, printed in _STILL_PLACEABLE.items():
         _place_one_report_path(printed)      # raises _Unplaceable if it cannot
@@ -4279,13 +4279,18 @@ def test_every_test_this_repo_cites_by_name_exists():
     This file's comments carry a lot of "X pins that" and "Y binds the two",
     and the value of every one of them is that the reader can go and read Y.
     A renamed test leaves the sentence looking exactly as authoritative as it
-    was and pointing at nothing, and nothing else in the suite notices —
-    24bb05d added `test_check_format_asks_no_git_and_still_addresses_its_own_
-    line` to a docstring and `test_check_format_asks_no_git_even_to_address_
-    its_own_line` to this file, in one commit. Two more were already stale at
-    the merge base: both copies of `test_the_hooks_inline_digest_matches_the_
-    generators`, in the generator and in the bootstrap hook, whose real name
-    is `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill`.
+    was and pointing at nothing, and nothing else in the suite notices.
+    24bb05d added a docstring citing a test whose name ends
+    "and_still_addresses_its_own_line" and, in the same commit, a test whose
+    name ends "even_to_address_its_own_line". Two more were already stale at
+    the merge base: both copies of a citation ending
+    "inline_digest_matches_the_generators", in the generator and in the
+    bootstrap hook, whose real name is
+    `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill`.
+
+    Names are never wrapped across lines in a citation this scans, for the
+    reason this test exists: a wrapped name is not greppable, and this reads
+    the halves as two names neither of which is defined.
 
     Scanned over every non-test source this repo tracks, so a citation in the
     hook counts the same as one in the generator. A name resolves if some
@@ -4359,7 +4364,7 @@ def test_only_remediation_can_spell_this_scripts_invocation():
              f"--registry evil/repo --bundles adam -o {output}")`
     in `repin_unproven_sources_blocker` — a string both `report_drift` and
     `report_digest_format` print inside a verdict headline — left the placement
-    gate at "1 passed" and fails here.
+    gate green and fails here.
     """
     functions = _module_functions()
     banned = _module_command_names()
