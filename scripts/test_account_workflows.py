@@ -1919,6 +1919,27 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
     _OUTPUT_WRITE = re.compile(r'^echo\s+.*>>\s*"\$GITHUB_OUTPUT"$')
     _COMPOUND_HEAD = re.compile(r"^(?:if|elif|while|until)\b")
+    _CASE_OPEN = re.compile(r"^case\s+\S+\s+in$")
+    _ARM_TERMINATORS = (";;&", ";;", ";&")
+
+    # THE FOUR ANSWERS, AND THERE IS NO FIFTH. Every command this classifier
+    # extracts leaves it carrying one of these names, and a construct it
+    # cannot name raises instead of picking one. Three of the four EXEMPT a
+    # command from the rule below, which is why none of them may be reached
+    # by a heuristic: an exemption handed out by a rule of thumb is an
+    # unguarded command the guard has stopped being able to see, and that is
+    # a silent green rather than a red.
+    _BUCKETS = ("guarded", "carved-out", "punctuation", "bare")
+
+    # CONSTRUCTS THIS CLASSIFIER DOES NOT MODEL, RECOGNISED SO THEY RAISE.
+    # A function definition is the one that matters: its body does not run
+    # where it is written, so every answer above is the wrong answer for it -
+    # `bare` reds with a diagnosis that is false, and any exemption hides a
+    # body nothing here has read. Naming it is the only honest outcome.
+    _UNMODELLED = (
+        (re.compile(r"^(?:function\s|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\))"),
+         "a function definition, whose body does not run where it is written"),
+    )
 
     @staticmethod
     def _one_command(mask):
@@ -1960,52 +1981,155 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
             return True
         return bool(self._OUTPUT_WRITE.match(command))
 
-    def _classified(self):
-        """Every command in the step as (first line, text, guarded).
+    @staticmethod
+    def _pattern_end(mask):
+        """Index just past the `)` closing a `case` pattern list, or None.
 
-        `guarded` is TRUE where errexit is defined not to act: an `if` /
-        `elif` / `while` / `until` condition, the left of the final `&&` or
-        `||`, and the shell's own punctuation. Everything else is FALSE,
-        including whatever sits to the right of that final operator.
+        A pattern list may be written `(a|b)` as well as `a|b)`, so a leading
+        `(` is consumed rather than counted, and any other `(` before the
+        pattern's own `)` is a construct this cannot read - which returns
+        None and reds at the caller rather than guessing where the pattern
+        stopped.
         """
-        classified = []
+        i, depth = 0, 0
+        while i < len(mask) and mask[i].isspace():
+            i += 1
+        if i < len(mask) and mask[i] == "(":
+            i += 1
+        while i < len(mask):
+            if mask[i] == "(":
+                depth += 1
+            elif mask[i] == ")":
+                if depth == 0:
+                    return i + 1
+                depth -= 1
+            i += 1
+        return None
+
+    def _classify_region(self, start, text, mask, classified):
+        """One command region - a line, or an arm body after its pattern.
+
+        Splits at the final `&&`/`||` and then at every top-level `;`, and
+        gives each piece one of `_BUCKETS`. A `case` opener or an `esac`
+        reaching here is a `case` written in a shape `_classified`'s state
+        machine never saw, so it raises rather than being counted as
+        punctuation by a regex that cannot tell which block it belongs to.
+        """
+        head = text.strip()
+        if self._COMPOUND_HEAD.match(head):
+            assert head.endswith("then") or head.endswith("do"), (
+                f"line {start} of the audit step opens a compound command "
+                f"and puts something after its `then`/`do` on the same "
+                f"line; this classifier would read the whole line as a "
+                f"condition and exempt it: {head!r}"
+            )
+            classified.append((start, head, "guarded"))
+            return
+        if self._STRUCTURE.match(head):
+            classified.append((start, head, "punctuation"))
+            return
+        guards = _top_level(mask, ("||", "&&"))
+        if guards:
+            at, token = guards[-1]
+            classified.append((start, text[:at].strip(), "guarded"))
+            text, mask = text[at + len(token):], mask[at + len(token):]
+        previous = 0
+        for at, _token in _top_level(mask, (";",)) + [(len(mask), ";")]:
+            segment = text[previous:at].strip()
+            previous = at + 1
+            if not segment:
+                continue
+            for shape, what in self._UNMODELLED:
+                assert not shape.match(segment), (
+                    f"line {start} of the audit step is {what}. This "
+                    f"classifier has no answer for it, and every answer it "
+                    f"does have would be wrong: {segment!r}"
+                )
+            assert not self._CASE_OPEN.match(segment) and segment != "esac", (
+                f"line {start} of the audit step writes a `case` construct "
+                f"inside another command, which the classifier's `case` "
+                f"state machine never sees - so its arms would be read as "
+                f"ordinary commands and its patterns as failures: "
+                f"{segment!r}"
+            )
+            classified.append(
+                (start, segment,
+                 "carved-out" if self._carved_out(segment) else "bare"))
+
+    def _classified(self):
+        """Every command in the step as (first line, text, bucket).
+
+        `bucket` is one of `_BUCKETS`, and getting there is POSITIVE
+        throughout: a command is exempt because a recogniser said what it is,
+        never because no recogniser objected. `guarded` is where errexit is
+        defined not to act - an `if`/`elif`/`while`/`until` condition and the
+        left of the final `&&`/`||`. `punctuation` is the shell's own
+        skeleton, including a `case` pattern list. `carved-out` is the list
+        above. Everything else is `bare`, and `bare` is what reds.
+
+        THE `case` BLOCK IS PARSED, NOT SNIFFED, and that is this method's
+        whole shape. The heuristic it replaces called a line punctuation
+        whenever its masked text ended in `)` with more `)` than `(` - which
+        is true of a one-line arm as well as of a pattern, so
+        `zzz) drift=$(mkdir -p /proc/nope/c) ;;` was punctuation: guarded,
+        read by no rule, and exempting exactly the assignment-from-`$( )`
+        the carve-out list says is deliberately NOT carved out. Here a `case`
+        opener pushes a state, a pattern list is consumed by `_pattern_end`
+        and the REST OF THE LINE is classified as the arm body it is, an arm
+        terminator returns the block to awaiting a pattern, and `esac` pops.
+        Anything the machine cannot place - a pattern it cannot find the end
+        of, an arm terminator or an `esac` outside a `case`, a `case` left
+        open at the end of the step - raises, naming the text. An
+        unrecognised construct must not become an exemption.
+        """
+        classified, cases = [], []
         for start, _, text, mask in _logical_lines(_audit_body()):
-            for terminator in (";;&", ";;", ";&"):
+            ended_arm = None
+            for terminator in self._ARM_TERMINATORS:
                 if text.rstrip().endswith(terminator):
                     cut = len(text.rstrip()) - len(terminator)
-                    text, mask = text[:cut], mask[:cut]
+                    text, mask, ended_arm = text[:cut], mask[:cut], terminator
                     break
+            assert ended_arm is None or cases, (
+                f"line {start} of the audit step ends an arm with "
+                f"`{ended_arm}` and no `case` block is open, so the "
+                f"classifier does not know what it terminates"
+            )
             head = text.strip()
-            if not head:
-                continue
-            if self._COMPOUND_HEAD.match(head):
-                assert head.endswith("then") or head.endswith("do"), (
-                    f"line {start} of the audit step opens a compound command "
-                    f"and puts something after its `then`/`do` on the same "
-                    f"line; this classifier would read the whole line as a "
-                    f"condition and exempt it: {head!r}"
+            if head == "esac":
+                assert cases, (
+                    f"line {start} of the audit step closes a `case` block "
+                    f"that was never opened"
                 )
-                classified.append((start, head, True))
+                cases.pop()
+                classified.append((start, head, "punctuation"))
                 continue
-            if self._STRUCTURE.match(head):
-                classified.append((start, head, True))
-                continue
-            if (mask.rstrip().endswith(")")
-                    and mask.count(")") > mask.count("(")):
-                # A `case` pattern, which is punctuation and not a command.
-                classified.append((start, head, True))
-                continue
-            guards = _top_level(mask, ("||", "&&"))
-            if guards:
-                at, token = guards[-1]
-                classified.append((start, text[:at].strip(), True))
-                text, mask = text[at + len(token):], mask[at + len(token):]
-            previous = 0
-            for at, _token in _top_level(mask, (";",)) + [(len(mask), ";")]:
-                segment = text[previous:at].strip()
-                previous = at + 1
-                if segment:
-                    classified.append((start, segment, False))
+            if cases and cases[-1]:
+                end = self._pattern_end(mask)
+                assert end is not None, (
+                    f"line {start} of the audit step stands where a `case` "
+                    f"pattern list must, and no `)` closes one there. The "
+                    f"classifier cannot tell where the pattern stops and the "
+                    f"arm body starts, so it can say nothing about either: "
+                    f"{head!r}"
+                )
+                classified.append((start, text[:end].strip(), "punctuation"))
+                text, mask = text[end:], mask[end:]
+                cases[-1] = False
+                head = text.strip()
+            if self._CASE_OPEN.match(head):
+                cases.append(True)
+                classified.append((start, head, "punctuation"))
+            elif head:
+                self._classify_region(start, text, mask, classified)
+            elif ended_arm is not None:
+                classified.append((start, ended_arm, "punctuation"))
+            if ended_arm is not None:
+                cases[-1] = True
+        assert not cases, (
+            "the audit step opens a `case` block it never closes, so every "
+            "line after it was classified as an arm of a block with no end"
+        )
         return classified
 
     def test_the_classifier_reads_every_line_of_the_step(self):
@@ -2225,7 +2349,7 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         bare position would abort the step in whichever branch it sits in -
         found only on the day that branch runs.
         """
-        for line, command, _guarded in self._classified():
+        for line, command, _bucket in self._classified():
             if command.split()[:1] != ["echo"]:
                 continue
             _, mask = _shell_scan(command)
@@ -2344,6 +2468,88 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"something else: {caught.value}"
             )
 
+    def test_every_command_gets_one_of_the_four_answers(self):
+        """The vocabulary is closed, and closed is the whole point.
+
+        Three of `_BUCKETS` exempt a command from the rule below. A fourth
+        answer invented in passing - or a bucket name misspelled at one
+        `append` - would exempt whatever carries it, because the rule tests
+        for `bare` and everything that is not `bare` walks free.
+        """
+        for line, command, bucket in self._classified():
+            assert bucket in self._BUCKETS, (
+                f"line {line} of the audit step was classified `{bucket}`, "
+                f"which is not one of {self._BUCKETS}: {command!r}"
+            )
+
+    # A MENU OF CONSTRUCTS THIS CLASSIFIER DOES NOT MODEL, each with the text
+    # its failure has to name. Three of these were live silent exemptions -
+    # the escaped backslash, the assignment-headed pipeline and the one-line
+    # `case` arm - and the rest are the neighbouring shapes a reader would
+    # reasonably wonder about. The requirement is the same for all of them
+    # and it is not "handled": each has to be classified as the failable
+    # unguarded command it is, or to RAISE naming itself. What none of them
+    # may do is pass.
+    _UNMODELLED_CONSTRUCTS = (
+        ("an-escaped-backslash-before-a-newline",
+         ["echo \\\\", "mkdir -p ../scratch"], "mkdir -p ../scratch"),
+        ("an-assignment-headed-pipeline",
+         ["harness_ok=yes | mkdir -p ../scratch"], "mkdir -p ../scratch"),
+        ("a-one-line-case-arm",
+         ["case zzz in", "  zzz) drift=$(mkdir -p ../scratch) ;;", "esac"],
+         "mkdir -p ../scratch"),
+        ("a-fallthrough-case-arm",
+         ["case zzz in", "  zzz) mkdir -p ../scratch ;;&", "  *) : ;;",
+          "esac"], "mkdir -p ../scratch"),
+        ("an-arithmetic-command", ["(( 0 ))"], "(( 0 ))"),
+        ("a-double-bracket-with-a-quoted-or",
+         ['[[ "x" == "a||b" ]]'], '[[ "x" == "a||b" ]]'),
+        ("a-background-list",
+         ["harness_ok=yes & mkdir -p ../scratch"], "mkdir -p ../scratch"),
+        ("a-function-definition",
+         ["zzz() { mkdir -p ../scratch; }"], "a function definition"),
+    )
+
+    def test_a_construct_this_classifier_cannot_place_is_never_a_pass(
+            self, monkeypatch, tmp_path):
+        """The negative control for the classification itself.
+
+        A guard whose parser mis-reads a construct does not red - it hands
+        out an exemption, which is #120's subject wearing this file's
+        clothes. All three blocking faults of this round had that shape: a
+        line joined onto the one above it, a pipeline admitted as its
+        leading assignment, and a whole `case` arm called punctuation
+        because its masked text ended in `)`. Each left the shipped step
+        green with an unguarded command inside it.
+
+        So every row is spliced into the real step and the guard has to
+        FAIL - either by naming the command as unguarded, or by refusing to
+        classify the construct at all. The two are one assertion on purpose:
+        which of them is right is a judgement about the construct, and the
+        thing that must never happen is neither.
+        """
+        bash = require_bash()
+        # Every body built BEFORE anything is monkeypatched, or the second
+        # one would be built from a step that already carries the first.
+        armed = {name: (self._with_lines_before_the_case(lines), names)
+                 for name, lines, names in self._UNMODELLED_CONSTRUCTS}
+        for name, (body, names) in armed.items():
+            syntax = subprocess.run(
+                [bash, "-n", _script(tmp_path, body, name="menu.sh")],
+                capture_output=True, text=True)
+            assert syntax.returncode == 0, (
+                f"the body carrying `{name}` is not valid bash, so what the "
+                f"guard says about it is about the fixture:\n{syntax.stderr}"
+            )
+            monkeypatch.setitem(globals(), "_audit_body", lambda b=body: b)
+            with pytest.raises(AssertionError) as caught:
+                self.\
+                    test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+            assert names in str(caught.value), (
+                f"the guard reded on a step carrying `{name}`, but not about "
+                f"{names!r}: {caught.value}"
+            )
+
     def test_every_command_that_can_fail_sits_in_an_if_or_an_or_list(self):
         """The rule the tolerance paragraph states and nothing held.
 
@@ -2351,8 +2557,8 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         carve-out list above is what says which bare commands are safe anyway.
         A command that is neither reds here rather than at 06:23 UTC.
         """
-        for line, command, guarded in self._classified():
-            assert guarded or self._carved_out(command), (
+        for line, command, bucket in self._classified():
+            assert bucket != "bare", (
                 f"line {line} of the audit step runs a command that can fail "
                 f"and is neither in an `if` condition nor in a `||` list: "
                 f"{command!r}. Under `bash -e` that aborts the whole step - "
