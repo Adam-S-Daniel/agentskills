@@ -1839,19 +1839,42 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
     #     this asymmetry exists to require.
     #   `:` - the no-op the quiet `case` arm is made of.
     #   an `echo` to stdout - an `echo` to a runner's stdout essentially never
-    #     fails. An `echo` that REDIRECTS is a different command and gets no
+    #     fails. THE COMMAND WORD HAS TO BE `echo` EXACTLY AND THE COMMAND
+    #     HAS TO BE A SIMPLE ONE: `_headed_by` refuses `echofail --now`,
+    #     whose name merely starts with those letters, and it refuses a
+    #     PIPELINE headed by `echo`. `echo hi | grep -q zzz` under `bash -e`
+    #     exits 1 and never reaches the next line - it aborts the step
+    #     exactly like a bare `mkdir`, and a prefix test called it safe. An
+    #     `echo` that REDIRECTS is a different command too and gets no
     #     carve-out here; the redirect rule below is what covers it.
     #   the `$GITHUB_OUTPUT` write - the one deliberately unguarded failable
     #     command in the step. There is no degraded path when the runner
     #     cannot write its own output file: aborting is the intended answer,
     #     and test_the_output_write_is_left_unguarded_on_purpose holds that it
-    #     keeps no guard.
+    #     keeps no guard. A simple `echo` again, for the same two reasons: a
+    #     pipeline ending in that redirect is not the write this describes.
     #   `{` and `}` - a brace group's punctuation, not a command.
     _STRUCTURE = re.compile(
         r"^(?:else|fi|done|do|then|esac|\{|\}|case\s+\S+\s+in)$")
     _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
     _OUTPUT_WRITE = re.compile(r'^echo\s+.*>>\s*"\$GITHUB_OUTPUT"$')
     _COMPOUND_HEAD = re.compile(r"^(?:if|elif|while|until)\b")
+
+    @staticmethod
+    def _headed_by(command, name):
+        """True when `command` is a SIMPLE command whose name is `name`.
+
+        Both halves are what `command.startswith(name)` got wrong. The name
+        has to be the whole first word, and the command has to be one command
+        - no `|`, no `&`, no `;` outside quotes - because errexit's exemption
+        is about a command's position in a list, and a carve-out that admits
+        a whole pipeline on the strength of its first word admits whatever
+        the pipeline ends with.
+        """
+        _, mask = _shell_scan(command)
+        if any(ch in mask for ch in "|&;"):
+            return False
+        return command.split()[:1] == [name]
 
     def _carved_out(self, command):
         if command.startswith("{"):
@@ -1867,7 +1890,9 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         if (self._ASSIGNMENT.match(command) and "$(" not in mask
                 and "`" not in mask and not redirects):
             return True
-        if command.startswith("echo") and not redirects:
+        if not self._headed_by(command, "echo"):
+            return False
+        if not redirects:
             return True
         return bool(self._OUTPUT_WRITE.match(command))
 
@@ -2033,7 +2058,7 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
         found only on the day that branch runs.
         """
         for line, command, _guarded in self._classified():
-            if not command.startswith("echo"):
+            if command.split()[:1] != ["echo"]:
                 continue
             _, mask = _shell_scan(command)
             if not any(ch in mask for ch in "<>"):
@@ -2043,6 +2068,59 @@ class TestEveryFailableCommandInTheAuditStepIsGuarded:
                 f"and is not the `$GITHUB_OUTPUT` write, so it can fail and "
                 f"abort the step: {command!r}. Put it in an `if` condition or "
                 f"a `||` list, or explain it in the carve-out list above."
+            )
+
+    _NOT_A_SIMPLE_ECHO = (
+        "echo hi | grep -q zzz",
+        "echofail --now",
+    )
+
+    def test_the_echo_carve_out_admits_only_a_simple_echo(
+            self, monkeypatch, tmp_path):
+        """The two shapes `command.startswith("echo")` let through.
+
+        A carve-out too broad certifies the shipped file while holding
+        nothing, which the list above says in its own first sentence. A
+        prefix match is exactly that: it admitted an entire PIPELINE headed
+        by `echo`, whose exit status is the LAST command's, and it admitted
+        any command whose name merely begins with those four letters.
+
+        Each is run under `bash -e` first, so what makes it dangerous is
+        measured here rather than argued - both abort before the next line,
+        which is what a bare `mkdir` does and what the whole rule exists to
+        stop. Then each is spliced into the step and the guard has to name
+        it.
+        """
+        bash = require_bash()
+        # Every body built BEFORE anything is monkeypatched, or the second
+        # one would be built from a step that already carries the first.
+        armed_bodies = {c: self._with_lines_before_the_case([c])
+                        for c in self._NOT_A_SIMPLE_ECHO}
+        for command, armed in armed_bodies.items():
+            script = f"set -uo pipefail\n{command}\necho reached\n"
+            proc = subprocess.run(
+                [bash, "-e", _script(tmp_path, script, name="carve.sh")],
+                capture_output=True, text=True)
+            assert proc.returncode != 0 and "reached" not in proc.stdout, (
+                f"`{command}` no longer aborts under `bash -e`, so this case "
+                f"proves nothing about the carve-out: {proc.returncode}, "
+                f"{proc.stdout!r}"
+            )
+            syntax = subprocess.run(
+                [bash, "-n", _script(tmp_path, armed, name="carve-body.sh")],
+                capture_output=True, text=True)
+            assert syntax.returncode == 0, (
+                f"the body carrying `{command}` is not valid bash, so what "
+                f"the guard says about it is about the fixture:"
+                f"\n{syntax.stderr}"
+            )
+            monkeypatch.setitem(globals(), "_audit_body", lambda b=armed: b)
+            with pytest.raises(AssertionError) as caught:
+                self.\
+                    test_every_command_that_can_fail_sits_in_an_if_or_an_or_list()
+            assert command in str(caught.value), (
+                f"the guard reded on a step carrying `{command}`, but about "
+                f"something else: {caught.value}"
             )
 
     def test_every_command_that_can_fail_sits_in_an_if_or_an_or_list(self):

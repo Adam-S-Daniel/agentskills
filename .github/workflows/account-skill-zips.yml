@@ -189,10 +189,12 @@ jobs:
         # corrected: an unasserted count reads as checked, and this one was
         # still accurate on the day it was deleted - which is exactly when
         # nobody is looking at it. See #120. The SHAPE is the durable claim:
-        # every `echo` in this step is left unguarded, including the
+        # every SIMPLE `echo` in this step is left unguarded, including the
         # `$GITHUB_OUTPUT` write named above, and any command here that can
         # plausibly fail and has a degraded path to take belongs in an `if`
-        # condition or a `||` list.
+        # condition or a `||` list. Simple, because an `echo` at the head of
+        # a PIPELINE takes the status of whatever the pipeline ends with, and
+        # that one is an ordinary failable command however it starts.
         #
         # scripts/test_account_workflows.py holds that shape rather than
         # leaving it to be read - see #124.
@@ -200,7 +202,9 @@ jobs:
         # body, blanks the Python heredoc and the comments, and reds on an
         # `echo` that redirects anywhere but the `$GITHUB_OUTPUT` write, and
         # on any command sitting outside an `if` condition and a `||` list
-        # that is not in that test's own commented carve-out list. It also
+        # that is not in that test's own commented carve-out list - which
+        # matches a command's NAME rather than its first four letters, and
+        # takes a pipeline as the command it ends with. It also
         # reds if a count comes back into this paragraph, and if the
         # `status=` write acquires the guard the sentence above says it must
         # not have.
