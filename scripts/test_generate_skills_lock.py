@@ -3586,9 +3586,29 @@ _REPIN_APPLY_PATH = ("_repin_inherit_guard", "_repin_primary_guard",
                      "_apply_repin_sources", "plan_sources", "_repin_shrink_guard")
 _REPIN_REPORT_PATH = ("remediation",)
 
-# Every verdict that tells a reader what to type. None of them may build a
-# command of its own — see test_no_report_path_writes_a_command_of_its_own.
-_REPORT_PATHS = ("report_drift", "report_digest_format", "main")
+# The three verdicts that tell a reader what to type, as of this line. Named
+# only so the derivation below can assert it has not lost one to a rename —
+# `_report_paths` is what the gate actually scans, and it is derived.
+_KNOWN_REPORT_PATHS = ("report_drift", "report_digest_format", "main")
+
+
+def _report_paths(functions: dict) -> list:
+    """Every module-level function that PRINTS — derived, never listed.
+
+    A written-down list is a list someone has to remember to widen, and the
+    gate is only as total as the set it scans: a fourth verdict added beside
+    these three and not added here would go unscanned, which is the same shape
+    of hole the substring blacklist was. PRINTING is what makes a function a
+    verdict that tells a reader what to type, so that is what selects it.
+    """
+    names = [name for name, node in functions.items()
+             if any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id == "print" for call in ast.walk(node))]
+    for expected in _KNOWN_REPORT_PATHS:
+        assert expected in names, (
+            f"{expected} no longer prints, so the derivation has lost a verdict it "
+            "used to scan. Check what renamed it rather than dropping the name.")
+    return names
 
 
 def _module_functions() -> dict:
@@ -3824,8 +3844,7 @@ def test_no_report_path_writes_a_command_of_its_own():
     """
     functions = _module_functions()
     banned_names = _module_command_names()
-    for name in _REPORT_PATHS:
-        assert name in functions, name
+    for name in _report_paths(functions):
         function = functions[name]
 
         for node in ast.walk(function):
