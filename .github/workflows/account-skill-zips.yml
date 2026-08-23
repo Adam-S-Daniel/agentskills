@@ -274,6 +274,48 @@ jobs:
           print(status)
           PY
           ) || verdict=""
+          # NORMALISED HERE, BECAUSE THE `case` BELOW AND
+          # account_zip_selection.py HAVE TO AGREE ABOUT WHAT A VERDICT IS.
+          # `normalise_status` strips before it tests the vocabulary; a `case`
+          # pattern does not.
+          #
+          # BEFORE THE `-z` GUARD, DELIBERATELY. A single space is an empty
+          # capture in every sense that matters and `[ -z "$verdict" ]` cannot
+          # see one, so a whitespace-only capture used to skip the diagnostic
+          # branch below, reach `*)`, and accuse skills-evals of a rename that
+          # never happened while writing `status= ` downstream. Trimming first
+          # hands it to the branch that was written for it.
+          #
+          # THE TRIM IS DEFENCE IN DEPTH AND IS NOT LOAD-BEARING TODAY:
+          # `freshness_verdict` returns string literals and its
+          # artifact-derived text goes to stderr, so nothing padded reaches
+          # this capture from skills-evals as it stands. It is two lines
+          # against a change in another repo that no test here can see.
+          verdict="${verdict#"${verdict%%[![:space:]]*}"}"
+          verdict="${verdict%"${verdict##*[![:space:]]}"}"
+          # THE LINE BELOW IS THE ONE THAT CLOSES A REACHABLE FAULT. `$( )`
+          # captures ALL stdout of the heredoc, so anything printing at import
+          # time inside it - in `yaml`, or in skills-evals' own
+          # `propagation.account_store` - prepends a line, and
+          # `echo "status=$verdict"` then writes a MULTI-LINE entry to
+          # $GITHUB_OUTPUT whose second line has no `=`. The runner parses that
+          # file line by line and rejects it, so the step dies instead of
+          # degrading. This is the same fault the paragraph above the `drift`
+          # read already names; `drift` has a test that executes it and this
+          # capture had nothing.
+          #
+          # REJECTED RATHER THAN SALVAGED. Keeping the last line would recover
+          # a plausible answer and leave the run green with no annotation,
+          # which is this file header's "we could not ask" read as "we asked
+          # and it passed". Blanking it hands the capture to the empty-capture
+          # branch, whose text - "what broke is the import inside this step" -
+          # is already the right diagnosis, and which degrades loudly.
+          #
+          # AFTER THE TRIM, so a capture that is only surrounded by whitespace
+          # is normalised rather than condemned: `$( )` already discards a
+          # TRAILING blank line, and treating a LEADING one as fatal while its
+          # mirror image is invisible would be the inconsistent rule.
+          [ "$verdict" = "${verdict%%[$'\n']*}" ] || verdict=""
           # An empty capture is the ONLY way this can end without a verdict, and
           # it must not read as one. `unavailable` is not a skills-evals status;
           # the selection module treats it - and any string it does not

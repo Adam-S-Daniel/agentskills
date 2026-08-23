@@ -1676,6 +1676,132 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
             "region of the step"
         )
 
+    @pytest.mark.parametrize("results_ok", ["yes", "no"])
+    @pytest.mark.parametrize("pad", [" {}", "{} ", "{}\r", "\t{} "])
+    @pytest.mark.parametrize(
+        "verdict", sorted(sel.KNOWN_STATUSES | {sel.UNAVAILABLE}))
+    def test_whitespace_around_a_verdict_changes_nothing(
+            self, tmp_path, verdict, pad, results_ok):
+        """A padded verdict and its bare twin must behave identically.
+
+        PARAMETRIZED OVER `results_ok` BECAUSE THAT IS WHERE THEY DIVERGED
+        MOST, and taking the default on both sides cannot see it. Measured
+        without the fix: ` not-yet-bootstrapped` with results_ok=no raised one
+        annotation where bare `not-yet-bootstrapped` raised none.
+
+        WHAT THAT ANNOTATION WAS SAYING MATTERS, because "loud went quiet"
+        reads like a regression and this is the opposite. The annotation was
+        the catch-all's - "skills-evals' verdict vocabulary has moved under
+        it" - which is FALSE about a padded status this repo knows perfectly
+        well. The bare form's silence is the deliberate answer argued at
+        length in that arm's own comment: a workflow that annotates every run
+        of a fresh install is a workflow whose annotations get ignored. So
+        what the fix removes is a wrong diagnosis, and what it leaves is the
+        designed one.
+
+        AND THE HARNESS'S WINDOW IS NARROWER THAN THE RUN'S, said rather than
+        assumed: `_tail()` starts after the heredoc, so the clone failure that
+        sets results_ok=no is annotated in the step HEAD that this harness
+        never executes. A production run in that state is not silent; this
+        slice of it is.
+        """
+        one, two = tmp_path / "bare", tmp_path / "padded"
+        one.mkdir()
+        two.mkdir()
+        bare = self._run(one, verdict, results_ok=results_ok)
+        padded = self._run(two, pad.format(verdict), results_ok=results_ok)
+        assert bare[1] == padded[1], (
+            f"{verdict!r} and {pad.format(verdict)!r} wrote different "
+            f"$GITHUB_OUTPUT: {bare[1]!r} vs {padded[1]!r}"
+        )
+        assert bare[0].count("::warning::") == padded[0].count("::warning::"), (
+            f"{verdict!r} and {pad.format(verdict)!r} raised a different "
+            f"number of annotations:\n{bare[0]}\n---\n{padded[0]}"
+        )
+
+    @pytest.mark.parametrize("blank", [" ", "\t", "\r", " \t\r ", "  "])
+    def test_a_whitespace_only_capture_is_an_empty_capture(
+            self, tmp_path, blank):
+        """`[ -z "$verdict" ]` cannot see a single space, and one is empty.
+
+        Without the trim a whitespace-only capture sails past the diagnostic
+        branch that was written for exactly this fault, lands in `*)`, and
+        accuses skills-evals of a vocabulary rename that never happened -
+        while writing `status= ` for the next step to read.
+
+        Asserted on the BRANCH it reaches, not only on the status it writes:
+        the wrong branch with the right status is still the wrong annotation
+        on the run page, which is the thing this step exists to get right.
+        """
+        log, out = self._run(tmp_path, blank)
+        assert "status=unavailable" in out.splitlines(), out
+        assert "could not compute the published account audit verdict" in log, (
+            "a whitespace-only capture did not reach the empty-capture "
+            f"branch, so it was diagnosed as something it is not:\n{log}"
+        )
+
+    @pytest.mark.parametrize("verdict", [
+        "fresh", " fresh", "fresh ", "fresh\r", "\tfresh",
+        sel.AUDIT_DRIFT_STATUS, sel.AUDIT_DRIFT_STATUS + "\r",
+        " " + sel.UNAVAILABLE, " ", "\t", "", "wat", " wat ",
+        "junk\nfresh", sel.AUDIT_DRIFT_STATUS + "\njunk",
+    ])
+    def test_the_step_and_the_module_agree_on_what_a_verdict_is(
+            self, tmp_path, verdict):
+        """THE PROPERTY, rather than an enumeration of the shapes that hold it.
+
+        The step dispatches on `$verdict` with `case` patterns;
+        account_zip_selection.py decides what the same string MEANS. A `case`
+        pattern does not strip and `normalise_status` does, so the two can
+        disagree about a string neither of them is wrong about.
+
+        THE FIRST ASSERTION IS THE ONE THAT CATCHES A REACHABLE FAULT, and it
+        is first because the other two pass without it. `$( )` captures ALL
+        stdout of the heredoc, so a print at import time - in `yaml`, or in
+        skills-evals' own `propagation.account_store`, neither of which this
+        repo can see - prepends a line and `echo "status=$verdict"` writes a
+        two-line entry whose second line has no `=`. The runner parses that
+        file line by line and REJECTS it: the step dies instead of degrading,
+        which is the one outcome this whole block exists to avoid. The last
+        two cases are what exercise it, and on the untrimmed step they wrote
+        two lines while both of the assertions below still passed.
+
+        This is the same fault this workflow already documents twenty lines
+        further down for `drift`, where a test executes the read. This capture
+        had nothing.
+        """
+        _, out = self._run(tmp_path, verdict)
+        lines = [l for l in out.splitlines() if l]
+        assert len(lines) == 1, (
+            f"the step wrote {len(lines)} lines to $GITHUB_OUTPUT for "
+            f"{verdict!r}: {out!r}. The runner parses that file line by line "
+            f"and rejects a line with no `=`, so a stray stdout print inside "
+            f"the heredoc takes the step out rather than degrading it."
+        )
+        written = lines[0].partition("=")[2]
+        assert written == written.strip(), (
+            f"the step wrote un-normalised whitespace into its own output: "
+            f"{written!r}"
+        )
+        if "\n" in verdict:
+            # The policy EDIT above chose, asserted rather than assumed: a
+            # contaminated capture is REJECTED, not salvaged by keeping a
+            # line of it. Salvaging recovers a plausible answer and leaves the
+            # run green with no annotation; rejecting hands it to the branch
+            # whose text is already the right diagnosis.
+            assert sel.normalise_status(written) == sel.UNAVAILABLE, (
+                f"a multi-line capture was salvaged rather than degraded: "
+                f"{written!r}"
+            )
+        else:
+            assert sel.normalise_status(written) == sel.normalise_status(
+                verdict), (
+                f"the step and the module disagree about {verdict!r}: the "
+                f"step wrote {written!r}, which the module reads as "
+                f"{sel.normalise_status(written)!r}, while it reads the "
+                f"capture itself as {sel.normalise_status(verdict)!r}"
+            )
+
     def test_a_published_tree_that_moved_is_not_read_as_a_fresh_install(
             self, tmp_path):
         """THE FOURTH FAULT IN THE FAMILY, and the one that annotated nowhere.

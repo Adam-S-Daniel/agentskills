@@ -60,6 +60,16 @@ def normalise_status(value: str | None) -> str:
     Deliberately permissive on INPUT and strict on MEANING: a future
     skills-evals status this repo has never heard of must degrade to "could not
     use the audit", never to a silent pass that suppresses a real upload.
+
+    THE `.strip()` STAYS NOW THAT THE WORKFLOW ALSO TRIMS, and not as a
+    leftover. account-skill-zips.yml normalises its own capture before it
+    dispatches on it, so this call no longer carries that step - but
+    `--audit-status` is a public entry point with other callers, and dropping
+    the strip here would buy agreement with a NEW false negative: `fresh\r`
+    would silently degrade to `unavailable` everywhere, and the annotation
+    that reported it would still name the wrong cause. Two places trim
+    because two places have to answer the question; they agree, which is the
+    property test_the_step_and_the_module_agree_on_what_a_verdict_is holds.
     """
     text = (value or "").strip()
     return text if text in KNOWN_STATUSES else UNAVAILABLE
