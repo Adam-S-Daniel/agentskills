@@ -3775,6 +3775,23 @@ def _more_sources_than_the_cap_asked_with_only(tmp_path):
     return primary, out, ["--only", roots[0].resolve().as_uri()]
 
 
+def _a_skills_key_for_a_bundle_the_lock_does_not_declare(tmp_path):
+    """A merge artifact: `skills` carries a key whose bundle is not in `bundles`.
+
+    Nothing rebuilds such a key, so an unnarrowed shrink comparison calls every
+    re-pin a shrink — and the refusal it gives is a dead end no generator
+    command clears, whose sentence ("a bundle directory stopped existing at the
+    commit this would pin") a reader can check against `bundles` and find
+    false. Measured before `_movable_bundles`: `--check-current` printed a bare
+    `--repin` and running it exited 1 with exactly that sentence about `ghost`.
+    """
+    primary, out, extra_args = _drifted_plain(tmp_path)
+    document = json.loads(out.read_text(encoding="utf-8"))
+    document["skills"]["ghost/oldskill"] = f"{gsl.LOCK_DIGEST_PREFIX}{'a' * 64}"
+    out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return primary, out, extra_args
+
+
 def _hand_broken_lock(field, value=None):
     """A really-drifted lock with one field --repin cannot inherit.
 
@@ -3813,6 +3830,8 @@ _DRIFT_SHAPES = [
     (_drifted_source_only, "a source moved", True),
     (_drifted_source_only_scoped, "a source moved, asked with --only", True),
     (_drifted_primary_and_source, "both moved", True),
+    (_a_skills_key_for_a_bundle_the_lock_does_not_declare,
+     "the lock declares a skill for a bundle it does not list", True),
     (_branch_primary_drifted, "the primary is pinned at a branch", False),
     (_branch_primary_with_a_drifted_source,
      "a source moved under a branch-pinned primary", False),
@@ -4045,6 +4064,50 @@ def test_the_report_and_the_refusal_give_the_same_reason(build, tmp_path):
         assert refusal.returncode == 1, (registry, refusal.stdout + refusal.stderr)
         assert reason in refusal.stderr, (reason, refusal.stderr)
         assert out.read_text(encoding="utf-8") == before, "a refused re-pin still wrote"
+
+
+def test_one_sources_emptied_bundle_does_not_suppress_anothers_remediation(tmp_path):
+    """A block's refusal must be about the command that block prints.
+
+    `--repin --ref <the lock's ref> --repin-source '<srcB>@'` holds every other
+    pin at the sha the lock records, so srcA's bundles cannot move under it —
+    and a re-pin that cannot move them cannot empty them. Asking one shrink
+    question for the whole report suppressed srcB's line anyway, stranding a
+    federated bump behind an unrelated registry's problem with no route the
+    tool offers, and printing srcA's sentence under srcB's headline.
+
+    Both halves are measured: srcA's block still refuses (the guard is not
+    merely switched off), and the line srcB's block prints is RUN and required
+    to advance srcB while leaving srcA's skills where they were.
+    """
+    primary, out = _two_sources(tmp_path)
+    before = json.loads(out.read_text(encoding="utf-8"))
+    src_a, src_b = tmp_path / "cms-platform", tmp_path / "other-platform"
+    shutil.rmtree(src_a / "skills" / "deploy")
+    _write(src_a / "README.md", "still a repository\n")
+    _git(src_a, "add", "-A")
+    _git(src_a, "commit", "-q", "-m", "the bundle is gone")
+    _write(src_b / "skills" / "publish" / "SKILL.md", "---\nname: publish\n---\nedited\n")
+
+    verdict = run_generator("--repo", str(primary), "--check-current", "-o", str(out))
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    blocks = dict(_blocked_headlines(verdict.stdout))
+    assert list(blocks) == [src_a.resolve().as_uri()], verdict.stdout
+    assert "with no skills at all" in blocks[src_a.resolve().as_uri()]
+
+    commands = _printed_commands(verdict.stdout)
+    assert len(commands) == 1, verdict.stdout
+    assert src_b.resolve().as_uri() in commands[0], commands[0]
+    applied = run_generator(*shlex.split(commands[0])[2:],
+                            "--repo", str(primary), "-o", str(out))
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    after = json.loads(out.read_text(encoding="utf-8"))
+    assert after["skills"].keys() == before["skills"].keys(), "a skill was lost"
+    pins = {source["registry"]: source["ref"] for source in after["sources"]}
+    was = {source["registry"]: source["ref"] for source in before["sources"]}
+    assert pins[src_a.resolve().as_uri()] == was[src_a.resolve().as_uri()]
+    assert pins[src_b.resolve().as_uri()] == was[src_b.resolve().as_uri()], \
+        "srcB's working-tree edit is uncommitted, so its pin has nowhere new to go"
 
 
 def _emptied_source_tree(tmp_path):

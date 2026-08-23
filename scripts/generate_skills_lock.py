@@ -349,7 +349,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 from typing import (Collection, Dict, Iterable, List, Mapping, Optional, Sequence,
-                    Tuple)
+                    Set, Tuple)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY = "Adam-S-Daniel/agentskills"
@@ -1049,10 +1049,43 @@ def _per_bundle(skills: Mapping[str, str]) -> Dict[str, int]:
     return counts
 
 
+def _movable_bundles(
+    bundles: Sequence[str],
+    extras: Sequence[dict],
+    *,
+    primary_moves: bool,
+    named: Collection[str],
+) -> Set[str]:
+    """The bundles whose content a given `--repin` can change.
+
+    A re-pin rebuilds the WHOLE document, but only the pins it actually
+    advances can change what a bundle contains: every other source is
+    re-planned at the 40-hex sha the lock already records, so `git archive`
+    hands back the same tree and the same digests. `primary_moves` is false
+    exactly when the command carries `--ref <the lock's own ref>`; `named` is
+    the set of registries on `--repin-source`.
+
+    One function because the answer decides two things that must agree: which
+    bundles `repin_shrink_blocker` compares on the APPLY path, and which it
+    compares when a report asks the same question about a command it is about
+    to print. Round 4 had those two asking different questions, and both
+    directions of the disagreement bit — the report suppressed a source's
+    remediation over a shrink its command could not cause, and the apply path
+    refused a bare `--repin` over a `skills` key for a bundle the lock does not
+    declare at all, which no command can ever repopulate.
+    """
+    movable = set(bundles) if primary_moves else set()
+    for source in extras:
+        if source["registry"] in named:
+            movable.update(source["bundles"])
+    return movable
+
+
 def repin_shrink_blocker(
     before: Mapping[str, str],
     after: Mapping[str, str],
-    bundles: Collection[str] = (),
+    movable: Collection[str],
+    extras: Sequence[dict] = (),
 ) -> Optional[str]:
     """Why a re-pin must not be written — a bundle that lost every skill it had.
 
@@ -1075,18 +1108,23 @@ def repin_shrink_blocker(
     `--repin-source`. Anyone re-pinning by hand, and every consumer whose
     re-pin is not the bumper's, got the silent version.
 
-    `bundles` narrows both sides to the bundles a caller actually re-derived,
-    which is what lets the read-only report ask this question about a SCOPED
-    run: `--check-current --only <source>` reads that source alone, and the
-    command it prints holds every other pin with `--ref`, so that source's
-    bundles are the only ones whose content can move.
+    `movable` narrows BOTH sides to the bundles the command in question can
+    actually change — `_movable_bundles` is the one place that set is decided,
+    and the apply path and the report ask it the same way. An empty set means
+    the command moves no pin, so there is nothing for it to empty.
+
+    Narrowing is not only a scoping nicety; it is what keeps this refusal from
+    being a dead end. A `skills` key whose bundle the lock does not declare —
+    a merge artifact, a hand edit — is missing from every rebuild, so an
+    unnarrowed comparison calls it a shrink that no `--repin` can ever clear,
+    and the sentence below ("a bundle directory stopped existing") is one the
+    reader can check against `bundles` and find false.
     """
-    if bundles:
-        keep = set(bundles)
-        before = {key: value for key, value in before.items()
-                  if key.split("/", 1)[0] in keep}
-        after = {key: value for key, value in after.items()
-                 if key.split("/", 1)[0] in keep}
+    keep = set(movable)
+    before = {key: value for key, value in before.items()
+              if key.split("/", 1)[0] in keep}
+    after = {key: value for key, value in after.items()
+             if key.split("/", 1)[0] in keep}
     if not before:
         return None
     counts = _per_bundle(after)
@@ -1100,24 +1138,33 @@ def repin_shrink_blocker(
         "rename, a deleted plugin, a layout change. A skill that leaves the lock stops "
         "being installed in every ephemeral session that reads it, so this is a "
         "registry-side decision rather than a lock chore. Fix it where it broke, or "
-        "decide deliberately that the lock should stop declaring that bundle. "
+        "decide deliberately, with a plain generate, that the lock should stop "
+        "declaring that bundle. "
         "(_agent-guidance's bump-consumer-locks.sh refuses to PROPOSE such a re-pin for "
-        "the same reason; this refuses to write one.)"
+        "the same reason; this refuses to write one.)" + restated_sources(extras)
     )
 
 
-def _repin_shrink_guard(existing: dict, document: dict, output: Path) -> None:
+def _repin_shrink_guard(
+    existing: dict,
+    document: dict,
+    output: Path,
+    movable: Collection[str],
+    extras: Sequence[dict],
+) -> None:
     """Refuse to WRITE a re-pin that empties a bundle.
 
     Asked after build_lock rather than from a blocker the earlier guards read,
     because the answer is not in the lock: it is in the content at the commit
     the re-pin would write, which is exactly what build_lock has just gone and
-    read. `report_drift` asks the same predicate off `--check-current`'s own
-    reading of that content.
+    read. `report_drift` asks the same predicate, with the same `movable` set
+    from `_movable_bundles`, off `--check-current`'s own reading of that
+    content.
     """
     skills = existing.get("skills")
     blocker = repin_shrink_blocker(
-        skills if isinstance(skills, dict) else {}, document.get("skills") or {})
+        skills if isinstance(skills, dict) else {},
+        document.get("skills") or {}, movable, extras)
     if blocker:
         raise GeneratorError(f"{output}: {blocker}")
 
@@ -2039,7 +2086,6 @@ def report_drift(
     extras: Sequence[dict],
     registry: str,
     working: Mapping[str, str],
-    read: Sequence[dict],
 ) -> None:
     """Print one FAILED block per drifted source, with its repair or its reason.
 
@@ -2157,23 +2203,32 @@ def report_drift(
                or repin_primary_blocker(existing, extras, registry, output)
                or repin_unproven_sources_blocker(extras, output)
                or repin_plan_blocker(existing.get("bundles") or (), extras, registry))
-    # Asked off what THIS run read, and scoped to the bundles it read: a
-    # `--only` run reads one source and the command it prints holds every other
-    # pin with --ref, so those are the only bundles whose content can move.
-    # `existing["skills"]` may be any JSON — a lock the hook would reject reaches
-    # here on the way to being told so.
-    declared = existing.get("skills")
-    shrink = repin_shrink_blocker(
-        declared if isinstance(declared, dict) else {},
-        working,
-        {bundle for source in read for bundle in source["bundles"]},
-    )
+    # Asked PER BLOCK, off `_movable_bundles`, because each block prints a
+    # different command and they move different pins. The primary's is a bare
+    # `--repin`, which advances the primary and holds every source at the sha
+    # the lock records; a source's holds the primary with `--ref` and advances
+    # that one source. Asking one question for the whole report is what had a
+    # source's remediation suppressed over a shrink in an UNRELATED source's
+    # bundles — a command that, run, exits 0 and does exactly what its block
+    # asked for. `existing["skills"]` may be any JSON — a lock the hook would
+    # reject reaches here on the way to being told so.
+    skills = existing.get("skills")
+    declared_skills = skills if isinstance(skills, dict) else {}
+
+    def shrink_for(source) -> Optional[str]:
+        return repin_shrink_blocker(
+            declared_skills, working,
+            _movable_bundles(
+                existing.get("bundles") or (), extras,
+                primary_moves=source["is_primary"] or primary_drifted,
+                named=() if source["is_primary"] else (source["registry"],)),
+            extras)
     for source, differences in drifted:
         if source["is_primary"]:
             # `or shrink` last, matching the order the apply path meets them:
             # `_repin_primary_guard` runs before build_lock, `_repin_shrink_guard`
             # after it, so a lock tripping both is refused with the first.
-            blocked_here = blocked or shrink
+            blocked_here = blocked or shrink_for(source)
             if blocked_here:
                 print(f"FAILED: the bundle has moved on since {ref}, which {output} "
                       "still pins — nothing added or changed since then reaches an "
@@ -2214,7 +2269,7 @@ def report_drift(
             # refusals first, and a report that named a later reason would be
             # handing the reader a sentence the flag never says.
             blocker = (blocked or repin_source_blocker(
-                extras, source["registry"], registry) or shrink)
+                extras, source["registry"], registry) or shrink_for(source))
             if blocker:
                 # "the commit its pin resolves to", not "which the lock still
                 # pins": `source` here is PLANNED, so its ref is resolved, and
@@ -2516,6 +2571,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # verifying only some of what the lock promises; a --repin that dropped it
     # would WRITE that half away, and then pass --check for having done so.
     raw_sources = existing.get("sources")
+    # `declared` below is `extras` as the LOCK spells it, kept apart from the
+    # merged array `--repin-source` produces: the shrink refusal restates the
+    # sources a plain generate would need, and the array to restate is the one
+    # that exists on disk, not the one this run was about to write.
     if args.source:
         extras = [parse_source(spec) for spec in args.source]
     elif isinstance(raw_sources, list):
@@ -2525,6 +2584,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ]
     else:
         extras = []
+    declared = extras
     overrides = dict(parse_source_repo(spec) for spec in args.source_repo or [])
     if args.repin:
         # Every reason this refuses is in `repin_primary_blocker` or in the
@@ -2596,14 +2656,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       f"({len(working)} skills).")
             else:
                 report_drift(drifted, ref=ref, output=output, existing=existing,
-                             extras=extras, registry=registry, working=working,
-                             read=read)
+                             extras=extras, registry=registry, working=working)
                 status = 1
         return status
 
     document = build_lock(repo, registry, ref, bundles, extras, overrides)
     if args.repin:
-        _repin_shrink_guard(existing, document, output)
+        # The same `_movable_bundles` question `report_drift` asks about the
+        # command it prints, so the report and this refusal cannot disagree
+        # about which bundles a given re-pin could empty. The primary moves
+        # unless this run pinned it back where the lock already had it — which
+        # is exactly what the source-block remediation's `--ref` anchor does.
+        _repin_shrink_guard(
+            existing, document, output,
+            _movable_bundles(bundles, declared,
+                             primary_moves=args.ref != existing.get("ref"),
+                             named=set(_parse_repin_specs(args.repin_source or []))),
+            declared)
     try:
         # newline="": the lock is a COMMITTED artifact whose bytes are compared
         # (test_this_repos_committed_lock_regenerates_byte_identically, and
