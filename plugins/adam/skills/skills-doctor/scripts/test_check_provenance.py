@@ -4831,9 +4831,6 @@ def matrix_kinds(out: str):
 
 _H, _U, _F, _K = prov.HOOK, prov.UNATTRIBUTED, prov.FOREIGN, prov.UNKNOWN
 
-# (origin, record present, lock declares, observation) ->
-#     (finding kinds, note kinds, exit code)
-# Every triple absent from the keys is unreachable and asserted to be.
 # (origin, record present, lock declares, observation, variant) ->
 #     (finding kinds, note kinds, exit code)
 # Every key absent from this table is unreachable and asserted to be. The
