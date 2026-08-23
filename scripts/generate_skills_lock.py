@@ -1599,9 +1599,21 @@ def report_digest_format(document: dict, output: Path, repo: Path,
                          source_repos: Sequence[str] = ()) -> int:
     """Print --check-format's verdict for one lock and return its exit status.
 
-    Reads `skills`, and `ref` only to name it in the remediation command below
-    — no `registry`, no `sources`, and no git — because the fleet bumper calls
-    this per consumer lock before it has a clone of anything to read from.
+    TOUCHES NO CLONE — no checkout, no network, not one git call — because the
+    fleet bumper calls this per consumer lock before it has a clone of
+    anything to read from. That is the flag's calling convention rather than
+    an accident of how it is written, and it is what the early return in
+    `main` keeps literal.
+
+    WHAT IT READS is wider than that, and was described here as `skills` and
+    `ref` alone until the remediation below became `remediation`'s: it now
+    also reads `registry`, `bundles` and `sources` — the identity a `--repin`
+    inherits, so a lock that could not be re-pinned gets the refusal instead
+    of a line — and this run's `--repo` and `--source-repo`, which that line
+    restates so it can be pasted. Every clause of that is measured in
+    `test_check_format_reads_the_lock_and_its_addressing_and_no_clone`,
+    including the no-clone half, against a `--repo` that does not exist.
+
     Written defensively for the same reason `_render_sources` is: the document
     arrives as found ON DISK and may be hand-edited into any shape at all, and
     a verdict that raises instead of printing is a verdict nobody gets.
@@ -2571,11 +2583,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "whole-document comparison that reports a wrong shape as "
                              "'digest changed' — so a lock of bare hex is green on the "
                              "first and indistinguishable from content drift on the "
-                             "second. Reads the file ALONE: no registry checkout, no "
-                             "network, not one git call. --repo is accepted (it is "
-                             "meaningful when this composes with --check) but is never "
-                             "READ here, so the verdict cannot depend on which clone, or "
-                             "no clone, is at hand. An empty 'skills' map is an ERROR "
+                             "second. TOUCHES NO CLONE: no registry checkout, no "
+                             "network, not one git call — so the verdict cannot depend "
+                             "on which clone, or no clone, is at hand, which is what "
+                             "lets the fleet bumper ask it before cloning anything. It "
+                             "does read more of the LOCK than the digests it judges: "
+                             "'registry', 'bundles' and 'sources', plus this run's "
+                             "--repo and --source-repo, because the re-pin command it "
+                             "prints is the same one --check-current prints and meets "
+                             "the same refusals. An empty 'skills' map is an ERROR "
                              "rather than a vacuous pass; only malformed digests are "
                              "reported as FAILED.")
     parser.add_argument("--repin", action="store_true",
