@@ -245,12 +245,20 @@ CROSS_LOCK_CONFLICT_DELETES = (
     "name are the ordinary fleet shape and collapse to a single install. "
     "Reconcile the locks — regenerate them against one ref of the registry that "
     "ships this skill — or open the session on one repo.")
-# `{owner}` is the repo's own `.claude/skills` DIRECTORY, not the repo root, so
-# the sentence below joins the name straight onto it. The hook's verdict names
-# the repo root because that is what its own loop holds; a reader of this report
-# wants the file to move, so it gets the whole path.
+# `{path}` is the WHOLE path to the file, joined by the caller with `/` on a
+# Path rather than assembled here out of a directory and two more segments. The
+# hook's verdict names the repo root because that is what its own loop holds; a
+# reader of this report wants the file to move, so it gets the whole path — and
+# it has to be a path they can paste.
+#
+# Assembling it in the template was a Windows bug, not a style preference: this
+# sentence used to read "`{owner}/{name}/SKILL.md`", and `str(WindowsPath)`
+# renders backslashes, so the rendered text came out as
+# `C:\Users\...\skills/alpha/SKILL.md` — separators both ways in one path.
+# `pytest-windows` caught it on the assertion; the reader would have caught it
+# by pasting a path that does not resolve.
 COLLISION_GUARD_DELETES = (
-    "`{owner}/{name}/SKILL.md` is shipped by a repo in this "
+    "`{path}` is shipped by a repo in this "
     "session, and personal `~/.claude/skills` shadows a repo's own — so the "
     "hook DELETES this directory to let the repo-owned copy win, skips the "
     "install, and names it after `DEGRADED` as `collision(s) skipped, "
@@ -2181,7 +2189,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 notes.append(_observed(
                     DELETED_BY_THE_COLLISION_GUARD, origin, name,
                     COLLISION_GUARD_DELETES.format(
-                        name=name, owner=repo_owned[name]) + but_here))
+                        path=repo_owned[name] / name / "SKILL.md") + but_here))
             elif fate == COLLISION_UNMEASURED:
                 findings.append(_observed(
                     COLLISION_UNMEASURED, origin, name,
@@ -2322,7 +2330,7 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                 notes.append(_observed(
                     DELETED_BY_THE_COLLISION_GUARD, HOOK, name,
                     COLLISION_GUARD_DELETES.format(
-                        name=name, owner=repo_owned[name]) + but_here))
+                        path=repo_owned[name] / name / "SKILL.md") + but_here))
             elif fate == COLLISION_UNMEASURED:
                 findings.append(_observed(
                     COLLISION_UNMEASURED, HOOK, name,
