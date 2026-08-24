@@ -1360,11 +1360,32 @@ def _extract_hook_lock_reader() -> str:
 
     It does no network — it only validates the lock and writes the framing
     files — so running it in isolation is exactly the hook's acceptance check.
+
+    POSITIONAL, and that is the whole fragility: three heredocs in the hook open
+    with `import json, os, re, sys` (this reader, the install-record reader, the
+    prune planner), and this works only because the lock reader is the FIRST of
+    them and its delimiter is exactly `PY`. Move it, or give another heredoc that
+    opening line, and every rejection test below would quietly start asserting
+    against a different program — which is the shape of drift alarm that reads
+    green forever.
+
+    So the extraction is CHECKED rather than trusted: the block must carry the
+    lock reader's own `DEFAULT_LAYOUT` and must NOT carry `RECORD_PATH`, which
+    only the two record heredocs read. Neither is a deep property; both are
+    things no other heredoc in this file can satisfy.
     """
     text = HOOK.read_text(encoding="utf-8")
     start = text.index("import json, os, re, sys")
     end = text.index("\nPY\n", start)
-    return text[start:end] + "\n"
+    block = text[start:end] + "\n"
+    assert "DEFAULT_LAYOUT" in block, (
+        "the first `import json, os, re, sys` in the hook is no longer the lock "
+        "reader — the extraction is positional, so every test below is now "
+        "asserting against the wrong heredoc")
+    assert "RECORD_PATH" not in block, (
+        "the extracted block reads the install record, so it is one of the two "
+        "record heredocs rather than the lock reader")
+    return block
 
 
 def _run_hook_reader(lock: dict, tmp_path: Path) -> subprocess.CompletedProcess:
@@ -1436,10 +1457,25 @@ def test_hook_and_generator_share_the_source_cap():
 
     Spelled against `gsl.MAX_SOURCES` rather than a literal on both sides, so
     the hook's text is bound to the value the generator actually enforces.
+
+    EXACTLY ONCE per file, not merely somewhere. A second spelling is how a cap
+    acquires two values: the skills-doctor reads the hook's back out with
+    `re.search(r"^MAX_SOURCES = (\\d+)$", ..., re.M)` and takes the FIRST match,
+    so a second line further down would be enforced by the hook and invisible to
+    both of the files that check it. This became a live hazard when the union
+    added a whole-run fetch cap — that one is deliberately named `MAX_FETCHES`,
+    with its own number, precisely so it cannot answer that search.
+
+    Not extended to the four validation patterns above, and deliberately: NAME
+    is spelled six times in the hook and twice in the generator on purpose (bash
+    re-validates every name that reaches a destructive op, and both record
+    readers apply the charset again on the way out of a file anyone can write),
+    so a once-per-file rule there would be asserting the opposite of the
+    defence-in-depth those copies exist for.
     """
     literal = f"MAX_SOURCES = {gsl.MAX_SOURCES}"
-    assert literal in HOOK.read_text(encoding="utf-8"), literal
-    assert literal in GENERATOR.read_text(encoding="utf-8"), literal
+    assert HOOK.read_text(encoding="utf-8").count(literal) == 1, literal
+    assert GENERATOR.read_text(encoding="utf-8").count(literal) == 1, literal
 
 
 def _lock_with_sources(count: int) -> dict:
@@ -6872,12 +6908,20 @@ def test_hook_fails_soft_when_the_lock_is_missing(tmp_path):
 
 
 def test_missing_lock_verdict_names_one_location_once(tmp_path):
-    """The two candidates collapse when they name the same file.
+    """One project dir, one candidate, named once.
 
-    `$CLAUDE_PROJECT_DIR/skills.lock` and the hook-relative `../../skills.lock`
-    are the same path whenever the session's project dir IS the repo shipping
-    the hook -- the common case -- and the verdict used to list it twice, which
-    reads like two separate lookups failed.
+    Written for a de-duplication that no longer exists: the hook used to try
+    `$CLAUDE_PROJECT_DIR/skills.lock` AND the hook-relative `../../skills.lock`,
+    which are the same file whenever the session's project dir IS the repo
+    shipping the hook -- the common case -- and it listed that one path twice,
+    reading like two separate lookups had failed. The candidate list is now one
+    entry long whenever a project dir is named at all (see
+    `test_missing_lock_verdict_does_not_name_the_hooks_own_repo` for why), so
+    two independent rules would now both have to break for this to red.
+
+    Kept anyway: it is the shape a reader of a real transcript sees, and a
+    verdict that names one location twice is exactly as confusing as it ever
+    was, whichever mechanism put it there.
     """
     repo = tmp_path / "repo"
     script = _hook_copy(repo)
@@ -6890,31 +6934,52 @@ def test_missing_lock_verdict_names_one_location_once(tmp_path):
     assert _looked_in(verdict) == [_hook_path((repo / "skills.lock").resolve())]
 
 
-def test_missing_lock_verdict_names_each_distinct_location_once(tmp_path):
-    """De-duplicating must not collapse candidates that really are different.
+def test_missing_lock_verdict_does_not_name_the_hooks_own_repo(tmp_path):
+    """A named project dir is the WHOLE search. The fallback is not consulted.
 
-    Both are still named, in priority order -- project dir first.
+    This asserted the opposite until the union landed: both candidates were
+    named, project dir first, and the hook installed from its own repo's lock
+    whenever the project had none. That is the behaviour that cannot survive a
+    user-scope wiring of this hook -- such a wiring fires in every session, and a
+    repo that never adopted delivery would then receive THIS registry's skills
+    because the hook happened to be reachable from disk. A lockless project is a
+    project that did not opt in.
+
+    So the hook's own `skills.lock` exists here and must still not be used, and
+    the verdict must not name it: naming a location that was not searched is the
+    same defect as searching one nobody asked for, told to the reader instead of
+    done to their $HOME. The fallback's remaining case is
+    `test_the_hooks_own_repo_is_the_fallback_only_when_no_project_dir_is_named`.
     """
+    root = tmp_path / "registry"
+    sha = make_registry(root, {"adam/alpha": SKILL_A})
     repo = tmp_path / "repo"
     script = _hook_copy(repo)
+    make_project(repo, root, sha)          # the hook's own repo HAS a lock
     project = tmp_path / "project"
     project.mkdir()
+    home = tmp_path / "home"
 
-    proc = _run_hook(tmp_path / "home", project,
-                     {"SKILLS_BOOTSTRAP_FORCE": "1"}, script=script)
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"}, script=script)
     assert proc.returncode == 0
-    assert _looked_in(_verdict(proc)) == [
-        _hook_path((project / "skills.lock").resolve()),
-        _hook_path((repo / "skills.lock").resolve()),
-    ]
+    verdict = _verdict(proc)
+    assert "DEGRADED" in verdict, verdict
+    assert _looked_in(verdict) == [_hook_path((project / "skills.lock").resolve())]
+    assert _hook_path((repo / "skills.lock").resolve()) not in verdict, verdict
+    # And the consequence, not merely the sentence: nothing was installed from
+    # a repo this session never named.
+    assert not (home / ".claude" / "skills").exists(), verdict
 
 
-def test_missing_lock_verdict_de_duplicates_a_symlinked_project_dir(tmp_path):
-    """The comparison is between RESOLVED paths, not the strings as spelled.
+def test_missing_lock_verdict_names_a_symlinked_project_dir_by_its_real_path(tmp_path):
+    """The path named is the RESOLVED one, not the string as spelled.
 
-    A project dir reached through a symlink is the same directory as the hook's
-    own repo. Comparing the raw strings would not see that, so this is the test
-    that keeps the de-duplication from being "simplified" back into one.
+    A project dir reached through a symlink and the directory it points at are
+    one place, and the verdict has to name the one a reader can `cd` to. This
+    was originally the test that kept a two-candidate de-duplication from being
+    "simplified" back into one; with a single candidate the de-duplication is
+    gone and what survives is the `pwd -P` inside `resolve_lock_path`, which is
+    what this now pins. Drop that resolution and the verdict names the link.
     """
     repo = tmp_path / "repo"
     script = _hook_copy(repo)
@@ -7712,7 +7777,16 @@ def test_hook_reports_two_lock_rows_that_want_the_same_destination(tmp_path):
 # writer and watch the reader catch it.
 # --------------------------------------------------------------------------
 
-_META_WRITE = 'handle.write("%d\\n%d\\n" % (len(sources), len(rows)))'
+# The meta writer, anchored by its exact text so `_hook_with` fails loudly if it
+# is renamed rather than silently patching nothing. It states FOUR counts, not
+# two: the union added the accepted- and rejected-lock streams, and a stream with
+# no declared count is one whose truncation nothing would notice. The two
+# sub-expressions the tests below substitute into — `len(sources)` and
+# `len(rows)` — deliberately kept their names when `sources` became the DEDUPED
+# fetch list and `rows` the EMITTED rows, so those injections still name the
+# numbers bash actually cross-checks.
+_META_WRITE = ('handle.write("%d\\n%d\\n%d\\n%d\\n"'
+               ' % (len(sources), len(rows), len(accepted), len(rejected)))')
 
 
 def test_a_source_count_that_disagrees_with_the_stream_is_refused(tmp_path, registry):
@@ -8727,6 +8801,532 @@ def test_another_repos_lock_does_not_reap_this_ones_skills(tmp_path):
         "alpha": one.resolve().as_uri(),
         "beta": two.resolve().as_uri(),
     }
+
+# --------------------------------------------------------------------------
+# several locks in one session: the UNION (#84 / ADR 0005)
+#
+# A Claude Code on the web session opened on more than one repo sets the project
+# directory to their PARENT, so no child repo's `.claude/settings.json` is
+# consulted and -- separately -- the hook read exactly one `skills.lock`. Both
+# halves delivered nothing at all there, because the parent has no lock. The
+# hook now reads the project's own lock if it has one and every immediate CHILD
+# directory's otherwise, so the session ends up with the UNION of what each
+# single-repo session would have delivered.
+#
+# Every fixture below builds the real shape -- a parent directory holding child
+# repos -- rather than handing a list of locks to something, because both ways
+# discovery can be wrong are in the walk itself: scanning SIBLINGS instead of
+# children (which would reach the fixture registries these tests deliberately
+# keep beside the parent, and the scratch $HOME with them), and treating a
+# lockless project dir as licence to fall back to the hook's own repo.
+#
+# The three cross-lock outcomes each get a test, and conflating any two of them
+# breaks the ordinary input rather than a corner case:
+#
+#   (a) same name, same digest, different locks -> ONE install
+#   (b) same name, different digests            -> NEITHER installs
+#   (c) two rows for one name inside ONE lock   -> `dup`, exactly as before
+# --------------------------------------------------------------------------
+
+
+def _child_repo(parent: Path, name: str, registry_root: Path, sha: str) -> Path:
+    """A child repo of `parent` carrying a lock that pins `registry_root`.
+
+    Callers keep the fixture REGISTRIES outside `parent` on purpose: a discovery
+    that walked siblings rather than children would find them and install from a
+    tree no session ever attached, and a fixture that nested them inside the
+    parent would hide exactly that.
+    """
+    repo = parent / name
+    make_project(repo, registry_root, sha)
+    return repo
+
+
+def test_two_sibling_repos_with_disjoint_skills_both_install(tmp_path):
+    """The union in its plainest form: two repos, one session, everything.
+
+    Before discovery this session installed NOTHING -- the project dir is the
+    parent, the parent has no lock, and the single-lock reader stopped there. So
+    the load-bearing assertion is not the count but that two registries' skills
+    are both live under one flat $DEST after one run.
+
+    The verdict has to name the contributing REPOS as well, and that is not
+    decoration: `2/2 from <two registries>` says what was fetched and nothing
+    about who asked for it, and in the measured session -- fourteen attached
+    repos -- that is the difference between an auditable delivery and a number.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/gamma": SKILL_C})
+    parent = tmp_path / "repos"
+    _child_repo(parent, "repo-a", one, one_sha)
+    _child_repo(parent, "repo-b", two, two_sha)
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.startswith("skills: 2/2 "), verdict
+    assert verdict.endswith("OK"), verdict
+    assert "across 2 locks (repo-a, repo-b)" in verdict, verdict
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+    assert (home / ".claude" / "skills" / "gamma" / "SKILL.md").is_file(), verdict
+    # Each attributed to the registry that actually supplied it, which is what
+    # lets either repo later prune its own installs without touching the other's.
+    assert {entry["name"]: entry["registry"]
+            for entry in _record(home)["installed"]} == {
+        "alpha": one.resolve().as_uri(),
+        "gamma": two.resolve().as_uri(),
+    }
+
+
+def test_two_sibling_repos_pinning_one_registry_share_a_single_fetch(tmp_path):
+    """Case (a) -- the COMMON input, and the one a naive union turns into 0/N.
+
+    The fleet's locks largely declare the same `adam` bundle from the same
+    registry at the same ref, so in an ordinary multi-repo session most
+    destination names are claimed by EVERY lock present. A union that counted
+    names before collapsing identical (name, digest) rows would call every one
+    of them a duplicate, `rm -rf` its destination and install nothing --
+    `skills: 0/N` for the normal case, which is worse than the bug being fixed
+    and reads as a lock authoring error rather than as a hook defect.
+
+    THE FETCH COUNT IS ASSERTED, not only the install count, because those are
+    two separate regressions and only one of them is visible in a verdict:
+    installing 2/2 after cloning one registry fourteen times is correct and
+    unaffordable, and nothing else in this suite would notice. The hook writes
+    one `source[<n>] ...` line to $LOG per entry in the deduped fetch list, so
+    counting those lines counts clones.
+
+    Deliberately NOT asserted: which of the two locks the surviving row came
+    from. The rows are identical by construction -- that is what makes the case
+    benign -- so there is nothing for an answer to that to mean.
+    """
+    shared = tmp_path / "registry"
+    sha = make_registry(shared, {"adam/alpha": SKILL_A, "adam/beta": SKILL_B})
+    parent = tmp_path / "repos"
+    _child_repo(parent, "repo-a", shared, sha)
+    _child_repo(parent, "repo-b", shared, sha)
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    # Two skills, not four rows and not zero: the identical rows collapsed
+    # rather than colliding.
+    assert verdict.startswith("skills: 2/2 "), verdict
+    assert verdict.endswith("OK"), verdict
+    assert "share a destination name" not in verdict, verdict
+    assert "different digests" not in verdict, verdict
+    for name in ("alpha", "beta"):
+        assert (home / ".claude" / "skills" / name / "SKILL.md").is_file(), verdict
+    log = _bootstrap_log(home)
+    assert log.count("source[") == 1, log
+
+
+def test_two_locks_naming_one_skill_at_different_digests_install_neither(tmp_path):
+    """Case (b) -- the question ADR 0005 refused to invent a tiebreak for.
+
+    Two attached repos pin different registries that each ship a skill directory
+    called `alpha`, and each lock names its own true digest. The install dir is
+    FLAT, so one of them would have to become the other's bytes.
+
+    THE ANSWER IS NEITHER. Serving bytes under a name whose own lock names
+    different bytes breaks the one guarantee this file exists for, and between
+    two pinned locks there is no non-invented winner -- sort order and scan order
+    are both "decided by nobody". Failing closed is PER NAME, so two repos whose
+    refs differ only in the skills that actually changed still union cleanly on
+    everything else; and it never regresses, because today a multi-repo session
+    delivers nothing whatsoever.
+
+    The verdict must name the LOCKS, not just the skill: "alpha was not
+    installed" sends a reader to one lock, and the thing they can act on is which
+    two disagree. The stale copy goes too, by the same rule every other skip in
+    this hook follows -- a verdict saying a skill is not installed has to mean it
+    is not there.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/alpha": SKILL_B})
+    parent = tmp_path / "repos"
+    repo_a = _child_repo(parent, "repo-a", one, one_sha)
+    repo_b = _child_repo(parent, "repo-b", two, two_sha)
+    home = tmp_path / "home"
+    stale = _seed_installed(home, "alpha")
+
+    proc = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.startswith("skills: 0/2 "), verdict
+    assert "DEGRADED" in verdict, verdict
+    assert "claimed at different digests" in verdict, verdict
+    assert "alpha (" in verdict, verdict
+    for repo in (repo_a, repo_b):
+        assert _hook_path((repo / "skills.lock").resolve()) in verdict, verdict
+    # Neither won, and the pre-existing copy did not win by default either.
+    assert not stale.exists(), verdict
+    assert not (home / ".claude" / "skills" / "alpha").exists(), verdict
+
+
+def test_a_project_with_its_own_lock_ignores_its_child_repos_locks(tmp_path):
+    """Own lock wins, and the children are then not looked at at all.
+
+    The single-repo session is the overwhelmingly common one and it must not
+    change shape: a repo that happens to contain a checkout of another repo
+    carrying its own `skills.lock` -- a vendored dependency, a sibling cloned
+    inside for convenience -- must not silently start installing that repo's
+    skills. Either/or, exactly as the skills-doctor's `discover_locks` reads it.
+
+    The `across N locks` clause is asserted ABSENT for the same reason the
+    counts are: with one lock the verdict must be the one this hook has always
+    printed, with no wording acquired to describe a shape it is not in.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/gamma": SKILL_C})
+    project = tmp_path / "project"
+    make_project(project, one, one_sha)                 # the project's OWN lock
+    _child_repo(project, "vendored", two, two_sha)      # a child that has one too
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.startswith("skills: 1/1 "), verdict
+    assert verdict.endswith("OK"), verdict
+    assert "across" not in verdict, verdict
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+    assert not (home / ".claude" / "skills" / "gamma").exists(), verdict
+
+
+def test_one_malformed_sibling_lock_degrades_only_its_own_skills(tmp_path):
+    """A bad lock costs its own repo, never the other thirteen.
+
+    This is the fragility the union would otherwise have INTRODUCED. Reading one
+    lock, a refusal cost the repo that authored it and nobody else, so a
+    whole-lock `sys.exit` was a proportionate answer. Under discovery the number
+    of locks read is no longer the adopting repo's to control: any one of
+    fourteen attached repos could then deny delivery to every other, and the
+    verdict would name a failure the reader has no way to attribute.
+
+    So the refusal is scoped to its lock, the reason is carried into the verdict
+    with the lock's path, and -- the half that keeps it a refusal rather than a
+    warning -- that lock's skills are NOT installed.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/gamma": SKILL_C})
+    parent = tmp_path / "repos"
+    _child_repo(parent, "repo-a", one, one_sha)
+    repo_b = _child_repo(parent, "repo-b", two, two_sha)
+    bad = repo_b / "skills.lock"
+    lock = json.loads(bad.read_text(encoding="utf-8"))
+    lock["skills"]["adam/gamma"] = "not-a-digest"
+    bad.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.startswith("skills: 1/1 "), verdict
+    assert "DEGRADED" in verdict, verdict
+    assert "1 discovered lock rejected" in verdict, verdict
+    assert _hook_path(bad.resolve()) in verdict, verdict
+    assert "has no sha256 digest" in verdict, verdict
+    # The good repo is unaffected...
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+    # ...and the bad one delivered nothing, which is what makes it a refusal.
+    assert not (home / ".claude" / "skills" / "gamma").exists(), verdict
+
+
+def test_a_sibling_lock_naming_synced_contributes_nothing_and_spares_the_store(
+        tmp_path):
+    """The fail-closed refusal, narrowed to one lock and still fail-closed.
+
+    `~/.claude/skills/synced` is the claude.ai account-sync store: the only
+    channel reaching chat, Cowork, Claude in Chrome and mobile, with no delete
+    or restore API behind it. A lock naming a skill `synced` reaches two
+    destructive consumers of `skills.nul` -- the install loop's `rm -rf` then
+    `cp -R`, and `purge_locked_destinations` -- and either annihilates it.
+
+    The refusal works by keeping that name OUT of `skills.nul` before the stream
+    exists, and scoping it per lock does not weaken that by a byte: the offending
+    lock contributes no rows and no claims, so neither consumer ever sees the
+    name. What changes is only who else pays for it -- the sibling repo still
+    gets its skills, where a whole-run refusal would have taken the session down
+    with one bad upstream directory name.
+
+    The store is compared as a TREE, not merely "still exists": a `cp -R` over
+    it succeeds and verifies, so the failure this guards against reports
+    `skills: n/n ... OK` while the account's files are gone.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/gamma": SKILL_C, "adam/synced": SYNCED_SKILL})
+    parent = tmp_path / "repos"
+    _child_repo(parent, "repo-a", one, one_sha)
+    repo_b = parent / "repo-b"
+    repo_b.mkdir(parents=True)
+    # Hand-built, because the generator refuses to WRITE such a lock -- but from
+    # the fixture registry's own bytes, so routing, source index, SKILL.md and
+    # digest all check out and the reserved-name rule is the only thing standing
+    # between this lock and the account store.
+    skills_root = two / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam")
+    _write(repo_b / "skills.lock", json.dumps({
+        "registry": two.resolve().as_uri(),
+        "ref": two_sha,
+        "bundles": ["adam"],
+        "skills": {f"adam/{name}": gsl.digest_skill_dir(skills_root / name)
+                   for name in ("gamma", "synced")},
+    }, indent=2) + "\n")
+    home = tmp_path / "home"
+    account = _account_store(home)
+
+    proc = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert _tree(home / ".claude" / "skills" / "synced") == account, verdict
+    assert verdict.startswith("skills: 1/1 "), verdict
+    assert "DEGRADED" in verdict, verdict
+    assert _hook_path((repo_b / "skills.lock").resolve()) in verdict, verdict
+    assert "account-sync directory" in _bootstrap_log(home), verdict
+    # The refused lock delivered NOTHING -- not even the innocent row beside the
+    # poisoned one, which is the deliberate trade this rule makes.
+    assert not (home / ".claude" / "skills" / "gamma").exists(), verdict
+    # And the other repo in the session is untouched by any of it.
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+
+
+def test_the_hooks_own_repo_is_the_fallback_only_when_no_project_dir_is_named(
+        tmp_path, registry):
+    """The other half of the $SELF_ROOT rule, and the reason it still exists.
+
+    With CLAUDE_PROJECT_DIR unset there is no project dir to search and no
+    children to walk, so `$SELF_ROOT/skills.lock` is the only lock there is.
+    That is the invocation a hand run and a harness that does not set the
+    variable both make, and removing the fallback outright would break them.
+
+    The half that had to go is the OTHER one -- see
+    `test_missing_lock_verdict_does_not_name_the_hooks_own_repo`. Keeping the
+    fallback for the unset case only is what makes a user-scope wiring of this
+    hook safe to write, which is the sequencing constraint ADR 0005 left open:
+    such a wiring fires in every session, and every session without a lock of
+    its own has to install nothing.
+    """
+    root, sha = registry
+    repo = tmp_path / "repo"
+    script = _hook_copy(repo)
+    make_project(repo, root, sha)
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, None, {"SKILLS_BOOTSTRAP_FORCE": "1"}, script=script)
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.startswith("skills: 2/2 "), verdict
+    assert verdict.endswith("OK"), verdict
+    for name in ("alpha", "beta"):
+        assert (home / ".claude" / "skills" / name / "SKILL.md").is_file(), verdict
+
+
+def test_a_narrower_session_leaves_the_other_repos_skills_alone(tmp_path):
+    """The prune, across the two session shapes a machine really alternates.
+
+    ~/.claude/skills is shared by every session on the machine, so a run that
+    discovered fewer locks than the last one must not reap what the locks it did
+    not see still want. The scope is `(registry, bundle)` and is built from the
+    ACCEPTED locks' routing maps, so a narrower session simply has no opinion
+    about the other repo's registry.
+
+    Both directions are driven in one test on purpose, because each alone passes
+    against a broken prune: "B's skills survived" is equally true of a prune that
+    stopped working, so the same narrow session has to still reap a skill that
+    left A's OWN lock. That is the positive control, and it runs on the same
+    store.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A, "adam/beta": SKILL_B})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/gamma": SKILL_C})
+    parent = tmp_path / "repos"
+    repo_a = _child_repo(parent, "repo-a", one, one_sha)
+    _child_repo(parent, "repo-b", two, two_sha)
+    home = tmp_path / "home"
+
+    union = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert union.returncode == 0, union.stderr
+    assert _verdict(union).startswith("skills: 3/3 "), _verdict(union)
+
+    # A later session opened on repo-a alone: its lock is the only one there is.
+    narrow = _run_hook(home, repo_a, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert narrow.returncode == 0, narrow.stderr
+    verdict = _verdict(narrow)
+    assert verdict.startswith("skills: 2/2 "), verdict
+    assert "; removed " not in verdict, verdict
+    assert (home / ".claude" / "skills" / "gamma" / "SKILL.md").is_file(), verdict
+
+    # ...and the control: a skill leaving repo-a's OWN lock still goes, in a
+    # session of exactly the same shape.
+    lock_path = repo_a / "skills.lock"
+    full = json.loads(lock_path.read_text(encoding="utf-8"))
+    _relock(lock_path, full, {"alpha"})
+    reaped = _run_hook(home, repo_a, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert reaped.returncode == 0, reaped.stderr
+    verdict = _verdict(reaped)
+    assert "removed 1 skill no longer in the lock (beta)" in verdict, verdict
+    assert (home / ".claude" / "skills" / "gamma" / "SKILL.md").is_file(), verdict
+
+
+@pytest.mark.parametrize("variable", ["AGENTSKILLS_REPO", "AGENTSKILLS_REF"])
+def test_an_env_override_is_refused_when_several_locks_were_discovered(
+        tmp_path, variable):
+    """These name THE primary. With N locks there are N of them.
+
+    Applying the override to one lock is a guess about which; applying it to all
+    silently repoints every attached repo at one registry and one ref, which is
+    how a debug knob becomes a session-wide substitution nobody asked for. They
+    are debug knobs, so the ambiguous case is refused and the verdict names the
+    variable that caused it.
+
+    The single-lock control is in the same test rather than a sibling, because
+    "the override is refused" and "the override stopped working" are the same
+    observation from outside: the identical environment against a one-lock
+    project must still reach the fetch, which it can only do if it was not
+    refused here.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/gamma": SKILL_C})
+    parent = tmp_path / "repos"
+    repo_a = _child_repo(parent, "repo-a", one, one_sha)
+    _child_repo(parent, "repo-b", two, two_sha)
+    home = tmp_path / "home"
+    env = {"SKILLS_BOOTSTRAP_FORCE": "1", variable: "0" * 40}
+
+    proc = _run_hook(home, parent, env)
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert "DEGRADED" in verdict, verdict
+    assert variable in verdict, verdict
+    assert "discovered 2 locks" in verdict, verdict
+    # Refused BEFORE any lock was read, so the verdict cannot claim a clean
+    # slate and says so instead.
+    assert "LEFT IN PLACE" in verdict, verdict
+    assert not (home / ".claude" / "skills").exists(), verdict
+
+    # The control: one lock, same variable, and the run proceeds far enough to
+    # fail on the override's own content rather than on its ambiguity.
+    single = _run_hook(tmp_path / "home-single", repo_a, env)
+    assert single.returncode == 0, single.stderr
+    assert variable not in _verdict(single), _verdict(single)
+
+
+def test_two_identical_union_runs_write_a_byte_identical_install_record(tmp_path):
+    """Discovery ORDER is not free, and nothing else here would catch it.
+
+    The install record is keyed by name, carries no timestamp, and lets the last
+    writer win, so two runs over the same repos must visit the locks in the same
+    order or they write different bytes for the same machine -- and a record that
+    churns at every session start is one no diff can be read against. The child
+    walk is therefore a sorted glob, and this is what says so.
+
+    Run into two separate scratch HOMEs rather than twice into one: a second run
+    into the same store is a no-op that would pass against any order at all.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A, "adam/beta": SKILL_B})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/gamma": SKILL_C, "adam/delta": SKILL_D})
+    parent = tmp_path / "repos"
+    _child_repo(parent, "repo-a", one, one_sha)
+    _child_repo(parent, "repo-b", two, two_sha)
+
+    first_home = tmp_path / "home-one"
+    second_home = tmp_path / "home-two"
+    first = _run_hook(first_home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    second = _run_hook(second_home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert _verdict(first).startswith("skills: 4/4 "), _verdict(first)
+    assert _verdict(second) == _verdict(first), _verdict(second)
+
+    record = first_home / ".claude" / "skills" / _RECORD
+    assert record.read_bytes() == (
+        second_home / ".claude" / "skills" / _RECORD).read_bytes()
+    assert _tree(first_home / ".claude" / "skills") == _tree(
+        second_home / ".claude" / "skills")
+
+
+def test_a_discovery_scan_that_cannot_be_completed_installs_but_prunes_nothing(
+        tmp_path):
+    """A repo the scan MISSED must not have its skills reaped.
+
+    This is the AGENTSKILLS_BUNDLE rule one level up -- "narrowing means install
+    a subset, never this subset is now the whole truth". If the child
+    enumeration is incomplete the run discovers fewer locks, `claims.nul`
+    shrinks, and the previously-installed skills of the repo that was missed stop
+    having an owner in this run: the orphan prune would then delete them. A
+    transient permissions error would silently reap a repo's delivery.
+
+    So an enumeration that cannot be completed claims authority over nothing:
+    everything found still installs, nothing is removed, and the verdict says so
+    in the same words the unreadable-install-record clause already uses.
+
+    FAULT-INJECTED, and it has to be: this suite runs as root in CI, and root
+    ignores the directory mode -- a `chmod 000` test could not fail for the
+    reason it names, which is the same reason the `mkdir -p "$DEST"` purge path
+    above is left uncovered. The anchor is the readability probe itself, so the
+    branch under test is the hook's own.
+
+    The negative control is the second half: the identical run under the REAL
+    hook DOES reap, so "the guard held" cannot be confused with "the prune
+    stopped working".
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A, "adam/beta": SKILL_B})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/gamma": SKILL_C})
+    parent = tmp_path / "repos"
+    repo_a = _child_repo(parent, "repo-a", one, one_sha)
+    _child_repo(parent, "repo-b", two, two_sha)
+
+    probe = 'if [ ! -r "$CLAUDE_PROJECT_DIR" ] || [ ! -x "$CLAUDE_PROJECT_DIR" ]; then'
+    script = _hook_with(tmp_path, probe, "if true; then", "unlistable-project")
+
+    lock_path = repo_a / "skills.lock"
+    full = json.loads(lock_path.read_text(encoding="utf-8"))
+
+    for home_name, hook, reaped in (("home-guarded", script, False),
+                                    ("home-control", HOOK, True)):
+        home = tmp_path / home_name
+        first = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+        assert first.returncode == 0, first.stderr
+        assert _verdict(first).startswith("skills: 3/3 "), _verdict(first)
+
+        _relock(lock_path, full, {"beta"})          # alpha leaves repo-a's lock
+        proc = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"}, script=hook)
+        assert proc.returncode == 0, proc.stderr
+        verdict = _verdict(proc)
+        # Either way the run still DELIVERS: installing on partial information
+        # is fine, deleting on it is not.
+        assert verdict.startswith("skills: 2/2 "), verdict
+        assert (home / ".claude" / "skills" / "beta" / "SKILL.md").is_file(), verdict
+        assert (home / ".claude" / "skills" / "gamma" / "SKILL.md").is_file(), verdict
+        if reaped:
+            assert "removed 1 skill no longer in the lock (alpha)" in verdict, verdict
+            assert not (home / ".claude" / "skills" / "alpha").exists(), verdict
+        else:
+            assert "could not fully enumerate" in verdict, verdict
+            assert "no stale skill could be removed this run" in verdict, verdict
+            assert "; removed " not in verdict, verdict
+            assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+        _relock(lock_path, full, {"alpha", "beta"})  # restore for the next pass
+
 
 # --------------------------------------------------------------------------
 # the matrix: every report path against every refusal
