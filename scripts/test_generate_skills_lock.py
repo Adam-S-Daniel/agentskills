@@ -1427,6 +1427,94 @@ def _hook_reader_accepts(lock: dict, tmp_path: Path) -> bool:
     return proc.returncode == 0
 
 
+def _run_hook_reader_on_locks(pairs: list, tmp_path: Path
+                              ) -> subprocess.CompletedProcess:
+    """Run the reader over a `locks.nul` built from (open_path, label) pairs.
+
+    The multi-lock entry point, as bash drives it. `_run_hook_reader` above
+    exercises the single-lock `LOCK_PATH` fallback and cannot reach this.
+    """
+    out = tmp_path / "reader-out"
+    out.mkdir(exist_ok=True)
+    locks = tmp_path / "locks.nul"
+    with open(locks, "wb") as handle:
+        for open_path, label in pairs:
+            handle.write(str(open_path).encode("utf-8") + b"\0")
+            handle.write(str(label).encode("utf-8") + b"\0")
+    return subprocess.run(
+        [sys.executable, "-c", _extract_hook_lock_reader()],
+        env={"LOCKS_PATH": str(locks), "LOCK_PATH": str(locks), "OUT_DIR": str(out),
+             "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        capture_output=True, text=True,
+    )
+
+
+def _nul_records(path: Path, width: int) -> list:
+    """The NUL-framed records in `path`, as `width`-field tuples."""
+    fields = path.read_text(encoding="utf-8").split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    return [tuple(fields[at:at + width])
+            for at in range(0, len(fields) - width + 1, width)]
+
+
+@pytest.mark.parametrize("valid", [True, False], ids=["accepted", "rejected"])
+def test_the_reader_opens_one_spelling_of_a_lock_and_reports_the_other(
+        tmp_path, valid):
+    """A lock is OPENED by one path and REPORTED by another, and they can differ.
+
+    Windows-only in origin, and asserted here on every platform because the
+    platform that reproduces it is the one this suite cannot reach when it is
+    being written. Under Git Bash the shell's paths are MSYS ones and a native
+    Windows python cannot open them; `LOCK_PATH` survived that only because MSYS
+    rewrites the VALUES OF ENVIRONMENT VARIABLES on the way to a native process,
+    and it does not rewrite the CONTENT OF A FILE. So when the lock list moved
+    into `locks.nul`, every Windows session began reporting
+    `could not read <lock> (invalid JSON or a bad field)` over an ENOENT on a
+    file sitting right there -- 105 tests, one cause, and nothing on Linux
+    noticed because there the two spellings are identical.
+
+    Two fields per record is therefore a CONTRACT, not an implementation detail,
+    and this pins both halves of it: the reader must OPEN field one (so a lock
+    that is only findable at that path still parses) and must SAY field two (so
+    every path reaching a verdict, or compared against $PROJECT_DIR_REAL by the
+    collision guard, is the spelling bash itself uses). Collapsing back to one
+    field reddens this on any machine.
+
+    Deliberately NOT asserted: anything about `cygpath` or MSYS. The conversion
+    is bash's job and is unobservable from here; what this owns is that the
+    reader honours the two spellings it is handed.
+    """
+    real = tmp_path / "really-here.lock"
+    if valid:
+        real.write_text(json.dumps({
+            "registry": "owner/repo", "ref": "0" * 40,
+            "bundles": ["adam"], "skills": {},
+        }), encoding="utf-8")
+    else:
+        real.write_text("{ not json at all", encoding="utf-8")
+    # A label that is not a path at all, so a reader that opened it could only
+    # fail -- "it opened field one" is then proved by the run succeeding.
+    label = "SPELLED-THE-OTHER-WAY"
+
+    proc = _run_hook_reader_on_locks([(real, label)], tmp_path)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    out = tmp_path / "reader-out"
+
+    if valid:
+        assert proc.returncode == 0, proc.stderr
+        assert _nul_records(out / "accepted.nul", 1) == [(label,)]
+        assert str(real) not in (out / "accepted.nul").read_text(encoding="utf-8")
+    else:
+        # One lock, and it was refused: the reader exits non-zero having written
+        # no stream, and bash renders its whole-run "could not read" verdict.
+        # The LABEL is what reaches $LOG, which is the only surface that says
+        # which field was wrong.
+        assert proc.returncode != 0
+        assert label in proc.stderr, proc.stderr
+        assert str(real) not in proc.stderr, proc.stderr
+
+
 def test_hook_and_generator_share_the_validation_patterns():
     """The trust-boundary patterns must be byte-identical in both files.
 

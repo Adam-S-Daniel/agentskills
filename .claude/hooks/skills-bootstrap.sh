@@ -431,9 +431,34 @@ LOG="$(mktemp "${TMPDIR:-/tmp}/skills-bootstrap.XXXXXX")" || LOG="$tmp/skills-bo
 # `-I` (isolated): see the header. Without it the project directory is on
 # sys.path, and a `json.py` or `re.py` sitting there IS this reader's parser and
 # validator.
+# TWO spellings per lock, and the reason is a real one rather than belt and
+# braces. Under Git Bash the shell's paths are MSYS ones (`/c/Users/...`, and
+# `/tmp` is wherever the mount table says), which a NATIVE Windows python
+# cannot open. `LOCK_PATH` survives that only because MSYS rewrites the values
+# of environment variables when it spawns a native process — and it does NOT
+# rewrite the CONTENT of a file. So the moment the lock list moved into
+# `locks.nul` every Windows session started reporting
+# `could not read <lock> (invalid JSON or a bad field)` with an ENOENT in the
+# log, on a file sitting right there: 105 tests, one cause.
+#
+# `cygpath -m` is the deterministic answer — it asks the very shell the hook is
+# running under, so it tracks the real mount table instead of guessing that
+# `/c/` means `C:\` (which would be wrong for `/tmp` alone). Off Windows there
+# is no cygpath and nothing to translate.
+#
+# The SECOND field is the spelling bash itself uses. Python echoes it back in
+# `accepted.nul`, `rejected.nul` and the conflict notices, so every path that
+# reaches a verdict, or is compared against `PROJECT_DIR_REAL` by the collision
+# guard, is the one bash would have printed anyway. Converting on the way in and
+# labelling on the way out is what keeps that one-directional.
+CYGPATH="$(command -v cygpath 2>/dev/null || true)"
+python_path () {
+  if [ -n "$CYGPATH" ]; then "$CYGPATH" -m -- "$1" 2>/dev/null || printf '%s' "$1"
+  else printf '%s' "$1"; fi
+}
 : >"$tmp/locks.nul"
 for lock_path in "${LOCKS[@]}"; do
-  printf '%s\0' "$lock_path" >>"$tmp/locks.nul"
+  printf '%s\0%s\0' "$(python_path "$lock_path")" "$lock_path" >>"$tmp/locks.nul"
 done
 if ! LOCK_PATH="$LOCK" LOCKS_PATH="$tmp/locks.nul" OUT_DIR="$tmp" python3 -I - <<'PY' >>"$LOG" 2>&1
 import json, os, re, sys
@@ -445,17 +470,32 @@ only_bundle = os.environ.get("AGENTSKILLS_BUNDLE") or ""
 # contain anything except a NUL, so nothing a discovered directory is NAMED can
 # forge an extra entry.
 #
+# TWO fields per record: the path to OPEN and the path to SAY. They differ only
+# under Git Bash, where the shell's `/c/Users/...` is not something a native
+# Windows python can open — see the comment on `python_path` above for why a
+# file's content does not get the rewrite an environment variable's value does.
+# Opening one spelling and reporting the other is what keeps every path in a
+# verdict, and every path the collision guard compares, in bash's own spelling.
+#
 # `LOCK_PATH` remains the SINGLE-LOCK spelling and is what this falls back to,
 # which is what keeps this reader liftable: scripts/test_generate_skills_lock.py
 # extracts it and runs it with only LOCK_PATH, OUT_DIR and PATH in the
-# environment, and some forty validation tests ride on that.
+# environment, and some forty validation tests ride on that. In that shape the
+# two spellings are necessarily the same one.
 lock_paths = []
+lock_labels = []
 locks_path = os.environ.get("LOCKS_PATH") or ""
 if locks_path:
     with open(locks_path, encoding="utf-8", newline="") as handle:
-        lock_paths = [field for field in handle.read().split("\0") if field]
+        fields = handle.read().split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()                    # the NUL terminating the final field
+    for at in range(0, len(fields) - 1, 2):
+        lock_paths.append(fields[at])
+        lock_labels.append(fields[at + 1])
 if not lock_paths:
     lock_paths = [os.environ["LOCK_PATH"]]
+    lock_labels = list(lock_paths)
 
 # Where a bundle's skills sit inside its own repo. This repo's shape is the
 # default; a federated source keeps them wherever it keeps them.
@@ -854,17 +894,21 @@ rejected = []
 notices = []
 
 for lock_index, lock_path in enumerate(lock_paths):
+    # OPEN `lock_path`, SAY `lock_labels[lock_index]`. Everything that leaves
+    # this reader as text is the label, so bash never has to translate a path
+    # back out of a spelling only python could produce.
+    label = lock_labels[lock_index]
     try:
         local_sources, rows, claim = read_lock(lock_path)
     except LockRejected as exc:
-        rejected.append((lock_path, str(exc)))
+        rejected.append((label, str(exc)))
         # To stderr as well as to `rejected.nul`: stderr is $LOG, which is where
         # every verdict sends the operator, and it is the only surface that ever
         # states WHICH field was wrong.
-        sys.stderr.write("%s (%s)\n" % (exc, lock_path))
+        sys.stderr.write("%s (%s)\n" % (exc, label))
         continue
     # Only a lock that fully validated contributes anything at all.
-    accepted.append(lock_path)
+    accepted.append(label)
     # EVERY source this lock declares gets a fetch slot, needed by a row or not.
     # That is today's behaviour and it is load-bearing in two directions: a
     # pinned registry nobody can reach is worth reporting even when this run
@@ -967,7 +1011,7 @@ for name in sorted(by_name):
         # to reconcile.
         if not intra:
             notices.append(("conflict", name,
-                            ", ".join(sorted({lock_paths[row[0]] for row in group}))))
+                            ", ".join(sorted({lock_labels[row[0]] for row in group}))))
         for row in group:
             emitted.append(((row[1], row[0]), (row[1], row[2], str(row[3]), row[4], "dup")))
     else:
