@@ -1388,6 +1388,26 @@ def _extract_hook_lock_reader() -> str:
     return block
 
 
+def _reader_script(tmp_path: Path) -> Path:
+    """The extracted reader, written to a FILE rather than passed with `-c`.
+
+    A file because Windows caps a whole command line at 32767 characters, and
+    the reader is past that: it measured 34427 the day the union landed, so
+    every `-c` invocation of it died with
+    `FileNotFoundError: [WinError 206] The filename or extension is too long` --
+    42 tests, and an error message that names neither python nor the reader nor
+    a length. Nothing on Linux notices, where the limit is roughly two megabytes.
+
+    `-I` on the run below matches how the hook itself launches this block, and
+    it also keeps `tmp_path` off `sys.path`, which running a script from a
+    directory otherwise puts there -- the same isolation argument the hook makes
+    for its own six invocations.
+    """
+    script = tmp_path / "extracted-lock-reader.py"
+    script.write_text(_extract_hook_lock_reader(), encoding="utf-8")
+    return script
+
+
 def _run_hook_reader(lock: dict, tmp_path: Path) -> subprocess.CompletedProcess:
     """Run the hook's lock reader standalone against `lock`.
 
@@ -1401,11 +1421,46 @@ def _run_hook_reader(lock: dict, tmp_path: Path) -> subprocess.CompletedProcess:
     out = tmp_path / "reader-out"
     out.mkdir(exist_ok=True)
     return subprocess.run(
-        [sys.executable, "-c", _extract_hook_lock_reader()],
+        [sys.executable, "-I", str(_reader_script(tmp_path))],
         env={"LOCK_PATH": str(lock_path), "OUT_DIR": str(out),
              "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
         capture_output=True, text=True,
     )
+
+
+def test_the_hook_reader_is_never_handed_to_python_on_a_command_line():
+    """`-c` cannot carry this reader, and only Windows can tell you so.
+
+    Windows caps an entire command line at 32767 characters. The extracted
+    reader passed that when the union landed -- 34427 -- and every `-c`
+    invocation of it then died with
+    `FileNotFoundError: [WinError 206] The filename or extension is too long`,
+    which names neither python, nor the reader, nor a length. 42 tests, one
+    cause, and `pytest` on Linux stayed green throughout because the limit there
+    is roughly two megabytes.
+
+    So this is a SOURCE assertion, not a behavioural one, and deliberately: the
+    behaviour it guards is unobservable on the platform most runs happen on, and
+    a guard that can only fire on the platform that already failed is no guard.
+    Reverting `_reader_script` to a `-c` payload reddens this on any machine.
+
+    The length is NOT asserted. It would have to be re-measured on every edit to
+    the reader, and the rule does not depend on the number: a block this size
+    belongs in a file whether it is one character over the limit or ten thousand.
+
+    The pattern is ASSEMBLED at runtime rather than written out, because a test
+    that scans its own file for a literal finds the literal in its own assertion
+    and fails on itself -- which is exactly what the first draft of this did.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    forbidden = '"-c", ' + "_extract_hook_lock" + "_reader()"
+    # A bool, not the haystack: asserting on `x not in source` makes pytest
+    # render all 9000 lines of this file into the failure report.
+    assert (forbidden in source) is False, (
+        "the extracted lock reader is being passed to python on a command line; "
+        "it is far past Windows' 32767-character limit, so pytest-windows will "
+        "fail with WinError 206 while Linux stays green. Write it to a file "
+        "(see _reader_script) instead.")
 
 
 def _hook_reader_accepts(lock: dict, tmp_path: Path) -> bool:
@@ -1442,7 +1497,7 @@ def _run_hook_reader_on_locks(pairs: list, tmp_path: Path
             handle.write(str(open_path).encode("utf-8") + b"\0")
             handle.write(str(label).encode("utf-8") + b"\0")
     return subprocess.run(
-        [sys.executable, "-c", _extract_hook_lock_reader()],
+        [sys.executable, "-I", str(_reader_script(tmp_path))],
         env={"LOCKS_PATH": str(locks), "LOCK_PATH": str(locks), "OUT_DIR": str(out),
              "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
         capture_output=True, text=True,
