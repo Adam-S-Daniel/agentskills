@@ -169,6 +169,18 @@ into a scan. Several locks judging one store names **no winner** among them;
 every finding says which lock declared it, and identical findings from several
 locks are folded into one that names them all.
 
+**There is no winner to name because the hook installs the UNION**
+(`docs/decisions/0007`), and that changes which questions are per-lock. Rows from
+different locks that agree on a name AND a digest collapse to one install — the
+ordinary fleet shape, where fourteen repos declare the same `adam` bundle. Rows
+that disagree about the digest install **neither**, and the doctor reports that
+as `deleted-by-the-cross-lock-conflict`, naming the locks to reconcile. So
+"has this skill left the lock", "is its bundle still in scope" and "is its
+destination contested" are judged against **every discovered lock at once**: a
+skill dropped from one repo's lock that a sibling repo still declares is not
+stale, and nothing removes it. What stays per-lock is attribution — which repo
+declared a name, and therefore whose lock has to change.
+
 **It reads the surface, and the surface changes the verdict.** A locked skill
 missing from the personal store is the correct state on a durable machine and a
 delivery failure on an ephemeral one, so the same three facts are a NOTE on one
@@ -271,14 +283,22 @@ paths and say which copy is winning (the personal one, always).
 
 The hook removes a skill that has left the lock only when it can prove all four
 of: the record says it installed it, the bytes are still exactly what it
-installed, the lock still declares that (registry, bundle), and the lock no
-longer names it. Everything else it leaves alone — correctly, because
-`~/.claude/skills` is the user's own directory and deleting work to satisfy a
-lock they may not control is the worse failure.
+installed, the discovered locks still declare that (registry, bundle) between
+them, and **none** of them names it any more. Everything else it leaves alone —
+correctly, because `~/.claude/skills` is the user's own directory and deleting
+work to satisfy a lock they may not control is the worse failure.
+
+**Both halves of that are about every discovered lock, not about one.** The
+hook writes its prune scope as the union of the accepted locks' claims, so a
+skill dropped from repo A's lock while repo B still names it is not stale at
+all — the next run reinstalls it, and a doctor judging repo A's lock alone
+would tell you the opposite. That is a report whose stated cause never happens,
+which is the failure the whole FINDINGS section exists to avoid, so
+`check_provenance.py` asks the union rather than the lock in hand.
 
 The consequence is that directories live there permanently with nothing saying
 so — a skill the record does not name at all, one whose bytes no longer match
-what was installed, one whose (registry, bundle) the lock has stopped declaring.
+what was installed, one whose (registry, bundle) no discovered lock declares.
 The causes differ and so does what to do about each, which is why
 `check_provenance.py` names the cause rather than just the count. Read its
 FINDINGS section; the hook being right not to act is exactly why a human has to
@@ -287,9 +307,12 @@ see them.
 Two of these are easy to state backwards. What preserves an edited skill is the
 **digest mismatch**, not its having left the lock — restore the original bytes
 and the next run removes it, so moving it out of the store is the only way to
-keep it. And a skill whose bundle the lock no longer claims is not merely
+keep it. And a skill whose bundle no discovered lock claims is not merely
 unremoved: it is out of scope, so the hook does not mention it in any verdict
-either, and nothing will ever say it is there.
+either, and nothing will ever say it is there — until a sibling repo whose lock
+does claim that pair joins the session, which brings it back in scope and makes
+the next run remove it. `stale-out-of-scope` is therefore a statement about the
+session as it stands, not about the directory.
 
 ### Staleness of the account store
 
@@ -369,18 +392,24 @@ figure. No remediation is performed — recommend, do not do.
   session, one repo's committed skills are advertised while you are working in
   another. Enumerate all workspace roots before concluding a skill "came from
   nowhere".
-- **The shadow guard is INERT in a multi-repo shape, not merely mispointed.**
-  Both the hook and `check_provenance.py` look for repo-owned skills at
-  `$PROJECT_DIR/.claude/skills/<name>/SKILL.md`. When the project dir is the
-  parent of several repos, that directory does not exist at all — so the guard
-  can never fire for ANY of them, and `delivered-by-the-project` can never be
-  the reason a locked skill is absent. Harmless today only because the one
-  repo-owned project skill on this fleet (`embeddable-tool-pages`) is not among
-  the locked names; it stops being harmless the moment a repo ships a skill a
-  lock also declares. Do the shadowing comparison by hand against each
-  workspace root, per the `comm` recipe above, rather than trusting either
-  tool's silence. Fixing it needs an answer to "which repo's skills win", which
-  is the open question in `docs/decisions/0005`.
+- **The shadow guard used to be INERT in a multi-repo shape, and both halves
+  moved together when it was fixed.** The hook and `check_provenance.py` both
+  looked for repo-owned skills at `$PROJECT_DIR/.claude/skills/<name>/SKILL.md`
+  alone. When the project dir is the parent of several repos that directory
+  does not exist at all, so the guard could never fire for ANY of them, and
+  `delivered-by-the-project` could never be the reason a locked skill was
+  absent — worse, the doctor's lookup returned a confident measured *empty set*
+  rather than "unknown", so it reported the next run as replacing a directory
+  that run deletes. Both now consult the project dir **plus every accepted
+  lock's own repo**, first answer wins, and the report NAMES the directory that
+  won because "repo-owned" no longer identifies a single repo. ADR 0005's
+  footnote is why the two had to move in one change: the doctor's lookup exists
+  to *suppress* a finding, so widening one side alone makes the net effect
+  unreadable. One residual is recorded rather than fixed — under a union, one
+  repo's project-owned skill now suppresses delivery of a locked skill the
+  other repos asked for. Still worth doing the shadowing comparison by hand
+  against each workspace root, per the `comm` recipe above, when the answer
+  matters.
 - **Absence from the listing is not absence from disk.** Deduplication and the
   listing budget both drop entries. Check disk *and* listing; a mismatch
   between them is itself a finding.
@@ -439,14 +468,22 @@ figure. No remediation is performed — recommend, do not do.
   the rest of the ladder before it says delivery is unaffected.** The install
   loop asks several more questions after that gate, and seven of its arms end in
   `rm -rf` on the very directory it just agreed it could replace. The doctor
-  models the two that a reading of your own disk can answer: two lock rows
+  models the three that a reading of your own disk can answer: two rows of ONE
+  lock
   folding onto one destination name (`deleted-by-the-dup-guard`, a finding —
-  neither row installs) and the project shipping a `.claude/skills/<name>` of
+  neither row installs), TWO locks naming one destination at different digests
+  (`deleted-by-the-cross-lock-conflict`, a finding — the hook installs neither
+  and there is no invented tiebreak; the finding names the locks to reconcile),
+  and a repo in the session shipping a `.claude/skills/<name>` of
   its own (`deleted-by-the-collision-guard`, a note — repo-owned is supposed to
-  win). That last question is asked the hook's own way — one
-  `[ -f .claude/skills/<name>/SKILL.md ]` per name, never a listing of the
+  win). The first two share one `dup` arm in the hook and are reported apart
+  because the remedy differs — one lock to correct against two to reconcile —
+  and the intra-lock reading wins when a store manages both, which is the hook's
+  own `if not intra`. That last question is asked the hook's own way — one
+  `[ -f .claude/skills/<name>/SKILL.md ]` per name per directory, never a
+  listing of the
   directory — so a plain file, a missing directory or a symlink loop where
-  `.claude/skills` belongs is a measured "the project ships nothing", exactly as
+  `.claude/skills` belongs is a measured "this repo ships nothing", exactly as
   it is for the hook. Only a stat that fails for a reason which is not about the
   path leaves it unknown, and the doctor says so
   (`collision-guard-unmeasured`) rather than assuming the benign reading.

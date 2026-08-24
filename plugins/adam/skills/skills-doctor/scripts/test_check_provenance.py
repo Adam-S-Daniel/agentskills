@@ -863,6 +863,15 @@ def test_untracked_does_not_contradict_another_locks_verdict_on_the_same_name(
     they can. The fix is in the text, not the judgement: `untracked` now says
     what the lock that raised it can support, and the LOCK line says which lock
     that was.
+
+    ITS HEDGE CHANGED WITH THE UNION, which is why the sentence pinned below is
+    a different one. "Another lock may name it, and would report it separately"
+    was true of a hook that read one lock: a sibling lock's judgement was a
+    second opinion and nothing more. Under ADR 0007 the hook installs the union,
+    so a sibling lock naming this name means the bundle's copy IS delivered
+    here — a fact about the store rather than a second reading of it, and the
+    old wording left the reader thinking the two findings were merely opinions
+    to weigh.
     """
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
@@ -890,7 +899,12 @@ def test_untracked_does_not_contradict_another_locks_verdict_on_the_same_name(
     assert "[hand-placed-over-locked] shared" in flattened, out
     # ...and the untracked one no longer asserts what the other one disproves.
     assert "The hook will never update it" not in flattened, out
-    assert "another lock may name it" in flattened, out
+    assert "a sibling lock naming this name means the bundle's copy IS " \
+        "delivered here" in flattened, out
+    # The retired hedge is pinned as retired, not merely replaced: it described
+    # a hook that read one lock, and a reader who believed it would treat the
+    # sibling lock's finding as an opinion rather than as delivery.
+    assert "another lock may name it" not in flattened, out
 
 
 def test_the_untracked_finding_still_fires_without_a_record(tmp_path, capsys):
@@ -1952,6 +1966,73 @@ def test_two_lock_rows_on_one_destination_are_reported_as_a_deletion(
     assert not (store / "alpha").exists(), verdict
 
 
+def test_two_locks_naming_one_destination_at_different_digests_delete_it(
+        tmp_path, capsys, ephemeral):
+    """The rung a single-lock doctor had nowhere to put, measured end to end.
+
+    The hook's new rule is that a destination installs iff every row naming it
+    — across every lock it discovered — agrees on one normalised digest. Two
+    repos pinned at refs whose `alpha` differs is therefore not "one of them
+    wins": it is NEITHER, because serving bytes under a name whose own lock
+    pins different bytes breaks the integrity guarantee the lock exists for,
+    and ADR 0005 declined to invent a tiebreak. Nothing in `Lock.duplicates`
+    can express that — `landings` counts keys within ONE lock file, by
+    construction — so before this the doctor read the store, found the bytes
+    matched repo-a's lock, and reported the directory as healthy.
+
+    Driven through the real hook in both directions, like the dup-guard test
+    above and for its reason: the extracted ladder cannot show what the store
+    looks like after the arm that deletes. Run one leaves alpha installed and
+    recorded from repo-a alone; the doctor is then asked while repo-b's
+    conflicting lock is in the session and the directory is still there — which
+    is the actionable moment, because after the next run there is no directory
+    left to report on. Run two is that next run.
+    """
+    suite = _suite()
+    root_a = tmp_path / "registry-a"
+    sha_a = suite.make_registry(root_a, {"adam/alpha": suite.SKILL_A})
+    moved = dict(suite.SKILL_A)
+    moved["SKILL.md"] = "---\nname: alpha\n---\nalpha body, repo-b's ref\n"
+    root_b = tmp_path / "registry-b"
+    sha_b = suite.make_registry(root_b, {"adam/alpha": moved})
+
+    project = tmp_path / "repos"
+    repo_a = suite.make_project(project / "repo-a", root_a, sha_a)
+    home = tmp_path / "home"
+    store = home / ".claude" / "skills"
+
+    # Run one: only repo-a is in the session, and alpha installs from it.
+    proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert suite._verdict(proc).startswith("skills: 1/1 "), suite._verdict(proc)
+    assert (store / "alpha").is_dir()
+
+    repo_b = suite.make_project(project / "repo-b", root_b, sha_b)
+    assert prov.read_lock(repo_a).digests["alpha"] \
+        != prov.read_lock(repo_b).digests["alpha"], "the fixture locks agree"
+
+    code, out = run_autolock(store, project, capsys)
+    text = flat(out)
+    assert code == 1, out
+    assert "[deleted-by-the-cross-lock-conflict] alpha" in text, out
+    # NOT the intra-lock reading, whose remedy is to rename a skill directory
+    # in one registry — here there is nothing to rename and two locks to
+    # reconcile, and sending the reader to the wrong one is the whole cost of
+    # folding the two into a single sentence.
+    assert "deleted-by-the-dup-guard" not in out, out
+    assert "bytes-are-the-locked-ones" not in out, out
+    # The locks that disagree are NAMED. "alpha was not installed" sends a
+    # reader to whichever lock they thought of first, which with fourteen
+    # attached repos is a search rather than a fix.
+    assert str(repo_a) in text and str(repo_b) in text, out
+
+    # Run two: the same store, with both locks discovered.
+    proc = suite._run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    verdict = suite._verdict(proc)
+    assert "claimed at different digests by different locks" in verdict, verdict
+    assert not (store / "alpha").exists(), verdict
+
+
 def _forge(store: Path, name: str, **fields) -> None:
     """Rewrite one record row's fields in place, leaving the rest of it alone."""
     path = store / prov.RECORD_NAME
@@ -2031,8 +2112,8 @@ def test_a_project_path_the_hook_can_answer_is_not_reported_unmeasured(
     (project / ".claude").mkdir(exist_ok=True)
     build(project)
 
-    assert prov.project_ships(project / ".claude" / "skills",
-                              {"alpha", "beta"}) == set()
+    assert prov.project_ships([project / ".claude" / "skills"],
+                              {"alpha", "beta"}) == {}
     code, out = run(store, lock_path, capsys, project_dir=project)
     text = flat(out)
     assert "collision-guard-unmeasured" not in text, text
@@ -2095,7 +2176,7 @@ def test_a_stat_that_does_not_settle_the_question_is_still_unmeasured(
     with mock.patch.object(prov, "hook_sees_a_file",
                            lambda path: None if path.parent.name == "alpha"
                            else False):
-        assert prov.project_ships(project / ".claude" / "skills",
+        assert prov.project_ships([project / ".claude" / "skills"],
                                   {"alpha", "beta"}) is None
         code, out = run(store, lock_path, capsys, project_dir=project)
     text = flat(out)
@@ -2111,8 +2192,11 @@ def test_an_absent_project_skills_dir_is_measured_and_not_unmeasured(tmp_path):
     unmeasured would be the same defect pointing the other way — a finding on
     every healthy machine. ENOENT is an answer, not a failure to get one.
     """
-    assert prov.project_ships(tmp_path / "nothing" / "here",
-                              {"alpha"}) == set()
+    assert prov.project_ships([tmp_path / "nothing" / "here"],
+                              {"alpha"}) == {}
+
+
+ALONE = prov.Union({"alpha", "dup", "contested"}, set())
 
 
 @pytest.mark.parametrize("fate", prov.FATES)
@@ -2122,21 +2206,36 @@ def test_every_fate_on_the_ladder_is_one_the_hook_can_reach(fate, tmp_path):
     A constant nothing returns is a comment wearing a variable's clothes: it
     reads as a modelled state and asserts nothing. This walks the ladder with the
     inputs each rung needs and collects what comes back.
+
+    Two of the rungs take their input from the UNION rather than from the lock
+    in hand — a destination one lock names twice, and a destination two locks
+    name at different digests — so the union is what varies for those two and
+    `ALONE` is the single-lock reading everywhere else.
     """
     lock = prov.Lock(prov.PRESENT, {"alpha"}, set(),
-                     digests={"alpha": frozenset({"a" * 64})},
-                     duplicates=frozenset({"dup"}))
+                     digests={"alpha": frozenset({"a" * 64})})
     dupped = lock._replace(names={"alpha", "dup"},
                            digests={"alpha": frozenset({"a" * 64}),
                                     "dup": frozenset({"a" * 64})})
+    contested = lock._replace(names={"alpha", "contested"},
+                              digests={"alpha": frozenset({"a" * 64}),
+                                       "contested": frozenset({"a" * 64})})
     reached = {
         prov.hook_fate(prov.Lock(prov.REJECTED, set(), set(), "why"), "alpha",
-                       replaceable=True, repo_owned=set()),
-        prov.hook_fate(lock, "alpha", replaceable=False, repo_owned=set()),
-        prov.hook_fate(dupped, "dup", replaceable=True, repo_owned=set()),
-        prov.hook_fate(lock, "alpha", replaceable=True, repo_owned={"alpha"}),
-        prov.hook_fate(lock, "alpha", replaceable=True, repo_owned=None),
-        prov.hook_fate(lock, "alpha", replaceable=True, repo_owned=set()),
+                       replaceable=True, repo_owned={}, union=ALONE),
+        prov.hook_fate(lock, "alpha", replaceable=False, repo_owned={},
+                       union=ALONE),
+        prov.hook_fate(dupped, "dup", replaceable=True, repo_owned={},
+                       union=ALONE._replace(duplicated=frozenset({"dup"}))),
+        prov.hook_fate(contested, "contested", replaceable=True, repo_owned={},
+                       union=ALONE._replace(conflicted={
+                           "contested": ("a.lock", "b.lock")})),
+        prov.hook_fate(lock, "alpha", replaceable=True,
+                       repo_owned={"alpha": tmp_path}, union=ALONE),
+        prov.hook_fate(lock, "alpha", replaceable=True, repo_owned=None,
+                       union=ALONE),
+        prov.hook_fate(lock, "alpha", replaceable=True, repo_owned={},
+                       union=ALONE),
     }
     assert reached == set(prov.FATES)
     assert fate in reached
@@ -2152,10 +2251,11 @@ def test_a_directory_the_ladder_cannot_place_raises_instead_of_defaulting():
     present = prov.Lock(prov.PRESENT, {"alpha"}, set(),
                         digests={"alpha": frozenset({"a" * 64})})
     with pytest.raises(ValueError, match="stray"):
-        prov.hook_fate(present, "stray", replaceable=True, repo_owned=set())
+        prov.hook_fate(present, "stray", replaceable=True, repo_owned={},
+                       union=ALONE)
     with pytest.raises(ValueError, match="alpha"):
         prov.hook_fate(prov.Lock(prov.ABSENT, {"alpha"}, set()), "alpha",
-                       replaceable=True, repo_owned=set())
+                       replaceable=True, repo_owned={}, union=ALONE)
 
 
 def test_the_ladders_order_is_the_hooks_order(tmp_path):
@@ -2168,6 +2268,12 @@ def test_the_ladders_order_is_the_hooks_order(tmp_path):
     out of the hook rather than restated here — and then confirmed against the
     ladder on a store that trips both rungs at once, where only the order
     decides which answer comes back.
+
+    Two of the rungs now share ONE bash arm — the `dup` status covers both a
+    lock naming a destination twice and two locks naming it at different
+    digests — so the hook's order between THEM is not a line order between two
+    `if`s but the order of `intra` and the `if not intra` that gates the
+    conflict notice. Read out of the hook the same way, for the same reason.
     """
     lines = _hook_path().read_text(encoding="utf-8").splitlines()
 
@@ -2186,10 +2292,24 @@ def test_the_ladders_order_is_the_hooks_order(tmp_path):
     # hook, so `dup` is the answer; reversing the two arms in `hook_fate` is what
     # this reds on, and nothing else in the suite would.
     lock = prov.Lock(prov.PRESENT, {"alpha"}, set(),
-                     digests={"alpha": frozenset({"a" * 64})},
-                     duplicates=frozenset({"alpha"}))
-    assert prov.hook_fate(lock, "alpha", replaceable=True,
-                          repo_owned={"alpha"}) == prov.DELETED_BY_THE_DUP_GUARD
+                     digests={"alpha": frozenset({"a" * 64})})
+    both = prov.Union({"alpha"}, set(), duplicated=frozenset({"alpha"}))
+    assert prov.hook_fate(lock, "alpha", replaceable=True, union=both,
+                          repo_owned={"alpha": Path("/repo")}) \
+        == prov.DELETED_BY_THE_DUP_GUARD
+
+    # And the two fates that share the hook's ONE `dup` arm are ordered too: it
+    # sets `intra` from the rows and emits the conflict notice only
+    # `if not intra`, so a name in both states reads as the intra-lock
+    # duplicate. Swapping the two arms in `hook_fate` sends the reader to
+    # reconcile two locks over a defect inside one of them, and nothing else
+    # here measures that.
+    intra = only('    intra = any(row[6] for row in group)')
+    notice = only('        if not intra:')
+    assert intra < notice, (intra, notice)
+    contested = both._replace(conflicted={"alpha": ("a.lock", "b.lock")})
+    assert prov.hook_fate(lock, "alpha", replaceable=True, repo_owned={},
+                          union=contested) == prov.DELETED_BY_THE_DUP_GUARD
 
 
 def test_only_a_still_delivering_fate_may_say_delivery_is_unaffected():
@@ -2245,7 +2365,8 @@ def test_the_doctor_reads_the_record_the_hook_actually_writes(tmp_path):
     parsed = prov.read_lock(lock)
     rows, findings, notes = prov.classify(
         skills, names, record, parsed,
-        prov.assign_origins(skills, names, record, parsed.names))
+        prov.assign_origins(skills, names, record, parsed.names),
+        prov.read_union([(lock, parsed)]))
     assert [(row.name, row.origin, row.integrity) for row in rows] == [
         ("alpha", prov.HOOK, prov.UNCHANGED), ("beta", prov.HOOK, prov.UNCHANGED)]
     assert findings == [], findings
@@ -2705,6 +2826,215 @@ def test_one_unreadable_store_is_reported_once_not_once_per_lock(
 
     _, out = run_autolock(store, project, capsys)
     assert out.count("[store-unreadable]") == 1, out
+
+
+# ---------------------------------------------------------------------------
+# the UNION — what the hook installs, and therefore what it removes
+#
+# The hook stopped reading one lock (ADR 0007): it discovers every repo's lock
+# and installs the union of them, identical (name, digest) rows collapsing to
+# one install and disagreeing ones installing nothing. Three of the doctor's
+# questions are about that union rather than about the lock in hand — has this
+# skill left the lock, is its bundle still in scope, is its destination
+# contested — and asking them of one lock reports a cause that never happens,
+# which is the one failure the fate ladder was built to end.
+#
+# Every test here therefore has a SINGLE-LOCK control: the same store judged
+# against one of the two locks, showing the finding the union suppresses or
+# changes. Without it, "no `[stale]` in the output" passes just as well on a
+# fixture that never produced one.
+# ---------------------------------------------------------------------------
+
+def _repo_declaring(parent: Path, repo: str, store: Path, *names: str,
+                    bundle: str = "adam", digests: dict = None) -> Path:
+    """A child repo whose `skills.lock` names `names`, digested off `store`.
+
+    Unlike `_repo_with_lock` above, which stamps every skill `aaaa…` because it
+    only ever needed the NAME to exist, this writes the digest the directory in
+    `store` actually has — which is what makes a lock either agree with a
+    sibling (one install) or disagree with it (nothing installed), and the two
+    are the whole subject of this section. `digests` overrides per name for the
+    disagreeing half.
+    """
+    directory = parent / repo
+    directory.mkdir(parents=True, exist_ok=True)
+    write_lock(directory / prov.LOCK_NAME, store, *names,
+               bundle=bundle, digests=digests)
+    return directory
+
+
+def test_a_skill_a_sibling_lock_still_names_is_not_reported_stale(tmp_path,
+                                                                  capsys):
+    """The assertion that fails on a doctor judging one lock at a time.
+
+    `stale` says the quiet part outright — "left the lock, is untouched since
+    install, and its registry and bundle are still declared — the next
+    bootstrap removes it". Under a union that is FALSE whenever another
+    discovered lock still names the skill: the next bootstrap reinstalls it,
+    because the union still declares it. A reader who acts on the note goes
+    looking for a removal that never comes, and the directory they were told
+    was on its way out is the one the fleet is delivering.
+
+    The control runs the identical store against repo-a's lock alone, where the
+    note is correct and fires — so this measures the union rather than a
+    fixture that had nothing to say.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+
+    project = tmp_path / "repos"
+    emptied = _repo_declaring(project, "repo-a", store)      # names nothing
+    _repo_declaring(project, "repo-b", store, "alpha")
+
+    # The control: one lock, and the directory really has left it.
+    code, alone = run(store, emptied / prov.LOCK_NAME, capsys,
+                      project_dir=project)
+    assert code == 0, alone
+    assert "[stale] alpha" in flat(alone), alone
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 0, out
+    assert "[stale] alpha" not in flat(out), out
+    assert "the next bootstrap removes it" not in flat(out), out
+    # And the reader is not left guessing which lock keeps it alive: the row's
+    # own lock column names it, which is what the silence above defers to.
+    assert f"in lock: {project / 'repo-b' / prov.LOCK_NAME}" in flat(out), out
+
+
+def test_two_locks_naming_one_digest_for_one_name_are_one_install(tmp_path,
+                                                                  capsys):
+    """The ORDINARY fleet shape, and the one a careless union breaks.
+
+    Most of the fleet's locks declare the same `adam` bundle at the same ref, so
+    fourteen repos naming `alpha` with one digest is not fourteen duplicates —
+    the hook collapses them to a single install, and a fold that counted names
+    before collapsing digests would mark every shared skill contested and
+    report a healthy multi-repo session as delivering nothing. That failure is
+    silent in the direction that matters: it reads as a diagnosis rather than
+    as a bug in the diagnostic.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+
+    project = tmp_path / "repos"
+    _repo_declaring(project, "repo-a", store, "alpha")
+    _repo_declaring(project, "repo-b", store, "alpha")
+
+    locks = [(path, prov.read_lock(path))
+             for path in prov.discover_locks(None, project)]
+    assert len(locks) == 2, locks
+    assert prov.read_union(locks).conflicted == {}, locks
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 0, out
+    assert "FINDINGS (0)" in flat(out), out
+    assert "cross-lock-conflict" not in out, out
+
+
+def test_a_sibling_locks_claim_brings_an_out_of_scope_skill_back_in_scope(
+        tmp_path, capsys):
+    """`stale-out-of-scope` is the mirror, and the union widens the scope.
+
+    The hook writes its prune scope — `claims.nul` — as the UNION of every
+    accepted lock's (registry, bundle) pairs, which is what dissolves the
+    documented A-reaps-B contention within one session. So a directory that is
+    permanently orphaned under one lock becomes in-scope, and REMOVABLE, the
+    moment a sibling repo whose lock declares that pair is in the session. That
+    is a behaviour change for a directory of the user's own, and the report has
+    to say the removable thing rather than "nothing here will ever clean it up".
+
+    Both readings are measured on one store, which is the only way to tell the
+    fix from a fixture that reached neither verdict.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    make_skill(store, "orphan")
+    write_record(store, "alpha", "orphan")
+    record = json.loads((store / prov.RECORD_NAME).read_text(encoding="utf-8"))
+    for entry in record["installed"]:
+        if entry["name"] == "orphan":
+            entry["bundle"] = "retired"
+    (store / prov.RECORD_NAME).write_text(json.dumps(record, indent=2) + "\n",
+                                          encoding="utf-8")
+
+    project = tmp_path / "repos"
+    current = _repo_declaring(project, "repo-a", store, "alpha")
+    # The control: the only lock declares `adam`, so nothing claims `retired`
+    # and nothing will ever remove the orphan.
+    code, alone = run(store, current / prov.LOCK_NAME, capsys,
+                      project_dir=project)
+    assert code == 1, alone
+    assert "[stale-out-of-scope] orphan" in flat(alone), alone
+
+    # A sibling repo that still declares the retired bundle. It names no skill
+    # in it, which is exactly the shape that reaps: `claims` comes from the
+    # lock's `bundles`, not from its skill keys.
+    _repo_declaring(project, "repo-b", store, bundle="retired")
+
+    code, out = run_autolock(store, project, capsys)
+    assert code == 0, out
+    assert "[stale-out-of-scope]" not in out, out
+    assert "[stale] orphan" in flat(out), out
+    assert "the next bootstrap removes it" in flat(out), out
+
+
+def test_a_child_repos_own_skills_directory_wins_the_collision_guard(
+        tmp_path, capsys):
+    """ADR 0005's footnote: the doctor's lookup and the hook's guard move together.
+
+    The hook's collision guard now consults `$PROJECT_DIR/.claude/skills` PLUS
+    each accepted lock's own repo, because in a multi-repo session the project
+    dir is the PARENT of the repos and has no `.claude/skills` at all — the arm
+    that exists for the C3 shadowing hazard was inert in exactly the shape that
+    made it reachable. The doctor resolved against that same missing directory
+    and, measured, `project_ships` returned an empty SET rather than None: a
+    confident "the project ships nothing", which made `hook_fate` answer
+    REPLACED for a directory the next run deletes and left
+    `delivered-by-the-project` unable to fire at all.
+
+    Both halves are asserted, because widening one alone makes the net effect
+    unreadable: a locked directory ON DISK that a child repo shadows, and a
+    locked name NOT on disk that a different child repo delivers. The old
+    project-dir-only reading is measured beside them as the control.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    make_skill(store, "alpha")
+    write_record(store, "alpha")
+
+    project = tmp_path / "repos"
+    owner = _repo_declaring(project, "repo-a", store, "alpha", "beta")
+    other = _repo_declaring(project, "repo-b", store)
+    make_skill(owner / ".claude" / "skills", "alpha", body="repo-a's own\n")
+    make_skill(other / ".claude" / "skills", "beta", body="repo-b's own\n")
+
+    # The control, and the reading that used to be the whole of it: the project
+    # dir ships nothing, measured rather than unknown.
+    assert prov.project_ships([project / ".claude" / "skills"],
+                              {"alpha", "beta"}) == {}
+    # ...and the directories the hook actually consults answer both.
+    locks = [(path, prov.read_lock(path))
+             for path in prov.discover_locks(None, project)]
+    assert prov.project_ships(prov.repo_owned_dirs(project, locks),
+                              {"alpha", "beta"}) == {
+        "alpha": owner / ".claude" / "skills",
+        "beta": other / ".claude" / "skills"}
+
+    code, out = run_autolock(store, project, capsys)
+    text = flat(out)
+    # Repo-owned winning is the design, so both are notes and the session is
+    # green — the point is that they are SAID, and that they name the directory
+    # the reader has to go to.
+    assert code == 0, out
+    assert "[deleted-by-the-collision-guard] alpha" in text, out
+    assert str(owner / ".claude" / "skills" / "alpha" / "SKILL.md") in text, out
+    assert "[delivered-by-the-project] beta" in text, out
+    assert str(other / ".claude" / "skills" / "beta") in text, out
 
 
 # ---------------------------------------------------------------------------
@@ -5244,6 +5574,38 @@ def test_the_stale_verdicts_name_the_array_the_hook_appends_to(tmp_path, capsys,
     # Held alive by an artefact: the hook keeps it and says so in `problems`.
     assert "[artefacts-and-stale] gamma" in out, out
     assert f"`DEGRADED`, as `{left}`" in flat(out), out
+
+
+def test_the_two_dup_findings_quote_the_verdict_clauses_the_hook_emits():
+    """One bash arm, two findings, and each has to quote its own clause.
+
+    The hook removes the destination for both shapes through a single
+    `if [ "$status" = "dup" ]` — a second `rm -rf` in the most destructive loop
+    in that file for no behavioural difference is a second arm to audit — and
+    then reports them APART, because the remedy differs: two rows of one lock
+    is one lock to correct, two locks at different digests is two locks to
+    reconcile. A doctor that quoted one clause for both would send half its
+    readers to the wrong file, and nothing on disk would contradict it.
+
+    Read out of the hook rather than restated, and via the ARRAY each clause is
+    appended to, which is the same discipline
+    `test_the_stale_verdicts_name_the_array_the_hook_appends_to` keeps: both are
+    `problems`, so both make the run read DEGRADED, so both are FINDINGS here
+    rather than notes.
+    """
+    source = _hook_path().read_text(encoding="utf-8")
+    intra = "lock rows share a destination name, none installed"
+    cross = "claimed at different digests by different locks, none installed"
+    assert _hook_verdict_line(source, intra).startswith("problems+=(")
+    assert _hook_verdict_line(source, cross).startswith("problems+=(")
+    assert intra in prov.DUP_GUARD_DELETES, prov.DUP_GUARD_DELETES
+    assert cross in prov.CROSS_LOCK_CONFLICT_DELETES, \
+        prov.CROSS_LOCK_CONFLICT_DELETES
+    # And they are two constants, not one quoted twice: the fates they belong
+    # to are distinct members of the ladder's closed set.
+    assert prov.DELETED_BY_THE_DUP_GUARD != prov.DELETED_BY_THE_CROSS_LOCK_CONFLICT
+    assert {prov.DELETED_BY_THE_DUP_GUARD,
+            prov.DELETED_BY_THE_CROSS_LOCK_CONFLICT} <= set(prov.FATES)
 
 
 def test_no_finding_promises_the_hook_will_replace_or_remove_a_refused_directory(
