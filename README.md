@@ -255,9 +255,18 @@ write is the delivery channel for ephemeral surfaces. What works where:
   renamed one stops loading instead of living on under a clean verdict — but
   only one it installed itself and nobody has edited since, tracked in
   `~/.claude/skills/.skills-bootstrap-installed.json` and scoped to the
-  registries and bundles the lock still declares. A hand-placed skill, another
-  repo's lock's skills, and the account-sync `synced/` store are never touched;
-  an edited one is kept and named in the verdict rather than deleted.
+  registries and bundles the locks still declare. A hand-placed skill, the
+  skills of a repo that is **not in this session**, and the account-sync
+  `synced/` store are never touched; an edited one is kept and named in the
+  verdict rather than deleted.
+  In a session opened on several repos it reads **every** repo's lock and
+  installs the union, so a repo in the same session is no longer "another
+  repo" — its skills are this run's too. Two locks naming one skill directory
+  at the same digest collapse to one install; at different digests neither
+  installs and the verdict names the locks that disagree. See
+  [ADR 0007](docs/decisions/0007-install-the-union-of-every-discovered-lock.md),
+  and [`docs/multi-repo-delivery.md`](docs/multi-repo-delivery.md) for the
+  wiring such a session needs before any of it runs.
 - **The claude.ai account store** — `~/.claude/skills/synced/`, populated by
   uploading skills as ZIPs via Settings → Capabilities. This is the *only*
   channel that reaches claude.ai chat, Cowork, Claude in Chrome, and mobile —
