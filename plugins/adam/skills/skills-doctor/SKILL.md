@@ -160,7 +160,9 @@ this machine's.
 
 **`--lock` is optional, and leaving it off is usually right.** Omitted, it takes
 the project dir's own `skills.lock`; when the project dir has none it resolves
-every `*/skills.lock` one level below and reports per lock. That second case is
+the `skills.lock` of every child GIT REPOSITORY one level below and reports per
+lock — a plain subdirectory carrying a lock is not one, because the hook does
+not read it either (ADR 0007). That second case is
 the multi-repo session, and it is the one the old bare default got wrong: it
 resolved to nothing at the parent and reported the absence of a lock as though
 it were the absence of a problem — 0 findings, exit 0, over nine undelivered

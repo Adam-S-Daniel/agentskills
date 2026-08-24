@@ -72,9 +72,12 @@
 # than one repo sets the project directory to their PARENT (ADR 0005), so the
 # locks that session was started against all sit one level down and the parent
 # has none. Reading only the parent's delivered nothing at all there. So
-# discovery is the project's own lock if it has one, else every immediate CHILD
-# directory's — and the session ends up with the UNION of what each single-repo
-# session would have delivered.
+# discovery is the project's own lock if it has one, else the lock of every
+# immediate CHILD that is a git repository — and the session ends up with the
+# UNION of what each single-repo session would have delivered. The repository
+# test is not incidental: without it any directory holding a `skills.lock` is a
+# delivery source, which is a different and much weaker promise. See "locate the
+# lock(s)" below for the three rules and what each one was measured to close.
 #
 # A union of valid inputs must not be invalid, which is what shapes the rules
 # below: routing is validated PER LOCK (two sibling repos both declaring the
@@ -191,6 +194,42 @@ join_names () {
 # plural <count> <singular> <plural>
 plural () { if [ "$1" -eq 1 ]; then printf '%s' "$2"; else printf '%s' "$3"; fi; }
 
+# names_the_account_store <name> — would $DEST/<name> BE ~/.claude/skills/synced?
+#
+# NOT `[ "$name" = "synced" ]`, and the difference is a store with no delete API
+# and no restore API behind it. Exact equality answers the question the byte
+# sequence asks, and the question that matters is which DIRECTORY the name
+# resolves to — which the filesystem decides, not this comparison:
+#
+#   * macOS APFS and Windows NTFS are case-INSENSITIVE by default, so `Synced`,
+#     `SYNCED` and `synced` are one directory there. The hook's own skill-name
+#     charset accepts all three.
+#   * Win32 strips trailing dots and spaces from a path component before it
+#     reaches the filesystem, so `synced.` opens `synced`.
+#
+# Measured on the exact-equality version: `purge_locked_destinations` took the
+# name verbatim and removed a canary planted at `$DEST/Synced`, and the
+# record-driven prune removed one at `$DEST/SYNCED` and `$DEST/synced.` too.
+# The install path was already blocked by `may_replace` — which is why this
+# reads as safe from the install loop alone and is not.
+#
+# Folded rather than enumerated, so a spelling nobody has thought of yet is
+# covered by the rule instead of by a list. Pure bash 3.2: no `${var,,}` (4.0+)
+# and no `tr`, which is not on the PATH farm the tool-less tests build.
+names_the_account_store () {
+  local folded="$1"
+  while :; do
+    case "$folded" in
+      *. | *' ') folded="${folded%?}" ;;
+      *) break ;;
+    esac
+  done
+  case "$folded" in
+    [Ss][Yy][Nn][Cc][Ee][Dd]) return 0 ;;
+  esac
+  return 1
+}
+
 # --- surface guard: ephemeral sessions only --------------------------------
 # The verdict NAMES the two values this decision was made from, because "durable
 # session" on its own is indistinguishable from a MISCLASSIFIED remote surface,
@@ -211,7 +250,7 @@ fi
 # (ADR 0005), where the only locks in the session sit one level down. So:
 #
 #   own lock ->              [$CLAUDE_PROJECT_DIR/skills.lock]
-#   else, project dir set -> every immediate CHILD DIRECTORY's, sorted
+#   else, project dir set -> every immediate CHILD REPOSITORY's, sorted
 #   else (dir UNSET) ->      [$SELF_ROOT/skills.lock], if it is a file
 #
 # CHILDREN of the project dir, never SIBLINGS of anything, and one level only.
@@ -221,9 +260,38 @@ fi
 # recursing reaches `node_modules`. Children-of-the-named-project-dir is also
 # exactly the shape the multi-repo session has.
 #
+# A CONTRIBUTING CHILD IS A REAL DIRECTORY, A GIT REPOSITORY ROOT, AND NOT AN
+# ALIAS OF ONE ALREADY READ. "Any immediate subdirectory" was the first rule
+# tried and it is not narrow enough to keep the two promises in the paragraph
+# above — measured, not theorised:
+#
+#   * `*/` MATCHES A SYMLINK to a directory and `[ -d ]` follows it, so a child
+#     symlink pointing outside the project installed from a tree no session ever
+#     attached, and one pointing at `..` read a lock ABOVE the project dir and
+#     installed from it. Both under a clean `skills: 1/1 … — OK`. That is
+#     "children, never siblings" and "nothing can walk upward" being false at
+#     the same time, so the predicate is what changes rather than the comment.
+#   * A SESSION'S ATTACHED REPOS ARE CLONES. `testdata/`, `fixtures/`,
+#     `vendor/`, `.claude/` and `.github/` are not, and a `skills.lock` sitting
+#     in one of them is a fixture or a vendored copy rather than a declaration
+#     this session made. Requiring `<child>/.git` is what restores this file's
+#     own promise that a lockless project is a project that did not opt in —
+#     the promise ADR 0007 cites as making a user-scope wiring safe. `.git` is
+#     accepted as a FILE as well as a directory: that is how a worktree and a
+#     submodule spell it.
+#   * DEDUPED BY RESOLVED LOCK PATH, so one physical lock discovered under two
+#     names cannot starve $MAX_LOCKS or inflate the verdict's lock count.
+#
+# Every skip that COSTS something — a child carrying a `skills.lock` that this
+# run did not read — is named in the verdict, the same rule the caps follow. A
+# child with no lock is not a skip at all: it is the ordinary case, and naming
+# every `docs/` and `node_modules/` would degrade every healthy session.
+#
 # Mirrors `discover_locks` in the skills-doctor's check_provenance.py — own lock
-# wins, one level, directories only — deliberately, so the hook and the
-# diagnostic that judges it cannot disagree about what a session contains.
+# wins, one level, real directories, git repository roots, deduped — so the hook
+# and the diagnostic that judges it cannot disagree about what a session
+# contains. A doctor that discovers a lock the hook ignores reports on an
+# expectation nothing will ever deliver.
 #
 # The $SELF_ROOT fallback applies ONLY when CLAUDE_PROJECT_DIR is UNSET. When a
 # session names a project dir, that dir plus its immediate children is the whole
@@ -273,6 +341,20 @@ DROPPED_LOCKS=()
 SCOPE=""
 # Set when the child enumeration could not be completed — see the block below.
 scan_incomplete=""
+# Children that CARRIED a skills.lock this run refused to read, with the reason,
+# and the count of those whose own NAME is why. They are apart because one of
+# them can be named in the verdict and the other cannot: see `unsafe_children`.
+SKIPPED_CHILDREN=()
+unsafe_children=0
+# Every resolved lock path this scan has already considered, read or dropped —
+# the dedupe key, kept as its own list so a duplicate arriving past $MAX_LOCKS
+# is not counted a second time in the dropped clause either.
+SEEN_LOCKS=()
+# The project dir canonicalised — see the child walk below for why a path this
+# scan names cannot be built by appending to `$CLAUDE_PROJECT_DIR`. Declared out
+# here, defaulted to the raw value, because the clause that renders the skips is
+# rendered after both branches and `set -u` makes an unset name fatal.
+project_real="${CLAUDE_PROJECT_DIR:-}"
 
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   own="$(resolve_lock_path "$CLAUDE_PROJECT_DIR/skills.lock")"
@@ -314,18 +396,87 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
     shopt -q dotglob && dotglob_was_on=1
     shopt -s dotglob
     children=0
+    # The project dir CANONICALISED, so a child this scan names is spelled the
+    # way `resolve_lock_path` spells one. `$CLAUDE_PROJECT_DIR` arrives from the
+    # environment in whatever form the harness used, and under Git Bash that is
+    # a native `C:\...` path — appending `/name` to it produces a mixed-separator
+    # string that is not any path the reader can paste and not one any other
+    # verdict clause would print. Same `cd -P` as `resolve_lock_path`, for the
+    # same reason, and it also collapses a symlinked project dir onto the
+    # directory it points at.
+    project_real="$(cd -- "$CLAUDE_PROJECT_DIR" >/dev/null 2>&1 && pwd -P)" \
+      || project_real="$CLAUDE_PROJECT_DIR"
     for child in "$CLAUDE_PROJECT_DIR"/*/; do
       [ -d "$child" ] || continue
+      # THE TRAILING SLASH `*/` LEAVES BEHIND IS STRIPPED HERE, ONCE, and every
+      # test below uses the stripped name — because `[ -L "dir/" ]` is FALSE
+      # even when `dir` is a symlink (the trailing slash makes the shell resolve
+      # it), so a symlink guard written against the glob's own spelling compiles,
+      # reads correctly, and silently never fires.
+      child="${child%/}"
       children=$((children + 1))
+      # A NAME IS NOT TRUSTED TEXT, and it is rejected HERE rather than escaped
+      # on the way out. Child directory names flow into `additionalContext` —
+      # the model's trusted session context — through the `across N locks (…)`
+      # clause, so a name carrying a newline forges whole extra lines inside an
+      # otherwise clean `— OK` verdict: measured, a 3-line verdict whose second
+      # line read `skills: 99 of 99 from nowhere - OK` and whose third gave the
+      # model an instruction. JSON-escaping does not help — `json.dumps` renders
+      # `\n` correctly and the model still reads a new line.
+      #
+      # The offending name is NOT echoed into the skip clause: repeating it is
+      # exactly the thing being prevented. The count is the report, and the
+      # directory it was found in is already named by $CLAUDE_PROJECT_DIR.
+      case "$child" in
+        *[[:cntrl:]]*)
+          if [ -f "$child/skills.lock" ]; then
+            unsafe_children=$((unsafe_children + 1))
+          fi
+          continue
+          ;;
+      esac
+      if [ -L "$child" ]; then
+        if [ -f "$child/skills.lock" ]; then
+          SKIPPED_CHILDREN+=("$project_real/${child##*/} (a symlink, not a directory in this project)")
+        fi
+        continue
+      fi
+      # BEFORE the `.git` test, and the order is load-bearing: `[ -e ]` inside a
+      # directory this hook cannot search answers false, so testing for the
+      # repository first would report an unsearchable CLONE as "not a git
+      # repository" — a named, final-sounding skip — instead of setting
+      # $scan_incomplete, and the prune would then run against a session it
+      # could not enumerate. That is the reap this variable exists to prevent.
       if [ ! -x "$child" ] || [ ! -r "$child" ]; then
-        scan_incomplete="${child%/} cannot be read or searched"
+        scan_incomplete="$project_real/${child##*/} cannot be read or searched"
+        continue
+      fi
+      if [ ! -e "$child/.git" ]; then
+        if [ -f "$child/skills.lock" ]; then
+          SKIPPED_CHILDREN+=("$project_real/${child##*/} (not a git repository)")
+        fi
         continue
       fi
       [ -f "$child/skills.lock" ] || continue
+      candidate="$(resolve_lock_path "$child/skills.lock")"
+      # UNREACHABLE while the symlink rule above stands, and kept anyway: two
+      # distinct real directories cannot resolve to one path, so this can only
+      # fire if aliasing is ever let back in. It is the belt for relaxing that
+      # rule, not a live guard, and it is written now because the thing it
+      # prevents — one physical lock read N times, starving $MAX_LOCKS and
+      # inflating the lock count the verdict reports — is invisible in a verdict.
+      seen_lock=0
+      if [ "${#SEEN_LOCKS[@]}" -gt 0 ]; then
+        for seen_path in "${SEEN_LOCKS[@]}"; do
+          if [ "$seen_path" = "$candidate" ]; then seen_lock=1; break; fi
+        done
+      fi
+      if [ "$seen_lock" -eq 1 ]; then continue; fi
+      SEEN_LOCKS+=("$candidate")
       if [ "${#LOCKS[@]}" -lt "$MAX_LOCKS" ]; then
-        LOCKS+=("$(resolve_lock_path "$child/skills.lock")")
+        LOCKS+=("$candidate")
       else
-        DROPPED_LOCKS+=("$(resolve_lock_path "$child/skills.lock")")
+        DROPPED_LOCKS+=("$candidate")
       fi
     done
     [ "$dotglob_was_on" -eq 1 ] || shopt -u dotglob
@@ -343,6 +494,27 @@ else
   SEARCHED+=("$own")
   if [ -f "$own" ]; then LOCKS=("$own"); fi
   SCOPE="; CLAUDE_PROJECT_DIR is unset, so only the repo that ships this hook was searched"
+fi
+
+# A child this run refused to read that WAS carrying a lock. Rendered once and
+# used twice — appended to $SCOPE for the no-lock verdict, which exits before
+# the problem list below exists, and pushed into that list on every other path.
+# A cap names what it dropped; so does a trust rule, or "your repo delivered
+# nothing" is a conclusion the reader has to reach unaided.
+SKIPPED_CLAUSE=""
+if [ "${#SKIPPED_CHILDREN[@]}" -gt 0 ]; then
+  SKIPPED_CLAUSE="${#SKIPPED_CHILDREN[@]} child $(plural "${#SKIPPED_CHILDREN[@]}" directory directories) carrying a skills.lock $(plural "${#SKIPPED_CHILDREN[@]}" was were) not read ($(join_names "${SKIPPED_CHILDREN[@]}"))"
+fi
+if [ "$unsafe_children" -gt 0 ]; then
+  unsafe_clause="$unsafe_children child $(plural "$unsafe_children" directory directories) carrying a skills.lock in $project_real $(plural "$unsafe_children" was were) not read: the directory name holds a control character, and this verdict does not repeat such a name"
+  if [ -n "$SKIPPED_CLAUSE" ]; then
+    SKIPPED_CLAUSE="$SKIPPED_CLAUSE; $unsafe_clause"
+  else
+    SKIPPED_CLAUSE="$unsafe_clause"
+  fi
+fi
+if [ -n "$SKIPPED_CLAUSE" ]; then
+  SCOPE="$SCOPE ($SKIPPED_CLAUSE)"
 fi
 
 if [ "${#LOCKS[@]}" -eq 0 ]; then
@@ -525,6 +697,13 @@ NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 REF = r"[A-Za-z0-9._/+:@-]+"
 URL = r"(?:https|file)://[A-Za-z0-9._~:/?#@%!$&()*+,;=\[\]-]+"
 CONTROL = re.compile(r"[\s\x00-\x1f\x7f]")
+# The control bytes alone, WITHOUT `\s`. CONTROL above is a validation charset
+# and refuses an ordinary SPACE along with everything else, which is right for a
+# registry or a ref and wrong for the thing this is used for: flattening a
+# message on its way into a NUL-framed stream, where a space is exactly what a
+# control byte is replaced BY. Its one consumer is `_write_records`; see the
+# argument there for why that boundary is where this belongs.
+UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")
 # Each source is fetched at SESSION START, so the list length is a stall
 # multiplier: an unbounded one is an unbounded delay before the model can be
 # used. Generous next to any real lock (this repo's has none; a consumer
@@ -753,8 +932,17 @@ def read_lock(lock_path):
             prior = claim.get(bundle)
             if prior is not None and prior != len(sources):
                 held = sources[prior]["name"] or ("'registry'" if prior == 0 else "sources[%d]" % prior)
+                # NAMED, not quoted. `held` has already been through
+                # `remote_url`, so it is a registry this reader accepted; this
+                # one has not been through anything yet — the refusal fires
+                # before the source is normalised — so a value that fails the
+                # charset is reported by POSITION instead. A reader chasing a
+                # routing collision needs to know WHICH source, and `sources[2]`
+                # says that without quoting bytes an attacker chose. The stream
+                # writer flattens control characters too (`_write_records`);
+                # this is the half that keeps them out of the message at all.
                 taking = raw.get("registry")
-                if not isinstance(taking, str) or not taking:
+                if not isinstance(taking, str) or not taking or CONTROL.search(taking):
                     taking = where
                 raise LockRejected(
                     "lock: bundle %r is claimed by two sources, %s and %s; a bundle has "
@@ -846,7 +1034,19 @@ def read_lock(lock_path):
         # Sits above the AGENTSKILLS_BUNDLE filter for the reason the routing
         # check below spells out, with a poisoned row in place of an unroutable
         # one.
-        if name == "synced":
+        #
+        # NOT `name == "synced"`. The question is which DIRECTORY $DEST/<name>
+        # resolves to, and the filesystem answers that, not this comparison:
+        # APFS and NTFS are case-insensitive by default, so `Synced` and
+        # `SYNCED` are the account store there, and Win32 strips trailing dots
+        # and spaces from a path component, so `synced.` opens `synced`. All
+        # three pass the skill-name charset above. Measured on the exact-equality
+        # version: each of them walked straight through this refusal and into
+        # `skills.nul`, where `purge_locked_destinations` removed the canary
+        # planted at that name. `.lower()` is enough because the charset checked
+        # above is ASCII-only. Mirrored in bash by `names_the_account_store` and
+        # in the generator, which refuses to WRITE such a key.
+        if name.rstrip(". ").lower() == "synced":
             raise LockRejected(
                 "lock: skill %r would install over ~/.claude/skills/synced, the "
                 "claude.ai account-sync directory — this hook never installs a skill "
@@ -898,10 +1098,80 @@ for lock_index, lock_path in enumerate(lock_paths):
     # this reader as text is the label, so bash never has to translate a path
     # back out of a spelling only python could produce.
     label = lock_labels[lock_index]
+    # NOTHING THIS LOCK CONTRIBUTES TOUCHES THE MERGED STATE UNTIL IT HAS FULLY
+    # VALIDATED. Staged into locals and committed in one go below, so "a
+    # rejected lock contributes no rows and no claims" holds for a failure at
+    # ANY point in its processing rather than only for one raised inside
+    # `read_lock` — including a fetch slot, which is a network round trip a
+    # refused lock has no business buying.
+    new_sources = []
+    new_fetch_at = {}
+    lock_rows = []
+    lock_notices = []
+    lock_claims = []
     try:
         local_sources, rows, claim = read_lock(lock_path)
-    except LockRejected as exc:
-        rejected.append((label, str(exc)))
+        # EVERY source this lock declares gets a fetch slot, needed by a row or
+        # not. That is today's behaviour and it is load-bearing in two
+        # directions: a pinned registry nobody can reach is worth reporting even
+        # when this run wanted nothing from it (the "no locked skill needed it"
+        # clause exists for exactly that), and `fetched` is what the
+        # all-sources-unreachable bail-out counts — build the list from ROWS
+        # instead and a lock narrowed to zero rows produces an empty source
+        # list, no fetches at all, and a bail-out that says "could not fetch"
+        # with nothing named after it.
+        local_index = {}
+        for at, source in enumerate(local_sources):
+            fetch_key = (source["url"], source["ref"])
+            if fetch_key in fetch_at:
+                local_index[at] = fetch_at[fetch_key]
+            elif fetch_key in new_fetch_at:
+                local_index[at] = new_fetch_at[fetch_key]
+            elif len(sources) + len(new_sources) < MAX_FETCHES:
+                new_fetch_at[fetch_key] = len(sources) + len(new_sources)
+                new_sources.append(source)
+                local_index[at] = new_fetch_at[fetch_key]
+            # else: no slot. Its rows are dropped and named just below.
+        # Two rows for one destination INSIDE one lock is an authoring error the
+        # generator refuses to write and ADR 0001 forbids, and it stays an error
+        # whatever the digests say — which is why it is counted here, per lock,
+        # rather than falling out of the cross-lock rule below.
+        local_count = {}
+        for _key, _digest, name, _relpath, _index in rows:
+            local_count[name] = local_count.get(name, 0) + 1
+        for key, digest, name, relpath, index in rows:
+            if index not in local_index:
+                lock_notices.append(("dropped", key,
+                                     "%s@%s" % (local_sources[index]["name"],
+                                                local_sources[index]["ref"])))
+                continue
+            lock_rows.append((lock_index, key, digest, local_index[index], relpath,
+                              name, local_count[name] > 1))
+        for bundle in sorted(claim):
+            if only_bundle and bundle != only_bundle:
+                continue
+            lock_claims.append((local_sources[claim[bundle]]["url"], bundle))
+    except Exception as exc:            # deliberately broad — see below
+        # THE PER-LOCK BOUNDARY IS TOTAL, and `Exception` rather than
+        # `LockRejected` is the whole point of it. `read_lock` catches
+        # `(OSError, ValueError)` around `json.load`, which is not everything
+        # `json.load` raises: a lock of `[` x 200000 raises RecursionError,
+        # which is neither, so ONE hostile sibling crashed the reader and denied
+        # delivery to every honest repo in the session — under a verdict reading
+        # "could not read <every lock> (invalid JSON or a bad field)", which
+        # tells fourteen blameless repos to regenerate their locks. Measured.
+        #
+        # A broad catch is right HERE specifically, and nowhere else in this
+        # file: the unit of failure is one lock, the units are independent by
+        # construction, and an exception class nobody anticipated is exactly the
+        # case a boundary exists for. Narrowing it to the classes seen so far is
+        # how this defect was written the first time.
+        #
+        # `Exception` and NOT a bare `except:` — SystemExit and
+        # KeyboardInterrupt must still propagate. The whole-run `sys.exit` at
+        # the bottom of this reader is a SystemExit, and swallowing it here
+        # would turn "not one lock could be read" into a silent success.
+        rejected.append((label, str(exc) or exc.__class__.__name__))
         # To stderr as well as to `rejected.nul`: stderr is $LOG, which is where
         # every verdict sends the operator, and it is the only surface that ever
         # states WHICH field was wrong.
@@ -909,37 +1179,11 @@ for lock_index, lock_path in enumerate(lock_paths):
         continue
     # Only a lock that fully validated contributes anything at all.
     accepted.append(label)
-    # EVERY source this lock declares gets a fetch slot, needed by a row or not.
-    # That is today's behaviour and it is load-bearing in two directions: a
-    # pinned registry nobody can reach is worth reporting even when this run
-    # wanted nothing from it (the "no locked skill needed it" clause exists for
-    # exactly that), and `fetched` is what the all-sources-unreachable bail-out
-    # counts — build the list from ROWS instead and a lock narrowed to zero rows
-    # produces an empty source list, no fetches at all, and a bail-out that says
-    # "could not fetch" with nothing named after it.
-    local_index = {}
-    for at, source in enumerate(local_sources):
-        fetch_key = (source["url"], source["ref"])
-        if fetch_key not in fetch_at:
-            if len(sources) >= MAX_FETCHES:
-                continue        # no slot: its rows are dropped and named below
-            fetch_at[fetch_key] = len(sources)
-            sources.append(source)
-        local_index[at] = fetch_at[fetch_key]
-    # Two rows for one destination INSIDE one lock is an authoring error the
-    # generator refuses to write and ADR 0001 forbids, and it stays an error
-    # whatever the digests say — which is why it is counted here, per lock,
-    # rather than falling out of the cross-lock rule below.
-    local_count = {}
-    for _key, _digest, name, _relpath, _index in rows:
-        local_count[name] = local_count.get(name, 0) + 1
-    for key, digest, name, relpath, index in rows:
-        if index not in local_index:
-            notices.append(("dropped", key, "%s@%s" % (local_sources[index]["name"],
-                                                       local_sources[index]["ref"])))
-            continue
-        staged.append((lock_index, key, digest, local_index[index], relpath, name,
-                       local_count[name] > 1))
+    for fetch_key, at in new_fetch_at.items():
+        fetch_at[fetch_key] = at
+    sources.extend(new_sources)
+    staged.extend(lock_rows)
+    notices.extend(lock_notices)
     # The (registry, bundle) pairs the ACCEPTED locks declare — the exact scope
     # in which the orphan prune at the bottom is allowed to delete. Written from
     # `claim`, the routing map, rather than from rows, so that a bundle a lock
@@ -963,10 +1207,11 @@ for lock_index, lock_path in enumerate(lock_paths):
     # it is the guard left standing if that branch is ever reordered or dropped.
     # Reverting BOTH is what reaps another bundle, and that is the mutation the
     # narrowing test fails on.
-    for bundle in sorted(claim):
-        if only_bundle and bundle != only_bundle:
-            continue
-        claims.add((local_sources[claim[bundle]]["url"], bundle))
+    #
+    # Computed inside the try above and committed here, with the rows, so a lock
+    # that failed anywhere in its processing cannot leave its claim behind
+    # without the skills that claim was supposed to cover.
+    claims.update(lock_claims)
 
 # --- cross-lock destination arbitration ------------------------------------
 # The install dir is FLAT, so one destination name is one directory with one
@@ -1045,10 +1290,29 @@ def _write_records(path, records):
     # `meta` fail its `^[0-9]+$` check and report a bogus framing error on
     # every Windows session. These files are a byte-level contract with bash;
     # the writer decides what is in them, not the platform.
+    #
+    # NO FIELD REACHES A NUL-FRAMED STREAM CARRYING A CONTROL CHARACTER, and the
+    # rule lives HERE rather than at the one message that broke it. The claim
+    # "no field's CONTENT can forge a record" was true only of fields that had
+    # been VALIDATED, and one message — the "claimed by two sources" refusal —
+    # interpolated a source's `registry` before any validation ran. Two NULs in
+    # that registry split one 2-field rejection record into four fields, bash
+    # read two records where python declared one, and the framing-mismatch
+    # bail-out ran `purge_locked_destinations`: every honest repo's installed
+    # skills deleted, by a sibling lock, with a verdict blaming the framing.
+    # Measured.
+    #
+    # Fixing the one message would leave the next one to be written unguarded,
+    # so the boundary is the fix and the message is tightened as well. A space
+    # is the replacement because it cannot terminate a field, cannot start a
+    # line, and leaves the reader something that still reads as text; `emit`'s
+    # printf fallback already flattens the same bytes the same way for the same
+    # reason. For every validated field — which is all of them on a healthy run
+    # — this is a no-op.
     with open(path, "w", encoding="utf-8", newline="") as handle:
         for record in records:
             for field in record:
-                handle.write(field)
+                handle.write(UNPRINTABLE.sub(" ", field))
                 handle.write("\0")
 
 
@@ -1311,6 +1575,47 @@ if [ -f "$tmp/notices.nul" ]; then
       dropped)  DROPPED_ROW+=("$notice_subject (from $notice_detail)") ;;
     esac
   done < "$tmp/notices.nul"
+fi
+
+# A RUN THAT CANNOT FULLY ACCOUNT FOR THE SESSION CLAIMS AUTHORITY OVER NOTHING.
+#
+# This is the rule the incomplete-child-scan branch above already states — "a
+# discovery scan that misses a repo must not make that repo's skills reapable" —
+# extended to every other way this run can end up holding less than the whole
+# picture. `claims.nul` is the scope the orphan prune deletes in, so emptying it
+# turns every recorded install into a "keep": the run still installs everything
+# it found and removes nothing.
+#
+# It is not theoretical. Two routes were measured reaping skills a lock still
+# names, both silent:
+#
+#   * A REJECTED or capped lock's skills are reaped by a SIBLING. The prune is
+#     scoped by (registry, bundle), and in the fleet shape every lock declares
+#     the same registry and the same `adam` bundle — so the sibling's claim
+#     supplies exactly the scope the owner withheld, the owner's names are
+#     absent from `skills.nul`, and they are deleted.
+#   * A lock starved of a fetch slot at $MAX_FETCHES SELF-reaps: its rows are
+#     dropped from `skills.nul` while its own claim still reaches `claims.nul`
+#     from its routing map. No sibling needed.
+#
+# THE COST IS REAL AND IS THE RIGHT WAY ROUND: one bad sibling means no pruning
+# for that run, so a skill that genuinely left a lock stays one run longer. The
+# alternative is deleting a repo's delivered skills because a DIFFERENT repo's
+# lock is malformed, which is not a trade — it is the same "install a subset,
+# never this subset is now the whole truth" rule the AGENTSKILLS_BUNDLE
+# narrowing follows, and the reason `$scan_incomplete` already works this way.
+authority_lost=""
+if [ "${#REJ_LOCK[@]}" -gt 0 ]; then
+  authority_lost="${#REJ_LOCK[@]} discovered $(plural "${#REJ_LOCK[@]}" lock locks) could not be read"
+elif [ "${#DROPPED_LOCKS[@]}" -gt 0 ]; then
+  authority_lost="${#DROPPED_LOCKS[@]} discovered $(plural "${#DROPPED_LOCKS[@]}" lock locks) went unread past the $MAX_LOCKS-lock cap"
+elif [ "${#DROPPED_ROW[@]}" -gt 0 ]; then
+  authority_lost="${#DROPPED_ROW[@]} $(plural "${#DROPPED_ROW[@]}" skill skills) went uninstalled past the registry-fetch cap"
+elif [ -n "$SKIPPED_CLAUSE" ]; then
+  authority_lost="a child directory carrying a skills.lock was not read"
+fi
+if [ -n "$authority_lost" ]; then
+  : >"$tmp/claims.nul"
 fi
 
 # is_conflicted <name> — true when two LOCKS named different digests for it.
@@ -1933,7 +2238,10 @@ if [ "$record_unreadable" -eq 0 ] && [ -f "$tmp/plan.nul" ]; then
     # this hook installs is ever called that, so a record saying otherwise is
     # wrong by construction — and the account store is not ours to delete under
     # any lock.
-    if [ "$name" = "synced" ]; then continue; fi
+    #
+    # FOLDED, not compared: on a case-insensitive filesystem `Synced` IS that
+    # directory, and this loop is a `rm -rf`. See `names_the_account_store`.
+    if names_the_account_store "$name"; then continue; fi
     # Already gone — removed by hand, or by an earlier run. Nothing to remove,
     # and nothing left to keep a record of.
     if [ ! -d "$DEST/$name" ]; then continue; fi
@@ -2089,6 +2397,14 @@ fi
 if [ "${#DROPPED_LOCKS[@]}" -gt 0 ]; then
   problems+=("${#DROPPED_LOCKS[@]} discovered $(plural "${#DROPPED_LOCKS[@]}" lock locks) past the $MAX_LOCKS-lock cap were not read ($(join_names "${DROPPED_LOCKS[@]}"))")
 fi
+# A child that HAD a lock and was refused by the discovery trust rules. It
+# degrades for the ordinary reason: a repo in this session declared skills and
+# got none, which is the state this file exists to make knowable rather than
+# leave to be inferred from a count. Rendered far above, where the no-lock
+# verdict also needs it.
+if [ -n "$SKIPPED_CLAUSE" ]; then
+  problems+=("$SKIPPED_CLAUSE")
+fi
 if [ "${#DROPPED_ROW[@]}" -gt 0 ]; then
   problems+=("${#DROPPED_ROW[@]} $(plural "${#DROPPED_ROW[@]}" skill skills) dropped, this run had already reached its registry-fetch cap ($(join_names "${DROPPED_ROW[@]}"))")
 fi
@@ -2127,6 +2443,17 @@ fi
 # find still installed; nothing was removed.
 if [ -n "$scan_incomplete" ]; then
   problems+=("could not fully enumerate $PROJECT_DIR ($scan_incomplete), so some repo's lock may have been missed and no stale skill could be removed this run")
+fi
+# The same shape again, one cause along: this run READ the session but could not
+# account for all of it, so it pruned nothing. Suppressed when the clause above
+# already fired — both are the identical statement about the identical decision,
+# and saying it twice reads as two separate failures.
+#
+# What is NOT said here is which skill was spared: nothing was removed, so there
+# is no action to report. The clause names why the run declined, which is the
+# part the reader can fix.
+if [ -n "$authority_lost" ] && [ -z "$scan_incomplete" ]; then
+  problems+=("$authority_lost, so this run could not tell which skills the session still wants and no stale skill was removed")
 fi
 
 # Notes, not problems: something this run DID, or deliberately did not do, on a

@@ -1206,6 +1206,33 @@ def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
     checkouts and `node_modules`, and a lock found four levels down is not one
     any session was started against.
 
+    THE THREE RULES BELOW ARE THE HOOK'S, and they are here because this file
+    exists to describe what the hook does. A doctor that discovers a lock the
+    hook ignores reports on an expectation nothing will ever deliver — it lists
+    skills as missing, blames the delivery, and sends the reader to fix a repo
+    that was never in the session:
+
+      * NOT A SYMLINK. `*/` matches a symlink to a directory and `[ -d ]`
+        follows it, so before the hook tested for this a child symlink read a
+        lock outside the project entirely, or pointed at `..` and read one
+        ABOVE the project dir. Both are now skipped there, so both are skipped
+        here.
+      * A GIT REPOSITORY ROOT — `<child>/.git`, as a FILE as well as a
+        directory, which is how a worktree and a submodule spell it. A
+        session's attached repos are clones; `testdata/`, `fixtures/` and
+        `vendor/` are not, and a lock inside one of them is a fixture rather
+        than a declaration any session made.
+      * DEDUPED BY RESOLVED PATH, so one physical lock reachable under two
+        names is one expectation rather than two.
+
+    ONE DELIBERATE DIVERGENCE, stated rather than silently absorbed: the hook
+    additionally refuses a child whose directory NAME contains a control
+    character, because such a name reaches the model's session context through
+    its verdict and a newline there forges whole lines. This report goes to a
+    terminal, so it keeps no equivalent rule and will describe a lock the hook
+    refuses on that ground — over-reporting, in the one shape where the hook's
+    reason for refusing does not apply here.
+
     Falls back to the project's own path when nothing is found, so a machine that
     genuinely has no lock still reports `absent` rather than reporting nothing.
     An absent lock is not a finding: it is a machine this cannot verdict on.
@@ -1219,8 +1246,24 @@ def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
         children = sorted(project_dir.iterdir())
     except OSError:
         return [own]
-    found = [child / LOCK_NAME for child in children
-             if child.is_dir() and (child / LOCK_NAME).is_file()]
+    found: List[Path] = []
+    seen: set = set()
+    for child in children:
+        if child.is_symlink() or not child.is_dir():
+            continue
+        if not (child / ".git").exists():
+            continue
+        lock = child / LOCK_NAME
+        if not lock.is_file():
+            continue
+        try:
+            key = str(lock.resolve())
+        except OSError:
+            key = str(lock)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(lock)
     return found or [own]
 
 

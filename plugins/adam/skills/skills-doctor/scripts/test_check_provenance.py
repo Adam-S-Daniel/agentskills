@@ -2674,9 +2674,17 @@ def run_autolock(skills_dir: Path, project_dir: Path, capsys) -> Tuple[int, str]
 
 
 def _repo_with_lock(parent: Path, name: str, *skills: str, hook: bool = False) -> Path:
-    """A child repo carrying a `skills.lock`, and optionally a wired hook."""
+    """A child repo carrying a `skills.lock`, and optionally a wired hook.
+
+    A REPO, not merely a directory: `discover_locks` requires `<child>/.git`,
+    because that is what the hook requires and this file exists to describe the
+    hook. A fixture that skipped it would build a shape the hook ignores and
+    then assert the doctor reports on it, which is precisely the disagreement
+    the rule was added to end.
+    """
     repo = parent / name
     repo.mkdir(parents=True, exist_ok=True)
+    (repo / ".git").mkdir(exist_ok=True)
     lock = write_lock(repo / prov.LOCK_NAME, repo)
     data = json.loads(lock.read_text(encoding="utf-8"))
     data["skills"] = {f"adam/{skill}": "a" * 64 for skill in skills}
@@ -2804,6 +2812,49 @@ def test_discovery_looks_one_level_down_and_no_further(tmp_path, capsys):
     assert "too-deep" not in out, out
 
 
+def test_discovery_reads_only_the_child_repos_the_hook_would_read(tmp_path,
+                                                                  capsys):
+    """The doctor's job is to describe the hook, so its walk must be the hook's.
+
+    The hook contributes a child's lock only when the child is a real directory,
+    a git repository root, and not an alias of one already read. A doctor that
+    discovers MORE than that reports on expectations nothing will ever deliver:
+    it lists the skills as missing, blames the delivery chain, and sends the
+    reader to fix a repo that was never in the session — a diagnostic that
+    manufactures the defect it is being consulted about.
+
+    Three children, one project dir, and only one of them is a session:
+
+      * `repo-a` is a clone and is read;
+      * `testdata` holds a `skills.lock` and no `.git` — a fixture or a vendored
+        copy, which is what the hook decided this rule on;
+      * `link` is a symlink to a repo outside the project, which is how the walk
+        reached a tree nobody attached.
+
+    The symlink arm is conditional rather than skipped wholesale: Windows
+    refuses `os.symlink` without Developer Mode, and the other two rules are
+    worth measuring on a machine that cannot make one.
+    """
+    store = tmp_path / "skills"
+    store.mkdir()
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "repo-a", "alpha")
+    fixture = _repo_with_lock(project, "testdata", "alpha")
+    shutil.rmtree(fixture / ".git")
+    outside = _repo_with_lock(tmp_path / "elsewhere", "unattached", "alpha")
+    try:
+        (project / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:                     # no privilege to make one here
+        pass
+
+    assert prov.discover_locks(None, project) == [
+        project / "repo-a" / prov.LOCK_NAME]
+    _, out = run_autolock(store, project, capsys)
+    assert "testdata" not in out, out
+    assert "unattached" not in out, out
+
+
 def test_one_unreadable_store_is_reported_once_not_once_per_lock(
         tmp_path, monkeypatch, capsys):
     """Store-wide facts are store-wide, however many locks judge that store.
@@ -2858,6 +2909,9 @@ def _repo_declaring(parent: Path, repo: str, store: Path, *names: str,
     """
     directory = parent / repo
     directory.mkdir(parents=True, exist_ok=True)
+    # See `_repo_with_lock`: a child contributes a lock only if it is a git
+    # repository root, in the hook and therefore here.
+    (directory / ".git").mkdir(exist_ok=True)
     write_lock(directory / prov.LOCK_NAME, store, *names,
                bundle=bundle, digests=digests)
     return directory

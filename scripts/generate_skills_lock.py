@@ -767,10 +767,24 @@ def collect_skills(
             # tells the operator to "regenerate it with
             # scripts/generate_skills_lock.py", which without this check would
             # hand back the identical poisoned lock.
-            if skill_dir.name == "synced":
+            #
+            # FOLDED, not compared. Exact equality answers a question about
+            # bytes; the question is which DIRECTORY `~/.claude/skills/<name>`
+            # resolves to, and the filesystem decides that. APFS and NTFS are
+            # case-insensitive by default, so `Synced` and `SYNCED` ARE that
+            # store there, and Win32 strips trailing dots and spaces from a path
+            # component, so `synced.` opens `synced` — and all three pass
+            # `_NAME_RE` above. Measured on the exact-equality version: this
+            # generator wrote `adam/Synced` at exit 0, and the hook's own purge
+            # then removed the canary planted at that name. The hook's reader
+            # and its record-driven prune fold identically; a lock this
+            # generator writes and that hook refuses is the gap all three exist
+            # to close.
+            if skill_dir.name.rstrip(". ").lower() == "synced":
                 raise GeneratorError(
                     f"{skill_dir.relative_to(tree_root).as_posix()}: a skill "
-                    "directory named 'synced' cannot be locked — the bootstrap hook "
+                    f"directory named {skill_dir.name!r} cannot be locked — it names "
+                    "'synced' on a case-insensitive filesystem; the bootstrap hook "
                     "installs into ~/.claude/skills, where 'synced/' is the claude.ai "
                     "account-sync store, and installing over it would destroy an "
                     "account skill store that has no restore API; the hook refuses "
