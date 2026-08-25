@@ -205,10 +205,25 @@ sys.stdout.buffer.flush()'; then
   safe="${safe//$'\n'/ }"
   safe="${safe//$'\r'/ }"
   safe="${safe//$'\t'/ }"
-  # The same three Unicode line-enders the python branch above scrubs, as their
-  # UTF-8 byte sequences: U+0085, U+2028, U+2029. Kept in step deliberately — a
-  # fallback that is weaker than the primary is a fallback that only fails on
-  # the machine with no python3, which is the machine nobody tests on.
+  # EVERY character the python branch scrubs, not the memorable ones. This block
+  # first carried only \n, \r, \t plus the three Unicode line-enders, under a
+  # comment claiming it was "kept in step deliberately" with the primary — and it
+  # was not: \x0b, \x0c, \x1c, \x1d and \x1e are all `str.splitlines()` splitters,
+  # and every C0 byte plus \x7f is a raw control character inside a JSON string,
+  # which RFC 8259 forbids outright. Measured on a PATH with no python3: the hook
+  # exited 0 having emitted a payload `json.loads` refuses, and a lenient reader
+  # saw a three-line forged verdict. That is the "readily knowable contract
+  # silently produced nothing" failure this function's header says the design
+  # exists to prevent, on the one machine this branch exists for.
+  #
+  # Spelled out rather than looped: `set -uo pipefail` bash 3.2 has no character
+  # class for `${var//}`, and a loop over `printf '\\%03o'` would build the
+  # patterns at runtime out of the very bytes being removed.
+  for _cc in 00 01 02 03 04 05 06 07 08 0b 0c 0e 0f 10 11 12 13 14 15 16 17 \
+             18 19 1a 1b 1c 1d 1e 1f 7f; do
+    printf -v _ch "\\x$_cc"
+    safe="${safe//"$_ch"/ }"
+  done
   safe="${safe//$'\xc2\x85'/ }"
   safe="${safe//$'\xe2\x80\xa8'/ }"
   safe="${safe//$'\xe2\x80\xa9'/ }"
@@ -463,10 +478,35 @@ SEEN_LOCKS=()
 # rendered after both branches and `set -u` makes an unset name fatal.
 project_real="${CLAUDE_PROJECT_DIR:-}"
 
+# lock_file_is_refusable <path> — the reason this lock file may not be read, or
+# empty. THE SAME TEST AT EVERY SITE THAT OPENS A LOCK, which is the whole point
+# of it being a function: the child loop grew this rule first and the two
+# OWN-LOCK sites did not, so `$CLAUDE_PROJECT_DIR/skills.lock` as a symlink still
+# installed a lock from outside the project under a clean `skills: 1/1 … — OK`.
+# That is the more common path, not the rarer one — a single-repo session sets
+# the project dir to the repo itself — so the guard was added to the wrong half
+# first. `[ -f ]` follows symlinks, which is why this needs its own `-L`.
+lock_file_is_refusable () {
+  if [ -L "$1" ]; then
+    printf '%s' "its skills.lock is a symlink, which can name a file outside this project"
+  elif [ -e "$1" ] && [ ! -f "$1" ]; then
+    printf '%s' "its skills.lock is not a regular file"
+  fi
+}
+
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   own="$(resolve_lock_path "$CLAUDE_PROJECT_DIR/skills.lock")"
   SEARCHED+=("$own")
-  if [ -f "$own" ]; then
+  own_refused="$(lock_file_is_refusable "$CLAUDE_PROJECT_DIR/skills.lock")"
+  if [ -n "$own_refused" ]; then
+    # NOT a fall-through to the child scan. A project that ships a `skills.lock`
+    # has opted in, and refusing to READ that file does not turn it into a
+    # project that did not — treating it as lockless would silently install a
+    # DIFFERENT set of skills (its children's) than the one it declared, chosen
+    # by the refusal. So the run ends at the no-lock verdict with the reason
+    # named, which is the fail-closed direction.
+    SCOPE="; the project directory's own skills.lock was not read ($own_refused)"
+  elif [ -f "$own" ]; then
     LOCKS=("$own")
   else
     # A DISCOVERY SCAN THAT MISSES A REPO MUST NOT MAKE THAT REPO'S SKILLS
@@ -596,12 +636,9 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
       # for a directory named `skills.lock`, so testing `-f` first drops both
       # SILENTLY, and a repo that still ships a lock then reads exactly like a
       # repo that never opted in. Every skip that costs something is named.
-      if [ -L "$child/skills.lock" ]; then
-        SKIPPED_CHILDREN+=("$project_real/${child##*/} (its skills.lock is a symlink, which can name a file outside this project)")
-        continue
-      fi
-      if [ -e "$child/skills.lock" ] && [ ! -f "$child/skills.lock" ]; then
-        SKIPPED_CHILDREN+=("$project_real/${child##*/} (its skills.lock is not a regular file)")
+      child_refused="$(lock_file_is_refusable "$child/skills.lock")"
+      if [ -n "$child_refused" ]; then
+        SKIPPED_CHILDREN+=("$project_real/${child##*/} ($child_refused)")
         continue
       fi
       [ -f "$child/skills.lock" ] || continue
@@ -652,8 +689,15 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
 else
   own="$(resolve_lock_path "$SELF_ROOT/skills.lock")"
   SEARCHED+=("$own")
-  if [ -f "$own" ]; then LOCKS=("$own"); fi
+  # The third site that opens a lock, and it gets the same rule for the same
+  # reason — a hand run with no project dir is still a run that must not read a
+  # lock from somewhere the reader did not look.
+  own_refused="$(lock_file_is_refusable "$SELF_ROOT/skills.lock")"
+  if [ -z "$own_refused" ] && [ -f "$own" ]; then LOCKS=("$own"); fi
   SCOPE="; CLAUDE_PROJECT_DIR is unset, so only the repo that ships this hook was searched"
+  if [ -n "$own_refused" ]; then
+    SCOPE="$SCOPE (and $own_refused)"
+  fi
 fi
 
 # A child this run refused to read that WAS carrying a lock. Rendered once and
@@ -814,6 +858,13 @@ only_bundle = os.environ.get("AGENTSKILLS_BUNDLE") or ""
 # extracts it and runs it with only LOCK_PATH, OUT_DIR and PATH in the
 # environment, and some forty validation tests ride on that. In that shape the
 # two spellings are necessarily the same one.
+# The Unicode line-enders and lone surrogates are in here for the same reason
+# `emit` scrubs them (see there): `str.splitlines()` splits on U+0085, U+2028
+# and U+2029, so an ASCII-only class leaves exactly the characters that forge a
+# line. Surrogates additionally cannot be written by this file`s own utf-8
+# writer, so scrubbing them here is what keeps `_write_records` total.
+UNPRINTABLE = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029\ud800-\udfff]")
+
 lock_paths = []
 lock_labels = []
 # Indices of locks whose own PATH could not be decoded — see the read loop.
@@ -860,10 +911,22 @@ if locks_path:
         # other repo in the session still installs — which is the promise this
         # whole boundary exists to keep — and the offending bytes are never
         # echoed, which is the rule the control-character guard already follows.
-        if any("\ud800" <= ch <= "\udfff"
-               for ch in fields[at] + fields[at + 1]):
+        # THE TEST IS `UNPRINTABLE` ITSELF, not a surrogate check, and that is a
+        # correction rather than a flourish: this rule was first written for
+        # surrogates alone, on the same day `UNPRINTABLE` was widened to also
+        # scrub U+0085, U+2028 and U+2029 — so those three kept exactly the
+        # mangling described above, one character class away from the fix. A PATH
+        # may legitimately carry them (nothing validates a lock label, and a
+        # filesystem accepts any byte but NUL). Measured: a project directory
+        # whose real path held U+2028 stopped matching `PROJECT_DIR_REAL`, the C3
+        # guard went silent, and a child repo's own `alpha` was overwritten in the
+        # flat personal store under a clean `— OK`.
+        #
+        # Deriving the test FROM the scrub is what stops the two drifting again:
+        # whatever `_write_records` would alter, this refuses instead.
+        if UNPRINTABLE.search(fields[at] + fields[at + 1]):
             lock_labels[-1] = ("child %d of the project directory (a path this "
-                               "session cannot decode as UTF-8)"
+                               "session cannot render in a verdict)"
                                % (len(lock_paths) - 1))
             UNDECODABLE.add(len(lock_paths) - 1)
 if not lock_paths:
@@ -904,12 +967,6 @@ CONTROL = re.compile(r"[\s\x00-\x1f\x7f]")
 # message on its way into a NUL-framed stream, where a space is exactly what a
 # control byte is replaced BY. Its one consumer is `_write_records`; see the
 # argument there for why that boundary is where this belongs.
-# The Unicode line-enders and lone surrogates are in here for the same reason
-# `emit` scrubs them (see there): `str.splitlines()` splits on U+0085, U+2028
-# and U+2029, so an ASCII-only class leaves exactly the characters that forge a
-# line. Surrogates additionally cannot be written by this file`s own utf-8
-# writer, so scrubbing them here is what keeps `_write_records` total.
-UNPRINTABLE = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029\ud800-\udfff]")
 # Each source is fetched at SESSION START, so the list length is a stall
 # multiplier: an unbounded one is an unbounded delay before the model can be
 # used. Generous next to any real lock (this repo's has none; a consumer
@@ -1151,10 +1208,20 @@ def read_lock(lock_path):
                 # ASCII control bytes, so it fell back to the position only for a
                 # value that happened to contain a space — and any whitespace-free
                 # string of any length and any charset was printed verbatim into
-                # a verdict the model reads. Measured: a hyphenated sentence of
-                # attacker prose, unbounded in length, arrived in
-                # `additionalContext` under an otherwise healthy `1/1`. The
-                # comment above already claimed this was closed; only now is it.
+                # a verdict the model reads.
+                #
+                # WHAT THIS BOUNDS AND WHAT IT DOES NOT, because the first
+                # version of this comment claimed the whole class: it stops a
+                # BARE sentence of attacker prose, and it does NOT stop one
+                # carrying a `file:///` prefix — the URL charset admits
+                # `.,;!$&()*+=#?@-` and has no length bound, so ten characters of
+                # prefix put 41KB of hyphenated instructions back into
+                # `additionalContext` under a clean `2/2`. Measured. That is the
+                # general "a rejection reason quotes lock content at the model"
+                # problem — issue #134 — which wants one answer for every message
+                # rather than a charset per message. What IS closed here is the
+                # narrower thing the paragraph above always claimed: a value that
+                # is not registry-shaped is named by POSITION.
                 #
                 # Same two shapes `read_lock` accepts for a registry elsewhere —
                 # a URL, or an `OWNER/REPO` slug — so an honest federated lock
@@ -1344,9 +1411,9 @@ for lock_index, lock_path in enumerate(lock_paths):
         # Inside the loop, so it lands in `rejected` with a reason and degrades
         # only this lock — and above every other read, so nothing is fetched or
         # staged for a lock whose own path this run cannot name.
-        rejected.append((label, "lock: this path is not valid UTF-8, so it "
-                                "cannot be named in a verdict or matched "
-                                "against the repo that supplied it"))
+        rejected.append((label, "lock: this path carries bytes that cannot be "
+                                "rendered in a verdict, so it cannot be named "
+                                "or matched against the repo that supplied it"))
         continue
     new_sources = []
     new_fetch_at = {}

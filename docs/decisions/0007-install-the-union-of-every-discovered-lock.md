@@ -336,8 +336,54 @@ symlinks — predates this work and is
 > stream cannot be read back with a lying count; and the `synced` fold is
 > COMPLETE — see the next bullet.
 
+> **ROUND 4, 2026-08-25 — the gate did not close.** Two lenses against ROUND 3's
+> own fixes. E4's rule held for a fifth consecutive time: the fix round
+> introduced defects, and so did the fix that landed *during* round 4.
+>
+> Fixed here:
+>
+> - **The lock-file symlink rule reached one of the three sites that open a
+>   lock.** `$CLAUDE_PROJECT_DIR/skills.lock` as a symlink still installed a lock
+>   from outside the project under a clean `skills: 1/1 … — OK` — and that is the
+>   COMMON path, since a single-repo session sets the project dir to the repo
+>   itself. The guard had been added to the rarer half. It is now one function
+>   used at all three sites, so they cannot drift again.
+> - **A fourth Windows regression on this branch**, and the first one *caused by
+>   a test*: Win32 refuses a path component containing U+0085, U+2028 or U+2029
+>   (`WinError 123`), so the new line-forging fixtures could not be built there.
+>   The convention for this already existed three tests away and was not applied.
+>
+> Filed rather than fixed:
+> [#137](https://github.com/Adam-S-Daniel/agentskills/issues/137) — refuse a lock
+> by where it RESOLVES, not by being a symlink. The round-3 guard refuses
+> legitimate in-project layouts (`skills.lock -> locks/prod.lock`) with a reason
+> that is false for them, and makes a permanent session-wide prune kill-switch
+> reachable by `git clone`: a repo whose upstream commits `skills.lock` as a
+> symlink or a directory disarms the orphan prune for every repo in every session
+> that attaches it. That is a real widening of the limit this file states, because
+> the stated trigger requires a child that is NOT a git repository and these
+> require one that IS.
+> [#138](https://github.com/Adam-S-Daniel/agentskills/issues/138) — three older
+> discovery arms still drop a lock-carrying child silently.
+> [#139](https://github.com/Adam-S-Daniel/agentskills/issues/139) — an undecodable
+> child name gets a false remediation, and four bash label surfaces still render
+> it, which allows a hostile child to make the verdict blame an honest sibling.
+>
+> **Established SOUND with controls, so a fifth round need not re-run it:** the
+> widened discovery `case` is complete against `str.splitlines()`'s full
+> ten-code-point set in `C`, `C.utf8` and unset, and cannot false-positive (the
+> only non-ASCII it admits is U+0080–U+009F plus the two separators);
+> `_write_records` is total against surrogates across all five routes and both
+> locales; a symlinked CHILD and a symlinked PARENT are both handled correctly;
+> and the `-L`-before-`-f` ordering does what its comment says.
+
 Recorded so the coverage is not read as wider than it was:
 
+- **`[ -L ]` is check-then-use, not enforcing.** A racer flipping `skills.lock`
+  between a regular file and a symlink won 17 of 60 runs and installed the
+  out-of-project lock. It buys no new capability — a racer with write access to
+  the child can already put hostile bytes in a regular file — but the guard is
+  advisory, and only resolve-then-open-by-descriptor would close it.
 - **No Windows/Git Bash or macOS bash 3.2 run.** Everything was Linux. The MSYS
   mount table, the parallel-array paths and Win32 trailing-dot stripping are
   reasoned about, not measured — and three Windows regressions on this branch

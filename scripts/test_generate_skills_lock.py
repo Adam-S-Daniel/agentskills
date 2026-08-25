@@ -1387,9 +1387,12 @@ def _extract_hook_lock_reader() -> str:
     end = text.index("\nPY\n", start)
     block = text[start:end] + "\n"
     assert block.count("import json, os, re, sys") == 1, (
-        "the extracted block carries its own opening line more than once, so it "
-        "spans two python programs — the anchor has moved and every test below "
-        "is asserting against a concatenation rather than the lock reader")
+        "the extracted block carries its own opening line more than once. The "
+        "usual cause is that the anchor has moved and the block now spans two "
+        "python programs, so every test below is asserting against a "
+        "concatenation rather than the lock reader — but a single program that "
+        "QUOTES its own opening line in a comment reds this too, and that is a "
+        "false alarm. Check which before believing the first reading.")
     assert "DEFAULT_LAYOUT" in block, (
         "the first heredoc `import json, os, re, sys` in the hook is no longer "
         "the lock reader — the extraction is positional, so every test below is "
@@ -1506,8 +1509,13 @@ def _run_hook_reader_on_locks(pairs: list, tmp_path: Path
     locks = tmp_path / "locks.nul"
     with open(locks, "wb") as handle:
         for open_path, label in pairs:
-            handle.write(str(open_path).encode("utf-8") + b"\0")
-            handle.write(str(label).encode("utf-8") + b"\0")
+            # `surrogateescape`, because bash writes BYTES into this file and a
+            # path may hold any of them. A strict encoder here would make the
+            # harness, not the reader, decide which labels are testable -- and
+            # the labels a strict encoder refuses are exactly the ones the
+            # reader's refusal exists for.
+            handle.write(str(open_path).encode("utf-8", "surrogateescape") + b"\0")
+            handle.write(str(label).encode("utf-8", "surrogateescape") + b"\0")
     return subprocess.run(
         [sys.executable, "-I", str(_reader_script(tmp_path))],
         env={"LOCKS_PATH": str(locks), "LOCK_PATH": str(locks), "OUT_DIR": str(out),
@@ -10045,14 +10053,31 @@ def _emit_only(tmp_path: Path) -> Path:
     return script
 
 
-@pytest.mark.parametrize("sep", _UNICODE_LINE_ENDERS,
-                         ids=["nel-0085", "lsep-2028", "psep-2029"])
+# EVERY code point `str.splitlines()` splits on, plus `\x7f`. The parametrised
+# test below used to cover only the three Unicode ones, while its own docstring
+# claimed the fallback was "kept in step" with the primary -- and the fallback
+# was letting `\x0b`, `\x0c`, `\x1c`, `\x1d`, `\x1e` and `\x7f` straight
+# through. A test that names the property and checks a third of it is how that
+# survived. Derived from the runtime rather than hand-listed, so a future Python
+# that splits on one more character reddens this instead of quietly not covering
+# it.
+_LINE_ENDERS = tuple(chr(cp) for cp in range(0x110000)
+                     if len(("a" + chr(cp) + "b").splitlines()) > 1) + ("\x7f",)
+
+
+@pytest.mark.parametrize("sep", _LINE_ENDERS,
+                         ids=lambda ch: "U+%04X" % ord(ch))
 @pytest.mark.parametrize("with_python", [True, False],
                          ids=["python-branch", "printf-fallback"])
 def test_emit_flattens_every_character_that_ends_a_line(tmp_path, sep,
                                                         with_python):
     """Both branches, because a fallback weaker than the primary only fails on
     the machine with no python3 -- the machine nobody tests on.
+
+    The parametrisation is COMPUTED from `str.splitlines()`, which is the
+    property the whole guard is about: ten code points, not the three that are
+    easy to remember. `\x7f` is added because it is a raw control character
+    inside a JSON string, which RFC 8259 forbids even though it ends no line.
 
     `json.dumps(ensure_ascii=True)` renders these as `\\u2028`-style escapes, so
     the emitted BYTES look innocent and a JSON decoder hands the reader back a
@@ -10089,6 +10114,12 @@ def test_emit_flattens_every_character_that_ends_a_line(tmp_path, sep,
     assert "99 of 99" in got, repr(got)
 
 
+@pytest.mark.skipif(os.name == "nt", reason=(
+    "Win32 refuses a path component containing any of these too -- measured on "
+    "a windows-latest runner, `os.mkdir` raises WinError 123 for U+0085, U+2028 "
+    "and U+2029 alike -- so the hostile directory cannot be created at all "
+    "here, and a fixture that cannot be built is not a guard that was "
+    "measured. Same gate, same reason, as the control-character sibling above."))
 @pytest.mark.parametrize("sep", _UNICODE_LINE_ENDERS,
                          ids=["nel-0085", "lsep-2028", "psep-2029"])
 def test_a_child_name_cannot_forge_a_line_with_a_unicode_separator(tmp_path, sep):
@@ -10194,13 +10225,63 @@ def test_a_child_name_bash_cannot_decode_degrades_only_its_own_lock(tmp_path):
     # takes `${label%/*}` of exactly that value and compares it against real
     # directories. A mangled label silently disables the C3 shadowing guard for
     # that repo, which is a wrong install rather than a missing one.
-    assert "not valid UTF-8" in verdict, verdict
+    assert "cannot be rendered in a verdict" in verdict, verdict
     assert "child 1 of the project directory" in verdict, verdict
     assert "evil" not in verdict, verdict
     # And whatever the verdict says about the odd name, it says it without
     # emitting a lone surrogate or anything that ends a line.
     assert len(verdict.splitlines()) == 1, repr(verdict)
     assert all(not "\ud800" <= ch <= "\udfff" for ch in verdict), repr(verdict)
+
+
+@pytest.mark.parametrize("ch", ["\u0085", "\u2028", "\u2029", "\udcff"],
+                         ids=["nel-0085", "lsep-2028", "psep-2029", "surrogate"])
+def test_a_lock_label_the_writer_would_mangle_is_refused_by_position(tmp_path, ch):
+    """A LOCK LABEL IS A PATH, and a path may carry anything but NUL.
+
+    `_write_records` scrubs this whole class on the way OUT to `accepted.nul`
+    while bash keeps the real bytes on the way IN, so a label carrying one of
+    them is no longer the path bash wrote. `REPO_OWNED_DIRS` takes `${label%/*}`
+    of exactly that value and compares it against real directories — so a
+    mangled label silently disables the C3 shadowing guard for that repo, and a
+    skill the repo owns in its own `.claude/skills` gets installed over it in
+    the flat personal store instead of being left alone.
+
+    That was closed for lone surrogates first and for the three Unicode
+    line-enders only afterwards, which is the whole reason this is parametrised
+    on the class rather than written once: the two halves were added on the same
+    day, one character class apart, and nothing connected them. The test the
+    reader now applies is `UNPRINTABLE` itself — whatever the writer would
+    alter, the reader refuses — so the two cannot drift again.
+
+    Driven through the multi-lock reader rather than the hook, because bash's
+    own discovery guard refuses most of these names before the reader ever sees
+    them; the label is the surface that survives that, and this is where it is
+    decided.
+    """
+    lock = tmp_path / "probe.lock"
+    lock.write_text(json.dumps(_lock_with_digest("ab" * 32)), encoding="utf-8")
+
+    # An honest lock beside it, so the run completes and writes its streams --
+    # and so this also asserts the degradation is PER LOCK, which is the promise
+    # the whole boundary exists to keep.
+    proc = _run_hook_reader_on_locks(
+        [(lock, "/repos/honest/skills.lock"),
+         (lock, "/repos/re%sal/skills.lock" % ch)], tmp_path)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.returncode == 0, proc.stderr
+
+    accepted = (tmp_path / "reader-out" / "accepted.nul").read_bytes()
+    assert accepted == b"/repos/honest/skills.lock\0", accepted
+
+    rejected = (tmp_path / "reader-out" / "rejected.nul").read_bytes()
+    assert b"cannot be rendered in a verdict" in rejected, rejected
+    # Named by POSITION, and the offending path is never echoed -- repeating it
+    # is the thing being prevented, and a scrubbed spelling would additionally
+    # let one child impersonate a sibling whose name holds a space.
+    assert b"child 1 of the project directory" in rejected, rejected
+    assert b"re" + ch.encode("utf-8", "surrogateescape") not in rejected, rejected
+    assert b"/repos/re" not in rejected, rejected
 
 
 def test_a_childs_skills_lock_may_not_be_a_symlink(tmp_path):
@@ -10280,6 +10361,45 @@ def test_a_childs_skills_lock_that_is_not_a_regular_file_is_named_not_skipped(
     assert "not a regular file" in verdict, verdict
     assert verdict.startswith("skills: 1/1 "), verdict
     assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+
+
+def test_the_project_dirs_own_skills_lock_may_not_be_a_symlink_either(tmp_path):
+    """The same rule at the OTHER site that opens a lock — and the commoner one.
+
+    The child loop grew the lock-file symlink rule first and the own-lock path
+    did not, so `$CLAUDE_PROJECT_DIR/skills.lock` as a symlink still installed a
+    lock from outside the project under a clean `skills: 1/1 … — OK`. A
+    single-repo session sets the project dir to the repo itself, so the guard
+    had been added to the rarer of the two paths.
+
+    Committable, which is what makes it matter: git stores a symlink as a
+    mode-120000 blob, so a reviewer sees a file whose target is not in the tree
+    and the bytes actually installed come from outside the reviewed repository.
+
+    The run ends at the no-lock verdict rather than falling through to the child
+    scan: a project shipping a `skills.lock` has opted in, and refusing to READ
+    that file must not silently substitute a different set of skills.
+    """
+    outside_reg = tmp_path / "registry-two"
+    outside_sha = make_registry(outside_reg, {"adam/gamma": SKILL_C})
+    above = _child_repo(tmp_path, "above-the-project", outside_reg, outside_sha)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    try:
+        (project / "skills.lock").symlink_to(above / "skills.lock")
+    except (OSError, NotImplementedError):     # pragma: no cover - platform gate
+        pytest.skip("this platform does not permit creating symlinks")
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert "gamma" not in verdict, verdict
+    assert not (home / ".claude" / "skills" / "gamma").exists(), verdict
+    assert "DEGRADED" in verdict, verdict
+    assert "symlink" in verdict, verdict
 
 
 # --------------------------------------------------------------------------
