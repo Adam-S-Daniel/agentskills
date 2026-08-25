@@ -42,6 +42,29 @@ project directory, never siblings of anything: a sibling scan reaches whatever
 happens to sit beside the project and lets a directory nobody attached to the
 session decide what gets written into `$HOME`.
 
+> **CORRECTION, 2026-08-25 — "child repo" is now enforced, not assumed.** As
+> first implemented, discovery was `for child in "$PROJECT"/*/`, and an
+> adversarial round showed that predicate does not mean what this paragraph
+> says. `*/` matches symlinks-to-directories and `[ -d ]` follows them, so a
+> child symlink reached a tree outside the project — the exact "sibling scan"
+> the sentence above forbids — and a symlink pointing at `..` read a lock ABOVE
+> the project directory. Both landed under a clean `skills: 1/1 … — OK`. Worse,
+> ANY subdirectory carrying a lock contributed: `testdata/skills.lock`,
+> `vendor/skills.lock`, and — dotglob being on to match the doctor —
+> `.claude/skills.lock`. That falsified the promise the next section leans on,
+> that "a lockless project is a project that did not opt in", which is in turn
+> what this ADR cites as making a user-scope wiring safe.
+>
+> A contributing child must now be a real directory that is **not a symlink**, a
+> **git repository root** (`.git`, file or directory, so worktrees count), and
+> **not a duplicate by resolved lock path**. That single predicate closed six
+> separate findings, which is why it replaced them rather than being patched
+> around one at a time.
+>
+> One mechanical detail worth carrying forward, because it makes a guard that
+> reads correctly do nothing: `*/` leaves a TRAILING SLASH, and `[ -L "dir/" ]`
+> is FALSE even when `dir` is a symlink.
+
 ### Three destination cases, not one
 
 `~/.claude/skills/` is FLAT: one name, one directory, one owner. **A destination
@@ -98,17 +121,29 @@ repos declaring the SAME (registry, bundle) at different pinned refs with
 different skill sets still contend, each run removing what the other installed."
 One run that sees every lock reaps nothing another lock still wants.
 
-**Across session shapes it survives, bounded and unchanged.** A later
-single-repo session shrinks the claim set back to its own lock and reaps the
-names its lock lacks; the next multi-repo session reinstalls them. The bound is
-the symmetric difference of two locks' name sets *within a shared
-`(registry, bundle)`* — everything outside that pair is already protected by the
-existing scope. It is the same mechanism, the same bound and the same names as
-today's session-A-then-session-B churn. The proper fix is a per-entry `lock`
-provenance field in the install record, so a run never reaps what a lock it did
-not discover. That is deliberately not in this change: it is a record-schema
-change plus a new condition in the most destructive code path in the file, and
-the churn it would remove is pre-existing and bounded.
+> **CORRECTION, 2026-08-25.** As first written this section said the union
+> "dissolves that contention outright" within a session, and that the
+> cross-session residual was "the same mechanism, the same bound and the same
+> names as today's churn". An adversarial round falsified both, with four
+> isolating controls. Inside ONE session a sibling declaring the identical
+> `(registry, bundle)` supplied the claim a starved, rejected or capped lock had
+> withheld, and the planner then reaped that lock's own skills — no second
+> session needed, and reproducible with seventeen ordinary repos pinning one
+> registry at seventeen refs, with no hostility at all. The hook asserted the
+> opposite in two comments; those and this paragraph were wrong together.
+>
+> Fixed by extending the rule the file already applied to an incomplete child
+> enumeration: **a run that cannot fully account for the session claims
+> authority over nothing.** Rejected locks, cap-dropped locks and fetch-starved
+> locks now empty `claims.nul` and prune nothing, saying so.
+>
+> That is NARROWER than the per-entry `lock` provenance field this section
+> originally deferred, and it is the better fix — it reuses a principle the file
+> already states rather than adding a record-schema change to its most
+> destructive path. The provenance field is not owed.
+>
+> The cross-session residual itself is unchanged and still stands as described
+> above.
 
 **`purge_locked_destinations` now has a fleet-wide blast radius.** Six bail-outs
 call it and it removes every destination the locks name, ungated by provenance —
@@ -116,6 +151,19 @@ deliberately, per its own comment, with tests asserting exactly that. With N
 locks that is N repos' locked names. Per-lock degradation narrows it usefully (a
 rejected lock contributes no names), but the trade its comment declined to
 re-argue is now worth re-arguing. **Next question, not settled here.**
+
+Two facts about that radius were established by measurement afterwards, and both
+belong here rather than in a reader's imagination. A sibling lock **chooses the
+names**, and can **induce the bail-out itself** by declaring enough unreachable
+sources to exhaust the whole-run fetch cap. Against that: the radius is confined
+to `$DEST`; names are charset-bounded with no traversal; the install record is
+out of reach on its leading dot; `$DEST` in the sessions where this hook runs at
+all is a throwaway container's; and `~/.claude/skills/synced` — the one target
+whose loss is unrecoverable — is NOT reachable, which was attacked with three
+hostile locks and held, with a negative control confirming the guard rather than
+the harness was what stopped it. The author's chosen mitigation was to fail
+closed on the unrecoverable target and state the rest, and that judgement
+survives the round.
 
 **The no-lock verdict stays `DEGRADED`.** Under a user-scope wiring it becomes
 the ordinary state of every non-adopting repo on the machine, and a permanent
@@ -223,6 +271,35 @@ way to run the hook manually — it is how #84 was diagnosed.
 
 **Gate the fallback behind a new environment variable.** Rejected as a knob for a
 condition already exactly expressed by "the session named no project directory".
+
+## What the adversarial rounds did NOT reach
+
+Two rounds, 26 verified findings, each graded by a skeptic instructed to refute
+it. Six findings were fixed, two were REFUTED as stated limits re-reported, and
+one — the digest not covering symlinks — predates this work and is
+[#132](https://github.com/Adam-S-Daniel/agentskills/issues/132).
+
+Recorded so the coverage is not read as wider than it was:
+
+- **No Windows/Git Bash or macOS bash 3.2 run.** Everything was Linux. The MSYS
+  mount table, the parallel-array paths and Win32 trailing-dot stripping are
+  reasoned about, not measured — and three Windows regressions on this branch
+  say that gap is not theoretical.
+- **The case-fold itself was never measured.** No case-insensitive filesystem
+  could be built in the container, so `$DEST/Synced` resolving to `$DEST/synced`
+  on APFS and NTFS is asserted from platform semantics. The fix was made anyway;
+  the exposure was measured on the purge path, which takes the name verbatim.
+- **Four framing-error purge bail-outs were reasoned about, not induced.** No
+  route was found from lock CONTENT to a python↔bash record-count desync, so
+  whether a hostile lock can reach the post-install purge — the one that
+  discards a run's own successful installs — is unestablished.
+- **Concurrency was not probed at all**: two sessions running the hook against
+  one `$HOME`. The record is staged and `os.replace`d, but the install loop and
+  the prune are not serialised.
+- **`$DEST` itself as a symlink** was not tested, nor a symlink swapped in
+  between `may_replace` and the `rm`.
+- One lens was lost to a StructuredOutput retry cap and re-run separately; had
+  it not been re-run, four of the highest-severity findings would not exist.
 
 ## How to verify
 
