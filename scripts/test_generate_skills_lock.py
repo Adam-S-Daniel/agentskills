@@ -10182,8 +10182,21 @@ def test_a_child_name_bash_cannot_decode_degrades_only_its_own_lock(tmp_path):
     proc = _run_hook(home, parent, {"SKILLS_BOOTSTRAP_FORCE": "1"})
     assert proc.returncode == 0, proc.stderr
     verdict = _verdict(proc)
+    # NOT the whole-run "could not read <every lock>" sentence: that is the
+    # failure mode, and it is what a clean exit with an empty store looked like.
     assert "could not read" not in verdict, verdict
     assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
+
+    # The undecodable lock is REJECTED, by POSITION, and only it. Rejecting
+    # rather than half-trusting is deliberate: `surrogateescape` keeps the label
+    # alive but `_write_records` scrubs its surrogates on the way out, so the
+    # label bash reads back is not the path bash wrote — and `REPO_OWNED_DIRS`
+    # takes `${label%/*}` of exactly that value and compares it against real
+    # directories. A mangled label silently disables the C3 shadowing guard for
+    # that repo, which is a wrong install rather than a missing one.
+    assert "not valid UTF-8" in verdict, verdict
+    assert "child 1 of the project directory" in verdict, verdict
+    assert "evil" not in verdict, verdict
     # And whatever the verdict says about the odd name, it says it without
     # emitting a lone surrogate or anything that ends a line.
     assert len(verdict.splitlines()) == 1, repr(verdict)

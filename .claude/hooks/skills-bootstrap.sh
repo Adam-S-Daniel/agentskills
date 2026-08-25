@@ -816,6 +816,8 @@ only_bundle = os.environ.get("AGENTSKILLS_BUNDLE") or ""
 # two spellings are necessarily the same one.
 lock_paths = []
 lock_labels = []
+# Indices of locks whose own PATH could not be decoded — see the read loop.
+UNDECODABLE = set()
 locks_path = os.environ.get("LOCKS_PATH") or ""
 if locks_path:
     # `errors="surrogateescape"`, and it is not tidiness: a child DIRECTORY NAME
@@ -842,6 +844,28 @@ if locks_path:
     for at in range(0, len(fields) - 1, 2):
         lock_paths.append(fields[at])
         lock_labels.append(fields[at + 1])
+        # A PATH THIS SESSION CANNOT DECODE GETS A POSITIONAL NAME, NOT A
+        # SCRUBBED ONE, and the difference is not cosmetic. `surrogateescape`
+        # above keeps the run alive, but it leaves lone surrogates in the label —
+        # and `_write_records` replaces those with spaces on the way out, so the
+        # label bash reads back out of `accepted.nul` is no longer the path bash
+        # wrote in. `REPO_OWNED_DIRS` is built by taking `${label%/*}` of exactly
+        # that value and comparing it against real directories, so a mangled
+        # label silently disables the C3 shadowing guard for that repo: a skill
+        # the repo owns in its own `.claude/skills` gets installed over it in the
+        # flat personal store instead of being left alone.
+        #
+        # So the lock is REJECTED (below) rather than half-trusted, and its label
+        # is replaced here with its position. Rejection is per-lock, so every
+        # other repo in the session still installs — which is the promise this
+        # whole boundary exists to keep — and the offending bytes are never
+        # echoed, which is the rule the control-character guard already follows.
+        if any("\ud800" <= ch <= "\udfff"
+               for ch in fields[at] + fields[at + 1]):
+            lock_labels[-1] = ("child %d of the project directory (a path this "
+                               "session cannot decode as UTF-8)"
+                               % (len(lock_paths) - 1))
+            UNDECODABLE.add(len(lock_paths) - 1)
 if not lock_paths:
     lock_paths = [os.environ["LOCK_PATH"]]
     lock_labels = list(lock_paths)
@@ -1316,6 +1340,14 @@ for lock_index, lock_path in enumerate(lock_paths):
     # ANY point in its processing rather than only for one raised inside
     # `read_lock` — including a fetch slot, which is a network round trip a
     # refused lock has no business buying.
+    if lock_index in UNDECODABLE:
+        # Inside the loop, so it lands in `rejected` with a reason and degrades
+        # only this lock — and above every other read, so nothing is fetched or
+        # staged for a lock whose own path this run cannot name.
+        rejected.append((label, "lock: this path is not valid UTF-8, so it "
+                                "cannot be named in a verdict or matched "
+                                "against the repo that supplied it"))
+        continue
     new_sources = []
     new_fetch_at = {}
     lock_rows = []
