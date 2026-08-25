@@ -231,15 +231,76 @@ names_the_account_store () {
 }
 
 # --- surface guard: ephemeral sessions only --------------------------------
-# The verdict NAMES the two values this decision was made from, because "durable
-# session" on its own is indistinguishable from a MISCLASSIFIED remote surface,
-# and that ambiguity is what kept the exact-match `!= "remote"` test's fragility
-# invisible: $CLAUDE_CODE_ENTRYPOINT has at least six `remote_*` spellings
-# (`remote_desktop` among them), none of which this test matches. Printing the
-# inputs does not change the decision — widening the guard is held pending a
-# measurement on a durable Cowork machine, since `remote_cowork` may well BE
-# durable — it just makes a wrong one legible to whoever reads the transcript.
-if [ -z "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" ] && [ "${CLAUDE_CODE_ENTRYPOINT:-}" != "remote" ] \
+# entrypoint_reads_remote <value> — does this $CLAUDE_CODE_ENTRYPOINT name a
+# remote surface? A PREFIX, and the prefix is the whole point.
+#
+# The exact-match `!= "remote"` this replaces matched ONE spelling and was dead
+# on six others, so six of the seven remote surfaces reported
+# `skills: skipped — durable session` — a sentence that reads like a correct
+# decision while delivering nothing. That is why the verdict names its inputs:
+# "durable session" alone is indistinguishable from a MISCLASSIFIED remote one,
+# and that ambiguity is what kept the fragility invisible.
+#
+# MEASURED, by reading the entrypoint tables out of the bundled Claude Code
+# binary — VERSION 2.1.243, GIT_SHA 8565f923a3ec61dc4c61bf7bfd995521c702c9fc,
+# BUILD_TIME 2026-08-24T21:05:22Z:
+#
+#   * the ALLOWLIST of legal entrypoints has 26 values, and SEVEN begin with
+#     `remote`: remote, remote_baku, remote_cowork, remote_trigger,
+#     remote_cowork_trigger, remote_desktop, remote_mobile.
+#   * the REMOTE FAMILY set holds exactly those seven plus `claude_in_slack`,
+#     `claude-in-slack` and `claude-in-teams`.
+#   * the DURABLE set is {claude-desktop, claude-desktop-3p, local-agent}. None
+#     of the seven is in it.
+#
+# So `remote*` selects exactly the allowlist values that are in the remote
+# family and are not spelled `claude*` — it is that set, written as a prefix.
+#
+# `remote_cowork` is what held this widening back: the old comment waited on "a
+# measurement on a durable Cowork machine", because the binary's display map
+# groups `remote_cowork` with `local-agent`. That objection does not survive
+# reading the map — it is a display-NAME map, not a durability map, and it also
+# groups `remote_desktop` with `claude-desktop` under "Claude Desktop", which
+# nobody calls durable. Every table in that build that DOES carry durability
+# splits the two Cowork spellings: `remote_cowork` is in the remote family,
+# absent from the durable set, and its platform switch returns
+# `claude_code_remote`, while `local-agent` returns `claude_code_local_agent`.
+# The durable Cowork spelling is `local-agent`.
+#
+# THAT IS INFERENCE FROM THREE TABLES IN ONE BUILD, NOT THE LIVE COWORK
+# MEASUREMENT THE OLD COMMENT WAITED FOR. No durable Cowork machine was run.
+# (A prior session reported the same counts — 26 legal values, seven beginning
+# with `remote` — from build 2.1.241 / GIT_SHA c87e2742. Two adjacent releases
+# agreeing is weak evidence about the next one; see the residual below.)
+#
+# PREFIX, NEVER SUBSTRING. `ssh-remote` is a legal entrypoint and a DURABLE
+# workstation reached over SSH; it is in the allowlist and NOT in the remote
+# family. `case ... in remote*)` is anchored at the start so it does not match,
+# where `*remote*` or a `grep remote` would capture it and start writing into a
+# workstation's ~/.claude/skills. It is the one spelling that separates the two
+# spellings of this guard, which is why a test pins it.
+#
+# IT DOES NOT CLOSE EVERYTHING, and saying so is not a hedge. `claude_in_slack`,
+# `claude-in-slack` and `claude-in-teams` are in the same remote family and
+# begin with `claude`, so they still fall through to the session-id arm and
+# reach this hook only when $CLAUDE_CODE_REMOTE_SESSION_ID is set.
+#
+# RESIDUAL: this is ONE build's allowlist, and a release can add a spelling. An
+# explicit set of the seven would fail CLOSED on a new one — it would skip, and
+# a skip is the recoverable direction. An open prefix fails OPEN: a future
+# `remote_something_durable` would install without anyone deciding it should.
+# The prefix is chosen anyway, because the failure the exact match actually
+# produced was six live surfaces silently getting nothing, and because every
+# `remote*` value in two builds is ephemeral — but that is a trade, not a proof,
+# and it is the standing argument for revisiting this as a set.
+entrypoint_reads_remote () {
+  case "${1:-}" in
+    remote*) return 0 ;;
+  esac
+  return 1
+}
+if [ -z "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" ] \
+   && ! entrypoint_reads_remote "${CLAUDE_CODE_ENTRYPOINT:-}" \
    && [ -z "${SKILLS_BOOTSTRAP_FORCE:-}" ]; then
   emit "skills: skipped — durable session (entrypoint=${CLAUDE_CODE_ENTRYPOINT:-unset}, no remote session id), marketplace install is authoritative"
 fi

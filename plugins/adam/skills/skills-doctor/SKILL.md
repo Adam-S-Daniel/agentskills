@@ -49,7 +49,7 @@ echo "entry=$CLAUDE_CODE_ENTRYPOINT remote=$CLAUDE_CODE_REMOTE_SESSION_ID force=
 
 | Reading | Surface | What SHOULD be true |
 |---|---|---|
-| a non-empty remote session id, OR `entry=remote` exactly, OR `SKILLS_BOOTSTRAP_FORCE` set | ephemeral (cloud session, CI, container) | the bootstrap hook installed the locked bundle into `~/.claude/skills/`; **no** marketplace plugins (cloud gets none from repo-declared settings) |
+| a non-empty remote session id, OR `entry` beginning with `remote`, OR `SKILLS_BOOTSTRAP_FORCE` set | ephemeral (cloud session, CI, container) | the bootstrap hook installed the locked bundle into `~/.claude/skills/`; **no** marketplace plugins (cloud gets none from repo-declared settings) |
 | all three empty | durable machine | the marketplace install is authoritative; `~/.claude/skills/` should hold **no** hook-installed bundle skills — finding them there means double delivery |
 | some other entrypoint, no session id, not forced | unsure | not a shade of either row. Judge it as durable — the quiet reading — and settle it against the session's own `skills:` verdict rather than the entrypoint's name |
 
@@ -62,14 +62,21 @@ that recognises fewer of them disagrees with the hook silently: it answers
 `unsure`, which is the quiet reading, on a surface the hook has just installed
 onto. That is how #85's headline defect survived its own fix.
 
-**But do not widen to the entrypoint's SHAPE.** Every ephemeral entrypoint
-measured so far begins with `remote`, which makes a prefix match look like the
-same rule; it is not. The binary's own display classifier groups
-`remote_cowork` with `local-agent`, so "no durable entrypoint starts with
-`remote`" is unproven, and assuming it would call a durable Cowork machine
-ephemeral and report its correctly-empty store as a delivery failure. The exact
-string `remote` is settled and matched; `remote_cowork` and the other `remote_*`
-spellings stay `unsure`.
+**The second arm is a PREFIX, not the exact string `remote`.** Claude Code's
+entrypoint allowlist has 26 legal values and seven of them begin with `remote`
+(`remote`, `remote_baku`, `remote_cowork`, `remote_trigger`,
+`remote_cowork_trigger`, `remote_desktop`, `remote_mobile`), so an exact match
+recognised one and was dead on six live remote surfaces. It reads the hook's own
+test; the hook's surface-guard comment carries the measurement, the argument
+about `remote_cowork`, and the residual an open prefix leaves.
+
+**Prefix, never substring.** `ssh-remote` is in the same allowlist and names a
+DURABLE workstation reached over SSH. `startswith` does not match it; a
+substring test or a `grep remote` does, and would report a workstation's
+correctly-empty store as a delivery failure. It also does not close everything:
+`claude_in_slack`, `claude-in-slack` and `claude-in-teams` are in Claude Code's
+remote family and begin with `claude`, so they still reach the hook only through
+the session-id arm.
 
 ## 2. Read the expectation
 
@@ -187,12 +194,11 @@ declared a name, and therefore whose lock has to change.
 missing from the personal store is the correct state on a durable machine and a
 delivery failure on an ephemeral one, so the same three facts are a NOTE on one
 and a FINDING on the other. The test is the bootstrap hook's own three arms,
-copied: a remote session id, OR `CLAUDE_CODE_ENTRYPOINT` exactly `remote`, OR
-`SKILLS_BOOTSTRAP_FORCE`. Reading fewer of them than the hook does is
-disagreement, not caution. What is NOT copied is any prefix match on the
-entrypoint's shape — unproven against `remote_cowork`, held deliberately — so
-any other entrypoint with no session id reports as `unsure` and is judged as
-durable, which is the quiet reading.
+copied: a remote session id, OR `CLAUDE_CODE_ENTRYPOINT` beginning with
+`remote`, OR `SKILLS_BOOTSTRAP_FORCE`. Reading fewer of them than the hook does
+is disagreement, not caution. Any other entrypoint with no session id — a
+durable `cli`, or `ssh-remote` — reports as `unsure` and is judged as durable,
+which is the quiet reading.
 
 The same reading gates every sentence about what the NEXT run does. Those three
 arms are tested by the hook BEFORE it reads the lock, and failing all three it

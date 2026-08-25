@@ -6703,6 +6703,150 @@ def test_hook_is_a_no_op_without_the_ephemeral_marker(tmp_path, registry):
     assert not (tmp_path / "home" / ".claude" / "skills").exists()
 
 
+# --------------------------------------------------------------------------
+# the surface guard
+#
+# `emit` ends in `exit 0`, so this guard is a HARD early return taken before
+# the lock is read: whatever it decides is the whole run. Until these tests it
+# had ZERO coverage — `CLAUDE_CODE_ENTRYPOINT` and `CLAUDE_CODE_REMOTE_SESSION_ID`
+# appeared nowhere in this file, and `_run_hook` builds its environment from
+# scratch so neither could leak in from the developer's shell either. Both arms
+# could have been deleted with the suite still green, which is how an exact
+# match on `remote` stayed in place while being dead on six of the seven remote
+# surfaces.
+#
+# Every entrypoint in Claude Code's allowlist that begins with `remote`,
+# measured out of the bundled binary at VERSION 2.1.243, GIT_SHA 8565f923… —
+# seven of its 26 legal values. The hook's own surface-guard comment carries the
+# tables this came from, the argument for a prefix, and the residual it leaves.
+REMOTE_ENTRYPOINTS = ("remote", "remote_baku", "remote_cowork", "remote_trigger",
+                      "remote_cowork_trigger", "remote_desktop", "remote_mobile")
+
+# Legal entrypoints that must keep SKIPPING. `ssh-remote` is the load-bearing
+# one: it is a durable workstation reached over SSH, it is the only allowlist
+# value that CONTAINS `remote` without beginning with it, and it is what makes
+# the guard's prefix a prefix rather than a substring — `*remote*` or a
+# `grep remote` captures it and starts writing into a workstation's
+# ~/.claude/skills.
+DURABLE_ENTRYPOINTS = ("ssh-remote", "cli", "local-agent", "claude-desktop",
+                       "claude-vscode")
+
+
+@pytest.mark.parametrize("entrypoint", REMOTE_ENTRYPOINTS)
+def test_every_remote_entrypoint_installs_with_no_session_id(
+        tmp_path, registry, entrypoint):
+    """All seven, on the entrypoint ALONE — no session id, no FORCE.
+
+    That is the arm under test: with `CLAUDE_CODE_REMOTE_SESSION_ID` set the run
+    would install whatever the entrypoint said, so a fixture that sets both
+    proves nothing about the entrypoint. Six of these seven used to skip.
+
+    A wrongly-skipped session reports `skills: skipped — durable session`, which
+    reads like a correct decision and delivers nothing — so this asserts the
+    install, not merely the absence of the skip word.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, project, {"CLAUDE_CODE_ENTRYPOINT": entrypoint})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert not verdict.startswith("skills: skipped"), verdict
+    assert verdict.startswith("skills: 2/2 "), verdict
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file()
+    assert (home / ".claude" / "skills" / "beta" / "SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("entrypoint", DURABLE_ENTRYPOINTS)
+def test_a_durable_entrypoint_skips_before_the_lock_is_read(
+        tmp_path, registry, entrypoint):
+    """The other direction, and `ssh-remote` is why this is parametrised.
+
+    The widening is a PREFIX. `ssh-remote` contains `remote`, is in the same
+    26-value allowlist as the seven above, and names a durable workstation — so
+    it is the single spelling that separates `case $x in remote*)` from any
+    substring spelling of the same guard. Written as a substring test the hook
+    still passes every test above and starts installing into a developer's own
+    ~/.claude/skills, where the marketplace install is authoritative and the
+    same skills would then be double-loaded.
+
+    Asserted on the DIRECTORY as well as the verdict: the guard's job is that
+    nothing is written, and a verdict is not a filesystem.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, project, {"CLAUDE_CODE_ENTRYPOINT": entrypoint})
+    assert proc.returncode == 0, proc.stderr
+    verdict = _verdict(proc)
+    assert verdict.startswith("skills: skipped"), verdict
+    # The verdict NAMES its inputs, so a wrong decision is legible in the
+    # transcript rather than indistinguishable from a right one.
+    assert "entrypoint=%s" % entrypoint in verdict, verdict
+    assert not (home / ".claude" / "skills").exists()
+
+
+def test_the_session_id_arm_installs_on_its_own(tmp_path, registry):
+    """A remote session id with NO entrypoint at all.
+
+    The three arms are independent, and this is the one that has always carried
+    the cloud sessions this hook was written for. Isolated deliberately: with an
+    entrypoint also set, the prefix arm could satisfy the guard and this arm
+    could be deleted without a test noticing.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, project,
+                     {"CLAUDE_CODE_REMOTE_SESSION_ID": "cse_deadbeef"})
+    assert proc.returncode == 0, proc.stderr
+    assert _verdict(proc).startswith("skills: 2/2 "), _verdict(proc)
+    assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file()
+
+
+def test_a_session_id_installs_even_on_a_durable_entrypoint(tmp_path, registry):
+    """The arms are ORed, and `ssh-remote` is the sharpest way to say so.
+
+    A durable-looking entrypoint must not veto a session id — the id is issued
+    by the surface itself and is the stronger signal. This is what stops the
+    prefix from being read as the whole test.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, project, {"CLAUDE_CODE_ENTRYPOINT": "ssh-remote",
+                                     "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_x"})
+    assert proc.returncode == 0, proc.stderr
+    assert _verdict(proc).startswith("skills: 2/2 "), _verdict(proc)
+
+
+def test_an_empty_session_id_is_not_a_session_id(tmp_path, registry):
+    """`FOO=` is unset to `[ -z ]`, and the guard must agree.
+
+    An exported-but-empty variable is what a harness leaves behind when it
+    clears a value, and reading it as "set" would install on every durable
+    machine that has ever run a cloud session. The doctor's `read_surface`
+    pins the same rule on its own side.
+    """
+    root, sha = registry
+    project = tmp_path / "project"
+    make_project(project, root, sha)
+    home = tmp_path / "home"
+
+    proc = _run_hook(home, project, {"CLAUDE_CODE_REMOTE_SESSION_ID": ""})
+    assert proc.returncode == 0, proc.stderr
+    assert _verdict(proc).startswith("skills: skipped"), _verdict(proc)
+    assert not (home / ".claude" / "skills").exists()
+
+
 def test_hook_installs_and_verifies_the_locked_skills(tmp_path, registry):
     root, sha = registry
     project = tmp_path / "project"

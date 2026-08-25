@@ -1306,8 +1306,15 @@ def test_an_unsure_surface_is_named_rather_than_rounded(tmp_path, capsys,
     note. Reported as `unsure`, because telling the reader "durable machine" on
     a reading nobody has classified is the same fabrication this script exists
     to stop making about the record.
+
+    `ssh-remote` rather than the `remote_cowork` this used to set: the second
+    arm is now a `remote` PREFIX, so `remote_cowork` reads ephemeral. Which
+    makes `ssh-remote` the better fixture anyway — it is a real allowlist value
+    naming a DURABLE workstation over SSH, so it exercises the third state on a
+    spelling that genuinely has one, and it is the same spelling that separates
+    the prefix from a substring one test further down.
     """
-    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "remote_cowork")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "ssh-remote")
     store = tmp_path / "skills"
     store.mkdir()
     lock = write_lock(tmp_path / "skills.lock", store)
@@ -1322,22 +1329,47 @@ def test_an_unsure_surface_is_named_rather_than_rounded(tmp_path, capsys,
     assert "FINDINGS (0)" in flat(out), out
 
 
-def test_the_surface_is_read_from_the_session_id_not_the_entrypoints_shape(
-        monkeypatch):
-    """`remote_cowork` may or may not be ephemeral, and this must not guess.
+# Every entrypoint in the Claude Code allowlist that begins with `remote`,
+# measured out of the bundled binary at VERSION 2.1.243, GIT_SHA 8565f923… —
+# see the hook's own surface-guard comment for the tables and the residual.
+# Seven of the 26 legal values, and the hook installs on all seven.
+REMOTE_ENTRYPOINTS = ("remote", "remote_baku", "remote_cowork", "remote_trigger",
+                      "remote_cowork_trigger", "remote_desktop", "remote_mobile")
 
-    A prefix match on `remote` is the fix that looks right: every ephemeral
-    entrypoint measured so far starts with it. It is held deliberately (#85 §5)
-    — the binary's own display classifier groups `remote_cowork` with
-    `local-agent`, so "no durable entrypoint starts with remote" is unproven,
-    and a doctor that assumed it would call a durable Cowork machine ephemeral
-    and report its correctly-empty store as a delivery failure.
+
+@pytest.mark.parametrize("entrypoint", REMOTE_ENTRYPOINTS)
+def test_every_remote_entrypoint_reads_ephemeral_with_no_session_id(entrypoint):
+    """All seven, on the entrypoint alone — no `CLAUDE_CODE_REMOTE_SESSION_ID`.
+
+    The exact-match `== "remote"` this replaces recognised ONE of these and was
+    dead on the other six, so six live remote surfaces read `unsure`: the quiet
+    answer, which withholds every promotion and exits 0 over an undelivered
+    bundle. That is #85's headline defect, and it survived its own fix here
+    exactly as it did in the hook.
+
+    Parametrised on the measured set rather than asserted on one representative,
+    because "six of seven" is the fact, and a single example cannot carry it.
+    """
+    assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": entrypoint})[0] \
+        == prov.EPHEMERAL
+
+
+def test_the_remote_arm_is_a_prefix_and_not_a_substring():
+    """`ssh-remote` is the one spelling that tells the two apart.
+
+    It is in the same 26-value allowlist as the seven above and it names a
+    DURABLE workstation reached over SSH. `startswith("remote")` does not match
+    it; `"remote" in entrypoint`, a `find`, or a `grep remote` in the hook all
+    would — and the doctor would then report a workstation's correctly-empty
+    store as a delivery failure, which is the mirror image of the defect the
+    widening just fixed.
 
     Locked as a unit test on the reader rather than through a report, so the
     rule cannot be re-derived by someone reading only the rendered output.
     """
-    assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": "remote_cowork"})[0] \
+    assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": "ssh-remote"})[0] \
         == prov.UNSURE
+
     assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": "remote_mobile",
                               "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_x"})[0] \
         == prov.EPHEMERAL
@@ -1353,12 +1385,12 @@ def test_the_surface_is_read_from_the_session_id_not_the_entrypoints_shape(
 def test_the_surface_test_is_the_hooks_own_three_arms():
     """Copied from `skills-bootstrap.sh`, and copied EXACTLY — no wider, no narrower.
 
-    The sibling test above holds the widening that is NOT settled (the six
-    `remote_*` spellings, where `remote_cowork` may well be durable). This one
-    holds the three arms that ARE settled, because they are the hook's own: it
-    installs on a remote session id, on the exact entrypoint `remote`, or on
-    `SKILLS_BOOTSTRAP_FORCE`. Agreeing with the hook is not the same act as
-    guessing past it, and only the second is on hold.
+    The three arms are the hook's own: it installs on a remote session id, on an
+    entrypoint BEGINNING with `remote`, or on `SKILLS_BOOTSTRAP_FORCE`. The
+    sibling tests above hold the second arm's shape (all seven spellings, and
+    `ssh-remote` as the prefix-not-substring pin); this one holds all three
+    together, because reading FEWER of them than the hook is disagreement rather
+    than caution, and it is silent.
 
     Asserted on the reader as well as end to end, so the rule survives someone
     reading only the rendered output.
@@ -1374,10 +1406,18 @@ def test_the_surface_test_is_the_hooks_own_three_arms():
     assert prov.read_surface({"SKILLS_BOOTSTRAP_FORCE": "0"})[0] == prov.EPHEMERAL
     # An empty string IS unset to `-z`, and so must be unset here.
     assert prov.read_surface({"SKILLS_BOOTSTRAP_FORCE": ""})[0] == prov.DURABLE
-    # The EXACT value only: `remoteish` starts with `remote` and is not it, so a
-    # prefix match — the widening on hold — fails this line.
+    # `remoteish` is NOT in Claude Code's 26-value entrypoint allowlist, and it
+    # reads EPHEMERAL here. That is this line's whole content now, and it is
+    # deliberate: it used to assert UNSURE, pinning the exact match, and the
+    # widening was written knowing it would red exactly here.
+    #
+    # It is the RESIDUAL, kept as an assertion rather than a comment: an open
+    # prefix admits any future `remote*` spelling without anyone deciding it
+    # should, where an explicit set of the seven would fail closed on one. The
+    # hook's surface-guard comment argues the trade; this line is what makes a
+    # reader meet it.
     assert prov.read_surface({"CLAUDE_CODE_ENTRYPOINT": "remoteish"})[0] \
-        == prov.UNSURE
+        == prov.EPHEMERAL
 
 
 def test_a_locked_skill_the_account_store_delivers_is_not_called_missing(
@@ -3428,6 +3468,17 @@ def test_an_ephemeral_verdict_carried_by_force_alone_says_so(tmp_path, capsys,
     # NOT carry the caveat — it is not a hand-exported variable, and a caveat on
     # every cloud session is one the reader learns to skip.
     monkeypatch.setenv("CLAUDE_CODE_REMOTE_SESSION_ID", "cse_deadbeef")
+    _, out = run_autolock(store, project, capsys)
+    assert "SURFACE  ephemeral" in out, out
+    assert "rests on SKILLS_BOOTSTRAP_FORCE ALONE" not in flat(out), out
+
+    # SECOND NEGATIVE CONTROL: a `remote_*` entrypoint carries the verdict on
+    # its own, so the caveat is equally wrong there — unsetting the variable
+    # would not change the reading, and the sentence tells the reader it would.
+    # This is the arm the widening moved, and with the clause left on
+    # `!= "remote"` it fires on six of the seven remote spellings.
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE_SESSION_ID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "remote_desktop")
     _, out = run_autolock(store, project, capsys)
     assert "SURFACE  ephemeral" in out, out
     assert "rests on SKILLS_BOOTSTRAP_FORCE ALONE" not in flat(out), out

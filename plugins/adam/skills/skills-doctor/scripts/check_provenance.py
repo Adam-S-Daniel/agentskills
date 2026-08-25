@@ -930,8 +930,8 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
     (#85).
 
     THE THREE ARMS ARE COPIED FROM `.claude/hooks/skills-bootstrap.sh`, which
-    installs when a remote session id is set, OR `CLAUDE_CODE_ENTRYPOINT` is
-    EXACTLY `remote`, OR `SKILLS_BOOTSTRAP_FORCE` is set, and skips otherwise.
+    installs when a remote session id is set, OR `CLAUDE_CODE_ENTRYPOINT` BEGINS
+    WITH `remote`, OR `SKILLS_BOOTSTRAP_FORCE` is set, and skips otherwise.
     Reading a narrower test than the hook it diagnoses is not caution, it is
     disagreement — and it is silent, because the narrower reading returns
     `unsure`/`durable`, which is the quiet answer. Measured: on a surface the
@@ -940,15 +940,25 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
     eight undelivered locked skills. That is #85's headline defect surviving on a
     surface the hook itself installs on.
 
-    WHAT IS NOT COPIED, AND MUST NOT BE: any widening to the six `remote_*`
-    spellings. A prefix match on `remote` is the fix that looks equivalent and is
-    held deliberately (#85 §5) — the binary's own display classifier groups
-    `remote_cowork` with `local-agent`, so "no durable entrypoint starts with
-    `remote`" is unproven, and assuming it would call a durable Cowork machine
-    ephemeral and report its correctly-empty store as a delivery failure. The
-    EXACT value `remote` is a different question, already settled in this repo's
-    own hook, so matching it is agreement rather than a widening. `remote_cowork`
-    stays UNSURE.
+    THE SECOND ARM IS A PREFIX, AND IT MOVED IN STEP WITH THE HOOK. It used to
+    be the exact string `remote`, because the binary's display map groups
+    `remote_cowork` with `local-agent` and "no durable entrypoint starts with
+    `remote`" was therefore called unproven. That objection did not survive
+    reading the map: it is a display-NAME map, not a durability map — it also
+    groups `remote_desktop` with `claude-desktop`. The three tables that DO
+    carry durability all put `remote_cowork` on the remote side, and the durable
+    Cowork spelling is `local-agent`. The hook's own comment carries the
+    measurement (build 2.1.243, GIT_SHA 8565f923…): 26 legal entrypoints, seven
+    beginning with `remote`, none of the seven in the durable set.
+
+    This file does not get to hold a different opinion. Whatever the hook
+    installs on is what an empty store has to be judged against, so the rule
+    here is "agree with the hook", not "be independently sure" — and the hook is
+    where the argument for the prefix, and its residual, is written down.
+
+    NOT A SUBSTRING, for the same reason as the hook: `ssh-remote` is a legal
+    entrypoint naming a DURABLE workstation over SSH, and `in`/`find` would
+    match it where `startswith` does not.
 
     Anything else — an entrypoint with no session id — is UNSURE rather than
     durable. It is treated as durable everywhere a judgement depends on it,
@@ -963,7 +973,7 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
     # `SKILLS_BOOTSTRAP_FORCE=0` forces the install too. Reading the value here
     # would disagree with the hook in the one direction nobody thinks to check.
     forced = bool(env.get("SKILLS_BOOTSTRAP_FORCE", ""))
-    if remote or entrypoint == "remote" or forced:
+    if remote or entrypoint.startswith("remote") or forced:
         return Surface(EPHEMERAL, entrypoint, remote, forced)
     if not entrypoint:
         return Surface(DURABLE, entrypoint, remote, forced)
@@ -2984,9 +2994,15 @@ def render(record: Record, record_path: Path, skills_dir: Path,
         # arm would disagree with the hook silently — the failure this file
         # exists to stop — whereas a reader who is told which input carried the
         # verdict can check it in one command.
-        if forced and not remote and entrypoint != "remote":
+        # `startswith`, matching the second arm. With `!= "remote"` this said
+        # "FORCE ALONE" on any of the other six `remote_*` entrypoints, where
+        # the entrypoint arm carried the verdict too and unsetting the variable
+        # would change nothing — a caveat that names the wrong input and sends
+        # the reader to run a command that cannot help.
+        if forced and not remote and not entrypoint.startswith("remote"):
             para += (" That verdict rests on SKILLS_BOOTSTRAP_FORCE ALONE — no "
-                     "remote session id, and no entrypoint of exactly `remote`. "
+                     "remote session id, and no entrypoint beginning with "
+                     "`remote`. "
                      "The hook agrees, testing only whether the variable is SET "
                      "(so even =0 forces an install). But if you exported it by "
                      "hand on a durable machine, this is that machine being read "
