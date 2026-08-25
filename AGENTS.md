@@ -267,6 +267,45 @@ e2e and lint were FAILURE while the session reported CI green and moved on.)
 - Treat "watch done" as "now verify", never as "passed". Don't launch a watch
   and go passive without a definite verify-the-rollup step on resume.
 
+## A successful `git push` does not mean your commit exists
+
+Same shape as the trap above — an exit code that belongs to a different command
+than the one you meant to measure — but it bites at the other end of the cycle,
+and it is worse because the artifact it leaves behind looks finished.
+
+A pre-commit hook that refuses the commit does not stop the push. `git commit`
+exits non-zero and writes nothing; the `git push` that follows then pushes the
+branch at whatever HEAD still is — the base commit — and prints exactly what a
+real push prints:
+
+```
+ * [new branch]      claude/my-branch -> claude/my-branch
+branch 'claude/my-branch' set up to track 'origin/claude/my-branch'.
+```
+
+The branch is real, a PR can be opened on it, and the diff is empty. Nothing in
+the push output is false; it just answers a question you did not ask.
+
+**This is a hosted-session problem specifically.** The fleet's `secrets-scan`
+pre-commit guard (delivered by cms-platform's `dev-hooks-sync.yml`) requires
+`gitleaks` on `PATH` and FAILS CLOSED when it is missing — correctly, since a
+security gate that skips when absent is not a gate. A fresh container has no
+`gitleaks`, so every commit in one is refused until you install it. (Measured
+2026-08-25 on adamdaniel.ai: the hook printed its install instructions, the
+commit never happened, `git push -u` reported a new branch, and
+`git log --oneline -1` was still the base merge commit.)
+
+- **Verify the commit, not the push.** `git log --oneline -1` should show your
+  message, and `git status --short` should be clean. Or compare directly:
+  `git rev-parse HEAD` must differ from `git rev-parse origin/<base>`.
+- **`&&`-chain commit into push** so a refused commit stops the chain. A
+  newline or `;` between them does not — that is what turns a blocked commit
+  into a pushed branch.
+- **Install the tool; do not reach for the bypass.** `SKIP_SECRETS_SCAN=1`
+  exists for an emergency, and a missing binary in a container you control is
+  not one — a release binary is one `curl` away, and CI scans the PR either
+  way, so bypassing locally only moves the finding later.
+
 ## Dependency updates
 
 Dependabot runs with a **minimum package age** (`cooldown`) so an unattended
