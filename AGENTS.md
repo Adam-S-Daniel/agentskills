@@ -517,21 +517,34 @@ noise. So: **detect first, and say nothing at all when the check passes.** A
 session that opens by telling the operator to paste a script they pasted last
 week has spent their attention and taught them to skim the next one.
 
-Check when the work touches skills, or when a skill you expected is missing —
-not as a session-start ritual, and never more than once per session.
+Run the check once per session and never again that session. Not as a greeting —
+answer whatever you were actually asked first — but do **not** wait for the work
+to touch skills either. The gap is invisible precisely in the sessions where
+nobody is thinking about skills, so a skills-work trigger mostly guarantees the
+operator never hears about it. The conditions below are the anti-nag mechanism,
+not the timing: they fire only when the gap is real and unfixed, and condition 3
+goes false forever the moment the operator closes it.
 
 **Cloud (claude.ai) — PROMPT, never act.** The setup-script field lives in the
 environment settings and is not reachable from inside a session, so the most you
 can do is ask. Prompt only when **all four** hold; any one false means stay
-quiet:
+quiet.
+
+First resolve the project dir, because **`$CLAUDE_PROJECT_DIR` is unset on this
+surface** (measured on `remote_mobile`, 2026-08-25): use it when set, otherwise
+the nearest ancestor of the cwd that holds more than one repo checkout — in a
+hosted multi-repo session that is the cwd's parent, `/home/user`. Substituting an
+empty value silently turns conditions 2 and 3 into probes of `/`, which answers
+"not multi-repo" and suppresses the prompt — the exact failure this paragraph
+exists to prevent. Call the resolved value `$project` below.
 
 1. the session is hosted — entrypoint is `remote*`/`claude_in_slack`/
    `claude-in-slack`/`claude-in-teams`, **or** `$CLAUDE_CODE_REMOTE_SESSION_ID`
    is set (that `OR` is the whole rule; see agentskills' `multi-repo-delivery.md`);
-2. the shape is **multi-repo** — `$CLAUDE_PROJECT_DIR` has no `skills.lock` of
-   its own but at least one child directory does. A single-repo session needs
-   nothing: its own committed `.claude/settings.json` fires the hook;
-3. `$CLAUDE_PROJECT_DIR/.claude/settings.json` does not already register a
+2. the shape is **multi-repo** — `$project` has no `skills.lock` of its own but
+   at least one child directory does. A single-repo session needs nothing: its
+   own committed `.claude/settings.json` fires the hook;
+3. `$project/.claude/settings.json` does not already register a
    `skills-bootstrap` SessionStart hook — **this is the "already there" test, so
    run it before opening your mouth**;
 4. some child actually ships `.claude/hooks/skills-bootstrap.sh`, so there is
