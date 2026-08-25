@@ -75,6 +75,17 @@ bundle's skills, while the account store's 19 loaded normally. In a multi-repo
 session the collision count is zero — and the account store is the *only*
 channel.
 
+> **2026-08-24 — still true, and now conditional.** This measurement stands: it
+> is about the settings chain, and nothing about it has changed. But it holds
+> because of the WIRING half, not because of what the hook would install if it
+> ran. Since ADR 0007 the hook reads every discovered repo's lock and installs
+> the union, so the moment a session gets a `cwd`- or user-level settings file
+> (see [`docs/multi-repo-delivery.md`](../multi-repo-delivery.md)) every sentence
+> in this section and in §6 and §7 inverts: the record file appears, the `adam`
+> skills load, and the collision count stops being zero. Read the conditional,
+> not the heading — and note §6's unmeasured case (project `.claude/skills/` vs
+> account `synced/`) was tolerable precisely because the hook never ran here.
+
 ## 5. The measurement
 
 Both probes, independently, on a single-repo cloud session:

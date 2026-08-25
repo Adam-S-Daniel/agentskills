@@ -94,5 +94,6 @@ Optional sections for high-impact decisions:
 | [0002](0002-limit-account-store-to-repo-independent-skills.md) | Limit the claude.ai account store to personal, repo-independent skills | Accepted |
 | [0003](0003-retire-the-sha-pinning-skill.md) | Retire the SHA-pinning skill and carry its rule in managed guidance | Accepted (superseded in part by 0004) |
 | [0004](0004-drop-the-version-comment-from-sha-pins.md) | Drop the version comment from SHA-pinned actions | Accepted |
-| [0005](0005-resolve-hooks-only-from-cwd-and-user-settings.md) | Resolve hooks only from the cwd and user settings chains | Accepted |
+| [0005](0005-resolve-hooks-only-from-cwd-and-user-settings.md) | Resolve hooks only from the cwd and user settings chains | Accepted (open questions answered by 0007) |
 | [0006](0006-drive-the-account-store-drift-loop-from-one-published-artifact.md) | Drive the account-store drift loop from one published artifact, read by two repos on their own schedules | Accepted |
+| [0007](0007-install-the-union-of-every-discovered-lock.md) | Install the union of every discovered lock in a multi-repo session | Accepted |

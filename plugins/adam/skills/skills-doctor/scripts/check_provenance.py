@@ -170,14 +170,24 @@ THE_BYTES_THE_LOCK_NAMES = (
 # `hook_fate` is total over this set and RAISES rather than defaulting. A default
 # arm here would mean "no rung objected", which is precisely the reading that was
 # wrong — the rungs it had not asked were the ones that delete.
+#
+# TWO OF THESE RUNGS ARE QUESTIONS ABOUT THE WHOLE SESSION rather than about the
+# one lock being reported, and that is what the union changed. The hook installs
+# a destination iff every row naming it — across every lock it discovered —
+# agrees on one normalised digest AND no single lock contributed that name
+# twice. So "is this name duplicated" is asked of every lock at once, and
+# "do the locks disagree about it" cannot be asked of one lock at all. Both
+# arrive through `Union`; see `read_union`.
 LOCK_REFUSED = "not-reached-the-lock-is-refused"
 LEFT_UNREPLACED = "left-in-place-unreplaced"
 DELETED_BY_THE_DUP_GUARD = "deleted-by-the-dup-guard"
+DELETED_BY_THE_CROSS_LOCK_CONFLICT = "deleted-by-the-cross-lock-conflict"
 DELETED_BY_THE_COLLISION_GUARD = "deleted-by-the-collision-guard"
 COLLISION_UNMEASURED = "collision-guard-unmeasured"
 REPLACED = "replaced-by-the-locked-copy"
 FATES = (LOCK_REFUSED, LEFT_UNREPLACED, DELETED_BY_THE_DUP_GUARD,
-         DELETED_BY_THE_COLLISION_GUARD, COLLISION_UNMEASURED, REPLACED)
+         DELETED_BY_THE_CROSS_LOCK_CONFLICT, DELETED_BY_THE_COLLISION_GUARD,
+         COLLISION_UNMEASURED, REPLACED)
 
 # The fates under which the locked skill is still delivered out of THIS
 # directory, and therefore the only ones any sentence may say "delivery is
@@ -191,7 +201,8 @@ STILL_DELIVERS = frozenset({REPLACED})
 # and one nothing attributes to the hook — say the same thing about the same
 # rung, which is the mistake the ladder exists to stop being possible.
 DUP_GUARD_DELETES = (
-    "more than one row of this lock folds onto this one destination name. The "
+    "more than one row of ONE discovered lock folds onto this one destination "
+    "name. The "
     "install directory is FLAT, so `<bundle-a>/{name}` and `<bundle-b>/{name}` "
     "are one "
     "directory — the hook's lock reader stamps both rows `dup`, and the install "
@@ -200,23 +211,78 @@ DUP_GUARD_DELETES = (
     "after `DEGRADED` as `lock rows share a destination name, none installed`. "
     "`scripts/generate_skills_lock.py` refuses to write such a lock, so this is "
     "a hand-edited one, or one written before that rule existed. Rename the "
-    "skill directory in all but one of the registries that ship it.")
+    "skill directory in all but one of the registries that ship it. This is the "
+    "INTRA-LOCK reading and it is one lock to correct; two DIFFERENT locks "
+    "naming this destination at different digests is the sibling case, reported "
+    "as `deleted-by-the-cross-lock-conflict`, and it is two locks to reconcile. "
+    "The hook reports them apart for exactly that reason while running them "
+    "through one `dup` arm, and this rung takes precedence over the sibling "
+    "when a store manages both — the hook's own `if not intra` is what decides "
+    "which of the two clauses its verdict carries.")
+# The sibling rung, and the one no reading of a SINGLE lock can reach: it is a
+# statement about two locks disagreeing, so a doctor that judged each lock alone
+# had nowhere to put it and reported the destination as merely absent.
+#
+# `{locks}` is the locks that disagree, and naming them is the whole remedy —
+# "{name} was not installed" sends a reader to whichever lock they thought of
+# first, which with fourteen attached repos is a search rather than a fix. It is
+# safe against `dedupe`, whose identity is (kind, subject, detail): the
+# disagreeing set is a property of the NAME and is therefore byte-identical in
+# every lock's copy of this finding, so the fold still happens. A finding
+# naming its OWN lock in `detail` is the thing that must never be written here.
+CROSS_LOCK_CONFLICT_DELETES = (
+    "more than one lock discovered in this session names `{name}` as a "
+    "destination and they do not agree on the digest for it ({locks}). The "
+    "install directory is FLAT, so one destination name is one directory with "
+    "one owner, and there is no non-invented tiebreak between two pinned locks "
+    "— serving bytes under a name whose own lock pins different bytes is the "
+    "integrity guarantee the lock exists for. So the hook stamps every row for "
+    "this name `dup`, removes the destination and installs NEITHER: this "
+    "directory is deleted and the skill is delivered by no lock at all, with "
+    "the verdict naming it after `DEGRADED` as `destination name(s) claimed at "
+    "different digests by different locks, none installed`. Note the direction "
+    "before reading this as a duplicate: locks naming the SAME digest for one "
+    "name are the ordinary fleet shape and collapse to a single install. "
+    "Reconcile the locks — regenerate them against one ref of the registry that "
+    "ships this skill — or open the session on one repo.")
+# `{path}` is the WHOLE path to the file, joined by the caller with `/` on a
+# Path rather than assembled here out of a directory and two more segments. The
+# hook's verdict names the repo root because that is what its own loop holds; a
+# reader of this report wants the file to move, so it gets the whole path — and
+# it has to be a path they can paste.
+#
+# Assembling it in the template was a Windows bug, not a style preference: this
+# sentence used to read "`{owner}/{name}/SKILL.md`", and `str(WindowsPath)`
+# renders backslashes, so the rendered text came out as
+# `C:\Users\...\skills/alpha/SKILL.md` — separators both ways in one path.
+# `pytest-windows` caught it on the assertion; the reader would have caught it
+# by pasting a path that does not resolve.
 COLLISION_GUARD_DELETES = (
-    "the project ships `.claude/skills/{name}/SKILL.md`, and personal "
-    "`~/.claude/skills` shadows the project's — so the hook DELETES this "
-    "directory to let the repo-owned copy win, skips the install, and names it "
-    "after `DEGRADED` as `collision(s) skipped, repo-owned wins`. Nothing is "
-    "broken by that and nothing needs deciding about the project's copy; it is "
+    "`{path}` is shipped by a repo in this "
+    "session, and personal `~/.claude/skills` shadows a repo's own — so the "
+    "hook DELETES this directory to let the repo-owned copy win, skips the "
+    "install, and names it after `DEGRADED` as `collision(s) skipped, "
+    "repo-owned wins`. Nothing is "
+    "broken by that and nothing needs deciding about the repo's copy; it is "
     "recorded because these bytes go away, which is not what the rest of this "
     "report would lead a reader to expect of a directory whose digest the lock "
-    "names.")
+    "names. The owning directory is NAMED rather than called `the project`, "
+    "because the hook consults more than one of them: the project dir first, "
+    "then every accepted lock's own repo. In a multi-repo session the project "
+    "dir is the PARENT of the repos and ships nothing at all, so `repo-owned` "
+    "no longer identifies a single repo and a bare name would leave the reader "
+    "unable to find the file they have to move.")
 COLLISION_GUARD_UNMEASURED = (
-    "`.claude/skills/{name}/SKILL.md` in the project could not be statted, and "
+    "one of the `.claude/skills/{name}/SKILL.md` paths the hook consults — the "
+    "project dir's, or an accepted lock's own repo's — could not be statted, "
+    "and "
     "the reason was not one that settles the question — not absent, not behind "
-    "a non-directory, not a symlink loop. So whether the project ships a "
-    "`{name}` of its own is UNMEASURED. If it "
-    "does, the next run deletes these bytes so the repo-owned copy wins; if it "
-    "does not, the bundle's copy is installed over them — provided the rungs "
+    "a non-directory, not a symlink loop. So whether any repo in this session "
+    "ships a "
+    "`{name}` of its own is UNMEASURED. If one "
+    "does, the next run deletes these bytes so the repo-owned copy wins; if "
+    "none "
+    "does, the bundle's copy is installed over them — provided the rungs "
     "below this one, which no reading of this disk predicts, are clear too. "
     "Reported rather than "
     "resolved, because a failure of that kind may be about THIS process rather "
@@ -335,6 +401,7 @@ OBSERVATION_KINDS: Dict[str, Tuple[str, ...]] = {
                          "unattributable-over-locked",
                          "bytes-are-the-locked-ones",
                          DELETED_BY_THE_DUP_GUARD,
+                         DELETED_BY_THE_CROSS_LOCK_CONFLICT,
                          DELETED_BY_THE_COLLISION_GUARD,
                          COLLISION_UNMEASURED,
                          "stale-out-of-scope", "stale"),
@@ -472,11 +539,20 @@ class Lock(NamedTuple):
     because `names` folds `bundle/skill` keys to their last segment — two keys
     can land on one directory, and the hook asks `may_replace` once per key.
 
-    `duplicates` is the destination names TWO OR MORE lock keys fold onto. The
+    `duplicates` is the destination names TWO OR MORE OF THIS LOCK'S keys fold
+    onto. The
     install dir is flat, so `adam/alpha` and `fastmail/alpha` are one directory:
     the hook's lock reader marks both rows `dup` and the install loop removes the
     destination and installs neither. A name here is one no lock row can deliver,
     whatever else is true of it.
+
+    WITHIN ONE LOCK, and it stays that way — this is a per-file reading and the
+    hook counts it per lock too, deliberately (two sibling repos both declaring
+    the bundle `adam` is the ordinary fleet shape, not a collision). What the
+    hook then asks ACROSS locks is a different question with a different remedy,
+    and `read_union` is where the two are put together; feeding a merged count
+    in here would mark every skill the fleet shares a duplicate and install
+    nothing.
     """
     state: str
     names: Set[str]
@@ -484,6 +560,47 @@ class Lock(NamedTuple):
     reason: Optional[str] = None
     digests: Mapping[str, FrozenSet[str]] = NO_DIGESTS
     duplicates: FrozenSet[str] = frozenset()
+
+
+# The default `conflicted` every `Union` built without one shares, read-only for
+# `NO_DIGESTS`' reason: a NamedTuple default is ONE object shared by every
+# instance, and a mapping that can be mutated in place is a leak between locks
+# waiting to be written.
+NO_CONFLICTS: Mapping[str, Tuple[str, ...]] = MappingProxyType({})
+
+
+class Union(NamedTuple):
+    """What the NEXT hook run declares, across every lock it discovers.
+
+    Not a merged `Lock`, and the distinction is the whole of it. A `Lock` is one
+    repo's declared expectation and stays reportable on its own; this is the
+    four facts that stopped being answerable from one lock the day the hook
+    started installing the union of all of them (ADR 0007):
+
+    * `names` — every destination SOME discovered lock declares. "Has this
+      skill left the lock?" is a question about removal, and the hook now
+      removes only what NO discovered lock names, so asking it of one lock
+      reports a removal that will not happen.
+    * `claims` — every (registry, bundle) pair SOME discovered lock declares.
+      The hook writes `claims.nul` as this union, so the prune's scope is the
+      union's scope: a directory permanently orphaned under one lock becomes
+      in-scope, and removable, the moment a sibling lock is in the session.
+    * `duplicated` — a destination SOME ONE lock names twice. The hook's `intra`
+      flag is `any(...)` over every row for the name, so one lock's authoring
+      error stamps the rows the OTHER locks contributed as well.
+    * `conflicted` — a destination two or more locks name at DIFFERENT digests,
+      mapped to the locks that disagree. Nothing installs there at all, and no
+      single lock can see the condition.
+
+    Built from the ACCEPTED locks only — the ones this file reads as PRESENT —
+    because a lock the hook refuses contributes no rows and no claims, so
+    nothing it once named is a prune candidate and nothing it names can
+    conflict with anything.
+    """
+    names: Set[str]
+    claims: Set[Tuple[str, str]]
+    duplicated: FrozenSet[str] = frozenset()
+    conflicted: Mapping[str, Tuple[str, ...]] = NO_CONFLICTS
 
 
 class Surface(NamedTuple):
@@ -542,11 +659,27 @@ class LockResult(NamedTuple):
     """One declared expectation, and everything judged against it.
 
     The store is scanned once and judged once per lock, rather than the locks
-    being merged into one expectation first. Merging would be an answer to
-    "which lock wins in a multi-repo session", which is an open policy question
-    (see docs/decisions/0005) and not one a diagnostic gets to settle by being
-    convenient. Reporting per lock needs no winner: every sentence stays
-    attributable to the repo that declared it.
+    being merged into one expectation first — and the reason for that has
+    CHANGED, which is worth stating because the old one was load-bearing and is
+    now false. It used to be that merging would answer "which lock wins in a
+    multi-repo session", an open policy question (docs/decisions/0005) a
+    diagnostic does not get to settle by being convenient.
+
+    ADR 0007 settled it, and the answer is not a winner: the hook installs the
+    UNION, identical (name, digest) rows from different locks collapse to one
+    install, and rows that disagree about a digest install NEITHER. So there is
+    nothing left for this file to decline to decide.
+
+    Per-lock reporting survives on its own merits, which are about ATTRIBUTION
+    rather than about an unanswered question. `alpha is missing` is not a
+    sentence anyone can act on in a session with fourteen repos attached until
+    it says which repo declared alpha, and the repo that declared it is the repo
+    whose owner can change it. The doctor never installs, so it can afford to
+    report every lock's reading where the hook has to pick one behaviour — and
+    where a question is genuinely the UNION's (has this left the lock, is it in
+    scope, do two locks disagree about it) it is asked of `Union`, not of the
+    lock in hand. `dedupe` then folds what several locks say identically, so
+    per-lock attribution does not become per-lock repetition.
     """
     path: Path
     lock: Lock
@@ -797,8 +930,8 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
     (#85).
 
     THE THREE ARMS ARE COPIED FROM `.claude/hooks/skills-bootstrap.sh`, which
-    installs when a remote session id is set, OR `CLAUDE_CODE_ENTRYPOINT` is
-    EXACTLY `remote`, OR `SKILLS_BOOTSTRAP_FORCE` is set, and skips otherwise.
+    installs when a remote session id is set, OR `CLAUDE_CODE_ENTRYPOINT` BEGINS
+    WITH `remote`, OR `SKILLS_BOOTSTRAP_FORCE` is set, and skips otherwise.
     Reading a narrower test than the hook it diagnoses is not caution, it is
     disagreement — and it is silent, because the narrower reading returns
     `unsure`/`durable`, which is the quiet answer. Measured: on a surface the
@@ -807,15 +940,25 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
     eight undelivered locked skills. That is #85's headline defect surviving on a
     surface the hook itself installs on.
 
-    WHAT IS NOT COPIED, AND MUST NOT BE: any widening to the six `remote_*`
-    spellings. A prefix match on `remote` is the fix that looks equivalent and is
-    held deliberately (#85 §5) — the binary's own display classifier groups
-    `remote_cowork` with `local-agent`, so "no durable entrypoint starts with
-    `remote`" is unproven, and assuming it would call a durable Cowork machine
-    ephemeral and report its correctly-empty store as a delivery failure. The
-    EXACT value `remote` is a different question, already settled in this repo's
-    own hook, so matching it is agreement rather than a widening. `remote_cowork`
-    stays UNSURE.
+    THE SECOND ARM IS A PREFIX, AND IT MOVED IN STEP WITH THE HOOK. It used to
+    be the exact string `remote`, because the binary's display map groups
+    `remote_cowork` with `local-agent` and "no durable entrypoint starts with
+    `remote`" was therefore called unproven. That objection did not survive
+    reading the map: it is a display-NAME map, not a durability map — it also
+    groups `remote_desktop` with `claude-desktop`. The three tables that DO
+    carry durability all put `remote_cowork` on the remote side, and the durable
+    Cowork spelling is `local-agent`. The hook's own comment carries the
+    measurement (build 2.1.243, GIT_SHA 8565f923…): 26 legal entrypoints, seven
+    beginning with `remote`, none of the seven in the durable set.
+
+    This file does not get to hold a different opinion. Whatever the hook
+    installs on is what an empty store has to be judged against, so the rule
+    here is "agree with the hook", not "be independently sure" — and the hook is
+    where the argument for the prefix, and its residual, is written down.
+
+    NOT A SUBSTRING, for the same reason as the hook: `ssh-remote` is a legal
+    entrypoint naming a DURABLE workstation over SSH, and `in`/`find` would
+    match it where `startswith` does not.
 
     Anything else — an entrypoint with no session id — is UNSURE rather than
     durable. It is treated as durable everywhere a judgement depends on it,
@@ -830,7 +973,7 @@ def read_surface(env: Optional[Dict[str, str]] = None) -> Surface:
     # `SKILLS_BOOTSTRAP_FORCE=0` forces the install too. Reading the value here
     # would disagree with the hook in the one direction nobody thinks to check.
     forced = bool(env.get("SKILLS_BOOTSTRAP_FORCE", ""))
-    if remote or entrypoint == "remote" or forced:
+    if remote or entrypoint.startswith("remote") or forced:
         return Surface(EPHEMERAL, entrypoint, remote, forced)
     if not entrypoint:
         return Surface(DURABLE, entrypoint, remote, forced)
@@ -898,7 +1041,7 @@ def lock_names_the_bytes(lock: Lock, name: str,
 
 
 def hook_fate(lock: Lock, name: str, *, replaceable: bool,
-              repo_owned: Optional[Set[str]]) -> str:
+              repo_owned: Optional[Mapping[str, Path]], union: Union) -> str:
     """What the next hook run does to `~/.claude/skills/<name>`, as one of `FATES`.
 
     The install loop's own ladder, in the hook's order, and TOTAL: every path
@@ -908,15 +1051,31 @@ def hook_fate(lock: Lock, name: str, *, replaceable: bool,
     The rungs this models, in `.claude/hooks/skills-bootstrap.sh`'s order:
 
       * the whole-lock gate, which exits inside the lock reader before the
-        install loop exists. Nothing is installed and nothing is removed;
+        install loop exists. Nothing is installed and nothing is removed FROM
+        THIS LOCK — under discovery a rejected lock degrades only its own
+        skills, so another lock in the same session may still deliver this
+        name, and `classify` never asks this rung at all (it guards on the lock
+        being PRESENT first);
       * `may_replace` — false means the directory is left exactly as it is and
         named after `DEGRADED` as shadowed. THIS IS THE RUNG ROUND 5 MODELLED,
         and everything below it is what it reported nothing about;
       * the `dup` guard — `rm -rf "${DEST:?}/$name"`, then the row is skipped.
-        Both rows sharing the destination are stamped, so neither is installed;
-      * the collision guard — the project ships `.claude/skills/<name>/SKILL.md`,
-        so `rm -rf "${DEST:?}/$name"` and repo-owned wins;
+        ONE bash arm, TWO fates, because what the loop does is identical and
+        what the reader has to do about it is not: `union.duplicated` is one
+        lock naming the destination twice (one lock to correct) and
+        `union.conflicted` is two locks naming it at different digests (two
+        locks to reconcile). Both are questions about every discovered lock at
+        once, which is why they arrive through `Union` and not through `lock`;
+      * the collision guard — some repo in the session ships
+        `.claude/skills/<name>/SKILL.md`, so `rm -rf "${DEST:?}/$name"` and
+        repo-owned wins;
       * the copy itself.
+
+    THE TWO `dup` FATES ARE ORDERED, and the order is the hook's own: it
+    computes `intra` first and emits the conflict notice only `if not intra`,
+    so a store managing both reads as the intra-lock duplicate. Swapping them
+    here would send a reader to reconcile two locks over a defect that lives
+    inside one of them.
 
     NOT MODELLED, and named here rather than silently folded into the copy: the
     source-index framing check, an unreachable source, the skill being absent at
@@ -944,12 +1103,25 @@ def hook_fate(lock: Lock, name: str, *, replaceable: bool,
     false through a plain file, a missing directory or a symlink loop and stays
     false, so those are measured "no" and not this. Reading the directory with
     `iterdir` instead made every one of them unmeasured, which put a finding at
-    exit 1 on a store the hook goes on to install into without complaint.
+    exit 1 on a store the hook goes on to install into without complaint. It is
+    a MAPPING rather than a set because the hook consults several directories
+    and its verdict names the winner whenever it is not the project dir; a fate
+    that knows a name is repo-owned but not by which repo cannot produce a
+    sentence the reader can act on.
+
+    `union` is the whole session's expectation, and the two `dup` rungs read it
+    rather than `lock`. `lock.duplicates` alone is the reading that was wrong:
+    the hook stamps `dup` when ANY contributing lock named the destination
+    twice, so a lock whose own rows are impeccable still has its row for that
+    name thrown away.
     """
     if lock.state in (REJECTED, UNREADABLE):
-        # Rung zero, and it is answered for every name at once: the reader exits
-        # before the loop, so there is no per-name question left to ask and
-        # `lock.names` is empty for the same reason.
+        # Rung zero, and it is answered for every name at once: the reader
+        # raises before this lock contributes a row, so there is no per-name
+        # question left to ask and `lock.names` is empty for the same reason.
+        # NOT a statement about the run: under discovery the other locks still
+        # install, and a name this lock alone would have delivered is simply
+        # not delivered.
         return LOCK_REFUSED
     if lock.state != PRESENT:
         raise ValueError(
@@ -962,13 +1134,68 @@ def hook_fate(lock: Lock, name: str, *, replaceable: bool,
             f"loop never visits it and it has no fate on this ladder")
     if not replaceable:
         return LEFT_UNREPLACED
-    if name in lock.duplicates:
+    # The hook's own precedence inside its single `dup` arm: `intra` first, and
+    # the conflict notice only `if not intra`. See the docstring.
+    if name in union.duplicated:
         return DELETED_BY_THE_DUP_GUARD
+    if name in union.conflicted:
+        return DELETED_BY_THE_CROSS_LOCK_CONFLICT
     if repo_owned is None:
         return COLLISION_UNMEASURED
     if name in repo_owned:
         return DELETED_BY_THE_COLLISION_GUARD
     return REPLACED
+
+
+def read_union(locks: List[Tuple[Path, Lock]]) -> Union:
+    """Fold every discovered lock the way the HOOK folds them. See `Union`.
+
+    ACCEPTED locks only: a lock this file reads as anything but PRESENT is one
+    the hook's reader refuses, and a refused lock contributes no rows and no
+    claims. Counting its names here would make the union claim a scope the
+    prune does not have, and counting its digests would invent conflicts out of
+    a file nothing was read from.
+
+    THE COLLAPSE COMES BEFORE THE COUNT, which is the ordering the hook's own
+    comment calls out as the one that breaks the ordinary input. The fleet's
+    locks largely declare the same `adam` bundle at the same ref, so identical
+    (name, digest) rows from fourteen repos are ONE install; a fold that
+    counted names first would mark every shared skill a duplicate and report a
+    healthy multi-repo session as delivering nothing.
+
+    `duplicated` is unioned rather than intersected for the reason
+    `hook_fate`'s docstring gives: the hook's `intra` flag is `any(...)` over
+    every row for the name, so one lock's authoring error decides the
+    destination for all of them. And a name in `duplicated` is deliberately
+    kept OUT of `conflicted`, because the hook emits its conflict notice only
+    `if not intra` — a store in both states is one lock to correct, not two to
+    reconcile.
+    """
+    names: Set[str] = set()
+    claims: Set[Tuple[str, str]] = set()
+    duplicated: Set[str] = set()
+    # name -> digest -> the locks naming that digest for it. Keyed by DIGEST
+    # first so that the collapse is the data structure rather than a step
+    # somebody has to remember to take.
+    by_digest: Dict[str, Dict[str, List[str]]] = {}
+    for path, lock in locks:
+        if lock.state != PRESENT:
+            continue
+        names |= lock.names
+        claims |= lock.claims
+        duplicated |= lock.duplicates
+        for name, values in lock.digests.items():
+            for value in values:
+                by_digest.setdefault(name, {}).setdefault(value, []).append(
+                    str(path))
+    conflicted: Dict[str, Tuple[str, ...]] = {}
+    for name, digests in by_digest.items():
+        if name in duplicated or len(digests) < 2:
+            continue
+        conflicted[name] = tuple(sorted(
+            {path for paths in digests.values() for path in paths}))
+    return Union(names, claims, frozenset(duplicated),
+                 MappingProxyType(conflicted))
 
 
 def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
@@ -989,6 +1216,44 @@ def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
     checkouts and `node_modules`, and a lock found four levels down is not one
     any session was started against.
 
+    THE THREE RULES BELOW ARE THE HOOK'S, and they are here because this file
+    exists to describe what the hook does. A doctor that discovers a lock the
+    hook ignores reports on an expectation nothing will ever deliver — it lists
+    skills as missing, blames the delivery, and sends the reader to fix a repo
+    that was never in the session:
+
+      * NOT A SYMLINK. `*/` matches a symlink to a directory and `[ -d ]`
+        follows it, so before the hook tested for this a child symlink read a
+        lock outside the project entirely, or pointed at `..` and read one
+        ABOVE the project dir. Both are now skipped there, so both are skipped
+        here.
+      * A GIT REPOSITORY ROOT — `<child>/.git`, as a FILE as well as a
+        directory, which is how a worktree and a submodule spell it. A
+        session's attached repos are clones; `testdata/`, `fixtures/` and
+        `vendor/` are not, and a lock inside one of them is a fixture rather
+        than a declaration any session made.
+      * THE LOCK FILE IS NOT A SYMLINK EITHER — AT EITHER ARM. That is a
+        separate rule from the one above rather than a restatement of it, and it
+        applies to the PROJECT'S OWN lock as well as to a child's. `Path.is_file()` follows
+        symlinks exactly as `[ -f ]` does, so a child that is a real, non-symlinked,
+        git-rooted directory can still hold a `skills.lock` symlinked to a file
+        outside the project — measured, installing under a clean
+        `skills: 1/1 … — OK`. The hook refuses that now, so this does too.
+      * DEDUPED BY RESOLVED PATH, so one physical lock reachable under two
+        names is one expectation rather than two. Kept even though the rule
+        above makes symlink aliasing unreachable: a HARD link is still two real
+        files at one inode, and `resolve()` cannot collapse it either — but a
+        hard link shares its bytes, so the cost is a double count rather than a
+        second expectation.
+
+    ONE DELIBERATE DIVERGENCE, stated rather than silently absorbed: the hook
+    additionally refuses a child whose directory NAME contains a control
+    character, because such a name reaches the model's session context through
+    its verdict and a newline there forges whole lines. This report goes to a
+    terminal, so it keeps no equivalent rule and will describe a lock the hook
+    refuses on that ground — over-reporting, in the one shape where the hook's
+    reason for refusing does not apply here.
+
     Falls back to the project's own path when nothing is found, so a machine that
     genuinely has no lock still reports `absent` rather than reporting nothing.
     An absent lock is not a finding: it is a machine this cannot verdict on.
@@ -1002,8 +1267,28 @@ def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
         children = sorted(project_dir.iterdir())
     except OSError:
         return [own]
-    found = [child / LOCK_NAME for child in children
-             if child.is_dir() and (child / LOCK_NAME).is_file()]
+    found: List[Path] = []
+    seen: set = set()
+    for child in children:
+        if child.is_symlink() or not child.is_dir():
+            continue
+        if not (child / ".git").exists():
+            continue
+        lock = child / LOCK_NAME
+        # `is_symlink()` BEFORE `is_file()`, which follows: see the third rule
+        # above. This also drops a dangling symlink and a directory by that
+        # name, which `is_file()` would have dropped silently anyway — the hook
+        # names those skips, and this file has no verdict to name them in.
+        if lock.is_symlink() or not lock.is_file():
+            continue
+        try:
+            key = str(lock.resolve())
+        except OSError:
+            key = str(lock)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(lock)
     return found or [own]
 
 
@@ -1241,8 +1526,17 @@ def read_lock(path: Path) -> Lock:
     """The destination names a lock declares, their digests, and its claims.
 
     `claims` is what decides whether a stale skill gets removed or kept: the hook
-    removes only within the pairs its own lock declares, so that two repos sharing
-    one ~/.claude/skills do not reap each other's installs.
+    removes only within the (registry, bundle) pairs the locks it DISCOVERED
+    declare, so that two repos sharing one ~/.claude/skills do not reap each
+    other's installs.
+
+    THE UNION OF THE ACCEPTED LOCKS' PAIRS, not this one lock's — `claims.nul`
+    is written from every lock the run accepted, which is what dissolves that
+    contention within a session rather than merely bounding it. So this field
+    is one INPUT to the scope question and never the answer to it; `read_union`
+    folds it and `classify` asks the fold. Reading a stale skill's scope off
+    the lock in hand reports a directory as permanently orphaned while a
+    sibling repo's lock is what makes the next run remove it.
 
     `digests` is what decides whether a directory nothing attributes to the hook
     gets overwritten anyway — `may_replace`'s second clause. See `Lock`.
@@ -1287,7 +1581,26 @@ def read_lock(path: Path) -> Lock:
     that can lie — everything called REJECTED here is refused by the real hook —
     and the skill's known limitations carry the other.
     """
+    # A LOCK FILE THE HOOK WOULD REFUSE TO OPEN READS AS ABSENT, because that is
+    # the hook's own outcome for it: `no skills.lock found, looked in <path> …
+    # its skills.lock is a symlink`. `Path.is_file()` follows symlinks exactly as
+    # `[ -f ]` does, so without this the doctor opens the file the hook declined
+    # to — and the two then contradict each other about the same path. Measured
+    # before this: the hook said no lock was found there while this file judged a
+    # store against that lock and exited 1, calling two correctly-delivered
+    # skills stale.
+    #
+    # ABSENT rather than UNREADABLE, deliberately: UNREADABLE means "there is an
+    # expectation here and it is broken", which would be a finding. There is no
+    # expectation — the hook will not read it — and "this machine has no lock the
+    # hook will use" is the true statement.
+    #
+    # `discover_locks` keeps its own symlink rule for the CHILD arm, which is a
+    # different question: whether such a lock is a separate expectation at all.
+    # This is the arm that answers what a discovered path turns out to hold.
     try:
+        if Path(path).is_symlink():
+            return Lock(ABSENT, set(), set())
         lock = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return Lock(ABSENT, set(), set())
@@ -1477,13 +1790,15 @@ def hook_sees_a_file(path: Path) -> Optional[bool]:
         return False if failure.errno in SETTLED_BY_THE_PATH else None
 
 
-def project_ships(project_skills: Path, names: Set[str]) -> Optional[Set[str]]:
-    """Which of `names` the project delivers, measured the way the hook measures.
+def project_ships(directories: List[Path],
+                  names: Set[str]) -> Optional[Dict[str, Path]]:
+    """Which of `names` a repo delivers and out of WHICH `.claude/skills`.
 
-    ONE STAT PER NAME, because that is the whole of the hook's collision guard:
-    `[ -f "$PROJECT_DIR/.claude/skills/$name/SKILL.md" ]` at
-    skills-bootstrap.sh:1120. The hook never lists that directory, and listing it
-    here answered a harder question than the one being asked — a plain FILE at
+    ONE STAT PER NAME PER DIRECTORY, because that is the whole of the hook's
+    collision guard: `[ -f "$PROJECT_DIR/.claude/skills/$name/SKILL.md" ]`, then
+    the same test against each accepted lock's own repo. The hook never lists
+    those directories, and listing them here answered a harder question than the
+    one being asked — a plain FILE at
     `.claude/skills` makes `iterdir` raise NotADirectoryError, which read as "the
     answer is unknown", while the hook's `-f` through a non-directory is
     definitively false and its next run installed both skills and deleted
@@ -1491,18 +1806,74 @@ def project_ships(project_skills: Path, names: Set[str]) -> Optional[Set[str]]:
     every locked name at exit 1 over a store the real hook then reported
     `skills: 2/2 … — OK` on.
 
-    None when ANY name's stat is unresolvable, because the fate this feeds is
-    per-name only after the set is known, and a caller handed a partial set
-    cannot tell a measured "no" from an unmeasured one.
+    SEVERAL DIRECTORIES, IN THE HOOK'S ORDER, and that is the half a
+    single-`--project-dir` reading could not have. In a multi-repo session the
+    project dir is the PARENT of the repos and has no `.claude/skills` at all,
+    so this resolved against a directory that does not exist and returned a
+    confident, measured EMPTY SET — "the project ships nothing" — for a name a
+    child repo really does ship. `hook_fate` then answered REPLACED for a
+    directory the next run deletes, and `delivered-by-the-project` could never
+    fire at all. ADR 0005's footnote is explicit that the doctor's lookup and
+    the hook's guard have to move together, because this lookup exists to
+    SUPPRESS a finding: widening one without the other leaves the net effect
+    unreadable.
+
+    The FIRST directory that answers wins and the rest are not asked, which is
+    the hook's own `break` — and it is why the answer is a mapping. The verdict
+    names the owning directory whenever it is not the project dir, and a caller
+    holding only a set of names cannot write that sentence.
+
+    None when a stat the hook WOULD HAVE MADE is unresolvable, which is what
+    keeps this state narrow enough for `COLLISION_UNMEASURED` to mean something:
+    a later directory's unreadable stat for a name an earlier one already claims
+    is a stat the hook never performs, so it cannot make the answer unknown. Any
+    unresolvable stat before that point does, because the fate this feeds is
+    per-name only after the whole mapping is known and a caller handed a partial
+    one cannot tell a measured "no" from an unmeasured one.
     """
-    shipped: Set[str] = set()
+    shipped: Dict[str, Path] = {}
     for name in sorted(names):
-        answer = hook_sees_a_file(project_skills / name / "SKILL.md")
-        if answer is None:
-            return None
-        if answer:
-            shipped.add(name)
+        for directory in directories:
+            answer = hook_sees_a_file(directory / name / "SKILL.md")
+            if answer is None:
+                return None
+            if answer:
+                shipped[name] = directory
+                break
     return shipped
+
+
+def repo_owned_dirs(project_dir: Path, locks: List[Tuple[Path, Lock]]
+                    ) -> List[Path]:
+    """The `.claude/skills` directories the hook's collision guard consults.
+
+    The project dir first, then every ACCEPTED lock's own repo — the hook's
+    `REPO_OWNED_DIRS`, built in the same order and with the project dir
+    excluded from the tail rather than repeated in it, so the first answer is
+    the project's wherever both hold the name.
+
+    A repo shipping both a lock naming X and its own `.claude/skills/X/SKILL.md`
+    has made the more specific declaration about X, and overwriting that in the
+    flat personal store is the C3 shadowing hazard the guard exists for. With
+    one lock in the project dir this list is one entry and nothing changes.
+
+    Paths are compared as written rather than resolved, which is the convention
+    everywhere else in this file. The cost of a missed match is that one
+    directory is statted twice and gives the same answer twice; the cost of
+    resolving here would be a path in a finding that is not the one the reader
+    passed in.
+    """
+    directories = [project_dir / ".claude" / "skills"]
+    seen = {str(project_dir)}
+    for lock_path, lock in locks:
+        if lock.state != PRESENT:
+            continue
+        repo = lock_path.parent
+        if str(repo) in seen:
+            continue
+        seen.add(str(repo))
+        directories.append(repo / ".claude" / "skills")
+    return directories
 
 
 def skill_names(directory: Path) -> Set[str]:
@@ -1790,8 +2161,9 @@ def cluster(stamped: List[Tuple[str, float]]) -> List[List[Tuple[str, float]]]:
 
 
 def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
-             origins: Dict[str, Origin], account: Set[str] = frozenset(),
-             repo_owned: Optional[Set[str]] = frozenset(),
+             origins: Dict[str, Origin], union: Union,
+             account: Set[str] = frozenset(),
+             repo_owned: Optional[Mapping[str, Path]] = MappingProxyType({}),
              store_state: str = PRESENT,
              surface: str = DURABLE,
              ) -> Tuple[List[Row], List[Finding], List[Finding]]:
@@ -1827,9 +2199,29 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
     `account` and `repo_owned` are the names the OTHER two channels deliver. They
     are here only so that "not in the personal store" does not get reported as
     "not delivered": both of those channels satisfy a locked name without the
-    hook installing anything. `repo_owned` is None when the project's skills
-    directory answered no name's stat — see `project_ships` — and every use
+    hook installing anything. `repo_owned` maps a name to the repo directory
+    that ships it, and is None when one of the stats the hook would make was
+    unresolvable — see `project_ships` — and every use
     of it below has to say what it does with an answer nobody has.
+
+    `union` IS REQUIRED, AND IT IS NOT `lock`. This function is called once per
+    lock, and three of the questions it asks stopped being answerable from the
+    lock in hand the day the hook started installing the union of every lock it
+    discovers: has this skill left the lock (the hook removes only what NO
+    discovered lock names), is its bundle still in scope (the prune's scope is
+    the union of the accepted locks' claims), and is its destination contested
+    (a question about two locks, which one lock cannot see). Judged against
+    `lock` alone, the `stale` note told the reader "the next bootstrap removes
+    it" about a directory a sibling repo's lock keeps alive — a finding whose
+    stated cause never happens, which is the class of defect the fate ladder
+    was built to end. A default here would put that reading back one careless
+    call site at a time, so there is none.
+
+    What stays per-lock is what one repo's owner can act on: which lock names a
+    directory, what that lock's digest for it is, and therefore whether the
+    hook refuses to overwrite it. `dedupe` folds whatever several locks say
+    identically, so the union-scoped sentences below are written once for the
+    reader however many locks raise them.
     """
     rows: List[Row] = []
     findings: List[Finding] = []
@@ -1867,16 +2259,24 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             replaceable = (record_vouches_for(record, name, measured)
                            or lock_names_the_bytes(lock, name, measured))
             fate = (hook_fate(lock, name, repo_owned=repo_owned,
-                              replaceable=replaceable)
+                              replaceable=replaceable, union=union)
                     if in_lock else None)
             if fate == DELETED_BY_THE_DUP_GUARD:
                 findings.append(_observed(
                     DELETED_BY_THE_DUP_GUARD, origin, name,
                     DUP_GUARD_DELETES.format(name=name) + but_here))
+            elif fate == DELETED_BY_THE_CROSS_LOCK_CONFLICT:
+                findings.append(_observed(
+                    DELETED_BY_THE_CROSS_LOCK_CONFLICT, origin, name,
+                    CROSS_LOCK_CONFLICT_DELETES.format(
+                        name=name,
+                        locks=name_list(list(union.conflicted[name])))
+                    + but_here))
             elif fate == DELETED_BY_THE_COLLISION_GUARD:
                 notes.append(_observed(
                     DELETED_BY_THE_COLLISION_GUARD, origin, name,
-                    COLLISION_GUARD_DELETES.format(name=name) + but_here))
+                    COLLISION_GUARD_DELETES.format(
+                        path=repo_owned[name] / name / "SKILL.md") + but_here))
             elif fate == COLLISION_UNMEASURED:
                 findings.append(_observed(
                     COLLISION_UNMEASURED, origin, name,
@@ -1936,8 +2336,13 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     "update it, and the hook removes only what the record "
                     "proves it installed — so on that expectation alone it is "
                     "left alone indefinitely. Where a session has several locks "
-                    "this is one lock's reading, not a verdict about the name: "
-                    "another lock may name it, and would report it separately. "
+                    "this is one lock's reading and not a verdict about the "
+                    "name, and the reading that decides delivery is the UNION "
+                    "of them: the hook installs every lock it discovers, so a "
+                    "sibling lock naming this name means the bundle's copy IS "
+                    "delivered here and that lock's own findings are the ones "
+                    "to act on. The `in lock:` line on this directory's row "
+                    "above names every lock that declares it. "
                     "Four ways to land here: it is yours (right), you expected "
                     "the bundle to own it (a delivery gap), the hook "
                     "installed it and then rewrote the record after failing to "
@@ -1978,7 +2383,13 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
 
         if not expected:
             continue
-        in_scope = (entry.registry, entry.bundle) in lock.claims
+        # UNION-SCOPED, both of them, and this is the pair that used to lie.
+        # Whether a directory is stale is a question about what the next run
+        # REMOVES, and the hook removes only what NO discovered lock names and
+        # only inside the union of the accepted locks' claims — so a sibling
+        # repo's lock is what decides both. See `classify`'s docstring.
+        in_union = name in union.names
+        in_scope = (entry.registry, entry.bundle) in union.claims
         if in_lock:
             # `may_replace`'s clauses, asked of the reader the hook asks: the
             # record vouches for exactly these bytes, or the lock names them.
@@ -1988,17 +2399,25 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             # refuses. Then the LADDER, because a yes here is only the rung
             # after the whole-lock gate.
             fate = hook_fate(
-                lock, name, repo_owned=repo_owned,
+                lock, name, repo_owned=repo_owned, union=union,
                 replaceable=(record_vouches_for(record, name, measured)
                              or lock_names_the_bytes(lock, name, measured)))
             if fate == DELETED_BY_THE_DUP_GUARD:
                 findings.append(_observed(
                     DELETED_BY_THE_DUP_GUARD, HOOK, name,
                     DUP_GUARD_DELETES.format(name=name) + but_here))
+            elif fate == DELETED_BY_THE_CROSS_LOCK_CONFLICT:
+                findings.append(_observed(
+                    DELETED_BY_THE_CROSS_LOCK_CONFLICT, HOOK, name,
+                    CROSS_LOCK_CONFLICT_DELETES.format(
+                        name=name,
+                        locks=name_list(list(union.conflicted[name])))
+                    + but_here))
             elif fate == DELETED_BY_THE_COLLISION_GUARD:
                 notes.append(_observed(
                     DELETED_BY_THE_COLLISION_GUARD, HOOK, name,
-                    COLLISION_GUARD_DELETES.format(name=name) + but_here))
+                    COLLISION_GUARD_DELETES.format(
+                        path=repo_owned[name] / name / "SKILL.md") + but_here))
             elif fate == COLLISION_UNMEASURED:
                 findings.append(_observed(
                     COLLISION_UNMEASURED, HOOK, name,
@@ -2059,6 +2478,17 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
                     f"or move the directory out of the store, and the next run "
                     f"installs the locked copy.{but_here}"))
             continue
+        if in_union:
+            # THIS LOCK does not name it and a sibling one does, so the whole
+            # stale family is silent here: every sentence in it is a claim about
+            # a REMOVAL, and the next run removes nothing — the directory is
+            # still declared, still installed, still updated, by the lock that
+            # names it. That lock's own reading of the directory is the one to
+            # act on, and the row's `in lock:` line above says which lock that
+            # is. Reporting anything here is the defect this branch exists to
+            # stop: a cause the reader can go and check, and find did not
+            # happen.
+            continue
         if not in_scope:
             # Scope is checked BEFORE integrity, because out of scope the planner
             # short-circuits to `keep` without ever consulting the digest — so the
@@ -2067,15 +2497,25 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             # never emits.
             findings.append(_observed(
                 "stale-out-of-scope", HOOK, name,
-                f"left the lock, and the lock no longer declares the bundle "
+                f"left every lock discovered here, and none of them declares "
+                f"the bundle "
                 f"{entry.bundle!r} at the registry it came from. Removal is "
-                f"scoped to what the lock claims, so nothing here will ever "
+                f"scoped to what the discovered locks claim between them, so "
+                f"nothing here will ever "
                 f"clean it up — and the hook does not mention it either, because "
-                f"it is not in scope to have an opinion."))
+                f"it is not in scope to have an opinion. One sibling repo whose "
+                f"lock DOES declare that pair would bring it back in scope and "
+                f"make the next run remove it, so this is a statement about the "
+                f"session as it stands rather than about the directory — which "
+                f"is why it carries the same surface caveat the rest of the "
+                f"family does, where it used to carry none: it now says what a "
+                f"run would do rather than only that no run has an opinion."
+                + but_here))
         elif integrity in (EDITED, UNMEASURABLE):
             findings.append(_observed(
                 f"{integrity}-and-stale", HOOK, name,
-                f"{_cause(integrity)} and it has left the lock. The hook leaves "
+                f"{_cause(integrity)} and it has left every lock discovered "
+                f"here. The hook leaves "
                 f"it in place and degrades its verdict for as long as that holds "
                 f"— but what preserves it is the MISMATCH, not having left the "
                 f"lock: restore the original bytes and the next run removes it. "
@@ -2084,7 +2524,8 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             extra = dropped_files(skills_dir / name)
             findings.append(_observed(
                 "artefacts-and-stale", HOOK, name,
-                f"it has left the lock, and every file an upload would carry "
+                f"it has left every lock discovered here, and every file an "
+                f"upload would carry "
                 f"is byte-for-byte the one the hook installed — but files the "
                 f"upload filter drops"
                 f"{' (' + name_list(extra) + ')' if extra else ''} make the "
@@ -2098,8 +2539,10 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
         else:
             notes.append(_observed(
                 "stale", HOOK, name,
-                "left the lock, is untouched since install, and its registry and "
-                "bundle are still declared — the next bootstrap removes it. "
+                "left every lock discovered here, is untouched since install, "
+                "and its registry and "
+                "bundle are still declared by one of them — the next bootstrap "
+                "removes it. "
                 "Unless AGENTSKILLS_BUNDLE narrows that run away from its "
                 "bundle, which this cannot see from here: a narrowed run claims "
                 "authority over one bundle and leaves the rest alone." +
@@ -2129,9 +2572,15 @@ def classify(skills_dir: Path, names: List[str], record: Record, lock: Lock,
             if repo_owned and missing in repo_owned:
                 notes.append(Finding(
                     "delivered-by-the-project", missing,
-                    "not in the personal store because the project ships a skill "
-                    "of that name and repo-owned wins — the hook removes its own "
-                    "copy on purpose. The session sees the project's." + but_here))
+                    f"not in the personal store because a repo in this session "
+                    f"ships a skill of that name at "
+                    f"`{repo_owned[missing] / missing}` and repo-owned wins — "
+                    f"the hook removes its own copy on purpose. The session "
+                    f"sees the repo's. The directory is named rather than "
+                    f"called `the project` because the hook consults the "
+                    f"project dir AND every accepted lock's own repo, and in a "
+                    f"multi-repo session the project dir is the parent of them "
+                    f"all and ships nothing.{but_here}"))
                 continue
             if not attributable:
                 # No record means the hook has never delivered into this store.
@@ -2485,7 +2934,11 @@ def lock_findings(lock: Lock, lock_path: Path,
             "lock-rejected", str(lock_path),
             f"the hook's lock reader refuses this file ({lock.reason}), so it "
             f"installs nothing from it at all — every session start reports "
-            f"DEGRADED and the store keeps whatever it already had. Regenerate "
+            f"DEGRADED and names this file. A rejected lock now degrades only "
+            f"its OWN skills: with no other lock in the session the run reads "
+            f"nothing at all and the store keeps whatever it already had, and "
+            f"with siblings discovered they still install while this file "
+            f"contributes no rows and no claims. Regenerate "
             f"it with scripts/generate_skills_lock.py."
             f"{when_the_hook_runs(surface)}")]
     if lock.state == UNREADABLE:
@@ -2575,9 +3028,15 @@ def render(record: Record, record_path: Path, skills_dir: Path,
         # arm would disagree with the hook silently — the failure this file
         # exists to stop — whereas a reader who is told which input carried the
         # verdict can check it in one command.
-        if forced and not remote and entrypoint != "remote":
+        # `startswith`, matching the second arm. With `!= "remote"` this said
+        # "FORCE ALONE" on any of the other six `remote_*` entrypoints, where
+        # the entrypoint arm carried the verdict too and unsetting the variable
+        # would change nothing — a caveat that names the wrong input and sends
+        # the reader to run a command that cannot help.
+        if forced and not remote and not entrypoint.startswith("remote"):
             para += (" That verdict rests on SKILLS_BOOTSTRAP_FORCE ALONE — no "
-                     "remote session id, and no entrypoint of exactly `remote`. "
+                     "remote session id, and no entrypoint beginning with "
+                     "`remote`. "
                      "The hook agrees, testing only whether the variable is SET "
                      "(so even =0 forces an install). But if you exported it by "
                      "hand on a durable machine, this is that machine being read "
@@ -2617,13 +3076,21 @@ def render(record: Record, record_path: Path, skills_dir: Path,
                        f"without a declared expectation.")
     if len(results) > 1:
         # Said once, plainly, rather than left for the reader to infer from a
-        # column: several locks judging one store is the shape in which "which
-        # one wins" stops being obvious, and this script deliberately does not
-        # answer that (docs/decisions/0005).
+        # column. "Which one wins" was an open question when this paragraph was
+        # written and is now answered (docs/decisions/0007): the hook installs
+        # the UNION, matching rows collapse to one install and disagreeing ones
+        # install nothing — so there is no winner to name, rather than a winner
+        # this script declines to name. What is per-lock here is attribution:
+        # a finding is only actionable once it says which repo declared it.
         out += _para(f"{len(results)} locks were discovered one level below the "
-                     f"project directory and each is reported separately. This "
-                     f"names no winner among them: every finding below says "
-                     f"which lock declared it.", "  ")
+                     f"project directory and each is reported separately. The "
+                     f"bootstrap hook installs the UNION of all of them, so "
+                     f"there is no winner among them to name: every finding "
+                     f"below says which lock declared it, and the questions "
+                     f"that belong to the union — has a skill left the lock, is "
+                     f"its bundle still in scope, do two locks disagree about "
+                     f"one destination — are judged against all of them at "
+                     f"once. See docs/decisions/0007.", "  ")
 
     out += ["", f"SKILLS   {skills_dir} ({len(rows)} directories, "
                 f"excluding the account store {ACCOUNT_DIR}/)"]
@@ -2839,22 +3306,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     # row and the note came to disagree about one directory.
     locks = [(path, read_lock(path))
              for path in discover_locks(args.lock, project_dir)]
-    # After the locks, because `project_ships` needs the names to ask about: the
-    # hook asks its collision question once per row it is installing, so the
-    # candidates are the store's directories plus every name any lock declares.
-    repo_owned = project_ships(
-        project_dir / ".claude" / "skills",
-        set(names) | {name for _, lock in locks for name in lock.names})
-    origins = assign_origins(
-        skills_dir, names, record,
-        {name for _, lock in locks for name in lock.names})
+    # STORE-WIDE, and computed once, because these are facts about the session
+    # rather than about any one declared expectation — the same rule that keeps
+    # `store_findings` and `shadow_findings` outside the per-lock loop. The
+    # union is what the next hook run will install, so every question about
+    # what it REMOVES or REFUSES TO INSTALL is asked of this and not of a lock.
+    union = read_union(locks)
+    # After the locks, because `project_ships` needs both the names to ask about
+    # and the directories to ask in. The hook asks its collision question once
+    # per row it is installing, so the candidates are the store's directories
+    # plus every name any lock declares — and it asks it of the project dir plus
+    # every accepted lock's own repo, which is what `repo_owned_dirs` mirrors.
+    repo_owned = project_ships(repo_owned_dirs(project_dir, locks),
+                               set(names) | union.names)
+    origins = assign_origins(skills_dir, names, record, union.names)
 
-    # One store, judged once per declared expectation. See `LockResult`: the
-    # locks are deliberately not merged first.
+    # One store, judged once per declared expectation, against ONE union. See
+    # `LockResult`: the locks are deliberately not merged into a single
+    # expectation, and `classify` is handed the union separately so that the
+    # per-lock sentences and the union-scoped ones cannot be confused for each
+    # other.
     results: List[LockResult] = []
     for lock_path, lock in locks:
         rows, findings, notes = classify(
-            skills_dir, names, record, lock, origins, account=account,
+            skills_dir, names, record, lock, origins, union, account=account,
             repo_owned=repo_owned, store_state=store_state, surface=surface[0])
         tagged = [finding._replace(lock=str(lock_path))
                   for finding in lock_findings(lock, lock_path, surface[0])
