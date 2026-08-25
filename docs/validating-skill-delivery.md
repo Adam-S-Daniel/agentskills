@@ -34,9 +34,18 @@ echo "home       : $HOME"
 claude --version
 ```
 
-Then decide the surface from the table in
-[`multi-repo-delivery.md`](multi-repo-delivery.md) — do **not** infer it from
-the name. `ssh-remote` is durable; `claude-in-teams` is hosted.
+Then decide the surface. **Both lines matter, and they combine as an `OR`:**
+
+```
+the hook installs  ⇔  entrypoint is remote  OR  $CLAUDE_CODE_REMOTE_SESSION_ID is set
+```
+
+Do **not** infer the first half from the name — `ssh-remote` is durable,
+`claude-in-teams` is hosted; the table in
+[`multi-repo-delivery.md`](multi-repo-delivery.md) classifies all 26 values. And
+do not stop at the entrypoint: with the session-id variable set, **every** value
+installs, `cli` and `ssh-remote` included. A result that looks impossible for
+the entrypoint you read is usually the second arm.
 
 And establish which hook copy would run, since the alphabetically-first attached
 repo supplies it for the whole session:
