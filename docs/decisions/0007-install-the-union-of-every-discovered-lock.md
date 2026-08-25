@@ -353,6 +353,11 @@ symlinks — predates this work and is
 >   (`WinError 123`), so the new line-forging fixtures could not be built there.
 >   The convention for this already existed three tests away and was not applied.
 >
+> Also fixed there, and not recorded in the first draft of this block, which is
+> its own small instance of the same problem: the label refusal derived from
+> `UNPRINTABLE` (round 4's answer to a regression round 3 caused), and the
+> `emit` printf fallback widened to the whole line-forging class.
+>
 > Filed rather than fixed:
 > [#137](https://github.com/Adam-S-Daniel/agentskills/issues/137) — refuse a lock
 > by where it RESOLVES, not by being a symlink. The round-3 guard refuses
@@ -376,6 +381,71 @@ symlinks — predates this work and is
 > `_write_records` is total against surrogates across all five routes and both
 > locales; a symlinked CHILD and a symlinked PARENT are both handled correctly;
 > and the `-L`-before-`-f` ordering does what its comment says.
+
+> **ROUND 5, 2026-08-25 — the gate closed here.** Two lenses against ROUND 4's
+> fixes. E4's rule held a SIXTH time on the guard half and, for the first time on
+> this file, broke on the other: the `emit` lens found **no exploitable defect in
+> the code at all** — every claim BLOCKED with a control, including the printf
+> loop's quoting, its escape ordering, its 29 `printf -v` values, `local` scoping,
+> multibyte desynchronisation, and the `00` exclusion verified nine ways. The
+> guard lens found four regressions, all of them in round 4's own fixes.
+>
+> Fixed here:
+>
+> - **`UNPRINTABLE` was over-broad, and the refusal derived from it inherited
+>   that.** A TAB — or `\x0b`, `\x1c`, `\x1f`, `\x7f` — anywhere in the lock
+>   path's ANCESTRY refused every lock in the session, under `could not read …
+>   (invalid JSON or a bad field)`, naming a path `emit` had scrubbed so it did
+>   not exist, and prescribing a generator that refuses that path too. Three false
+>   statements in one line. The class is now the two members that are actually
+>   load-bearing at that boundary — `\x00`, which can forge a record in a
+>   NUL-framed stream, and lone surrogates, which this file's own utf-8 writer
+>   cannot write. Measured: the narrower class delivers AND makes the C3 shadowing
+>   guard fire and name the winner, where the wide class installed nothing and the
+>   pre-coupling version silently overwrote a repo-owned skill. Line-forging is
+>   `emit`'s job, and `emit` is the funnel every verdict passes through.
+> - **`skills-doctor`'s own-lock arm never got the rule.** Round 3 mirrored its
+>   CHILD rule into the doctor; round 4 extended the hook to its own-lock site and
+>   did not mirror that. The two then contradicted each other about one path: the
+>   hook said `no skills.lock found`, while the doctor opened that lock, judged the
+>   store against it, exited 1 and called two correctly-delivered skills stale.
+>   The rule now lives in `read_lock`, where a refused lock reads ABSENT — which is
+>   the hook's own outcome for it.
+> - **The no-lock headline contradicted its own reason clause.** "No skills.lock
+>   found … the project directory's own skills.lock was not read" is two statements
+>   about one file that cannot both be true, and the generic remedy that followed
+>   the wrong headline wrote THROUGH the symlink, exited 0 and changed nothing —
+>   a loop the reader could not leave by following the instruction. A refused
+>   own-lock now gets its own headline and its own remedy.
+> - **"Cannot drift again" was not test-enforced.** The label-refusal test
+>   hand-listed four characters out of 2081; narrowing the hook's class back left
+>   485 tests passing while TAB, VT and DEL labels mangled into `accepted.nul`
+>   again. Its parametrisation is now DERIVED from the hook's own `UNPRINTABLE`,
+>   the way `test_the_source_limits_are_the_hooks_own` reads `MAX_SOURCES` back
+>   out of the file. Widening the hook's class grows the test from 1 case to 36.
+> - **The collision message's comment was wrong for the third time**, and this
+>   time the correction is written as a rule rather than an example: position is
+>   used only for a value carrying a space or another out-of-charset character;
+>   everything else is echoed verbatim and unbounded. `https://` behaves exactly
+>   as `file:///`, and `NAME/NAME` needs no scheme at all — 40,150 characters of
+>   hyphenated prose echoed with nothing in front of it.
+> - **Two guards that could not fire, and two comments that had outlived their
+>   code**: the `00` iteration in the fallback loop (a bash variable cannot hold a
+>   NUL, so it expanded to `${safe//""/ }`), the orphaned half of `UNPRINTABLE`'s
+>   comment still claiming `_write_records` was its only consumer, and the
+>   fallback's "EVERY character the python branch scrubs" — false for invalid
+>   UTF-8, which no `${var//}` loop can reach, now stated instead of implied.
+>
+> Round 5 also produced the first measurements of the hook's COST: a realistic
+> worst case (400 lock-carrying children, a 108 KB verdict) runs in **0.42 s**,
+> 0.5% of the 90-second SessionStart budget, with the printf fallback marginally
+> faster than the python branch; `_LINE_ENDERS` costs 0.26 s at import, 0.07% of
+> the suite; and change 1's per-child subshell adds 0.23 s across 300 child repos.
+>
+> **The gate closes here** — not because nothing could be found, but because what
+> round 5 found was, for the first time, entirely comments, test coverage and
+> over-breadth rather than a reachable defect, and the code lens came back empty
+> with controls.
 
 Recorded so the coverage is not read as wider than it was:
 

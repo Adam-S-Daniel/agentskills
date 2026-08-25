@@ -2895,6 +2895,40 @@ def test_discovery_reads_only_the_child_repos_the_hook_would_read(tmp_path,
     assert "unattached" not in out, out
 
 
+def test_the_project_dirs_own_lock_that_is_a_symlink_is_not_discovered(tmp_path):
+    """The other arm, and the one that drifted.
+
+    `discover_locks` has two arms and `is_file()` follows symlinks in both, so
+    they do not share the check by default. The child arm grew the rule with the
+    hook; when the hook later extended it to its own-lock site, this arm was not
+    moved with it — and the result was the hook reporting `no skills.lock found`
+    for a path this function happily opened, judged a store against, and exited 1
+    over, calling two correctly-delivered skills stale.
+
+    Two diagnostics of one session contradicting each other about the same path
+    is precisely what the mirror exists to prevent, which is why this is asserted
+    per arm rather than once.
+    """
+    outside = _repo_with_lock(tmp_path / "elsewhere", "unattached", "alpha")
+    project = tmp_path / "project"
+    project.mkdir()
+    try:
+        (project / prov.LOCK_NAME).symlink_to(outside / prov.LOCK_NAME)
+    except OSError:                     # no privilege to make one here
+        pytest.skip("this platform does not permit creating symlinks")
+
+    # The path is still NAMED -- a machine with no usable lock must still be
+    # reportable -- but what it reads as is ABSENT, which is the hook's own
+    # outcome for it, rather than the outside lock's contents.
+    assert prov.discover_locks(None, project) == [project / prov.LOCK_NAME]
+    assert prov.read_lock(project / prov.LOCK_NAME).state == prov.ABSENT
+    # The control: the same lock, not symlinked, reads normally.
+    (project / prov.LOCK_NAME).unlink()
+    (project / prov.LOCK_NAME).write_bytes(
+        (outside / prov.LOCK_NAME).read_bytes())
+    assert prov.read_lock(project / prov.LOCK_NAME).state != prov.ABSENT
+
+
 def test_a_childs_lock_that_is_a_symlink_is_not_discovered(tmp_path):
     """The child is a real repo; only its LOCK is the alias.
 

@@ -205,7 +205,19 @@ sys.stdout.buffer.flush()'; then
   safe="${safe//$'\n'/ }"
   safe="${safe//$'\r'/ }"
   safe="${safe//$'\t'/ }"
-  # EVERY character the python branch scrubs, not the memorable ones. This block
+  # EVERY CHARACTER the python branch scrubs — with one class it cannot reach,
+  # named here rather than left for the next round to find. The python branch
+  # also scrubs `\ud800-\udfff`, which is the surrogateescape image of every
+  # byte that is not valid UTF-8; no `${var//}` loop can match those, because
+  # the pattern would have to be a byte range and `*[$'\x80'-$'\xff']*` matches
+  # the em-dash in every healthy verdict. Measured: a project directory whose
+  # name carries a lone `\xff` reaches the no-lock verdict (which renders
+  # $SEARCHED) BEFORE the python3 probe, so this branch emits it raw — a strict
+  # JSON reader then loses the whole payload, while Node substitutes U+FFFD and
+  # reads one line. No forged line, no lost verdict on the real consumer, and no
+  # cheap fix; the gap is stated instead of papered over.
+  #
+  # What follows is the rest of the class, not the memorable ones. This block
   # first carried only \n, \r, \t plus the three Unicode line-enders, under a
   # comment claiming it was "kept in step deliberately" with the primary — and it
   # was not: \x0b, \x0c, \x1c, \x1d and \x1e are all `str.splitlines()` splitters,
@@ -730,7 +742,23 @@ if [ -n "$SKIPPED_CLAUSE" ]; then
   SCOPE="$SCOPE ($SKIPPED_CLAUSE)"
 fi
 
+# TWO HEADLINES, because "no skills.lock found" is FALSE when one was found and
+# refused — and the remediation that follows it is then worse than useless.
+# Measured on the single-headline version, against a project whose `skills.lock`
+# was a symlink: the verdict said `no skills.lock found` and, three clauses
+# later, `the project directory's own skills.lock was not read`, contradicting
+# itself in one sentence. Worse, a reader who ran the suggested generator wrote
+# THROUGH the symlink — python's `open(…, "w")` follows one — so the tool exited
+# 0, the lock really was regenerated, the symlink survived, and the next session
+# emitted the byte-identical verdict. A loop the reader cannot leave by following
+# the instruction.
+#
+# `$SCOPE` already carries the reason; what changes here is the headline and the
+# remedy, so the two halves of the sentence agree about what happened.
 if [ "${#LOCKS[@]}" -eq 0 ]; then
+  if [ -n "${own_refused:-}" ]; then
+    emit "skills: DEGRADED — the skills.lock this session would use was found but not read, looked in $(join_names "${SEARCHED[@]}") (replace it with a regular file; regenerating it in place writes THROUGH a symlink and changes nothing)$SCOPE$LEFT_IN_PLACE"
+  fi
   emit "skills: DEGRADED — no skills.lock found, looked in $(join_names "${SEARCHED[@]}") (generate it with scripts/generate_skills_lock.py)$SCOPE$LEFT_IN_PLACE"
 fi
 
@@ -867,12 +895,41 @@ only_bundle = os.environ.get("AGENTSKILLS_BUNDLE") or ""
 # extracts it and runs it with only LOCK_PATH, OUT_DIR and PATH in the
 # environment, and some forty validation tests ride on that. In that shape the
 # two spellings are necessarily the same one.
-# The Unicode line-enders and lone surrogates are in here for the same reason
-# `emit` scrubs them (see there): `str.splitlines()` splits on U+0085, U+2028
-# and U+2029, so an ASCII-only class leaves exactly the characters that forge a
-# line. Surrogates additionally cannot be written by this file`s own utf-8
-# writer, so scrubbing them here is what keeps `_write_records` total.
-UNPRINTABLE = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029\ud800-\udfff]")
+# EXACTLY TWO MEMBERS, AND THE NARROWNESS IS THE POINT. This class has two
+# consumers now, not one: `_write_records` scrubs it out of every NUL-framed
+# stream, and the lock-label refusal in the read loop below is DERIVED from it,
+# so whatever the writer would alter, the reader refuses instead. That coupling
+# is what keeps a label the writer mangles from reaching bash — but it also means
+# every character added here costs a whole lock, so the class has to be only what
+# is load-bearing at THIS boundary.
+#
+#   * `\x00` is the one byte that can forge a record in a NUL-framed stream.
+#     That is the framing forgery a registry field once carried into a rejection
+#     message, desyncing the declared count and tripping the purge.
+#   * A lone surrogate cannot be written by this file's own `encoding="utf-8"`
+#     writer at all — it raises — so scrubbing it is what keeps `_write_records`
+#     total, and refusing it is what keeps a label from being altered on the way
+#     out. Bash's read-side `surrogateescape` can only ever produce U+DC80-DCFF,
+#     which is inside this range.
+#
+# WHAT IS DELIBERATELY NOT HERE, having been here for one commit: the ASCII
+# control bytes, `\x7f`, and U+0085/U+2028/U+2029. They forge a LINE, not a
+# RECORD, and `emit` is the one funnel every verdict passes through — it scrubs
+# the whole line-forging class there, which is where rendering belongs. Putting
+# them here as well looked like defence in depth and was not: measured, a TAB
+# anywhere in the lock path's ANCESTRY — a container image, a CI workspace, one
+# odd component above the checkout — refused every lock in the session under
+# `could not read … (invalid JSON or a bad field)`, pointing at a path `emit` had
+# scrubbed so it did not exist, and telling the reader to run a generator that
+# refuses that path too. Three false statements in one line, for a class that
+# needs no scrub at this boundary.
+#
+# The narrower class was measured to be strictly better on the case that
+# motivated the coupling: with a TAB in the ancestry the run installs, the label
+# reaches `accepted.nul` with its real bytes, `REPO_OWNED_DIRS` matches, and the
+# C3 shadowing guard FIRES and names the winner — where the wide class installed
+# nothing and the pre-coupling version silently overwrote a repo-owned skill.
+UNPRINTABLE = re.compile("[\x00\ud800-\udfff]")
 
 lock_paths = []
 lock_labels = []
@@ -970,12 +1027,6 @@ NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 REF = r"[A-Za-z0-9._/+:@-]+"
 URL = r"(?:https|file)://[A-Za-z0-9._~:/?#@%!$&()*+,;=\[\]-]+"
 CONTROL = re.compile(r"[\s\x00-\x1f\x7f]")
-# The control bytes alone, WITHOUT `\s`. CONTROL above is a validation charset
-# and refuses an ordinary SPACE along with everything else, which is right for a
-# registry or a ref and wrong for the thing this is used for: flattening a
-# message on its way into a NUL-framed stream, where a space is exactly what a
-# control byte is replaced BY. Its one consumer is `_write_records`; see the
-# argument there for why that boundary is where this belongs.
 # Each source is fetched at SESSION START, so the list length is a stall
 # multiplier: an unbounded one is an unbounded delay before the model can be
 # used. Generous next to any real lock (this repo's has none; a consumer
@@ -1219,18 +1270,32 @@ def read_lock(lock_path):
                 # string of any length and any charset was printed verbatim into
                 # a verdict the model reads.
                 #
-                # WHAT THIS BOUNDS AND WHAT IT DOES NOT, because the first
-                # version of this comment claimed the whole class: it stops a
-                # BARE sentence of attacker prose, and it does NOT stop one
-                # carrying a `file:///` prefix — the URL charset admits
-                # `.,;!$&()*+=#?@-` and has no length bound, so ten characters of
-                # prefix put 41KB of hyphenated instructions back into
-                # `additionalContext` under a clean `2/2`. Measured. That is the
-                # general "a rejection reason quotes lock content at the model"
-                # problem — issue #134 — which wants one answer for every message
-                # rather than a charset per message. What IS closed here is the
-                # narrower thing the paragraph above always claimed: a value that
-                # is not registry-shaped is named by POSITION.
+                # WHAT THIS BOUNDS, STATED ACCURATELY AT THE THIRD ATTEMPT. Two
+                # earlier versions of this comment over-claimed, each time in the
+                # reassuring direction, so the bound is written here as the rule
+                # rather than as an example:
+                #
+                #   POSITION is used only for a value carrying a SPACE, or some
+                #   other character outside these two charsets. Everything else
+                #   is echoed VERBATIM and UNBOUNDED IN LENGTH.
+                #
+                # Both halves of "everything else" are wider than they look.
+                # `URL` admits `.,;!$&()*+=#?@-`, so `https://` and `file:///`
+                # behave identically — the second version of this comment named
+                # only `file:///`, which would send a reader grepping for the
+                # wrong scheme. And `NAME/NAME` needs NO prefix at all: `NAME` is
+                # `[A-Za-z0-9][A-Za-z0-9._-]*`, so any hyphenated or dotted
+                # sentence containing exactly one `/` fullmatches it. Measured:
+                # 40,150 characters of instructions echoed with no scheme in
+                # front of them, which is precisely the "bare sentence" the
+                # second version claimed was stopped.
+                #
+                # So this narrows the charset and does NOT close the class. The
+                # class is "a rejection reason quotes lock content at the model"
+                # — issue #134 — and it wants one answer for every message rather
+                # than a per-message charset. What is genuinely closed here is
+                # only what the paragraph above always claimed: a value that is
+                # not registry-shaped is named by POSITION.
                 #
                 # Same two shapes `read_lock` accepts for a registry elsewhere —
                 # a URL, or an `OWNER/REPO` slug — so an honest federated lock

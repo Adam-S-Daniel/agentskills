@@ -1232,8 +1232,9 @@ def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
         session's attached repos are clones; `testdata/`, `fixtures/` and
         `vendor/` are not, and a lock inside one of them is a fixture rather
         than a declaration any session made.
-      * THE LOCK FILE IS NOT A SYMLINK EITHER, and that is a separate rule from
-        the one above rather than a restatement of it. `Path.is_file()` follows
+      * THE LOCK FILE IS NOT A SYMLINK EITHER — AT EITHER ARM. That is a
+        separate rule from the one above rather than a restatement of it, and it
+        applies to the PROJECT'S OWN lock as well as to a child's. `Path.is_file()` follows
         symlinks exactly as `[ -f ]` does, so a child that is a real, non-symlinked,
         git-rooted directory can still hold a `skills.lock` symlinked to a file
         outside the project — measured, installing under a clean
@@ -1580,7 +1581,26 @@ def read_lock(path: Path) -> Lock:
     that can lie — everything called REJECTED here is refused by the real hook —
     and the skill's known limitations carry the other.
     """
+    # A LOCK FILE THE HOOK WOULD REFUSE TO OPEN READS AS ABSENT, because that is
+    # the hook's own outcome for it: `no skills.lock found, looked in <path> …
+    # its skills.lock is a symlink`. `Path.is_file()` follows symlinks exactly as
+    # `[ -f ]` does, so without this the doctor opens the file the hook declined
+    # to — and the two then contradict each other about the same path. Measured
+    # before this: the hook said no lock was found there while this file judged a
+    # store against that lock and exited 1, calling two correctly-delivered
+    # skills stale.
+    #
+    # ABSENT rather than UNREADABLE, deliberately: UNREADABLE means "there is an
+    # expectation here and it is broken", which would be a finding. There is no
+    # expectation — the hook will not read it — and "this machine has no lock the
+    # hook will use" is the true statement.
+    #
+    # `discover_locks` keeps its own symlink rule for the CHILD arm, which is a
+    # different question: whether such a lock is a separate expectation at all.
+    # This is the arm that answers what a discovered path turns out to hold.
     try:
+        if Path(path).is_symlink():
+            return Lock(ABSENT, set(), set())
         lock = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return Lock(ABSENT, set(), set())
