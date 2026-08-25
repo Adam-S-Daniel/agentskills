@@ -167,28 +167,59 @@ rules out the cruder reading — that the two would collide by filename.
 
 ## Checking it worked
 
-The session opens with a one-line verdict. With several locks it names how many
-contributed and which repos they came from:
+**The verdict is addressed to the AGENT, not to you.** Every sentence below this
+heading used to read as if a person would see it, and a person never does. The
+hook emits its line as `hookSpecificOutput.additionalContext`, and Claude Code's
+hooks reference defines that field for `SessionStart` as *"text to inject into
+Claude's context"* — the field that shows text to the user is `systemMessage`,
+which this hook does not set. So "no `skills:` line" is a thing **Claude** can
+report and a human simply cannot observe, and reading its absence as "the hook
+never ran" is only valid when the agent is the one looking.
+
+That mattered in practice: the line's absence was cited as evidence in a session
+where the hook genuinely had not run, which was true — and separately taken as
+something the operator should have noticed across months of sessions, which was
+never possible.
+
+The verdict, when there is one:
 
 ```
 skills: 23/23 from Adam-S-Daniel/agentskills@eb25bd6 across 3 locks (agentskills, cms-platform, adamdaniel.ai) — OK
 ```
 
+With several locks it names how many contributed and which repos they came from.
 With exactly one lock the line is unchanged from what it has always been.
-`DEGRADED` names the knob to fix. **No `skills:` line at all** means the hook
-never ran — the wiring above is missing or was not read. Run
-`/adam:skills-doctor` for the long form.
+`DEGRADED` names the knob to fix.
+
+**So check it one of these ways instead**, in rough order of directness:
+
+- **Ask the agent.** "What does your `skills:` verdict say?" It is in the
+  context window; it can quote it verbatim, `DEGRADED` reason and all.
+- **Look at the filesystem.** `ls ~/.claude/skills/` in the session. The hook
+  installs each locked skill as a directory there, so a populated listing is the
+  install itself rather than a report about it. (`synced/` in that directory is
+  the claude.ai account-sync channel, not this hook's doing — ignore it.)
+- **Run `/adam:skills-doctor`** for the long form, once a bundle carrying it has
+  actually loaded. Note the ordering trap: the diagnostic that explains why no
+  skills loaded is itself a skill, so it is unavailable in exactly the case you
+  most want it.
 
 **Check the SECOND session too, not just the first.** The setup script runs only
 when no cached environment exists; afterwards the filesystem is snapshotted and
 later sessions skip it. Anthropic's documentation says a snapshot keeps what the
 script wrote to disk, which should carry `$project/.claude/settings.json`
 forward — but the repos beneath it are re-cloned per session, and whether that
-leaves this file untouched is NOT established here. A `skills:` line on the
-first session and none on the second is that failure, and the remedy is to move
-the wiring into something that runs every session rather than once: a
-`SessionStart` hook in a settings file the session does read. Recorded as an
-open question rather than a caveat, because one session cannot answer it.
+leaves this file untouched is NOT established here. Skills present on the first
+session and absent on the second is that failure, and the remedy is to move the
+wiring into something that runs every session rather than once: a `SessionStart`
+hook in a settings file the session does read. Recorded as an open question
+rather than a caveat, because one session cannot answer it.
+
+**Worth considering, not done here:** the hook could set `systemMessage`
+alongside `additionalContext` so the verdict reaches the operator too. That is a
+change to the hook rather than to this document, it lands in every session in
+the fleet at once, and it should be weighed against the noise of a line printed
+at every startup — so it belongs in its own change, with its own argument.
 
 ## What a repo still has to do
 
