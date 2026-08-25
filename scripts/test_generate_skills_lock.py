@@ -10146,12 +10146,81 @@ def test_emit_flattens_every_character_that_ends_a_line(tmp_path, sep,
     proc = subprocess.run([BASH, str(_emit_only(tmp_path)), verdict],
                           env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-    got = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert len(got.splitlines()) == 1, repr(got)
-    assert sep not in got, repr(got)
-    # The text is still THERE -- flattening, not deleting. A scrub that dropped
-    # the tail would pass the line assertion while losing the verdict.
-    assert "99 of 99" in got, repr(got)
+    payload = json.loads(proc.stdout)
+    # BOTH readers, not just the model. `systemMessage` is rendered to the
+    # PERSON, so a forged second line there is the worse half of this bug: the
+    # payload a hostile child name would be trying to plant is one that reads
+    # as the tool talking. Asserting only `additionalContext` would let a future
+    # edit scrub one field and not the other, and leave the user-visible one
+    # open.
+    for field, got in (("additionalContext",
+                        payload["hookSpecificOutput"]["additionalContext"]),
+                       ("systemMessage", payload["systemMessage"])):
+        assert len(got.splitlines()) == 1, (field, repr(got))
+        assert sep not in got, (field, repr(got))
+        # The text is still THERE -- flattening, not deleting. A scrub that
+        # dropped the tail would pass the line assertion while losing the
+        # verdict.
+        assert "99 of 99" in got, (field, repr(got))
+
+
+@pytest.mark.parametrize("with_python", [True, False],
+                         ids=["python-branch", "printf-fallback"])
+def test_emit_tells_the_operator_and_the_agent_the_same_thing(tmp_path,
+                                                              with_python):
+    """The verdict reaches a PERSON, not only the model.
+
+    `hookSpecificOutput.additionalContext` is defined by Claude Code as text
+    injected into the context of the model; the field that renders to the user
+    is the top-level `systemMessage`. For as long as the hook emitted only the
+    first, "no `skills:` line means the hook never ran" was a sound inference
+    for an agent and an unobservable one for an operator -- who could not tell a
+    working install from a hook that never fired, across months of sessions.
+
+    Two properties, and the second is the one that rots quietly:
+
+      * `systemMessage` is present and TOP-LEVEL. Nested inside
+        `hookSpecificOutput` it is not the documented field and shows nobody
+        anything, which is exactly the failure this test exists to prevent --
+        and it would look right in a diff.
+      * it is BYTE-IDENTICAL to `additionalContext`. Both branches bind one
+        scrubbed value, so the operator and the agent cannot be told different
+        things; asserting equality is what keeps a later edit from hardening,
+        rewording or truncating one and not the other.
+
+    Both branches, because a fallback that differs from the primary only fails
+    on the machine with no python3 -- the machine nobody tests on.
+    """
+    if BASH is None:
+        pytest.skip("no POSIX bash on this machine")
+    env = {"HOME": str(tmp_path), "TMPDIR": str(tmp_path)}
+    for name in _WINDOWS_BASE_ENV if os.name == "nt" else ():
+        if name in os.environ:
+            env[name] = os.environ[name]
+    if os.name == "nt":
+        env["TEMP"] = env["TMP"] = str(tmp_path)
+    env["PATH"] = (os.environ.get("PATH", "/usr/bin:/bin") if with_python
+                   else _path_farm(tmp_path, "python3"))
+
+    verdict = "skills: 22/22 from example/registry@0123abc — OK"
+    proc = subprocess.run([BASH, str(_emit_only(tmp_path)), verdict],
+                          env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+
+    assert "systemMessage" in payload, (
+        "the verdict is invisible to the operator: `systemMessage` is the only "
+        "field Claude Code renders to a person, and this payload has none -- "
+        "%r" % (payload,))
+    assert "systemMessage" not in payload.get("hookSpecificOutput", {}), (
+        "`systemMessage` is nested inside hookSpecificOutput, where it is not "
+        "the documented field and shows nobody anything")
+    assert payload["systemMessage"] == verdict, repr(payload["systemMessage"])
+    assert (payload["systemMessage"]
+            == payload["hookSpecificOutput"]["additionalContext"]), (
+        "the operator and the agent were told different things: %r vs %r"
+        % (payload["systemMessage"],
+           payload["hookSpecificOutput"]["additionalContext"]))
 
 
 @pytest.mark.parametrize("sep", _UNICODE_LINE_ENDERS,

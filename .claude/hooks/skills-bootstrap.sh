@@ -181,12 +181,34 @@ import json, os, re, sys
 # end a line and leaves the reader something that still reads as text. On every
 # healthy run this is a no-op.
 FORGES_A_LINE = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029\ud800-\udfff]")
+# SCRUBBED ONCE, USED TWICE. `additionalContext` and `systemMessage` carry the
+# same sentence to two different readers, and binding them to one expression is
+# what makes "the operator and the agent were told the same thing" a property of
+# the code rather than of whoever edits it next. Scrubbing them separately would
+# let a future edit harden one and leave the other \u2014 and the user-visible one is
+# the worse half to leave open.
+safe = FORGES_A_LINE.sub(" ", os.environ["SKILLS_VERDICT"])
 payload = json.dumps({
+    # NO APOSTROPHES ANYWHERE IN THIS PYTHON BLOCK. It is the body of a
+    # single-quoted bash string, so one apostrophe in a comment ends the
+    # program and the hook dies with a bash syntax error before it can emit
+    # anything. Reword, or use a backtick as the older comment above does.
+    #
+    # `additionalContext` is injected into the context of the MODEL and is
+    # invisible to the person at the keyboard; `systemMessage` is the field
+    # Claude Code shows the USER. Emitting only the first is why "no `skills:`
+    # line means the hook never ran" was a true inference for an agent and an
+    # unobservable one for an operator, who could not tell a working install
+    # from a dead one.
+    # Printed on every start, deliberately: it is the ABSENCE of the line that
+    # diagnoses a hook that never fired, so a verdict shown only when DEGRADED
+    # would go silent in exactly the case worth noticing.
+    "systemMessage": safe,
     "reloadSkills": True,
     "hookSpecificOutput": {
         "hookEventName": "SessionStart",
         "reloadSkills": True,
-        "additionalContext": FORGES_A_LINE.sub(" ", os.environ["SKILLS_VERDICT"]),
+        "additionalContext": safe,
     },
 }, ensure_ascii=True)
 sys.stdout.buffer.write(payload.encode("ascii") + b"\n")
@@ -248,7 +270,12 @@ sys.stdout.buffer.flush()'; then
   safe="${safe//$'\xc2\x85'/ }"
   safe="${safe//$'\xe2\x80\xa8'/ }"
   safe="${safe//$'\xe2\x80\xa9'/ }"
-  printf '{"reloadSkills":true,"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true,"additionalContext":"%s"}}\n' "$safe"
+  # `$safe` twice, and it is the SAME variable both times — the fallback has to
+  # hold the same "operator and agent were told the same thing" property the
+  # python branch gets from binding one expression. Every scrub above has
+  # already been applied to it, so `systemMessage` inherits them all rather
+  # than needing its own pass.
+  printf '{"systemMessage":"%s","reloadSkills":true,"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true,"additionalContext":"%s"}}\n' "$safe" "$safe"
   exit 0
 }
 

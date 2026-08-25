@@ -233,19 +233,28 @@ rules out the cruder reading — that the two would collide by filename.
 
 ## Checking it worked
 
-**The verdict is addressed to the AGENT, not to you.** Every sentence below this
-heading used to read as if a person would see it, and a person never does. The
-hook emits its line as `hookSpecificOutput.additionalContext`, and Claude Code's
-hooks reference defines that field for `SessionStart` as *"text to inject into
-Claude's context"* — the field that shows text to the user is `systemMessage`,
-which this hook does not set. So "no `skills:` line" is a thing **Claude** can
-report and a human simply cannot observe, and reading its absence as "the hook
-never ran" is only valid when the agent is the one looking.
+**Who sees the verdict depends on which hook the session is running**, and the
+answer changed on 2026-08-25.
 
-That mattered in practice: the line's absence was cited as evidence in a session
-where the hook genuinely had not run, which was true — and separately taken as
-something the operator should have noticed across months of sessions, which was
-never possible.
+The hook emits its line as `hookSpecificOutput.additionalContext`, which Claude
+Code's hooks reference defines for `SessionStart` as *"text to inject into
+Claude's context"*. The field that renders to a **person** is the top-level
+`systemMessage`, and for most of this hook's life it set only the first. So "no
+`skills:` line" was a thing the agent could report and a human simply could not
+observe — reading its absence as "the hook never ran" was sound only when the
+agent was the one looking. That is not academic: the absence was once put to an
+operator as something they should have noticed across months of sessions, when
+they were never in a position to notice it.
+
+The hook now emits **both**, bound to one scrubbed value so the operator and the
+agent cannot be told different things. Printed at every start, deliberately: it
+is the ABSENCE of the line that diagnoses a hook which never fired, so a verdict
+shown only when `DEGRADED` would go silent in exactly the case worth noticing.
+
+**A consumer does not get this the moment it merges here.** Sessions run the
+hook their `skills_bootstrap` pin names, so the verdict stays invisible to the
+operator until that pin moves and the sync delivers. Until then, treat the three
+checks below as the way to see it.
 
 The verdict, when there is one:
 
@@ -293,11 +302,14 @@ wiring into something that runs every session rather than once: a `SessionStart`
 hook in a settings file the session does read. Recorded as an open question
 rather than a caveat, because one session cannot answer it.
 
-**Worth considering, not done here:** the hook could set `systemMessage`
-alongside `additionalContext` so the verdict reaches the operator too. That is a
-change to the hook rather than to this document, it lands in every session in
-the fleet at once, and it should be weighed against the noise of a line printed
-at every startup — so it belongs in its own change, with its own argument.
+**The trade that was weighed before adding `systemMessage`:** it prints a line
+at every session start, in every repo carrying the bundle, forever. That is real
+noise. It wins anyway, on two counts — the line is one sentence, and the failure
+it replaces is unbounded (an operator who cannot tell a working install from a
+dead one has no way to stop being wrong about it). Showing it only on `DEGRADED`
+was the obvious compromise and is the wrong one: a hook that never fires prints
+no `DEGRADED` either, so the compromise goes quiet in the only case that
+actually needed a signal.
 
 ## What a repo still has to do
 
