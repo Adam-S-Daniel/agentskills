@@ -2783,10 +2783,12 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
         clocks = ("The two copies update on different clocks: the personal one "
                   "tracks skills.lock and is refreshed at every session start, "
                   "the account one changes only when someone runs sync-skills "
-                  "from a machine with a browser. `--account-drift` compares the "
-                  "recorded account state against the registry and has no notion "
-                  "of a session where both copies coexist, and CI never stands "
-                  "on the surface where they do.")
+                  "from a machine with a browser. `--account-drift <registry>` "
+                  "compares the account copy against a registry checkout by "
+                  "CONTENT and reports that pair on its own; it is a different "
+                  "question from this one and has no notion of a session where "
+                  "both copies coexist, and CI never stands on the surface where "
+                  "they do.")
 
         exact_mine = digest_shared_payload(mine)
         exact_theirs = digest_shared_payload(theirs)
@@ -2844,6 +2846,90 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
             f"docs/decisions/0002, which costed the duplicated context and not "
             f"this collision.{but_here}"))
     return findings, notes
+
+
+# =====================================================================================
+# Account drift — the account store against a registry checkout
+# =====================================================================================
+
+# Where a registry keeps its skills. `agentskills` nests them under a bundle plugin;
+# a federated registry declaring `"layout": "skills"` in a lock puts them at the top.
+# First hit wins, which is the same rule the lock's own source resolution uses.
+REGISTRY_LAYOUTS = ("plugins/*/skills/{name}", "skills/{name}")
+
+
+def registry_copy(registry: Path, name: str) -> Optional[Path]:
+    """Where `name` lives inside `registry`, or None if it does not."""
+    for layout in REGISTRY_LAYOUTS:
+        for candidate in sorted(registry.glob(layout.format(name=name))):
+            if (candidate / "SKILL.md").is_file():
+                return candidate
+    return None
+
+
+def account_drift(skills_dir: Path, registries: List[Path]) -> Tuple[List[str], int]:
+    """Compare every account-store copy against the same skill in a registry checkout.
+
+    This exists because the procedure it replaces was a TIMESTAMP comparison, and a
+    timestamp is the wrong clock. `updatedAt` records when the account copy was
+    uploaded; `git log -1 --format=%cI -- <path>` records when that PATH was last
+    touched by any commit — including a commit that only MOVED it. So every
+    repo-wide restructure re-flags every skill it touched, whether or not a single
+    byte of any of them changed.
+
+    That is not hypothetical. Measured 2026-08-25 on this registry: `pdf-ocr-audit`
+    and `wj-next-break` both read STALE under the timestamp rule against commit
+    88526d1 ("Prune skills that left the lock ..."), which moved paths across the
+    whole tree — and a CRLF-folded content diff showed both byte-identical to the
+    registry. Two false positives out of ten comparisons, in the one run that
+    happened to check. A drift signal that fires on skills nobody has edited is a
+    check that gets ignored, which is worse than not having one.
+
+    So content is the verdict here and the timestamp is not consulted at all. The
+    comparison is `digest_shared_payload(fold=True)` on both sides — the same one
+    `shadow_findings` uses, and for the same two reasons:
+
+      * it digests only `uploaded_files`, because the account copy is the ZIP
+        `zip_skill` built and never carried a `__pycache__` the registry working
+        tree may well have;
+      * `fold=True` folds CRLF to LF, because the account channel stores CRLF where
+        the registry is LF and comparing raw bytes marks every skill as drifted — a
+        signal that fires on all of them and so says nothing about any of them.
+
+    Comparing two copies with each OTHER is the sanctioned use of that digest: a file
+    dropped from one side changes the manifest's relpaths, so it is visible here in a
+    way it would not be against a recorded digest.
+    """
+    lines: List[str] = []
+    drifted = 0
+    names = sorted(skill_names(skills_dir / ACCOUNT_DIR))
+    if not names:
+        return ([f"  the account store {skills_dir / ACCOUNT_DIR} holds no skills — "
+                 f"nothing to compare. It is manifest-gated, so this is what an "
+                 f"account with no uploads looks like and not a failure to read it."],
+                0)
+
+    for name in names:
+        mine = skills_dir / ACCOUNT_DIR / name
+        found = next((hit for hit in (registry_copy(registry, name)
+                                      for registry in registries) if hit), None)
+        if found is None:
+            lines.append(f"  {name:42} not in any registry given — not judged")
+            continue
+        theirs = digest_shared_payload(found, fold=True)
+        ours = digest_shared_payload(mine, fold=True)
+        if ours is None or theirs is None:
+            unread = mine if ours is None else found
+            lines.append(f"  {name:42} UNREADABLE ({unread}) — not judged")
+            continue
+        if ours == theirs:
+            lines.append(f"  {name:42} identical to {found}")
+        else:
+            drifted += 1
+            lines.append(f"  {name:42} DRIFTED from {found}")
+            lines.append(f"  {'':42} account {ours[:12]} vs registry {theirs[:12]} "
+                         f"(CRLF folded, upload filter applied)")
+    return lines, drifted
 
 
 def store_findings(store_state: str, skills_dir: Path) -> List[Finding]:
@@ -3290,9 +3376,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "calling a locked skill missing, and its settings "
                              "chain is what decides whether any hook runs "
                              "(default: .)")
+    parser.add_argument("--account-drift", default=None, metavar="DIR",
+                        action="append",
+                        help="compare the ACCOUNT store against this registry "
+                             "checkout by content and report only that, instead "
+                             "of the provenance report. Repeatable. The account "
+                             "channel carries no content hash and no version, so "
+                             "content is the only honest drift signal there is — "
+                             "a timestamp comparison re-flags every skill any "
+                             "restructure commit moved")
     args = parser.parse_args(argv)
 
     skills_dir = Path(args.skills_dir).expanduser()
+
+    if args.account_drift:
+        # A separate mode on purpose. It answers a different question, against an
+        # input the default run does not need (a registry checkout), so folding it
+        # into the report would make the report's inputs conditional.
+        registries = [Path(entry).expanduser() for entry in args.account_drift]
+        missing = [str(entry) for entry in registries if not entry.is_dir()]
+        if missing:
+            sys.stderr.write("check_provenance.py: not a directory: "
+                             + ", ".join(missing) + "\n")
+            return 2
+        lines, drifted = account_drift(skills_dir, registries)
+        print("ACCOUNT DRIFT  " + skills_dir.joinpath(ACCOUNT_DIR).as_posix()
+              + " vs " + ", ".join(str(entry) for entry in registries))
+        print("  content is the verdict; `updatedAt` and commit dates are not "
+              "consulted. See `account_drift`.")
+        print()
+        print("\n".join(lines))
+        print()
+        print(f"  {drifted} drifted")
+        return 1 if drifted else 0
     project_dir = Path(args.project_dir).expanduser()
     record_path = skills_dir / RECORD_NAME
     surface = read_surface()

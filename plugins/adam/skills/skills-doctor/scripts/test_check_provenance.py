@@ -6179,3 +6179,148 @@ def test_the_origin_observation_matrix(tmp_path, capsys, ephemeral, cell):
         assert kind in prov.OBSERVATION_OF, (kind, out)
         assert assigned in prov.OBSERVATION_ORIGINS[prov.OBSERVATION_OF[kind]], (
             kind, assigned, out)
+
+
+# =====================================================================================
+# --account-drift — content is the verdict, never a timestamp
+# =====================================================================================
+
+
+def _account(store: Path, name: str, body: str, crlf: bool = True) -> Path:
+    """Write an ACCOUNT-store copy of `name`. CRLF by default, as that channel is."""
+    skill = store / prov.ACCOUNT_DIR / name
+    skill.mkdir(parents=True, exist_ok=True)
+    text = f"---\nname: {name}\n---\n{body}"
+    (skill / "SKILL.md").write_bytes(
+        text.replace("\n", "\r\n").encode() if crlf else text.encode())
+    return skill
+
+
+def _registry(root: Path, name: str, body: str, bundle: str = "adam") -> Path:
+    """Write a registry copy of `name` under the nested bundle layout, LF as git keeps it."""
+    skill = root / "plugins" / bundle / "skills" / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_bytes(f"---\nname: {name}\n---\n{body}".encode())
+    return skill
+
+
+def test_crlf_alone_is_not_drift(tmp_path, capsys):
+    """The account channel stores CRLF where the registry is LF. Comparing raw bytes
+    marks EVERY skill as drifted — a signal that fires on all of them says nothing
+    about any of them, which is how a drift check stops being read."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "writing-adrs", "same text\n", crlf=True)
+    _registry(reg, "writing-adrs", "same text\n")
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "identical" in out, out
+    assert code == 0, out
+
+
+def test_a_real_content_change_is_drift(tmp_path, capsys):
+    """The negative control for the test above: folding CRLF must not fold away an
+    actual edit, or the check is a green light wired to nothing."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "writing-adrs", "the old text\n", crlf=True)
+    _registry(reg, "writing-adrs", "the NEW text\n")
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "DRIFTED" in out, out
+    assert code == 1, out
+
+
+def test_a_moved_path_is_not_drift(tmp_path, capsys):
+    """The defect this mode was built to replace, stated as a test.
+
+    The old procedure compared the account copy's `updatedAt` against
+    `git log -1 --format=%cI -- <path>`, which records when that PATH was last
+    touched — a restructure commit that only MOVES a skill re-flags it. Measured
+    2026-08-25: `pdf-ocr-audit` and `wj-next-break` both read STALE that way while
+    being byte-identical to the registry. Content is the verdict, so a mtime far
+    newer than anything must not move it.
+    """
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "wj-next-break", "unchanged\n", crlf=True)
+    moved = _registry(reg, "wj-next-break", "unchanged\n")
+    os.utime(moved / "SKILL.md", (2_000_000_000, 2_000_000_000))
+    os.utime(moved, (2_000_000_000, 2_000_000_000))
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "identical" in out, out
+    assert code == 0, out
+
+
+def test_a_dropped_file_is_drift(tmp_path, capsys):
+    """Comparing two copies with each other (rather than against a recorded digest)
+    is what makes a missing payload visible: it changes the manifest's relpaths."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "skills-doctor", "body\n", crlf=True)
+    theirs = _registry(reg, "skills-doctor", "body\n")
+    (theirs / "scripts").mkdir()
+    (theirs / "scripts" / "helper.py").write_text("print(1)\n")
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "DRIFTED" in out, out
+    assert code == 1, out
+
+
+def test_a_build_artefact_is_not_drift(tmp_path, capsys):
+    """`__pycache__` beside a skill's scripts is in a working tree and was never in
+    the uploaded ZIP. Calling that a divergence reddens a session where nothing is
+    wrong, so the upload filter applies to both sides."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "skills-doctor", "body\n", crlf=True)
+    theirs = _registry(reg, "skills-doctor", "body\n")
+    (theirs / "__pycache__").mkdir()
+    (theirs / "__pycache__" / "helper.cpython-311.pyc").write_bytes(b"\x00binary")
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "identical" in out, out
+    assert code == 0, out
+
+
+def test_the_flat_registry_layout_is_found(tmp_path, capsys):
+    """A federated registry declaring `"layout": "skills"` puts skills at the top
+    rather than under a bundle plugin. Both shapes have to resolve or a whole
+    registry silently reports as `not in any registry given`."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "browser-testing", "body\n", crlf=True)
+    flat_layout = reg / "skills" / "browser-testing"
+    flat_layout.mkdir(parents=True)
+    (flat_layout / "SKILL.md").write_bytes(b"---\nname: browser-testing\n---\nbody\n")
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "identical" in out, out
+    assert code == 0, out
+
+
+def test_a_skill_no_registry_carries_is_not_judged(tmp_path, capsys):
+    """Anthropic-supplied account skills are in no registry here. Reporting them as
+    drifted would be a finding nobody can act on."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "docx", "body\n", crlf=True)
+    _registry(reg, "writing-adrs", "body\n")
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "not in any registry given" in out, out
+    assert code == 0, out
+
+
+def test_a_registry_path_that_is_not_a_directory_exits_2(tmp_path, capsys):
+    """2 is "cannot run", distinct from 1 ("ran, and here is drift")."""
+    store = tmp_path / "store"
+    _account(store, "writing-adrs", "body\n")
+    code = prov.main(["--skills-dir", str(store), "--account-drift",
+                      str(tmp_path / "absent")])
+    assert code == 2, capsys.readouterr()
+
+
+def test_account_drift_does_not_consult_a_lock_or_the_project(tmp_path, capsys):
+    """The mode takes a registry checkout, which the default run does not need. It
+    must therefore not require the inputs the default run does — a caller holding
+    only a store and a clone can still ask this question."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "writing-adrs", "body\n", crlf=True)
+    _registry(reg, "writing-adrs", "body\n")
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    assert code == 0, capsys.readouterr().out

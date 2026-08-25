@@ -16,6 +16,8 @@ Run: python3 -m pytest scripts/test_check_skills.py -q
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -880,3 +882,41 @@ def test_every_length_limited_field_is_also_declared_a_string():
 def test_shipped_field_types_declare_only_recognised_shapes():
     for name, shape in _shipped_contract()["field_types"].items():
         assert shape in check_skills.KNOWN_FIELD_TYPES, (name, shape)
+
+
+# =================================================================================
+# Missing dependency — the "cannot run" exit, distinct from a verdict
+# =================================================================================
+
+
+def test_a_missing_dependency_exits_2_and_names_the_remedy(tmp_path):
+    """A hosted session has none of `requirements-dev.txt` installed, so the import of
+    `markdown_it` is the first thing that fails there. It used to fail as a bare
+    ModuleNotFoundError traceback, which reads as "this script is broken" rather than
+    "this environment is missing a declared dependency" — and a skills-doctor run that
+    reads it that way falls back to eyeballing the payload check, which over-reports
+    every repo-relative reference as a dangling payload (measured: 21 false positives,
+    against 0 real findings from this tool).
+
+    A subprocess, because the behaviour under test happens at module-import time and
+    cannot be observed from a process that has already imported the module.
+    """
+    blocked = tmp_path / "blockmod"
+    blocked.mkdir()
+    (blocked / "markdown_it.py").write_text(
+        'raise ImportError("No module named \'markdown_it\'", name="markdown_it")\n')
+
+    env = dict(os.environ, PYTHONPATH=str(blocked))
+    proc = subprocess.run(
+        [sys.executable, str(Path(check_skills.__file__))],
+        capture_output=True, text=True, env=env)
+
+    # 2 is "nothing was checked", never 1 ("checked, and here are the findings").
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "markdown_it" in proc.stderr
+    assert "requirements-dev.txt" in proc.stderr
+    # The remedy has to survive the distro PyYAML that ships without installer
+    # metadata, or the named command fails and the reader is no better off.
+    assert "--ignore-installed PyYAML" in proc.stderr
+    # Nothing may be reported as a result, because nothing ran.
+    assert proc.stdout == ""

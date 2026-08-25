@@ -39,6 +39,8 @@ Exit status
 -----------
   0  no non-waived findings, no stale waivers, every required registry resolved
   1  otherwise
+  2  cannot run at all — a declared dependency is missing, so NOTHING was checked.
+     Distinct from 1 on purpose: 1 is a verdict, 2 is the absence of one.
 """
 
 from __future__ import annotations
@@ -52,8 +54,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import yaml
-from markdown_it import MarkdownIt
+try:
+    import yaml
+    from markdown_it import MarkdownIt
+except ImportError as exc:
+    # Exercised by test_a_missing_dependency_exits_2_and_names_the_remedy.
+    #
+    # This runs on hosted/ephemeral surfaces (a cloud session, a container) far more
+    # often than on a machine that has run CI, and there the dev dependencies are
+    # simply absent. A bare ModuleNotFoundError traceback reads as "this script is
+    # broken" rather than "this environment is missing a declared dependency", which
+    # is how a skills-doctor run came to eyeball the payload check by hand and
+    # produce 21 false positives instead. Name the remedy on the way out.
+    sys.stderr.write(
+        f"check_skills.py: cannot run — {exc.name} is not installed.\n"
+        'Every dependency this needs is declared in requirements-dev.txt:\n'
+        '    python3 -m pip install -r requirements-dev.txt\n'
+        'If that fails with "Cannot uninstall PyYAML ... RECORD file not found" the\n'
+        'distro supplied PyYAML without installer metadata; add --ignore-installed\n'
+        'PyYAML:\n'
+        '    python3 -m pip install --ignore-installed PyYAML -r requirements-dev.txt\n'
+        'This is exit 2 (cannot run), never exit 1 (findings) — nothing was checked.\n'
+    )
+    raise SystemExit(2)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
