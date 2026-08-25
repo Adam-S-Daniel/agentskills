@@ -10025,6 +10025,41 @@ def test_a_child_directory_name_with_a_control_character_is_not_read(tmp_path):
 _UNICODE_LINE_ENDERS = ("\u0085", "\u2028", "\u2029")
 
 
+# EVERY value Claude Code will accept for CLAUDE_CODE_ENTRYPOINT, read out of
+# the bundled binary rather than remembered: `2.1.245`, GIT_SHA `28b7e8c4`,
+# from the `{cli:!0,mcp:!0,...}` allowlist object. 26 values, and the split
+# below is the surface decision this hook exists to make.
+#
+# WHY THE LIST IS PINNED HERE AS DATA. The guard is a `case` with a prefix arm
+# and three exact arms, so what it does to any PARTICULAR spelling is not
+# readable off the pattern -- `ssh-remote` contains "remote" and is durable,
+# `claude-in-teams` does not begin with "remote" and is hosted. A test that
+# checked the pattern would restate the code; this checks the OUTCOME for every
+# value that can actually arrive, which is the only form that catches a
+# spelling whose meaning changed.
+#
+# A NEW SPELLING IN A FUTURE RELEASE IS NOT COVERED BY THIS TEST and cannot be
+# -- the list is a snapshot. The prefix arm is what gives an unseen `remote_*`
+# the right answer for free; anything else new arrives as durable, which is the
+# safe direction (a missed install, never an unwanted write to a workstation).
+_ENTRYPOINTS_REMOTE = (
+    "remote", "remote_baku", "remote_cowork", "remote_trigger",
+    "remote_cowork_trigger", "remote_desktop", "remote_mobile",
+    # Hosted by construction; no durable spelling of either exists.
+    "claude_in_slack", "claude-in-slack", "claude-in-teams",
+)
+_ENTRYPOINTS_DURABLE = (
+    "cli", "mcp", "sdk-cli", "sdk-ts", "sdk-py", "bench", "claude-vscode",
+    "claude-code-github-action", "local-agent", "local_agent",
+    "claude-desktop", "claude-desktop-3p", "claude-security",
+    # A durable workstation reached over SSH. It CONTAINS "remote", which is
+    # why the guard is anchored: `*remote*` or a grep would start writing into
+    # a workstation's ~/.claude/skills.
+    "ssh-remote",
+    "claude-coworker", "claude-coworker-terminal",
+)
+
+
 def _emit_only(tmp_path: Path) -> Path:
     """The hook's `emit` function alone, as a runnable script.
 
@@ -10051,6 +10086,91 @@ def _emit_only(tmp_path: Path) -> Path:
     script.write_text("#!/usr/bin/env bash\nset -uo pipefail\n" + body
                       + '\nemit "$1"\n', encoding="utf-8")
     return script
+
+
+def _guard_only(tmp_path: Path) -> Path:
+    """`entrypoint_reads_remote` alone, as a script that prints its verdict.
+
+    Extracted rather than driven through the whole hook for one reason that is
+    not speed: the hook reaches its surface decision only after resolving a
+    project dir and a lock, so a test driving it end to end would be asserting
+    the guard THROUGH two other subsystems, and a change in either could red or
+    green these cases for reasons that have nothing to do with the guard.
+    """
+    text = HOOK.read_text(encoding="utf-8")
+    start = text.index("entrypoint_reads_remote () {")
+    end = text.index("\n}\n", start) + len("\n}\n")
+    body = text[start:end]
+    assert body.count("entrypoint_reads_remote () {") == 1, body[:200]
+    script = tmp_path / "guard-only.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -uo pipefail\n" + body
+        + '\nif entrypoint_reads_remote "$1"; then echo REMOTE; '
+          'else echo DURABLE; fi\n', encoding="utf-8")
+    return script
+
+
+@pytest.mark.parametrize(
+    "entrypoint,expected",
+    [(e, "REMOTE") for e in _ENTRYPOINTS_REMOTE]
+    + [(e, "DURABLE") for e in _ENTRYPOINTS_DURABLE])
+def test_every_known_entrypoint_is_classified(tmp_path, entrypoint, expected):
+    """All 26 values Claude Code accepts, each pinned to an outcome.
+
+    The two that make this worth having as data rather than as a pattern
+    assertion:
+
+      * `ssh-remote` CONTAINS "remote" and is a durable workstation. A guard
+        written as `*remote*`, or as a `grep remote`, classifies it as hosted
+        and starts writing into that workstation`s ~/.claude/skills.
+      * `claude-in-teams` does NOT begin with "remote" and is hosted. The
+        prefix alone missed it, and it reached the hook only when
+        $CLAUDE_CODE_REMOTE_SESSION_ID happened to be set -- a property of the
+        harness, not of this repo.
+
+    Neither is readable off the `case` pattern, which is exactly why the list
+    is enumerated.
+    """
+    if BASH is None:
+        pytest.skip("no POSIX bash on this machine")
+    proc = subprocess.run([BASH, str(_guard_only(tmp_path)), entrypoint],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected, (
+        "%r classified as %s, expected %s"
+        % (entrypoint, proc.stdout.strip(), expected))
+
+
+def test_the_pinned_entrypoint_list_still_matches_the_binary(tmp_path):
+    """Drift check, and it SKIPS rather than failing when it cannot look.
+
+    The list above is a snapshot of a bundled binary. On a machine that has one,
+    re-read it and compare: a release that adds, removes or renames a spelling
+    then surfaces here instead of in production. On a machine without one --
+    most CI runners, every contributor laptop that installed Claude Code
+    differently -- there is nothing to compare against, and a hard failure there
+    would be a test reporting the absence of a file as a defect in the hook.
+    """
+    candidates = [Path(p) for p in ("/opt/claude-code/bin/claude",)]
+    binary = next((p for p in candidates if p.is_file()), None)
+    if binary is None:
+        pytest.skip("no bundled Claude Code binary on this machine to diff against")
+    # `strings` is not guaranteed present either; read the bytes directly.
+    blob = binary.read_bytes()
+    marker = b"a={cli:!0,"
+    at = blob.find(marker)
+    if at < 0:
+        pytest.skip("the entrypoint allowlist literal is not in this build`s "
+                    "bytes in the shape this test knows how to read")
+    literal = blob[at:blob.index(b"}", at) + 1].decode("ascii", "replace")
+    found = {a or b for a, b in re.findall(
+        r'(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s*:\s*!0', literal)}
+    pinned = set(_ENTRYPOINTS_REMOTE) | set(_ENTRYPOINTS_DURABLE)
+    assert found == pinned, (
+        "the entrypoint allowlist has moved. only in the binary: %s; only "
+        "pinned here: %s. Re-classify each new value in the hook`s "
+        "`entrypoint_reads_remote` and in the lists above, then re-run."
+        % (sorted(found - pinned), sorted(pinned - found)))
 
 
 # EVERY code point `str.splitlines()` splits on, plus `\x7f`. The parametrised

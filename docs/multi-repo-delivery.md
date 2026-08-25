@@ -41,6 +41,47 @@ as `/zz-invocation-probe` and `/finding-unknowns`. So `/adam:skills-doctor`
 **does not exist in a cloud session**, and typing it there gets
 `Unknown command`.
 
+### Which surface the hook thinks it is on, for every value it can see
+
+The hook decides from `CLAUDE_CODE_ENTRYPOINT`, and the decision is **not**
+readable off the variable's name — `ssh-remote` contains "remote" and is a
+durable workstation; `claude-in-teams` does not and is hosted. So here is the
+whole allowlist, read out of the bundled binary (**2.1.245**, GIT_SHA
+`28b7e8c4`) rather than remembered, and measured against the hook one value at a
+time.
+
+| classification | `CLAUDE_CODE_ENTRYPOINT` | hook behaviour |
+|---|---|---|
+| **remote** (10) | `remote`, `remote_baku`, `remote_cowork`, `remote_cowork_trigger`, `remote_desktop`, `remote_mobile`, `remote_trigger` | installs from `skills.lock` |
+| | `claude_in_slack`, `claude-in-slack`, `claude-in-teams` | installs — named exactly, see below |
+| **durable** (16) | `cli`, `mcp`, `sdk-cli`, `sdk-ts`, `sdk-py`, `bench`, `claude-vscode`, `claude-code-github-action`, `local-agent`, `local_agent`, `claude-desktop`, `claude-desktop-3p`, `claude-security`, `claude-coworker`, `claude-coworker-terminal`, **`ssh-remote`** | skips: `marketplace install is authoritative` |
+
+Three things this table exists to stop:
+
+- **`ssh-remote` is durable.** A guard written `*remote*`, or a `grep remote`,
+  classifies it as hosted and starts writing into a workstation's
+  `~/.claude/skills`. The guard is anchored (`case … in remote*`) for exactly
+  this one value, and a test pins it.
+- **Three hosted spellings do not begin with `remote`.** `claude_in_slack`,
+  `claude-in-slack` and `claude-in-teams` are named exactly in the guard. They
+  are matched exactly and not by a `claude*` prefix, which would wrongly capture
+  `claude-desktop`, `claude-vscode`, `claude-desktop-3p`, `claude-security`,
+  `claude-coworker` and `claude-coworker-terminal` — every one of them a durable
+  machine.
+- **The entrypoint is not the only arm.** The real test is *entrypoint is remote*
+  **OR** `CLAUDE_CODE_REMOTE_SESSION_ID` is set. Measured: with that variable
+  present, **all 26** values install, `ssh-remote` and `cli` included. That is
+  the intended fallback and worth knowing when a durable machine behaves
+  unexpectedly — check the variable before the entrypoint.
+
+`test_every_known_entrypoint_is_classified` pins all 26 outcomes, and
+`test_the_pinned_entrypoint_list_still_matches_the_binary` re-reads the
+allowlist from a bundled binary when one is present and fails if it has moved.
+A spelling a future release adds is **not** covered — the list is a snapshot.
+An unseen `remote_*` gets the right answer from the prefix arm for free;
+anything else new arrives classified as durable, which is the safe direction: a
+missed install, never an unwanted write to a workstation.
+
 **Why the laptop needs nothing, stated so nobody adds wiring it does not want.**
 Marketplace plugins install at user level, so they are already loaded whatever
 `cwd` is — the multi-repo shape that breaks cloud delivery is not a problem
