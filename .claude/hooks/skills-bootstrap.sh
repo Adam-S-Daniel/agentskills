@@ -198,7 +198,7 @@ sys.stdout.buffer.flush()'; then
   # the two bytes that can break a JSON string and flatten the control
   # characters a path could theoretically carry. Backslash first — escaping it
   # after the quote would double-escape what the quote rule just inserted.
-  local safe
+  local safe _cc _ch
   safe="$1"
   safe="${safe//\\/\\\\}"
   safe="${safe//\"/\\\"}"
@@ -216,10 +216,19 @@ sys.stdout.buffer.flush()'; then
   # silently produced nothing" failure this function's header says the design
   # exists to prevent, on the one machine this branch exists for.
   #
-  # Spelled out rather than looped: `set -uo pipefail` bash 3.2 has no character
-  # class for `${var//}`, and a loop over `printf '\\%03o'` would build the
-  # patterns at runtime out of the very bytes being removed.
-  for _cc in 00 01 02 03 04 05 06 07 08 0b 0c 0e 0f 10 11 12 13 14 15 16 17 \
+  # `${var//}` has no character class in bash 3.2, so the class is a loop over
+  # its members rather than a range.
+  #
+  # NO `00` IN THAT LIST, and its absence is the load-bearing part: a bash
+  # variable CANNOT HOLD A NUL — bash drops it at assignment — so `$safe` can
+  # never contain one, `printf -v _ch "\x00"` yields the EMPTY string, and the
+  # iteration would expand to `${safe//""/ }`. Measured on bash 5.2 that is a
+  # harmless no-op, which is the problem: it reads as a guard against the most
+  # dangerous byte in the file and is one that cannot fire, in either direction.
+  # The byte is already unreachable here; a line implying otherwise is worse
+  # than no line. (`emit`'s python branch still scrubs `\x00` because it works
+  # on a python `str`, which can hold one.)
+  for _cc in 01 02 03 04 05 06 07 08 0b 0c 0e 0f 10 11 12 13 14 15 16 17 \
              18 19 1a 1b 1c 1d 1e 1f 7f; do
     printf -v _ch "\\x$_cc"
     safe="${safe//"$_ch"/ }"
