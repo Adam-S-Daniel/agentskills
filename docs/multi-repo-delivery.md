@@ -50,13 +50,35 @@ Put this in the environment's **setup script**. It writes a settings file at the
 project level, a link of the chain that is definitely read.
 
 ```bash
+#!/bin/bash
 # Deliver the fleet's pinned skills in a multi-repo session.
 #
 # Hooks resolve from <cwd>/.claude and $HOME/.claude only, never from the repos
 # below cwd, so this cannot be committed to any of them (ADR 0005).
-set -eu
-project="${CLAUDE_PROJECT_DIR:-$PWD}"
-mkdir -p "$project/.claude"
+#
+# THE PROJECT DIR IS HARDCODED, and the two obvious ways to derive it are both
+# wrong HERE. A setup script runs as root before Claude Code launches, and
+# measured in a hosted session: `CLAUDE_PROJECT_DIR` is UNSET — Claude Code sets
+# it when it invokes a hook, which this is not — and `HOME` is `/root`, not the
+# project dir's parent. So `${CLAUDE_PROJECT_DIR:-$PWD}` falls through to a
+# `$PWD` that is not the project dir, and writes the file somewhere nothing
+# reads. The near miss is the bad one: `/root/.claude/settings.json` is exactly
+# the user-scope file the four notes below decline to write.
+#
+# Getting it right the first time matters more than usual, because the setup
+# script runs ONCE. Anthropic snapshots the filesystem afterwards and later
+# sessions skip the script, so a wrong path is baked into the snapshot and
+# persists until the script changes or the cache expires (~7 days).
+#
+# Safe in a single-repo session too: there `cwd` IS the repo, so this file sits
+# above it, off the settings chain and inert, and the repo's own committed
+# `.claude/settings.json` fires as it does today.
+project=/home/user
+
+# NOT `set -eu`. A setup script that exits non-zero makes the SESSION FAIL TO
+# START, and skills not loading is by far the lesser failure — hence `|| true`
+# here and the unconditional `exit 0` at the end.
+mkdir -p "$project/.claude" || true
 cat > "$project/.claude/settings.json" <<'JSON'
 {
   "hooks": {
@@ -75,7 +97,13 @@ cat > "$project/.claude/settings.json" <<'JSON'
   }
 }
 JSON
+echo "skills wiring: wrote $project/.claude/settings.json"
+exit 0
 ```
+
+`$CLAUDE_PROJECT_DIR` **inside** the hook command is correct and must stay: that
+one is expanded at hook time, by Claude Code, which does set it. Only the outer
+`project=` cannot rely on it.
 
 Four things about it are deliberate:
 
@@ -150,6 +178,17 @@ With exactly one lock the line is unchanged from what it has always been.
 `DEGRADED` names the knob to fix. **No `skills:` line at all** means the hook
 never ran — the wiring above is missing or was not read. Run
 `/adam:skills-doctor` for the long form.
+
+**Check the SECOND session too, not just the first.** The setup script runs only
+when no cached environment exists; afterwards the filesystem is snapshotted and
+later sessions skip it. Anthropic's documentation says a snapshot keeps what the
+script wrote to disk, which should carry `$project/.claude/settings.json`
+forward — but the repos beneath it are re-cloned per session, and whether that
+leaves this file untouched is NOT established here. A `skills:` line on the
+first session and none on the second is that failure, and the remedy is to move
+the wiring into something that runs every session rather than once: a
+`SessionStart` hook in a settings file the session does read. Recorded as an
+open question rather than a caveat, because one session cannot answer it.
 
 ## What a repo still has to do
 
