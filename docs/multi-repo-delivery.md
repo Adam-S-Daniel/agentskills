@@ -43,20 +43,31 @@ as `/zz-invocation-probe` and `/finding-unknowns`. So `/adam:skills-doctor`
 
 ### Which surface the hook thinks it is on, for every value it can see
 
-The hook decides from `CLAUDE_CODE_ENTRYPOINT`, and the decision is **not**
-readable off the variable's name — `ssh-remote` contains "remote" and is a
-durable workstation; `claude-in-teams` does not and is hosted. So here is the
-whole allowlist, read out of the bundled binary (**2.1.245**, GIT_SHA
-`28b7e8c4`) rather than remembered, and measured against the hook one value at a
-time.
+**THE RULE IS AN `OR`, AND THE ENTRYPOINT IS ONLY HALF OF IT:**
 
-| classification | `CLAUDE_CODE_ENTRYPOINT` | hook behaviour |
-|---|---|---|
-| **remote** (10) | `remote`, `remote_baku`, `remote_cowork`, `remote_cowork_trigger`, `remote_desktop`, `remote_mobile`, `remote_trigger` | installs from `skills.lock` |
-| | `claude_in_slack`, `claude-in-slack`, `claude-in-teams` | installs — named exactly, see below |
-| **durable** (16) | `cli`, `mcp`, `sdk-cli`, `sdk-ts`, `sdk-py`, `bench`, `claude-vscode`, `claude-code-github-action`, `local-agent`, `local_agent`, `claude-desktop`, `claude-desktop-3p`, `claude-security`, `claude-coworker`, `claude-coworker-terminal`, **`ssh-remote`** | skips: `marketplace install is authoritative` |
+```
+install  ⇔  entrypoint is remote  OR  $CLAUDE_CODE_REMOTE_SESSION_ID is set
+```
 
-Three things this table exists to stop:
+Neither half is readable off the variable's name — `ssh-remote` contains
+"remote" and is a durable workstation; `claude-in-teams` does not and is hosted.
+So here is the whole allowlist, read out of the bundled binary (**2.1.245**,
+GIT_SHA `28b7e8c4`) rather than remembered, and measured against the hook one
+value at a time, **in both states of the session-id variable**.
+
+| classification | `CLAUDE_CODE_ENTRYPOINT` | session id **unset** | session id **set** |
+|---|---|---|---|
+| **remote** (10) | `remote`, `remote_baku`, `remote_cowork`, `remote_cowork_trigger`, `remote_desktop`, `remote_mobile`, `remote_trigger` | installs | installs |
+| | `claude_in_slack`, `claude-in-slack`, `claude-in-teams` | installs — named exactly, see below | installs |
+| **durable** (16) | `cli`, `mcp`, `sdk-cli`, `sdk-ts`, `sdk-py`, `bench`, `claude-vscode`, `claude-code-github-action`, `local-agent`, `local_agent`, `claude-desktop`, `claude-desktop-3p`, `claude-security`, `claude-coworker`, `claude-coworker-terminal`, **`ssh-remote`** | skips: `marketplace install is authoritative` | **installs** |
+
+**Read the right-hand column before blaming the entrypoint.** Every one of the
+26 values installs when `CLAUDE_CODE_REMOTE_SESSION_ID` is present — `cli` and
+`ssh-remote` included. So "this is a durable machine, the hook cannot have run"
+is not a safe inference from the entrypoint alone, and a workstation that
+somehow carries that variable behaves like a hosted session. Check both.
+
+Two more things this table exists to stop, beyond the `OR` above:
 
 - **`ssh-remote` is durable.** A guard written `*remote*`, or a `grep remote`,
   classifies it as hosted and starts writing into a workstation's
@@ -68,12 +79,6 @@ Three things this table exists to stop:
   `claude-desktop`, `claude-vscode`, `claude-desktop-3p`, `claude-security`,
   `claude-coworker` and `claude-coworker-terminal` — every one of them a durable
   machine.
-- **The entrypoint is not the only arm.** The real test is *entrypoint is remote*
-  **OR** `CLAUDE_CODE_REMOTE_SESSION_ID` is set. Measured: with that variable
-  present, **all 26** values install, `ssh-remote` and `cli` included. That is
-  the intended fallback and worth knowing when a durable machine behaves
-  unexpectedly — check the variable before the entrypoint.
-
 `test_every_known_entrypoint_is_classified` pins all 26 outcomes, and
 `test_the_pinned_entrypoint_list_still_matches_the_binary` re-reads the
 allowlist from a bundled binary when one is present and fails if it has moved.
