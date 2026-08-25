@@ -16,6 +16,41 @@ finding, and it is why every claim elsewhere in these docs of the form "the hook
 installs nothing in a multi-repo session" is still true until the wiring below is
 placed.
 
+## First: which surface are you on
+
+**This whole document is about the CLOUD. A laptop needs none of it**, and the
+two surfaces differ in what delivers skills, where they land, and what you type
+to invoke one. Getting that wrong is the single easiest way to misread every
+section below.
+
+| | laptop (durable machine) | Claude Code on the web (cloud/ephemeral) |
+|---|---|---|
+| what delivers skills | the **marketplace plugin install** — `setup.sh`, `/plugin install adam@agentskills` | the **`skills-bootstrap` hook**, from `skills.lock` |
+| where they land | `~/.claude/plugins/` | `~/.claude/skills/<name>/` |
+| scope | **user-level, so cwd-independent** | per session, rebuilt each time |
+| multi-repo session | already works — nothing to do | needs the wiring below |
+| invoke a skill as | `/adam:skills-doctor` — bundle-namespaced | `/skills-doctor` — **bare, no prefix** |
+
+**The invocation difference is not cosmetic and is easy to get backwards.**
+Plugin skills are namespaced `<bundle>:<skill>`; a skill installed as a
+directory under `~/.claude/skills/` has no bundle to be namespaced by, so it is
+just its own name. Measured, not assumed: a probe skill planted at
+`~/.claude/skills/zz-invocation-probe/` and a hook-installed
+`~/.claude/skills/finding-unknowns/` were both reported by a fresh CLI session
+as `/zz-invocation-probe` and `/finding-unknowns`. So `/adam:skills-doctor`
+**does not exist in a cloud session**, and typing it there gets
+`Unknown command`.
+
+**Why the laptop needs nothing, stated so nobody adds wiring it does not want.**
+Marketplace plugins install at user level, so they are already loaded whatever
+`cwd` is — the multi-repo shape that breaks cloud delivery is not a problem
+there at all. And the hook itself declines to act: on a non-remote entrypoint it
+emits `skills: skipped — durable session (…), marketplace install is
+authoritative` and installs nothing. A laptop that has never run `setup.sh` gets
+no skills, and the fix for that is the marketplace, never the setup script
+below — a laptop has no environment setup script in the first place, because
+that field belongs to a **cloud environment**.
+
 ## Why the wiring cannot live in a repo
 
 Claude Code resolves hooks from the settings chain rooted at `cwd` and at
@@ -44,10 +79,15 @@ The committed wiring cannot simply be re-pointed either. This repo's
 multi-repo shape `$CLAUDE_PROJECT_DIR` is the parent — which has no
 `.claude/hooks/` at all.
 
-## The wiring
+## The wiring (cloud only)
 
-Put this in the environment's **setup script**. It writes a settings file at the
-project level, a link of the chain that is definitely read.
+Put this in the **cloud environment's setup script** — the *Setup script* field
+in the environment settings dialog at claude.ai/code. It writes a settings file
+at the project level, a link of the chain that is definitely read.
+
+There is no laptop counterpart to this section and no laptop version of the
+script. A durable machine has no environment setup script, and would have
+nothing for one to fix: see *First: which surface are you on* above.
 
 ```bash
 #!/bin/bash
@@ -126,10 +166,36 @@ Four things about it are deliberate:
   than silently inheriting the bundle of whichever repo happened to ship the
   hook.
 
-**Which copy of the hook runs.** The first match wins, and the fleet's copies are
-synced and sha-pinned by `_agent-guidance`, so they are normally byte-identical.
-A repo deliberately pinned to an older hook could supply an older copy — one
-without union discovery — in which case only that repo's lock is read.
+**Which copy of the hook runs, and why a stale one can deliver NOTHING.** The
+first match wins — the glob is alphabetical, so the alphabetically-first attached
+repo supplies the hook for the whole session. The fleet's copies are synced and
+sha-pinned by `_agent-guidance`, so they are normally byte-identical; a repo
+sitting on an older pin supplies an older copy.
+
+The obvious cost of an older copy is missing union discovery, so only that repo's
+lock is read. **That is not the expensive one.** Before the entrypoint guard was
+widened (ADR 0007's PR), the hook tested `CLAUDE_CODE_ENTRYPOINT != "remote"` —
+an exact match against ONE spelling, while seven legal values begin with
+`remote`. On any of the other six it took the early return and reported
+`skills: skipped — durable session`, a sentence that reads like a correct
+decision while installing nothing.
+
+Measured across both hook copies at three spellings, same lock, same project dir,
+only the entrypoint varying:
+
+| entrypoint | pre-widening copy | post-widening copy |
+|---|---|---|
+| `remote` | 22/22 — OK | 22/22 — OK |
+| `remote_mobile` | **0 — "skipped, durable session"** | 22/22 — OK |
+| `remote_cowork` | **0 — "skipped, durable session"** | 22/22 — OK |
+
+`remote_mobile` is not hypothetical: it is what `CLAUDE_CODE_ENTRYPOINT` actually
+held in the hosted session these notes were measured in. So the wiring above can
+be placed correctly, fire correctly, resolve a hook correctly, and still deliver
+nothing — because the copy it resolved is older than the guard fix. **Check the
+hook copy the glob will actually pick, not just that the wiring is in place**,
+and treat `skipped — durable session` in a session you know is remote as that
+diagnosis rather than as a durable machine.
 
 ## What crosses into a multi-repo session, and what does not
 
@@ -195,14 +261,26 @@ With exactly one lock the line is unchanged from what it has always been.
 
 - **Ask the agent.** "What does your `skills:` verdict say?" It is in the
   context window; it can quote it verbatim, `DEGRADED` reason and all.
-- **Look at the filesystem.** `ls ~/.claude/skills/` in the session. The hook
-  installs each locked skill as a directory there, so a populated listing is the
-  install itself rather than a report about it. (`synced/` in that directory is
-  the claude.ai account-sync channel, not this hook's doing — ignore it.)
-- **Run `/adam:skills-doctor`** for the long form, once a bundle carrying it has
-  actually loaded. Note the ordering trap: the diagnostic that explains why no
-  skills loaded is itself a skill, so it is unavailable in exactly the case you
-  most want it.
+- **Look at the filesystem** — a cloud check, and the most decisive one, because
+  it inspects the install rather than a report about it. `ls ~/.claude/skills/`:
+  the hook writes each locked skill as a directory there. Two things in that
+  listing are NOT the hook's doing and are the easy false positive —
+  `synced/` is the claude.ai account-sync channel, and a skill can also arrive
+  from a repo's own `.claude/skills/`. The unambiguous signal is the hook's own
+  install record, `~/.claude/skills/.skills-bootstrap-installed.json`: it exists
+  only if the hook ran, and it names what the hook itself put there.
+  On a **laptop** this bullet does not apply — look in `~/.claude/plugins/`
+  instead, or run `claude plugin list`, because the marketplace is what
+  installed them and `~/.claude/skills/` is not where they live.
+- **Run the skills-doctor skill** for the long form, once a bundle carrying it
+  has actually loaded — **`/skills-doctor` in a cloud session**, where the hook
+  installs it as a bare directory, and `/adam:skills-doctor` on a laptop, where
+  the marketplace namespaces it by bundle. Typing the laptop spelling in the
+  cloud gets `Unknown command`, which reads like the skill is missing when it is
+  present under its other name. Note also the ordering trap: the diagnostic that
+  explains why no skills loaded is itself a skill
+  (`plugins/adam/skills/skills-doctor`), so it is unavailable in exactly the
+  case you most want it.
 
 **Check the SECOND session too, not just the first.** The setup script runs only
 when no cached environment exists; afterwards the filesystem is snapshotted and
