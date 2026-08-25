@@ -103,6 +103,40 @@ synced and sha-pinned by `_agent-guidance`, so they are normally byte-identical.
 A repo deliberately pinned to an older hook could supply an older copy — one
 without union discovery — in which case only that repo's lock is read.
 
+## What crosses into a multi-repo session, and what does not
+
+Hooks do not. **Skills do** — and that asymmetry is worth knowing before anyone
+reaches for a workaround, because it is the one thing a repo can still deliver
+into this shape on its own.
+
+Measured in a hosted two-repo session on Claude Code **2.1.245**, project dir
+`/home/user` with `adamdaniel.ai` and `agentskills` beneath it: the project skill
+committed at `adamdaniel.ai/.claude/skills/embeddable-tool-pages/` was live in
+that session's skill roster, while neither repo's `SessionStart` hook fired at
+all and no `skills:` verdict was printed. Established by elimination rather than
+by inference — the only other skill sources present were `~/.claude/skills/`
+(the claude.ai account-sync channel's `synced/`, plus one built-in), and that
+skill is in neither, so it reached the session from a child of `cwd`.
+
+So a repo that needs one or two specific skills in a multi-repo session **can**
+commit them under `.claude/skills/` and skip the hook entirely. That is a real
+escape hatch and a bad default. A vendored copy is not digest-verified, does not
+track the registry, and is precisely the drift ADR 0001 declined to take on
+fleet-wide; adamdaniel.ai's own guidance says "do NOT re-vendor" for exactly
+this reason. Reach for it for a **site-owned** skill — which is what
+`embeddable-tool-pages` is — never for a bundle. The wiring above is what
+delivers a bundle.
+
+One further measurement from the same session, because it bears on why the
+snippet writes project scope rather than user scope: the hosted container ships
+**no `~/.claude/settings.json` at all**. The harness's own hooks live in
+`~/.claude/launcher-settings.json` — a different filename, and so a different
+entry in the settings chain rather than the same file being overwritten. That
+does not make a user-scope `settings.json` safe, and the bullet above stands as
+written: whether two chain entries merge their `SessionStart` arrays or one
+wins is still unmeasured here. It narrows the risk to that question alone, and
+rules out the cruder reading — that the two would collide by filename.
+
 ## Checking it worked
 
 The session opens with a one-line verdict. With several locks it names how many
