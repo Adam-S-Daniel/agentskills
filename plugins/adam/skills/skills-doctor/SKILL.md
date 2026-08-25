@@ -324,36 +324,81 @@ session as it stands, not about the directory.
 
 ### Staleness of the account store
 
-The account store carries **no content hash and no version** — `updatedAt` is
-the only drift signal there is. Compare it against the registry's last commit
-touching that skill:
+The account store carries **no content hash and no version**, so the only
+honest drift signal is the content itself. Run the comparison rather than
+reconstructing it:
 
 ```bash
-git -C <registry> log -1 --format=%cI -- plugins/adam/skills/<skill>
+python3 <skills-doctor>/scripts/check_provenance.py --account-drift <registry>
 ```
 
-A registry commit newer than `updatedAt` means the account copy is behind.
+It is repeatable (`--account-drift A --account-drift B`), reads both registry
+layouts, and reports per skill: `identical`, `DRIFTED`, `not in any registry
+given`, or `UNREADABLE`. Exit 1 means something drifted, 0 means nothing did, 2
+means it could not run at all.
 
-**Normalise line endings before comparing content.** Account copies are CRLF,
-the registry is LF. A naive hash or `diff` reports *every* skill as drifted,
-which is a check nobody will keep:
+**Do not verdict on `updatedAt` against a commit date.** This is the trap, and
+it is the one this section used to prescribe. `updatedAt` records when the
+account copy was uploaded; `git log -1 --format=%cI -- <path>` records when that
+PATH was last touched by any commit — **including a commit that only moved it**.
+The two clocks measure different things, so every repo-wide restructure re-flags
+every skill it touched, whether or not a byte changed.
+
+Measured 2026-08-25 on this registry: `pdf-ocr-audit` and `wj-next-break` both
+read STALE that way against commit `88526d1` ("Prune skills that left the
+lock…"), which moved paths across the whole tree — and a content comparison
+showed both byte-identical to the registry. Two false positives out of ten
+comparisons, in the one run that happened to check. A drift signal that fires on
+skills nobody edited is a check that gets ignored, which is worse than no check.
+The timestamp is at most a cheap pre-filter that over-reports; it is never the
+verdict.
+
+**If you compare by hand anyway, fold line endings first.** Account copies are
+CRLF, the registry is LF, so a raw `diff` or hash marks *every* skill as drifted:
 
 ```bash
 diff <(tr -d '\r' < ~/.claude/skills/synced/<skill>/SKILL.md) \
      <(tr -d '\r' < <registry>/plugins/adam/skills/<skill>/SKILL.md)
 ```
 
+That compares one file. `--account-drift` compares every file an upload
+carries — so it also catches a payload dropped from one side, which a
+`SKILL.md` diff cannot see — and applies the upload filter to both sides, so a
+`__pycache__` in the working tree is not mistaken for a divergence.
+
 ### Missing payloads
 
 A `SKILL.md` that tells the agent to run a file which is not there is a skill
-that fails at the moment of use, having looked healthy until then. Check that
-every `scripts/`, `references/`, `assets/` or `templates/` path named in a
-skill's runnable blocks exists inside that skill's own directory. The
-mechanised version of this is `scripts/check_skills.py` in the registry — run
-it rather than eyeballing when the registry is checked out:
+that fails at the moment of use, having looked healthy until then. The check is
+that every `scripts/`, `references/`, `assets/` or `templates/` path named in a
+skill's **runnable blocks** exists inside that skill's own directory.
+
+Run the mechanised version; do not eyeball it:
 
 ```bash
 python3 <registry>/scripts/check_skills.py
+```
+
+**A hand-rolled grep for those paths does not approximate this check — it
+inverts it.** The rule that matters is `PROSE_ONLY_RULE` in that script: only a
+path inside a *fenced code block* gates, because a skill legitimately names
+paths belonging to OTHER repos in prose and in backticks. Measured 2026-08-25: a
+grep for `(scripts|references|assets|templates)/…` over the installed store
+reported **21 missing payloads**, every one of them a reference to a script in
+the cms-platform repo (`bash <cms-platform>/scripts/set-repo-variables.sh`).
+`check_skills.py` on the same tree reported **0 findings**. The hand version is
+not a weaker check, it is a wrong one, and 21 confident false positives will
+bury the real finding if there ever is one.
+
+If the script cannot run, say the check is **unavailable** rather than
+substituting the grep. It exits **2** — distinct from 1, which is findings —
+and names the remedy on stderr when a dependency is missing:
+
+```bash
+python3 -m pip install -r <registry>/requirements-dev.txt
+# distro PyYAML ships without installer metadata on some images; if the above
+# fails with "Cannot uninstall PyYAML ... RECORD file not found":
+python3 -m pip install --ignore-installed PyYAML -r <registry>/requirements-dev.txt
 ```
 
 ### Context cost

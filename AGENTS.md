@@ -672,6 +672,31 @@ marketplace `renames` map is append-only.
   actually runs this repo's suite is the one CI runs:
   `python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q`,
   and read its result from `$?` directly rather than through a pipe.
+- **A hosted session starts with NONE of the dev dependencies**, so that command
+  and `scripts/check_skills.py` both fail before they check anything. CI installs
+  `requirements-dev.txt` per job; nothing installs it here, and no SessionStart
+  hook does either (`.claude/settings.json` wires only `skills-bootstrap.sh`).
+  Install it first — and expect the plain form to fail on these images:
+
+  ```bash
+  python3 -m pip install --ignore-installed PyYAML -r requirements-dev.txt
+  ```
+
+  `--ignore-installed PyYAML` is not optional cargo. The distro ships PyYAML
+  without installer metadata, so pip refuses with `Cannot uninstall PyYAML 6.0.1,
+  RECORD file not found. Hint: The package was installed by debian.` and installs
+  **nothing else either** — one unrelated package aborts the whole file, which
+  reads as "the repo's dependencies are broken" rather than "one of them is
+  undeletable". Measured on `remote_mobile`, 2026-08-25.
+
+- **A long background run is not a baseline if you edit while it runs.** The
+  suite takes ~5.5 minutes, and several meta-tests READ THE SOURCE FROM DISK at
+  run time rather than from the collected module — `test_every_test_this_repo_cites_by_name_exists`
+  is one. Edit during the run and it judges the new tree against the old run,
+  so a failure it reports may be from a file the run never started with.
+  (Measured 2026-08-25: a "pre-existing" red turned out to be a dangling test
+  citation written 90 seconds into the run.) Take the baseline before editing,
+  or re-run it after — never read one that overlapped the edits.
 
 ### One-way doors get an adversarial round
 
