@@ -181,12 +181,34 @@ import json, os, re, sys
 # end a line and leaves the reader something that still reads as text. On every
 # healthy run this is a no-op.
 FORGES_A_LINE = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029\ud800-\udfff]")
+# SCRUBBED ONCE, USED TWICE. `additionalContext` and `systemMessage` carry the
+# same sentence to two different readers, and binding them to one expression is
+# what makes "the operator and the agent were told the same thing" a property of
+# the code rather than of whoever edits it next. Scrubbing them separately would
+# let a future edit harden one and leave the other \u2014 and the user-visible one is
+# the worse half to leave open.
+safe = FORGES_A_LINE.sub(" ", os.environ["SKILLS_VERDICT"])
 payload = json.dumps({
+    # NO APOSTROPHES ANYWHERE IN THIS PYTHON BLOCK. It is the body of a
+    # single-quoted bash string, so one apostrophe in a comment ends the
+    # program and the hook dies with a bash syntax error before it can emit
+    # anything. Reword, or use a backtick as the older comment above does.
+    #
+    # `additionalContext` is injected into the context of the MODEL and is
+    # invisible to the person at the keyboard; `systemMessage` is the field
+    # Claude Code shows the USER. Emitting only the first is why "no `skills:`
+    # line means the hook never ran" was a true inference for an agent and an
+    # unobservable one for an operator, who could not tell a working install
+    # from a dead one.
+    # Printed on every start, deliberately: it is the ABSENCE of the line that
+    # diagnoses a hook that never fired, so a verdict shown only when DEGRADED
+    # would go silent in exactly the case worth noticing.
+    "systemMessage": safe,
     "reloadSkills": True,
     "hookSpecificOutput": {
         "hookEventName": "SessionStart",
         "reloadSkills": True,
-        "additionalContext": FORGES_A_LINE.sub(" ", os.environ["SKILLS_VERDICT"]),
+        "additionalContext": safe,
     },
 }, ensure_ascii=True)
 sys.stdout.buffer.write(payload.encode("ascii") + b"\n")
@@ -248,7 +270,12 @@ sys.stdout.buffer.flush()'; then
   safe="${safe//$'\xc2\x85'/ }"
   safe="${safe//$'\xe2\x80\xa8'/ }"
   safe="${safe//$'\xe2\x80\xa9'/ }"
-  printf '{"reloadSkills":true,"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true,"additionalContext":"%s"}}\n' "$safe"
+  # `$safe` twice, and it is the SAME variable both times — the fallback has to
+  # hold the same "operator and agent were told the same thing" property the
+  # python branch gets from binding one expression. Every scrub above has
+  # already been applied to it, so `systemMessage` inherits them all rather
+  # than needing its own pass.
+  printf '{"systemMessage":"%s","reloadSkills":true,"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true,"additionalContext":"%s"}}\n' "$safe" "$safe"
   exit 0
 }
 
@@ -362,10 +389,20 @@ names_the_account_store () {
 # workstation's ~/.claude/skills. It is the one spelling that separates the two
 # spellings of this guard, which is why a test pins it.
 #
-# IT DOES NOT CLOSE EVERYTHING, and saying so is not a hedge. `claude_in_slack`,
+# THE THREE THAT USED NOT TO BE COVERED NOW ARE. `claude_in_slack`,
 # `claude-in-slack` and `claude-in-teams` are in the same remote family and
-# begin with `claude`, so they still fall through to the session-id arm and
-# reach this hook only when $CLAUDE_CODE_REMOTE_SESSION_ID is set.
+# begin with `claude`, so the prefix alone missed them and they reached this
+# hook only when $CLAUDE_CODE_REMOTE_SESSION_ID happened to be set. They are
+# now named exactly in `entrypoint_reads_remote`, which removes a dependency on
+# a harness property nothing here measures. See that function for why the fix
+# is three exact matches and not a `claude*` prefix.
+#
+# THE CLASSIFICATION IS NOW TOTAL OVER THE MEASURED ALLOWLIST, and
+# `test_every_known_entrypoint_is_classified` pins it against all 26 values
+# read out of the binary — so a spelling that changes meaning, or a new one
+# this hook has never seen, fails a test instead of being discovered in
+# production. Measured 2.1.245 / GIT_SHA 28b7e8c4: 10 of the 26 are remote
+# (the seven `remote*` plus these three), 16 are durable.
 #
 # RESIDUAL: this is ONE build's allowlist, and a release can add a spelling. An
 # explicit set of the seven would fail CLOSED on a new one — it would skip, and
@@ -378,6 +415,19 @@ names_the_account_store () {
 entrypoint_reads_remote () {
   case "${1:-}" in
     remote*) return 0 ;;
+    # THE THREE REMOTE-FAMILY SPELLINGS THAT DO NOT BEGIN WITH `remote`, named
+    # exactly rather than left to the session-id arm. Claude in Slack and Claude
+    # in Teams are hosted surfaces by construction — there is no durable machine
+    # spelling of either — so classifying them here costs nothing and removes an
+    # unstated dependency: until now they reached this hook ONLY when
+    # $CLAUDE_CODE_REMOTE_SESSION_ID happened to be set, which is a property of
+    # the harness that nothing in this repo measures or controls.
+    #
+    # Exact matches, not `claude*`: that prefix would capture `claude-desktop`,
+    # `claude-vscode`, `claude-desktop-3p`, `claude-security`, `claude-coworker`
+    # and `claude-coworker-terminal`, every one of which is or can be a durable
+    # machine where the marketplace install is authoritative.
+    claude_in_slack|claude-in-slack|claude-in-teams) return 0 ;;
   esac
   return 1
 }

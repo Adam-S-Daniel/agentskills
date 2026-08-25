@@ -10025,6 +10025,41 @@ def test_a_child_directory_name_with_a_control_character_is_not_read(tmp_path):
 _UNICODE_LINE_ENDERS = ("\u0085", "\u2028", "\u2029")
 
 
+# EVERY value Claude Code will accept for CLAUDE_CODE_ENTRYPOINT, read out of
+# the bundled binary rather than remembered: `2.1.245`, GIT_SHA `28b7e8c4`,
+# from the `{cli:!0,mcp:!0,...}` allowlist object. 26 values, and the split
+# below is the surface decision this hook exists to make.
+#
+# WHY THE LIST IS PINNED HERE AS DATA. The guard is a `case` with a prefix arm
+# and three exact arms, so what it does to any PARTICULAR spelling is not
+# readable off the pattern -- `ssh-remote` contains "remote" and is durable,
+# `claude-in-teams` does not begin with "remote" and is hosted. A test that
+# checked the pattern would restate the code; this checks the OUTCOME for every
+# value that can actually arrive, which is the only form that catches a
+# spelling whose meaning changed.
+#
+# A NEW SPELLING IN A FUTURE RELEASE IS NOT COVERED BY THIS TEST and cannot be
+# -- the list is a snapshot. The prefix arm is what gives an unseen `remote_*`
+# the right answer for free; anything else new arrives as durable, which is the
+# safe direction (a missed install, never an unwanted write to a workstation).
+_ENTRYPOINTS_REMOTE = (
+    "remote", "remote_baku", "remote_cowork", "remote_trigger",
+    "remote_cowork_trigger", "remote_desktop", "remote_mobile",
+    # Hosted by construction; no durable spelling of either exists.
+    "claude_in_slack", "claude-in-slack", "claude-in-teams",
+)
+_ENTRYPOINTS_DURABLE = (
+    "cli", "mcp", "sdk-cli", "sdk-ts", "sdk-py", "bench", "claude-vscode",
+    "claude-code-github-action", "local-agent", "local_agent",
+    "claude-desktop", "claude-desktop-3p", "claude-security",
+    # A durable workstation reached over SSH. It CONTAINS "remote", which is
+    # why the guard is anchored: `*remote*` or a grep would start writing into
+    # a workstation's ~/.claude/skills.
+    "ssh-remote",
+    "claude-coworker", "claude-coworker-terminal",
+)
+
+
 def _emit_only(tmp_path: Path) -> Path:
     """The hook's `emit` function alone, as a runnable script.
 
@@ -10051,6 +10086,91 @@ def _emit_only(tmp_path: Path) -> Path:
     script.write_text("#!/usr/bin/env bash\nset -uo pipefail\n" + body
                       + '\nemit "$1"\n', encoding="utf-8")
     return script
+
+
+def _guard_only(tmp_path: Path) -> Path:
+    """`entrypoint_reads_remote` alone, as a script that prints its verdict.
+
+    Extracted rather than driven through the whole hook for one reason that is
+    not speed: the hook reaches its surface decision only after resolving a
+    project dir and a lock, so a test driving it end to end would be asserting
+    the guard THROUGH two other subsystems, and a change in either could red or
+    green these cases for reasons that have nothing to do with the guard.
+    """
+    text = HOOK.read_text(encoding="utf-8")
+    start = text.index("entrypoint_reads_remote () {")
+    end = text.index("\n}\n", start) + len("\n}\n")
+    body = text[start:end]
+    assert body.count("entrypoint_reads_remote () {") == 1, body[:200]
+    script = tmp_path / "guard-only.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -uo pipefail\n" + body
+        + '\nif entrypoint_reads_remote "$1"; then echo REMOTE; '
+          'else echo DURABLE; fi\n', encoding="utf-8")
+    return script
+
+
+@pytest.mark.parametrize(
+    "entrypoint,expected",
+    [(e, "REMOTE") for e in _ENTRYPOINTS_REMOTE]
+    + [(e, "DURABLE") for e in _ENTRYPOINTS_DURABLE])
+def test_every_known_entrypoint_is_classified(tmp_path, entrypoint, expected):
+    """All 26 values Claude Code accepts, each pinned to an outcome.
+
+    The two that make this worth having as data rather than as a pattern
+    assertion:
+
+      * `ssh-remote` CONTAINS "remote" and is a durable workstation. A guard
+        written as `*remote*`, or as a `grep remote`, classifies it as hosted
+        and starts writing into that workstation`s ~/.claude/skills.
+      * `claude-in-teams` does NOT begin with "remote" and is hosted. The
+        prefix alone missed it, and it reached the hook only when
+        $CLAUDE_CODE_REMOTE_SESSION_ID happened to be set -- a property of the
+        harness, not of this repo.
+
+    Neither is readable off the `case` pattern, which is exactly why the list
+    is enumerated.
+    """
+    if BASH is None:
+        pytest.skip("no POSIX bash on this machine")
+    proc = subprocess.run([BASH, str(_guard_only(tmp_path)), entrypoint],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected, (
+        "%r classified as %s, expected %s"
+        % (entrypoint, proc.stdout.strip(), expected))
+
+
+def test_the_pinned_entrypoint_list_still_matches_the_binary(tmp_path):
+    """Drift check, and it SKIPS rather than failing when it cannot look.
+
+    The list above is a snapshot of a bundled binary. On a machine that has one,
+    re-read it and compare: a release that adds, removes or renames a spelling
+    then surfaces here instead of in production. On a machine without one --
+    most CI runners, every contributor laptop that installed Claude Code
+    differently -- there is nothing to compare against, and a hard failure there
+    would be a test reporting the absence of a file as a defect in the hook.
+    """
+    candidates = [Path(p) for p in ("/opt/claude-code/bin/claude",)]
+    binary = next((p for p in candidates if p.is_file()), None)
+    if binary is None:
+        pytest.skip("no bundled Claude Code binary on this machine to diff against")
+    # `strings` is not guaranteed present either; read the bytes directly.
+    blob = binary.read_bytes()
+    marker = b"a={cli:!0,"
+    at = blob.find(marker)
+    if at < 0:
+        pytest.skip("the entrypoint allowlist literal is not in this build`s "
+                    "bytes in the shape this test knows how to read")
+    literal = blob[at:blob.index(b"}", at) + 1].decode("ascii", "replace")
+    found = {a or b for a, b in re.findall(
+        r'(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s*:\s*!0', literal)}
+    pinned = set(_ENTRYPOINTS_REMOTE) | set(_ENTRYPOINTS_DURABLE)
+    assert found == pinned, (
+        "the entrypoint allowlist has moved. only in the binary: %s; only "
+        "pinned here: %s. Re-classify each new value in the hook`s "
+        "`entrypoint_reads_remote` and in the lists above, then re-run."
+        % (sorted(found - pinned), sorted(pinned - found)))
 
 
 # EVERY code point `str.splitlines()` splits on, plus `\x7f`. The parametrised
@@ -10146,12 +10266,81 @@ def test_emit_flattens_every_character_that_ends_a_line(tmp_path, sep,
     proc = subprocess.run([BASH, str(_emit_only(tmp_path)), verdict],
                           env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-    got = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert len(got.splitlines()) == 1, repr(got)
-    assert sep not in got, repr(got)
-    # The text is still THERE -- flattening, not deleting. A scrub that dropped
-    # the tail would pass the line assertion while losing the verdict.
-    assert "99 of 99" in got, repr(got)
+    payload = json.loads(proc.stdout)
+    # BOTH readers, not just the model. `systemMessage` is rendered to the
+    # PERSON, so a forged second line there is the worse half of this bug: the
+    # payload a hostile child name would be trying to plant is one that reads
+    # as the tool talking. Asserting only `additionalContext` would let a future
+    # edit scrub one field and not the other, and leave the user-visible one
+    # open.
+    for field, got in (("additionalContext",
+                        payload["hookSpecificOutput"]["additionalContext"]),
+                       ("systemMessage", payload["systemMessage"])):
+        assert len(got.splitlines()) == 1, (field, repr(got))
+        assert sep not in got, (field, repr(got))
+        # The text is still THERE -- flattening, not deleting. A scrub that
+        # dropped the tail would pass the line assertion while losing the
+        # verdict.
+        assert "99 of 99" in got, (field, repr(got))
+
+
+@pytest.mark.parametrize("with_python", [True, False],
+                         ids=["python-branch", "printf-fallback"])
+def test_emit_tells_the_operator_and_the_agent_the_same_thing(tmp_path,
+                                                              with_python):
+    """The verdict reaches a PERSON, not only the model.
+
+    `hookSpecificOutput.additionalContext` is defined by Claude Code as text
+    injected into the context of the model; the field that renders to the user
+    is the top-level `systemMessage`. For as long as the hook emitted only the
+    first, "no `skills:` line means the hook never ran" was a sound inference
+    for an agent and an unobservable one for an operator -- who could not tell a
+    working install from a hook that never fired, across months of sessions.
+
+    Two properties, and the second is the one that rots quietly:
+
+      * `systemMessage` is present and TOP-LEVEL. Nested inside
+        `hookSpecificOutput` it is not the documented field and shows nobody
+        anything, which is exactly the failure this test exists to prevent --
+        and it would look right in a diff.
+      * it is BYTE-IDENTICAL to `additionalContext`. Both branches bind one
+        scrubbed value, so the operator and the agent cannot be told different
+        things; asserting equality is what keeps a later edit from hardening,
+        rewording or truncating one and not the other.
+
+    Both branches, because a fallback that differs from the primary only fails
+    on the machine with no python3 -- the machine nobody tests on.
+    """
+    if BASH is None:
+        pytest.skip("no POSIX bash on this machine")
+    env = {"HOME": str(tmp_path), "TMPDIR": str(tmp_path)}
+    for name in _WINDOWS_BASE_ENV if os.name == "nt" else ():
+        if name in os.environ:
+            env[name] = os.environ[name]
+    if os.name == "nt":
+        env["TEMP"] = env["TMP"] = str(tmp_path)
+    env["PATH"] = (os.environ.get("PATH", "/usr/bin:/bin") if with_python
+                   else _path_farm(tmp_path, "python3"))
+
+    verdict = "skills: 22/22 from example/registry@0123abc — OK"
+    proc = subprocess.run([BASH, str(_emit_only(tmp_path)), verdict],
+                          env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+
+    assert "systemMessage" in payload, (
+        "the verdict is invisible to the operator: `systemMessage` is the only "
+        "field Claude Code renders to a person, and this payload has none -- "
+        "%r" % (payload,))
+    assert "systemMessage" not in payload.get("hookSpecificOutput", {}), (
+        "`systemMessage` is nested inside hookSpecificOutput, where it is not "
+        "the documented field and shows nobody anything")
+    assert payload["systemMessage"] == verdict, repr(payload["systemMessage"])
+    assert (payload["systemMessage"]
+            == payload["hookSpecificOutput"]["additionalContext"]), (
+        "the operator and the agent were told different things: %r vs %r"
+        % (payload["systemMessage"],
+           payload["hookSpecificOutput"]["additionalContext"]))
 
 
 @pytest.mark.parametrize("sep", _UNICODE_LINE_ENDERS,
