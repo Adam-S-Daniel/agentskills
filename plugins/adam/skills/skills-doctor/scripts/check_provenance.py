@@ -1232,8 +1232,18 @@ def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
         session's attached repos are clones; `testdata/`, `fixtures/` and
         `vendor/` are not, and a lock inside one of them is a fixture rather
         than a declaration any session made.
+      * THE LOCK FILE IS NOT A SYMLINK EITHER, and that is a separate rule from
+        the one above rather than a restatement of it. `Path.is_file()` follows
+        symlinks exactly as `[ -f ]` does, so a child that is a real, non-symlinked,
+        git-rooted directory can still hold a `skills.lock` symlinked to a file
+        outside the project — measured, installing under a clean
+        `skills: 1/1 … — OK`. The hook refuses that now, so this does too.
       * DEDUPED BY RESOLVED PATH, so one physical lock reachable under two
-        names is one expectation rather than two.
+        names is one expectation rather than two. Kept even though the rule
+        above makes symlink aliasing unreachable: a HARD link is still two real
+        files at one inode, and `resolve()` cannot collapse it either — but a
+        hard link shares its bytes, so the cost is a double count rather than a
+        second expectation.
 
     ONE DELIBERATE DIVERGENCE, stated rather than silently absorbed: the hook
     additionally refuses a child whose directory NAME contains a control
@@ -1264,7 +1274,11 @@ def discover_locks(explicit: Optional[str], project_dir: Path) -> List[Path]:
         if not (child / ".git").exists():
             continue
         lock = child / LOCK_NAME
-        if not lock.is_file():
+        # `is_symlink()` BEFORE `is_file()`, which follows: see the third rule
+        # above. This also drops a dangling symlink and a directory by that
+        # name, which `is_file()` would have dropped silently anyway — the hook
+        # names those skips, and this file has no verdict to name them in.
+        if lock.is_symlink() or not lock.is_file():
             continue
         try:
             key = str(lock.resolve())

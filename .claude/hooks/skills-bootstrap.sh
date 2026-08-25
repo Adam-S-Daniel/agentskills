@@ -153,13 +153,40 @@ emit () {
   # the printf branch below on a machine that sets PYTHONPATH.
   if command -v python3 >/dev/null 2>&1 \
      && SKILLS_VERDICT="$1" python3 -I -c '
-import json, os, sys
+import json, os, re, sys
+# THE LAST LINE OF DEFENCE FOR additionalContext, and the only one that covers
+# EVERY route into it. The discovery guard rejects a hostile child NAME and
+# `_write_records` scrubs the record streams, but neither sees the clauses bash
+# builds directly — `SKIPPED_CHILDREN` is pure bash and reaches the verdict
+# without passing through python at all. This funnel sees all of them.
+#
+# The charset is wider than `[[:cntrl:]]` and wider than `[\x00-\x1f\x7f]`,
+# because BOTH of those miss the characters whose entire job is to end a line:
+#
+#   * U+0085 NEL, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR. Python
+#     `str.splitlines()` splits on all three; `json.dumps` renders them as
+#     `\u2028`-style escapes that a JSON decoder turns back into the real
+#     character. Measured: with LC_ALL unset — which is this hook`s own surface,
+#     a container reporting LC_CTYPE=POSIX — bash `[[:cntrl:]]` does NOT match
+#     any of them, so a child directory name carrying one forged extra lines
+#     inside an otherwise clean `— OK` verdict. That is the exact payload the
+#     control-character guard was written against, at a code point it did not
+#     reach.
+#   * Lone surrogates, which `os.environ` produces via surrogateescape when bash
+#     hands over a byte that is not valid UTF-8. Left in, they serialise to a
+#     `\udcff` escape: technically invalid JSON, and a lone surrogate handed to
+#     whatever reads it.
+#
+# A space, matching `_write_records` and the printf fallback below: it cannot
+# end a line and leaves the reader something that still reads as text. On every
+# healthy run this is a no-op.
+FORGES_A_LINE = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029\ud800-\udfff]")
 payload = json.dumps({
     "reloadSkills": True,
     "hookSpecificOutput": {
         "hookEventName": "SessionStart",
         "reloadSkills": True,
-        "additionalContext": os.environ["SKILLS_VERDICT"],
+        "additionalContext": FORGES_A_LINE.sub(" ", os.environ["SKILLS_VERDICT"]),
     },
 }, ensure_ascii=True)
 sys.stdout.buffer.write(payload.encode("ascii") + b"\n")
@@ -178,6 +205,13 @@ sys.stdout.buffer.flush()'; then
   safe="${safe//$'\n'/ }"
   safe="${safe//$'\r'/ }"
   safe="${safe//$'\t'/ }"
+  # The same three Unicode line-enders the python branch above scrubs, as their
+  # UTF-8 byte sequences: U+0085, U+2028, U+2029. Kept in step deliberately — a
+  # fallback that is weaker than the primary is a fallback that only fails on
+  # the machine with no python3, which is the machine nobody tests on.
+  safe="${safe//$'\xc2\x85'/ }"
+  safe="${safe//$'\xe2\x80\xa8'/ }"
+  safe="${safe//$'\xe2\x80\xa9'/ }"
   printf '{"reloadSkills":true,"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true,"additionalContext":"%s"}}\n' "$safe"
   exit 0
 }
@@ -210,8 +244,20 @@ plural () { if [ "$1" -eq 1 ]; then printf '%s' "$2"; else printf '%s' "$3"; fi;
 # Measured on the exact-equality version: `purge_locked_destinations` took the
 # name verbatim and removed a canary planted at `$DEST/Synced`, and the
 # record-driven prune removed one at `$DEST/SYNCED` and `$DEST/synced.` too.
-# The install path was already blocked by `may_replace` — which is why this
-# reads as safe from the install loop alone and is not.
+# The install path was already blocked by `may_replace` ON A MACHINE WHERE THE
+# STORE EXISTS — which is why this reads as safe from the install loop alone and
+# is not. The qualifier is load-bearing and this comment used to omit it:
+# `may_replace` opens with `[ ! -e "$DEST/$want_name" ] && [ ! -L … ] && return 0`,
+# so an ABSENT destination is granted unconditionally. `$DEST/synced` is absent
+# on a fresh container, a new account, and every session before the account
+# store's first sync — which is most of the population this hook runs in.
+#
+# Measured with the reader's fold neutered and nothing else changed: with the
+# store present the install loop refused and reported `shadowed`; with the store
+# ABSENT the same run created `~/.claude/skills/synced` and filled it with
+# registry-supplied bytes under a clean `skills: 2/2 … — OK`. So the reader's
+# refusal is not a second line of defence there, it is the only one, and that is
+# the reason this fold has to be total rather than merely careful.
 #
 # Folded rather than enumerated, so a spelling nobody has thought of yet is
 # covered by the rule instead of by a list. Pure bash 3.2: no `${var,,}` (4.0+)
@@ -488,8 +534,21 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
       # The offending name is NOT echoed into the skip clause: repeating it is
       # exactly the thing being prevented. The count is the report, and the
       # directory it was found in is already named by $CLAUDE_PROJECT_DIR.
+      #
+      # `[[:cntrl:]]` ALONE IS NOT THE CLASS, and the gap is locale-dependent so
+      # it cannot be read off the pattern. Measured on bash 5.2: under
+      # `LC_ALL=C.utf8` that class matches U+0085, U+2028 and U+2029, and under
+      # `LC_ALL=C` — or with LC_ALL unset, which is this hook`s own surface, a
+      # remote container reporting LC_CTYPE=POSIX — it matches none of them. The
+      # hook sets no locale, so the deployment it exists for is the one where the
+      # guard was weakest, and a name carrying U+2028 landed in the verdict in
+      # full. `str.splitlines()` splits on all three, which is exactly what the
+      # suite`s own `len(verdict.splitlines()) == 1` assertion is written on.
+      #
+      # So the three are matched as their literal UTF-8 byte sequences, which no
+      # locale can reinterpret, ALONGSIDE the class rather than instead of it.
       case "$child" in
-        *[[:cntrl:]]*)
+        *[[:cntrl:]]* | *$'\xc2\x85'* | *$'\xe2\x80\xa8'* | *$'\xe2\x80\xa9'*)
           if [ -f "$child/skills.lock" ]; then
             unsafe_children=$((unsafe_children + 1))
           fi
@@ -518,14 +577,54 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
         fi
         continue
       fi
+      # THE LOCK FILE GETS THE SAME SYMLINK RULE AS THE CHILD DIRECTORY, and it
+      # needs its OWN test because `[ -f ]` FOLLOWS symlinks. Without this the
+      # child-symlink rule above reads as if it closed the aliasing question and
+      # does not: a child can be a real, non-symlinked, git-rooted directory
+      # whose `skills.lock` is a symlink pointing anywhere at all.
+      #
+      # Measured on the version without it: a child repo whose committed
+      # `skills.lock` was a mode-120000 symlink to `../../outside/skills.lock`
+      # installed that outside lock's skills under a clean `skills: 1/1 … — OK`,
+      # and the verdict named the IN-PROJECT path, because `resolve_lock_path`
+      # canonicalises the DIRECTORY and the thing actually opened is the FILE.
+      # That is the same "a symlink read a lock ABOVE the project directory"
+      # ADR 0007's own correction says was closed — closed one level too high.
+      # Two independent adversarial lenses reached it separately.
+      #
+      # `-L` BEFORE `-f`, deliberately: `-f` is false for a dangling symlink and
+      # for a directory named `skills.lock`, so testing `-f` first drops both
+      # SILENTLY, and a repo that still ships a lock then reads exactly like a
+      # repo that never opted in. Every skip that costs something is named.
+      if [ -L "$child/skills.lock" ]; then
+        SKIPPED_CHILDREN+=("$project_real/${child##*/} (its skills.lock is a symlink, which can name a file outside this project)")
+        continue
+      fi
+      if [ -e "$child/skills.lock" ] && [ ! -f "$child/skills.lock" ]; then
+        SKIPPED_CHILDREN+=("$project_real/${child##*/} (its skills.lock is not a regular file)")
+        continue
+      fi
       [ -f "$child/skills.lock" ] || continue
       candidate="$(resolve_lock_path "$child/skills.lock")"
-      # UNREACHABLE while the symlink rule above stands, and kept anyway: two
+      # NOT unreachable, and this comment used to say it was. It claimed "two
       # distinct real directories cannot resolve to one path, so this can only
-      # fire if aliasing is ever let back in. It is the belt for relaxing that
-      # rule, not a live guard, and it is written now because the thing it
-      # prevents — one physical lock read N times, starving $MAX_LOCKS and
-      # inflating the lock count the verdict reports — is invisible in a verdict.
+      # fire if aliasing is ever let back in" — but `resolve_lock_path`
+      # canonicalises the dirname only, so any alias living in the BASENAME
+      # slipped straight past it. With symlinked locks now refused above, what
+      # remains is a HARD link: two real files, one inode, two distinct resolved
+      # paths, and no way to tell in pure bash without `stat` (which the
+      # tool-less PATH farm does not have).
+      #
+      # That residual is bounded in a way the symlink one was not. A hard link
+      # shares the inode, so there is no second set of bytes to smuggle in and
+      # nothing outside the project that a reader would be surprised by; the
+      # cost is only that one physical lock can occupy several of the $MAX_LOCKS
+      # slots — which N ordinary COPIES of a lock achieve anyway, and which the
+      # cap already names in the verdict when it drops something.
+      #
+      # So this guard is live, not a belt: it is what collapses the case the
+      # symlink rule cannot see, and the thing it prevents — one lock read N
+      # times, starving $MAX_LOCKS — is otherwise invisible in a verdict.
       seen_lock=0
       if [ "${#SEEN_LOCKS[@]}" -gt 0 ]; then
         for seen_path in "${SEEN_LOCKS[@]}"; do
@@ -719,7 +818,24 @@ lock_paths = []
 lock_labels = []
 locks_path = os.environ.get("LOCKS_PATH") or ""
 if locks_path:
-    with open(locks_path, encoding="utf-8", newline="") as handle:
+    # `errors="surrogateescape"`, and it is not tidiness: a child DIRECTORY NAME
+    # carrying one byte that is not valid UTF-8 made this read raise
+    # UnicodeDecodeError — at module scope, ~430 lines ABOVE the per-lock
+    # boundary — so the whole reader died and EVERY honest repo in the session
+    # got nothing, under a verdict telling all of them to regenerate their locks.
+    # Measured, from a directory name alone: the lock beside it was byte-identical
+    # to the honest one. That is the same "one hostile sibling denies delivery to
+    # every honest repo" the per-lock `except Exception` was widened to stop,
+    # reached through the path list instead of the lock content, which is why
+    # "THE PER-LOCK BOUNDARY IS NOW TOTAL" was false as written.
+    #
+    # surrogateescape is the right answer rather than a rejection because these
+    # bytes came FROM the filesystem and go straight back TO it: python re-encodes
+    # them unchanged when it opens the path, so such a repo`s lock is read and
+    # installed normally. Only the DISPLAY needs care, and `UNPRINTABLE` scrubs
+    # the surrogates out of every record stream while `emit` scrubs the verdict.
+    with open(locks_path, encoding="utf-8", errors="surrogateescape",
+              newline="") as handle:
         fields = handle.read().split("\0")
     if fields and fields[-1] == "":
         fields.pop()                    # the NUL terminating the final field
@@ -764,7 +880,12 @@ CONTROL = re.compile(r"[\s\x00-\x1f\x7f]")
 # message on its way into a NUL-framed stream, where a space is exactly what a
 # control byte is replaced BY. Its one consumer is `_write_records`; see the
 # argument there for why that boundary is where this belongs.
-UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")
+# The Unicode line-enders and lone surrogates are in here for the same reason
+# `emit` scrubs them (see there): `str.splitlines()` splits on U+0085, U+2028
+# and U+2029, so an ASCII-only class leaves exactly the characters that forge a
+# line. Surrogates additionally cannot be written by this file`s own utf-8
+# writer, so scrubbing them here is what keeps `_write_records` total.
+UNPRINTABLE = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029\ud800-\udfff]")
 # Each source is fetched at SESSION START, so the list length is a stall
 # multiplier: an unbounded one is an unbounded delay before the model can be
 # used. Generous next to any real lock (this repo's has none; a consumer
@@ -996,14 +1117,27 @@ def read_lock(lock_path):
                 # NAMED, not quoted. `held` has already been through
                 # `remote_url`, so it is a registry this reader accepted; this
                 # one has not been through anything yet — the refusal fires
-                # before the source is normalised — so a value that fails the
-                # charset is reported by POSITION instead. A reader chasing a
-                # routing collision needs to know WHICH source, and `sources[2]`
-                # says that without quoting bytes an attacker chose. The stream
-                # writer flattens control characters too (`_write_records`);
-                # this is the half that keeps them out of the message at all.
+                # before the source is normalised — so a value that is not
+                # REGISTRY-SHAPED is reported by POSITION instead. A reader
+                # chasing a routing collision needs to know WHICH source, and
+                # `sources[2]` says that without quoting bytes an attacker chose.
+                #
+                # THE TEST IS THE REGISTRY SHAPE, NOT `CONTROL`, and the
+                # difference is the whole guard. `CONTROL` is whitespace and the
+                # ASCII control bytes, so it fell back to the position only for a
+                # value that happened to contain a space — and any whitespace-free
+                # string of any length and any charset was printed verbatim into
+                # a verdict the model reads. Measured: a hyphenated sentence of
+                # attacker prose, unbounded in length, arrived in
+                # `additionalContext` under an otherwise healthy `1/1`. The
+                # comment above already claimed this was closed; only now is it.
+                #
+                # Same two shapes `read_lock` accepts for a registry elsewhere —
+                # a URL, or an `OWNER/REPO` slug — so an honest federated lock
+                # still names its registry and nothing else ever does.
                 taking = raw.get("registry")
-                if not isinstance(taking, str) or not taking or CONTROL.search(taking):
+                if not isinstance(taking, str) or not re.fullmatch(
+                        "(?:%s|%s/%s)" % (URL, NAME, NAME), taking):
                     taking = where
                 raise LockRejected(
                     "lock: bundle %r is claimed by two sources, %s and %s; a bundle has "
@@ -1104,9 +1238,26 @@ def read_lock(lock_path):
         # three pass the skill-name charset above. Measured on the exact-equality
         # version: each of them walked straight through this refusal and into
         # `skills.nul`, where `purge_locked_destinations` removed the canary
-        # planted at that name. `.lower()` is enough because the charset checked
-        # above is ASCII-only. Mirrored in bash by `names_the_account_store` and
-        # in the generator, which refuses to WRITE such a key.
+        # planted at that name.
+        #
+        # `.lower()` is enough ONLY BECAUSE the charset checked above is
+        # ASCII-only, and those two are coupled in a way nothing else says.
+        # `.lower()` is not `.casefold()`, and NTFS decides equality by an
+        # UPPERCASE table: `"\u017Fynced".upper() == "SYNCED"`, so LATIN SMALL
+        # LETTER LONG S is a spelling this fold misses and that filesystem
+        # resolves onto the store. It is unreachable today — measured, the
+        # per-character class admits 65 code points and not one of them is
+        # non-ASCII, at all three sites and in the bash re-validation — so
+        # widening `NAME` to admit non-ASCII means changing `.lower()` to
+        # `.casefold()` AND retiring the `[Ss][Yy][Nn][Cc][Ee][Dd]` bracket set
+        # in `names_the_account_store`, in the same commit. Neither would fail a
+        # test on its own.
+        #
+        # Mirrored in bash by `names_the_account_store` and in the generator,
+        # which refuses to WRITE such a key. All three folds were measured
+        # exhaustively over the whole language the charset admits — 576 strings,
+        # 256 of them end to end against both destructive consumers — with zero
+        # misses and zero false positives on neighbouring names.
         if name.rstrip(". ").lower() == "synced":
             raise LockRejected(
                 "lock: skill %r would install over ~/.claude/skills/synced, the "
@@ -1251,9 +1402,18 @@ for lock_index, lock_path in enumerate(lock_paths):
     # still declares but has emptied of skills reaps its old skills instead of
     # silently keeping them: no row would name that bundle at all.
     #
-    # The UNION across accepted locks, which is what dissolves the documented
-    # contention WITHIN a session: one run that sees every lock reaps nothing
-    # another lock still wants.
+    # The UNION across accepted locks, which is HALF of what dissolves the
+    # documented contention within a session: a run that sees every lock reaps
+    # nothing another lock still wants.
+    #
+    # The other half is `authority_lost` far below, and naming it here is not
+    # tidiness — this is the line a future editor touching prune scope reads
+    # first, and "the union already handles this" reads as a licence to drop
+    # that block. It is not: ACCEPTED is the word that breaks the guarantee. A
+    # REJECTED lock is not accepted, so its own claim is absent while a sibling
+    # declaring the identical (registry, bundle) still supplies the scope — and
+    # the planner then reaps the rejected lock's skills. Measured, with an
+    # isolating control. The union is NECESSARY here; it is not SUFFICIENT.
     #
     # NARROWED WITH THE ROWS, and that is the decision AGENTSKILLS_BUNDLE turns
     # on: narrowing means "install a subset", never "this subset is now the whole
@@ -1659,8 +1819,20 @@ fi
 #     dropped from `skills.nul` while its own claim still reaches `claims.nul`
 #     from its routing map. No sibling needed.
 #
-# THE COST IS REAL AND IS THE RIGHT WAY ROUND: one bad sibling means no pruning
-# for that run, so a skill that genuinely left a lock stays one run longer. The
+# THE COST IS REAL AND IS THE RIGHT WAY ROUND, and it is bigger than "one run".
+# This comment used to say a stale skill "stays one run longer", which is true
+# only if the condition clears. A sibling DIRECTORY does not clear: one
+# subdirectory that is not a git repository, holding a zero-byte file named
+# `skills.lock`, sets $SKIPPED_CLAUSE on every run — so the orphan prune is
+# disabled for every repo in that session, indefinitely, and a skill an operator
+# has WITHDRAWN stays installed. Measured over five consecutive runs against one
+# $HOME: the withdrawn skill was still there, with its original digest still in
+# the install record, so nothing decays it out either.
+#
+# It is not silent — every arm feeds `problems`, which forces DEGRADED, and the
+# verdict names the directory and states that nothing was removed — and that
+# visibility is what makes the trade survivable rather than the trade being
+# small. The
 # alternative is deleting a repo's delivered skills because a DIFFERENT repo's
 # lock is malformed, which is not a trade — it is the same "install a subset,
 # never this subset is now the whole truth" rule the AGENTSKILLS_BUNDLE
@@ -2147,17 +2319,30 @@ fi
 # installed. Neither lock is more authoritative than the other, so a tiebreak
 # here could only be invented — the limit is stated rather than guessed at.
 #
-# WITHIN one session the union dissolves that contention outright: `claims.nul`
-# is the union across every ACCEPTED lock, so a run that sees all of them reaps
-# nothing another one still wants. What survives is the CROSS-SESSION case —
-# a union session installs the union, a later single-repo session reaps the
-# names its own lock lacks, the next union session reinstalls them — which is
-# the same mechanism, the same bound (the symmetric difference of the two name
-# sets) and the same names as the A-then-B churn above. Fixing it needs a `lock`
-# provenance field in the install record so a run never reaps what a lock it did
-# not discover, and that is deliberately NOT landed here: a record-schema change
-# plus a new planner condition, in the most destructive code path in this file,
-# is not something to ship in the same change as the union.
+# WITHIN one session the union NARROWS that contention, and this comment used to
+# say it "dissolves it outright". That was wrong, and ADR 0007 retracts the same
+# sentence in its own words: `claims.nul` is the union across every ACCEPTED
+# lock, so a lock that is rejected, dropped past the cap or starved of a fetch
+# slot withholds its claim while a sibling declaring the identical
+# (registry, bundle) still supplies it — and this planner then reaps the skills
+# the withholding lock still names. No second session needed. Measured on the
+# fleet's own shape, with isolating controls.
+#
+# WHAT MAKES THE PROPERTY TRUE TODAY IS `authority_lost` ABOVE, not the union: a
+# run that cannot fully account for the session empties this stream and prunes
+# nothing. Read that block before changing anything here.
+#
+# What survives is the CROSS-SESSION case — a union session installs the union,
+# a later single-repo session reaps the names its own lock lacks, the next union
+# session reinstalls them — which is the same mechanism, the same bound (the
+# symmetric difference of the two name sets) and the same names as the A-then-B
+# churn above.
+#
+# A `lock` provenance field in the install record would fix that residual too,
+# and this comment used to call it what "fixing it needs". ADR 0007 now records
+# the narrower rule as the better fix and says the provenance field is NOT owed
+# — it reuses a principle this file already states rather than adding a
+# record-schema change to its most destructive path.
 # $RECORD is set above the install loop, which now reads it too — the same file,
 # for the same question, asked once per direction: may this be overwritten, and
 # may this be removed.

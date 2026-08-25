@@ -274,10 +274,67 @@ condition already exactly expressed by "the session named no project directory".
 
 ## What the adversarial rounds did NOT reach
 
-Two rounds, 26 verified findings, each graded by a skeptic instructed to refute
-it. Six findings were fixed, two were REFUTED as stated limits re-reported, and
-one — the digest not covering symlinks — predates this work and is
+Three rounds now. The first two produced 26 verified findings; six were fixed,
+two were REFUTED as stated limits re-reported, and one — the digest not covering
+symlinks — predates this work and is
 [#132](https://github.com/Adam-S-Daniel/agentskills/issues/132).
+
+> **ROUND 3, 2026-08-25.** Five independent lenses against the FIX ROUND itself,
+> because E4's rule is that the gate does not close while rounds keep finding
+> things, and because two of the four historical rounds on this file found
+> defects introduced by the previous round's fix. This one did too — four of
+> them, each in code `4a507b5` had just added or just claimed:
+>
+> - **The lock FILE was never given the child directory's symlink rule.** `[ -f ]`
+>   follows symlinks and `resolve_lock_path` canonicalises the DIRECTORY, so a
+>   child that satisfied every clause of the new predicate — real directory, not
+>   a symlink, git repository root — could hold a `skills.lock` symlinked
+>   anywhere. Measured: a lock ABOVE the project directory installed its skills
+>   under a clean `skills: 1/1 … — OK`, with the verdict naming the in-project
+>   path. That is the outcome the CORRECTION above says was closed; it was
+>   closed one level too high. **Two lenses reached it separately.** Fixed, with
+>   the non-regular-file case (a dangling symlink, a directory by that name)
+>   which was being dropped silently.
+> - **`[[:cntrl:]]` is locale-dependent, so the forged-verdict payload still
+>   landed.** With `LC_ALL` unset — this hook's own surface, a container
+>   reporting `LC_CTYPE=POSIX` — bash's class matches none of U+0085, U+2028,
+>   U+2029, and the python sanitiser's `[\x00-\x1f\x7f]` matches none of them
+>   either. `str.splitlines()` splits on all three, which is what the suite's own
+>   `len(verdict.splitlines()) == 1` assertion is built on — and that test was
+>   only ever fed `\n`. **Three lenses reached it.** Fixed at both layers, and
+>   `emit` now scrubs the class at the one funnel every verdict passes through.
+> - **"THE PER-LOCK BOUNDARY IS NOW TOTAL" was false.** The reader's `locks.nul`
+>   decode sits ~430 lines ABOVE the per-lock `try`, so one child directory NAME
+>   carrying an invalid UTF-8 byte killed the whole reader and denied delivery to
+>   every honest repo — the same failure the boundary was widened to stop,
+>   through the path list rather than the lock content. **Two lenses reached it.**
+>   Fixed with `errors="surrogateescape"`.
+> - **Three comments asserted things the code does not do**: the two the
+>   CORRECTION above retracts were never actually changed in the hook; the prune's
+>   cost was written as "one run longer" when a sibling directory makes it
+>   permanent; and `may_replace` was said to block the install path when it grants
+>   an ABSENT destination unconditionally — so on a machine with no account store
+>   yet, the reader's `synced` refusal is the only guard, not the second one.
+>
+> Filed rather than fixed, because each needs a decision rather than a patch:
+> [#133](https://github.com/Adam-S-Daniel/agentskills/issues/133) (`.git` is a
+> hygiene signal, not the trust signal this ADR leans on),
+> [#134](https://github.com/Adam-S-Daniel/agentskills/issues/134) (same-LINE
+> repo-controlled prose still reaches `additionalContext`),
+> [#135](https://github.com/Adam-S-Daniel/agentskills/issues/135) (a project dir
+> that acquires its own lock reaps its children's skills under `— OK` — a second
+> in-session residual the CORRECTION above does not cover), and
+> [#136](https://github.com/Adam-S-Daniel/agentskills/issues/136)
+> (`scan_incomplete` under-reports).
+>
+> **What round 3 established as SOUND**, with controls, so a fourth round need not
+> re-run it: the widened `except Exception` swallows nothing it should not,
+> leaves no shared state half-mutated, and always records the rejection that
+> disarms the prune (`SystemExit`, `KeyboardInterrupt` and `BaseException` all
+> still propagate — tested by injection); 49 targeted plus 1,200 randomised lock
+> shapes found no hook defect reachable from lock content; a truncated record
+> stream cannot be read back with a lying count; and the `synced` fold is
+> COMPLETE — see the next bullet.
 
 Recorded so the coverage is not read as wider than it was:
 
@@ -285,10 +342,19 @@ Recorded so the coverage is not read as wider than it was:
   mount table, the parallel-array paths and Win32 trailing-dot stripping are
   reasoned about, not measured — and three Windows regressions on this branch
   say that gap is not theoretical.
-- **The case-fold itself was never measured.** No case-insensitive filesystem
-  could be built in the container, so `$DEST/Synced` resolving to `$DEST/synced`
-  on APFS and NTFS is asserted from platform semantics. The fix was made anyway;
-  the exposure was measured on the purge path, which takes the name verbatim.
+- **The case-fold's STRING behaviour is now measured; the FILESYSTEM's still is
+  not.** Round 3 ran all three fold sites over the entire language the skill-name
+  charset admits — 576 strings, 256 of them end to end against both destructive
+  consumers — with zero misses, zero false positives on neighbouring names, and
+  zero disagreements between the bash, reader and generator implementations. The
+  controls destroy all 256 canaries. What remains unmeasured is only "does
+  APFS/NTFS fold ASCII case", and the reason is recorded rather than left to be
+  rediscovered: this kernel has `CONFIG_UNICODE` off (no ext4 casefold), no
+  vfat/exfat/ntfs3 built in or loadable, and no libfuse to build a shim against.
+  One real gap the sweep did surface: `.lower()` is not `.casefold()`, and
+  `"\u017Fynced".upper() == "SYNCED"` — unreachable only because the charset is
+  ASCII-only, so widening `NAME` means changing the fold in the same commit. The
+  hook now says so.
 - **Four framing-error purge bail-outs were reasoned about, not induced.** No
   route was found from lock CONTENT to a python↔bash record-count desync, so
   whether a hostile lock can reach the post-install purge — the one that

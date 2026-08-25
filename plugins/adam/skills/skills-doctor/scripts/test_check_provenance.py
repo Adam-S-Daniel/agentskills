@@ -2895,6 +2895,39 @@ def test_discovery_reads_only_the_child_repos_the_hook_would_read(tmp_path,
     assert "unattached" not in out, out
 
 
+def test_a_childs_lock_that_is_a_symlink_is_not_discovered(tmp_path):
+    """The child is a real repo; only its LOCK is the alias.
+
+    A separate rule from the child-symlink one, because `Path.is_file()` follows
+    symlinks exactly as `[ -f ]` does — so `repo-b` here satisfies every clause
+    the test above checks (real directory, not a symlink, `.git` present) while
+    the file actually read lives outside the project. Measured against the hook
+    before it grew the same rule: that outside lock's skills installed under a
+    clean `skills: 1/1 … — OK`, with the verdict naming the IN-PROJECT path.
+
+    This file exists to describe what the hook does, so the two move together:
+    a doctor that discovers a lock the hook refuses reports on an expectation
+    nothing will deliver.
+    """
+    project = tmp_path / "repos"
+    project.mkdir()
+    _repo_with_lock(project, "repo-a", "alpha")
+    outside = _repo_with_lock(tmp_path / "elsewhere", "unattached", "alpha")
+
+    aliased = project / "repo-b"
+    aliased.mkdir()
+    (aliased / ".git").mkdir()
+    try:
+        (aliased / prov.LOCK_NAME).symlink_to(outside / prov.LOCK_NAME)
+    except OSError:                     # no privilege to make one here
+        pytest.skip("this platform does not permit creating symlinks")
+
+    # The aliased child contributes nothing, and the honest one still does —
+    # refusing one child must not cost the scan, which is the hook's rule too.
+    assert prov.discover_locks(None, project) == [
+        project / "repo-a" / prov.LOCK_NAME]
+
+
 def test_one_unreadable_store_is_reported_once_not_once_per_lock(
         tmp_path, monkeypatch, capsys):
     """Store-wide facts are store-wide, however many locks judge that store.
