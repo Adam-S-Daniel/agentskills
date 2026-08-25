@@ -509,6 +509,65 @@ ref for review, not the setting, to catch.
   `agentskills-private`) rather than living on in a consumer repo. A long skill
   splits across files rather than growing into one wall of text.
 
+## Two setup gaps you may close, and must not nag about
+
+Skill delivery needs one thing per surface that no repo can commit for itself.
+Both are one-time, both are silent when missing, and both are easy to turn into
+noise. So: **detect first, and say nothing at all when the check passes.** A
+session that opens by telling the operator to paste a script they pasted last
+week has spent their attention and taught them to skim the next one.
+
+Check when the work touches skills, or when a skill you expected is missing —
+not as a session-start ritual, and never more than once per session.
+
+**Cloud (claude.ai) — PROMPT, never act.** The setup-script field lives in the
+environment settings and is not reachable from inside a session, so the most you
+can do is ask. Prompt only when **all four** hold; any one false means stay
+quiet:
+
+1. the session is hosted — entrypoint is `remote*`/`claude_in_slack`/
+   `claude-in-slack`/`claude-in-teams`, **or** `$CLAUDE_CODE_REMOTE_SESSION_ID`
+   is set (that `OR` is the whole rule; see agentskills' `multi-repo-delivery.md`);
+2. the shape is **multi-repo** — `$CLAUDE_PROJECT_DIR` has no `skills.lock` of
+   its own but at least one child directory does. A single-repo session needs
+   nothing: its own committed `.claude/settings.json` fires the hook;
+3. `$CLAUDE_PROJECT_DIR/.claude/settings.json` does not already register a
+   `skills-bootstrap` SessionStart hook — **this is the "already there" test, so
+   run it before opening your mouth**;
+4. some child actually ships `.claude/hooks/skills-bootstrap.sh`, so there is
+   something for the wiring to find.
+
+Then say it once, name the snippet's home (`docs/multi-repo-delivery.md` in
+agentskills — do not paraphrase it from memory, the project dir is hardcoded
+there for measured reasons), and drop it.
+
+**Durable machine — ACT, then one line.** Here you can just fix it, and should.
+`claude plugin marketplace list --json` returns `[]` when nothing is configured
+(verified), so presence is unambiguous:
+
+- **absent** → `claude plugin marketplace add Adam-S-Daniel/agentskills`, then
+  install the bundles the machine wants (`adam` at minimum).
+- **present but behind** → `claude plugin marketplace update agentskills`.
+- **present and current** → do nothing and say nothing.
+
+"Behind" is a git question, not a guess: the marketplace is a clone under
+`~/.claude/plugins/`. **Find it rather than assuming a path** — this account has
+already been bitten once by encoding a clone location as a constant — then
+compare `git -C <clone> rev-parse HEAD` against
+`git ls-remote https://github.com/Adam-S-Daniel/agentskills refs/heads/main`.
+Equal means current. The `--json` output may also carry an updated-at or commit
+field; read what your build actually prints rather than trusting a field name
+from here.
+
+Two things to say afterwards, because both surprise people: an update changes
+what loads **next** session, not this one, and a marketplace refresh moves the
+three local bundles' contents but not a federated bundle's — that one comes from
+its own registry (agentskills' `README.md`).
+
+Neither check belongs in a repo's own `AGENTS.md`, and neither is a reason to
+edit a repo. They are session-environment gaps, and the fix lives outside the
+tree in both cases.
+
 ## Git practices
 
 - Write concise commit messages that explain *why*, not just *what*.
