@@ -240,6 +240,41 @@ easy one to reach for.
 - Never report a repo, PR, or branch as gone on a 404 alone. Say which
   credential could not see it, and what you checked with.
 
+## The fleet spans TWO owners, and a scoped search will not say so
+
+`Adam-S-Daniel` and `jodidaniel`. Both are named in `SYNC_OWNERS` in
+_agent-guidance's `sync.yml`, `drift-report.yml` and `skills-lock-bump.yml`,
+and every fleet-wide script reads that variable rather than assuming one owner.
+An ad-hoc query that does assume one is answering a narrower question than the
+one you asked — and it answers it confidently.
+
+That is what makes this worse than the 404 above. A 404 at least looks like a
+problem. A search scoped to one owner returns a **plausible, complete-shaped
+result set**: no error, no empty page, nothing to prompt a second look.
+
+Measured 2026-08-25: `search_code filename:skills.lock user:Adam-S-Daniel`
+returned five repos, and that became a report that jodidaniel.com "has NO
+`skills.lock`, so it receives no bundles at all." It had one — a federated lock
+of 22 skills, the bootstrap hook, and the `settings.json` wiring. The repo is
+`jodidaniel/jodidaniel.com`, so the query could not have found it under any
+circumstances. `repos.yml` also said `lock: committed` in plain English, one
+`grep` away.
+
+- **Enumerate owners; never hardcode one.** `SYNC_OWNERS` is the list, and it
+  is two long today precisely so nobody has to remember that it is.
+- **Prefer the fleet's own registries to a search index.** `repos.yml`,
+  `fleet.yml` and `cron_coverage.fleet` are lists a human maintains and CI
+  checks. A code-search result is a snapshot of an index that is not
+  exhaustive even within one owner — a zero result is weak evidence in a way a
+  missing entry in one of those files is not.
+- **To ask whether repo X has file Y, ask the repo.** `git ls-remote`, a
+  shallow clone, or the contents API answers about the repo; a search answers
+  about the index.
+- **Your session's reach is not the fleet's shape.** Tooling may be scoped to
+  one owner — hosted sessions refuse cross-owner repo attachment — so "I cannot
+  see it" and "it does not exist" have to stay separate sentences. Say which
+  one you mean, and say what you checked with.
+
 ## "The watch finished" is not "CI passed"
 
 Never read CI pass/fail off a watch command's exit code, or off the fact that it
