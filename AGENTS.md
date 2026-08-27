@@ -26,6 +26,30 @@ that area.
 - Tests must be deterministic — no sleeps, no network, no reliance on
   wall-clock time.
 
+## An approval you name gets its link
+
+Never hand back "waiting on your approval", "needs sign-off", "pending review"
+or "blocked on a gate" without the URL of the thing to click. A noun is not
+something the operator can act on, and the one who wrote the sentence is the one
+holding the run id. (Real incident, 2026-08-27: a session reported
+jodidaniel.com#176 as waiting on a human approval across three consecutive
+turns, each time declining to act on it and each time naming no location. The
+operator's next message was "What human approval? Link me.")
+
+- **Link the surface that actually decides, not its parent.** A required
+  environment review lives on its own job page,
+  `.../actions/runs/<run_id>/job/<job_id>` — the PR only shows that it is
+  pending. Resolve the run that is `waiting` on the CURRENT head; a link
+  carried over from an earlier head points at a gate that no longer governs
+  anything.
+- **Give every surface when there is more than one, and say which you
+  verified.** The platform's regression gate is approvable from GitHub Actions
+  *and* from the site's own `/admin/reviews/` dashboard, and an operator may
+  hold only one of them.
+- The rule is not specific to approvals: anything you hand over as the
+  operator's move — a PR to merge, a red run to look at, a setting to flip, a
+  dashboard to read — is named with its URL in the same sentence.
+
 ## Finding your unknowns
 
 Output quality on a non-trivial task is bounded by how well the ambiguities got
