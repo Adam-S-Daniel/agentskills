@@ -49,9 +49,6 @@ repos:
   - name: Adam-S-Daniel/agentskills
   - name: Adam-S-Daniel/skills-evals
   - name: Adam-S-Daniel/claude-memory-map
-  - name: Adam-S-Daniel/civic-azure-infra
-  - name: Adam-S-Daniel/civic-iac-policy
-  - name: Adam-S-Daniel/civic-platform-agents
   - name: jodidaniel/squarespacetemp
 
   # --- GHA-bench: migrated from classic branch protection to a ruleset (the
