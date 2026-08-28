@@ -165,7 +165,6 @@ Policy for repos in this ecosystem:
 
 ## Out of scope (for now)
 
-- `civic-platform-agents` — intentionally excluded from this consolidation.
 - Using `GHA-bench` as an eval harness — evals get a dedicated `skills-evals` repo
   (issue #18, Phase 5). `GHA-bench` is treated only as a source of skills to
   extract (Phase 4).
