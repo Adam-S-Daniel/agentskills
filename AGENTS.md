@@ -153,6 +153,28 @@ email addresses and their correspondents' into a public Actions log.)
 - **Commit with the GitHub `…@users.noreply.github.com` identity** on public
   repos so a real email is not baked into commit author/committer metadata.
 
+## Network allowlists live in `_agent-guidance/docs/reference/`
+
+Two egress allowlists are kept there as **reference copies**, each with a
+sidecar changelog carrying the per-domain justification an allowlist line has
+no room for. Neither is loaded by anything — read them when you are changing
+one, and add a changelog entry when you do.
+
+- `network-allowlist-claude-environments.txt` — the domain list in force in the
+  Claude Code cloud environment named `My Whitelist`. **In force**; the
+  authoritative copy is the environment dialog at claude.ai/code, and this file
+  tracks it.
+- `network-allowlist-github-runners.txt` — a **proposed** list for CI. Not
+  enforced anywhere and not enforceable on a standard runner: GitHub-hosted
+  runners have unrestricted egress, and roadmap #821 for native outbound
+  control is closed as not planned.
+
+Each `.txt` has a `.CHANGELOG.md` beside it whose header states what an entry
+must carry. Two traps both files exist to record: a `*.example.com` line does
+**not** match the apex `example.com`, and the Claude environment's "also
+include default list of common package managers" checkbox silently adds ~200
+more domains, so a line that looks missing may be covered by it.
+
 ## Automation vs branch protection
 
 Fleet repos enforce PR-only default branches via ruleset, managed as code in
