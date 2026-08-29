@@ -28,62 +28,45 @@ that area.
 
 ## Anything you name gets its link
 
-Never hand back "waiting on your approval", "needs sign-off", "pending review"
-or "blocked on a gate" without the URL of the thing to click. A noun is not
-something the operator can act on, and the one who wrote the sentence is the one
-holding the run id. (Real incident, 2026-08-27: a session reported
-jodidaniel.com#176 as waiting on a human approval across three consecutive
-turns, each time declining to act on it and each time naming no location. The
-operator's next message was "What human approval? Link me.")
+Any noun the reader might want to open gets its URL in the same sentence — the
+one who wrote the sentence is the one holding the id. It covers three shapes,
+and the rule keeps being applied to the first while the other two slip:
 
-- **Link the surface that actually decides, not its parent.** A required
-  environment review lives on its own job page,
-  `.../actions/runs/<run_id>/job/<job_id>` — the PR only shows that it is
-  pending. Resolve the run that is `waiting` on the CURRENT head; a link
-  carried over from an earlier head points at a gate that no longer governs
-  anything.
-- **Give every surface when there is more than one, and say which you
-  verified.** The platform's regression gate is approvable from GitHub Actions
-  *and* from the site's own `/admin/reviews/` dashboard, and an operator may
-  hold only one of them.
-- The rule is not specific to approvals: anything you hand over as the
-  operator's move — a PR to merge, a red run to look at, a setting to flip, a
-  dashboard to read — is named with its URL in the same sentence.
-- **It governs what you cite as ALREADY DONE, not only what is pending.**
-  "it's tracked in the issue", "the changelog records it", "documented in the
-  ADR", "see the PR" each assert a fact the reader can only check by clicking —
-  and a noun offered as EVIDENCE is the one that most has to be verifiable,
-  because its whole job is to let someone confirm you did what you say. Link the
-  artifact you are citing, and prefer the anchor to the container: the comment,
-  not the issue; the entry, not the changelog file. (Real incident, 2026-08-29:
-  a session closed a large remediation with "the one item that isn't is
-  documented in the issue, the release changelog" — three nouns, no links, and
-  no statement of what the item WAS. The operator's next message was "What is
-  the item/blocker? Link to it please.")
-- **Say what the thing IS in the same breath as linking it.** "#329's blocker"
-  is not a description even when it is a hyperlink — it makes the reader open a
-  tab to find out what is being discussed, which is the cost the link was
-  supposed to remove, not relocate. One clause of identification travels with
-  it: what breaks, and for whom. And a bare `repo#123` autolinks only inside
-  that repo's own threads; in chat, in another repo's issue, in an email or a
-  doc it is dead text, so a cross-repo reference gets the full URL every time.
-- **It governs what YOU are waiting on, not only what you hand over.** "waiting
-  on CI", "the sync is running", "once the verifier finishes" each name a thing
-  the operator may want to watch right now, and the one who started it is the one
-  holding its id. Link every in-flight thing you name, every time you name it —
-  the run, the PR, the scheduled check-in — not once when you start it and never
-  again. A status update whose nouns cannot be clicked has handed the operator a
-  feeling of progress and no way to check it.
-- **When the thing has no URL, say that, and give what it does have.** A local
-  background task, a subagent, a file on a machine only you can see: name it, say
-  plainly that there is no link, and give the id and the output path. "No link —
-  local task `abc123`, output at `/tmp/…`" satisfies the rule. "I'm waiting on
-  the verifier" does not, and is worse than silence, because it reads as
-  something the operator could go and look at.
-- **Stop waiting out loud when you stop waiting.** A check-in scheduled against a
-  PR that has since merged, a watch on a closed issue, a poll for a run that
-  finished — cancel it and say so. Naming a blocker that is no longer blocking is
-  the same defect pointed at the past.
+- **What you hand over**: an approval, a PR to merge, a red run, a setting to
+  flip, a dashboard to read. (2026-08-27: a session reported jodidaniel.com#176
+  as waiting on a human approval across three turns, each time naming no
+  location. The reply was "What human approval? Link me.")
+- **What YOU are waiting on**: "waiting on CI", "the sync is running", "once the
+  verifier finishes". Link it every time you name it, not once when you start it
+  and never again. A status update whose nouns cannot be clicked has handed over
+  a feeling of progress and no way to check it.
+- **What you cite as already DONE**: "tracked in the issue", "the changelog
+  records it", "see the ADR". Evidence is the noun that most needs a link — its
+  whole job is to let someone confirm you did what you say. (2026-08-29: a
+  session closed a remediation with "documented in the issue, the release
+  changelog" — three nouns, no links, no statement of what the item WAS. The
+  reply was "What is the item/blocker? Link to it please.")
+
+Four rules about the link itself:
+
+- **Link the surface that decides, not its parent.** A required environment
+  review lives on its own job page, `.../actions/runs/<run_id>/job/<job_id>`;
+  the PR only shows it pending. Resolve the run `waiting` on the CURRENT head —
+  one carried from an earlier head governs nothing. Where there are two surfaces
+  (the regression gate is approvable from Actions *and* from `/admin/reviews/`),
+  give both and say which you verified.
+- **A link is not a description.** "#329's blocker" still costs the reader a tab,
+  which relocates the cost rather than paying it; one clause of identification
+  travels with the link. A bare `repo#123` autolinks only inside that repo's own
+  threads — in chat, another repo's issue, an email or a doc it is dead text, so
+  cross-repo references get the full URL.
+- **No URL? Say so, and give what it does have.** A local task, a subagent, a
+  file on a machine only you can see: "No link — local task `abc123`, output at
+  `/tmp/…`" satisfies the rule. "I'm waiting on the verifier" does not, and is
+  worse than silence — it reads as something the operator could go and look at.
+- **Stop naming it once it stops blocking.** A check-in on a PR that has merged,
+  a poll for a run that finished — cancel it and say so. Naming a blocker that no
+  longer blocks is the same defect pointed at the past.
 
 ## Finding your unknowns
 
@@ -478,6 +461,18 @@ commit never happened, `git push -u` reported a new branch, and
   exists for an emergency, and a missing binary in a container you control is
   not one — a release binary is one `curl` away, and CI scans the PR either
   way, so bypassing locally only moves the finding later.
+- **A push can also carry the WRONG ref, and the two checks above both pass.**
+  `git push -u origin <name>` pushes the LOCAL BRANCH of that name, which need
+  not be the branch you are on. If one already exists — a stale leftover from an
+  earlier session — your commit stays where you made it and the push updates
+  something else, successfully. (Measured 2026-08-29 in this repo: `checkout -b`
+  failed on a dirty tree, its fallback `checkout` failed too, so HEAD never left
+  `main`; the commit landed there, `push -u origin claude/…` pushed a stale
+  local branch of that name, and printed the ordinary success. `git log
+  --oneline -1` showed the commit and `git status --short` was clean — both true,
+  both measuring the wrong thing.) The only check that settles it names the
+  commit AND the remote branch:
+  `git merge-base --is-ancestor <sha> origin/<branch>`. Run it after every push.
 
 ## Dependency updates
 
