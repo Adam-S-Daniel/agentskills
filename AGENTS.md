@@ -722,6 +722,14 @@ ref for review, not the setting, to catch.
   `/adam:<skill>` (e.g. `/adam:finding-unknowns`).
 - Local machines get the marketplace plus per-agent symlinks via that repo's
   `setup.sh`.
+- **A `git push` that suddenly fails in EVERY repo is one repo's problem.**
+  `setup.sh` registers a GLOBAL sync-skills pre-push hook, so after a bundle
+  restructure a stale one keeps pointing at the old plugin path and refuses
+  every push from every repo until it is re-registered. The cause is recorded
+  in `agentskills`' own guidance, which is the right place for it and the
+  wrong place to find it: the symptom shows up in repos whose sessions never
+  open that file. Re-run `bash setup.sh` from the registry checkout on the
+  machine; nothing in the repo you were pushing from is broken.
 - Cloud/ephemeral sessions still get **no** plugins from repo-declared
   settings — that Claude Code limitation (agentskills' `docs/decisions/0001`)
   is unchanged. What changed is that it now has a fix: a repo carrying its own
