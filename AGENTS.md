@@ -26,7 +26,7 @@ that area.
 - Tests must be deterministic — no sleeps, no network, no reliance on
   wall-clock time.
 
-## An approval you name gets its link
+## Anything you name gets its link
 
 Never hand back "waiting on your approval", "needs sign-off", "pending review"
 or "blocked on a gate" without the URL of the thing to click. A noun is not
@@ -49,6 +49,24 @@ operator's next message was "What human approval? Link me.")
 - The rule is not specific to approvals: anything you hand over as the
   operator's move — a PR to merge, a red run to look at, a setting to flip, a
   dashboard to read — is named with its URL in the same sentence.
+- **It governs what you cite as ALREADY DONE, not only what is pending.**
+  "it's tracked in the issue", "the changelog records it", "documented in the
+  ADR", "see the PR" each assert a fact the reader can only check by clicking —
+  and a noun offered as EVIDENCE is the one that most has to be verifiable,
+  because its whole job is to let someone confirm you did what you say. Link the
+  artifact you are citing, and prefer the anchor to the container: the comment,
+  not the issue; the entry, not the changelog file. (Real incident, 2026-08-29:
+  a session closed a large remediation with "the one item that isn't is
+  documented in the issue, the release changelog" — three nouns, no links, and
+  no statement of what the item WAS. The operator's next message was "What is
+  the item/blocker? Link to it please.")
+- **Say what the thing IS in the same breath as linking it.** "#329's blocker"
+  is not a description even when it is a hyperlink — it makes the reader open a
+  tab to find out what is being discussed, which is the cost the link was
+  supposed to remove, not relocate. One clause of identification travels with
+  it: what breaks, and for whom. And a bare `repo#123` autolinks only inside
+  that repo's own threads; in chat, in another repo's issue, in an email or a
+  doc it is dead text, so a cross-repo reference gets the full URL every time.
 - **It governs what YOU are waiting on, not only what you hand over.** "waiting
   on CI", "the sync is running", "once the verifier finishes" each name a thing
   the operator may want to watch right now, and the one who started it is the one
