@@ -49,6 +49,23 @@ operator's next message was "What human approval? Link me.")
 - The rule is not specific to approvals: anything you hand over as the
   operator's move — a PR to merge, a red run to look at, a setting to flip, a
   dashboard to read — is named with its URL in the same sentence.
+- **It governs what YOU are waiting on, not only what you hand over.** "waiting
+  on CI", "the sync is running", "once the verifier finishes" each name a thing
+  the operator may want to watch right now, and the one who started it is the one
+  holding its id. Link every in-flight thing you name, every time you name it —
+  the run, the PR, the scheduled check-in — not once when you start it and never
+  again. A status update whose nouns cannot be clicked has handed the operator a
+  feeling of progress and no way to check it.
+- **When the thing has no URL, say that, and give what it does have.** A local
+  background task, a subagent, a file on a machine only you can see: name it, say
+  plainly that there is no link, and give the id and the output path. "No link —
+  local task `abc123`, output at `/tmp/…`" satisfies the rule. "I'm waiting on
+  the verifier" does not, and is worse than silence, because it reads as
+  something the operator could go and look at.
+- **Stop waiting out loud when you stop waiting.** A check-in scheduled against a
+  PR that has since merged, a watch on a closed issue, a poll for a run that
+  finished — cancel it and say so. Naming a blocker that is no longer blocking is
+  the same defect pointed at the past.
 
 ## Finding your unknowns
 
