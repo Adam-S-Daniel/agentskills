@@ -642,6 +642,17 @@ ref for review, not the setting, to catch.
 - Supply a throwaway credential, or scope the test to what runs
   unauthenticated. If it genuinely cannot run without a real one, that is the
   operator's call — not a gap for the subagent to close on its own initiative.
+- **A tree you made to break something in can still reach production, and the
+  obvious fix is worse than the problem in a worktree.** `cp -a` copies
+  `.git/config`, so a scratch copy inherits `origin` — measured, 45 such copies
+  in one container, 44 of which were never mutated, and the one that was pushed
+  14 commits to a real default branch. But `git remote remove origin` inside a
+  `git worktree` strips the PARENT checkout's remote, and `git config --local`
+  there rewrites the parent's identity (both measured), and the Agent tool's
+  `isolation: 'worktree'` means subagents land in one routinely. Before
+  disarming anything, run **`/adam:disarm-inherited-reach`** — it carries the
+  standalone-vs-worktree test, the reach paths a remote removal does not close,
+  and why no in-code guard can substitute.
 
 ## Skills ecosystem
 
