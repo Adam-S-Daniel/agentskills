@@ -423,6 +423,27 @@ in the fleet, and only that one, reporting false drift.
   because the status is discarded. That is correct by accident, so say so where
   you find it rather than leaving the next reader to re-derive it.
 
+### `gh api ... --jq` on an HTTP error prints the raw error body, not a filtered result
+
+On a non-2xx response, `gh api` skips the `--jq` filter entirely and writes the
+API's raw error JSON to **stdout** — not stderr — while still exiting non-zero.
+A caller that does `out=$(gh api ... --jq '.foo') || true` to tolerate a
+missing resource then captures that raw error body instead of an empty string:
+the fallback swallows the exit code, not the payload it was meant to guard
+against.
+
+This has already been independently rediscovered twice, in two different
+repos, which is the clearest signal a rule belongs here rather than in either
+repo alone: it once silently broke `sync.sh`'s `default_sections` (recorded in
+`agentskills`), and `_agent-guidance`'s own `drift-report.sh` documents the
+same shape in a code comment written to tell a real 404 apart from an API
+error.
+
+- **Discard output on failure explicitly, never with a bare `|| true`:**
+  `out=$(gh api ... --jq '.foo') || out=""`.
+- The exit code is not enough on its own — `|| true` clears the *status* but
+  leaves `$out` holding whatever `gh api` printed, error body included.
+
 ## A successful `git push` does not mean your commit exists
 
 Same shape as the trap above — an exit code that belongs to a different command
