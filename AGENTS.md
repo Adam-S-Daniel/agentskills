@@ -359,6 +359,18 @@ circumstances. `repos.yml` also said `lock: committed` in plain English, one
   one owner — hosted sessions refuse cross-owner repo attachment — so "I cannot
   see it" and "it does not exist" have to stay separate sentences. Say which
   one you mean, and say what you checked with.
+- **The DENOMINATOR is the part that lies.** Enumerating what to verify from
+  whatever happens to be checked out locally answers a narrower question than
+  the one you asked, and does it in both directions at once. Measured
+  2026-08-29 while verifying an AGENTS.md sync: three local checkouts were
+  repos DELETED from GitHub, counted as consumers and reported as missing the
+  text (false RED), while a real consumer that session had never attached was
+  absent from the set entirely — so the run printed `ALL PROPAGATED` over 17 of
+  18 (false GREEN). The false green is the dangerous half: a clean verdict over
+  an incomplete list, with nothing on screen to prompt a second look. It is the
+  same defect `repos.yml`'s `cron_coverage` block exists to prevent for the
+  cron audit (issue #37). Take the denominator from a registry or from the
+  remote — never from the disk — and say which one you used.
 
 ## "The watch finished" is not "CI passed"
 
@@ -636,6 +648,35 @@ ref for review, not the setting, to catch.
   time. Note that a "you have uncommitted changes, please commit and push" stop
   hook cannot see that a subagent holds the tree, so it will advise exactly this
   mistake; say why you are declining rather than complying by reflex.
+- **A subagent that has REPORTED can still be holding the tree.** The rule
+  above is about one that is still working; this is the half that surprises
+  people. The Agent or Workflow call returns when the agent returns, and its
+  BACKGROUND CHILDREN are not reaped with it — they keep running, in your
+  checkout, writing your files. Measured 2026-08-29 in `_agent-guidance`,
+  twice in one session, both after the workflow had printed its result: one
+  orphan was looping the test suite, which writes its report into the repo
+  root, so two runs clobbered the same artifact and a 999/0 tree reported
+  985/14 — fourteen failures in code nobody had touched. The other was
+  mutation-testing a source file: a guard I had restored and verified by
+  checksum was gone one command later, and the run in between blamed my
+  change for the orphan's mutation. The reviewing agent hit the same
+  collision from the other side and could not name it — it reported "the old
+  bytes" executing in freshly spawned processes while `md5sum` on that path
+  across 1779 samples never once showed the old content.
+  - **Look for descendants before trusting a long run**
+    (`ps -eo pid,etimes,cmd | grep '[y]our-command'`). A result arriving is
+    not evidence the processes behind it are gone.
+  - **Fingerprint the inputs across the run** — `md5sum` the files under test
+    before and after. If they differ, the run measured something you cannot
+    name and is not evidence, however green. Two lines, and it is the only
+    thing that separates a real regression from a race.
+  - **A shared mutable path is what turns a race into a wrong verdict**, so
+    prefer a per-run output path over a well-known one. The false RED is
+    loud; its false-GREEN twin — a run whose script never executed,
+    certifying the previous run's artifact — is silent.
+  - **Kill orphans rather than working around them, and say that you did.** A
+    result obtained after killing a competing writer is a different
+    measurement from one obtained before it.
 - **A subagent that goes quiet is not working — check activity, not the clock.**
   Its transcript file's mtime is the real signal; a run journal only writes on
   start and finish, so silence there is expected and proves nothing. Decide the
