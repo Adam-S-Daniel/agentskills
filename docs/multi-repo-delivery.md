@@ -174,6 +174,16 @@ cat > "$project/.claude/settings.json" <<'JSON'
         "hooks": [
           {
             "type": "command",
+            "command": "bash -c 'for h in \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/fleet-memory.sh \"$CLAUDE_PROJECT_DIR\"/*/.claude/hooks/fleet-memory.sh; do [ -f \"$h\" ] && exec bash \"$h\"; done'",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
             "command": "bash -c 'for h in \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/skills-bootstrap.sh \"$CLAUDE_PROJECT_DIR\"/*/.claude/hooks/skills-bootstrap.sh; do [ -f \"$h\" ] && exec bash \"$h\"; done'",
             "timeout": 90
           }
@@ -183,13 +193,40 @@ cat > "$project/.claude/settings.json" <<'JSON'
   }
 }
 JSON
-echo "skills wiring: wrote $project/.claude/settings.json"
+echo "wiring: wrote $project/.claude/settings.json"
 exit 0
 ```
 
 `$CLAUDE_PROJECT_DIR` **inside** the hook command is correct and must stay: that
 one is expanded at hook time, by Claude Code, which does set it. Only the outer
 `project=` cannot rely on it.
+
+### Why there are now TWO groups
+
+The second one is `fleet-memory`, and in the multi-repo shape it is not
+optional — it is the only thing that delivers the fleet's guidance at all.
+
+Each repo's `AGENTS.md` used to inline the whole ~52 kB managed block, so a
+session with 19 repos attached loaded 19 identical copies: 332.3k tokens across
+37 memory files, measured 2026-08-29. The block now lives in user memory
+(`~/.claude/CLAUDE.md`), written at session start by
+`.claude/hooks/fleet-memory.sh`, and each repo keeps a ~2.9 kB stub instead.
+
+That makes this file load-bearing in a way it was not before. **A single-repo
+session fires the repo's own committed `settings.json` and is fine either way.
+A MULTI-repo session fires only this file** — the same ADR 0005 finding the
+section above rests on — so without the `fleet-memory` group here, every
+multi-repo session runs on the stub alone and opens with
+`fleet-guidance: DEGRADED`. The stub carries the load-bearing rules inline, so
+such a session is diminished rather than blind; it is still not what you want.
+
+They are two GROUPS, not two commands in one, for the reason the registrar in
+`_agent-guidance` gives: a group carries one `matcher` and one `timeout`, and
+these two need different ones. `fleet-memory` copies a local file and wants 30
+seconds; `skills-bootstrap` fetches two registries and needs its 90. Putting
+them in one group would silently impose one budget on both. `exec` is also why
+they cannot share: it replaces the shell, so the first hook found would be the
+only one that ever ran.
 
 Four things about it are deliberate:
 
