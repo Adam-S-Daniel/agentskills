@@ -2199,8 +2199,24 @@ if not root.is_dir():
     sys.exit("not a directory: %s" % sys.argv[1])
 entries = []
 for candidate in root.rglob("*"):
+    # A SYMLINK IS REFUSED, NOT DIGESTED — the mirror of the guard in
+    # `digest_skill_dir`, and the fuller reasoning lives there. `is_file()`
+    # FOLLOWS symlinks, so a symlink to a DIRECTORY and a DANGLING symlink
+    # both answered false here and contributed NO manifest entry at all,
+    # which let two different installed trees carry one digest.
+    #
+    # This side is the one that matters most: the hook consumes locks
+    # authored elsewhere, so per E4 it must be the stricter of the two.
+    # Exiting here prints nothing on stdout, and every caller of `digest_dir`
+    # already treats an empty answer as a failed measurement — `may_replace`
+    # by its `-n "$have"` guard, the install loop by the `$got` = `$want`
+    # comparison — so a symlink-bearing skill fails integrity, its bytes are
+    # removed rather than left live, and the verdict says so. Fail-closed.
+    if candidate.is_symlink():
+        sys.exit("symlink in skill directory: %s"
+                 % candidate.relative_to(root).as_posix())
     if not candidate.is_file():
-        continue  # directories carry no bytes; broken symlinks carry none either
+        continue  # directories carry no bytes
     entries.append((candidate.relative_to(root).as_posix(), candidate))
 manifest = "".join(
     f"{relpath}\0{hashlib.sha256(file_path.read_bytes()).hexdigest()}\n"

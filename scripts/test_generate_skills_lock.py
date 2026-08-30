@@ -193,6 +193,77 @@ def test_digest_changes_when_a_payload_file_changes(tmp_path):
     assert gsl.digest_skill_dir(skill) != before
 
 
+# --- symlinks are refused, not digested (#132) -----------------------------
+# The defect these pin: `is_file()` FOLLOWS symlinks, so a symlink to a
+# DIRECTORY and a DANGLING symlink both answered false and contributed NO
+# manifest entry — meaning two materially different directories could carry
+# one digest, and the hook would install the tampered one under a digest that
+# verified. The digest is the primitive the whole delivery design rests on
+# ("what it installs is pinned and integrity-checked by skills.lock"), and the
+# payload is instruction text the model loads on turn one, so a digest that is
+# not a commitment to the directory makes that verification decorative.
+
+@pytest.mark.parametrize("shape", ["to-a-directory", "to-a-file", "dangling"])
+def test_the_generator_refuses_a_symlink_in_a_skill_directory(tmp_path, shape):
+    """Every symlink shape is refused, including the two that carried no bytes.
+
+    Parametrised over the shapes rather than asserted on one, because the two
+    that were INVISIBLE to the old walk are precisely the two a single-shape
+    test would have been most likely to omit: a symlink to a file was at least
+    present in the manifest, while the directory and dangling shapes were
+    skipped outright.
+    """
+    skill = tmp_path / "skill"
+    _write(skill / "SKILL.md", "body\n")
+    if shape == "to-a-directory":
+        outside = tmp_path / "outside"
+        _write(outside / "payload.md", "a whole subtree the digest never saw\n")
+        (skill / "link").symlink_to(outside, target_is_directory=True)
+    elif shape == "to-a-file":
+        outside = tmp_path / "outside.md"
+        _write(outside, "bytes that live outside the directory\n")
+        (skill / "link").symlink_to(outside)
+    else:
+        (skill / "link").symlink_to(tmp_path / "nothing-is-here")
+
+    with pytest.raises(gsl.GeneratorError) as excinfo:
+        gsl.digest_skill_dir(skill)
+    # The message names the offending path, because "regenerate the lock" is
+    # not actionable when the reason is one entry in a tree of them.
+    assert "symlink in skill directory" in str(excinfo.value)
+    assert "link" in str(excinfo.value)
+
+
+def test_the_collision_a_symlink_used_to_buy_is_gone(tmp_path):
+    """Two different trees must not reach one digest.
+
+    This is #132's actual claim, asserted directly rather than through the
+    refusal: before the guard, `honest` and `tampered` below digested
+    IDENTICALLY — the symlinked subtree contributed nothing at all — so a lock
+    row written for one verified the other. The assertion is that this is now
+    impossible to express, not merely that it hashes differently.
+    """
+    honest = tmp_path / "honest"
+    _write(honest / "SKILL.md", "body\n")
+    tampered = tmp_path / "tampered"
+    _write(tampered / "SKILL.md", "body\n")
+    smuggled = tmp_path / "smuggled"
+    _write(smuggled / "extra.md", "content the digest was blind to\n")
+    (tampered / "link").symlink_to(smuggled, target_is_directory=True)
+
+    honest_digest = gsl.digest_skill_dir(honest)
+    with pytest.raises(gsl.GeneratorError):
+        gsl.digest_skill_dir(tampered)
+
+    # The control: with the symlink replaced by the SAME content as a real
+    # directory, the two trees differ and so do their digests. Without this,
+    # the test above would also pass against an implementation that refused
+    # every directory, which would be a guard that proved nothing.
+    (tampered / "link").unlink()
+    _write(tampered / "link" / "extra.md", "content the digest was blind to\n")
+    assert gsl.digest_skill_dir(tampered) != honest_digest
+
+
 def test_digest_changes_on_a_one_byte_edit_in_a_nested_file(tmp_path):
     skill = tmp_path / "skill"
     _write(skill / "SKILL.md", "body\n")
@@ -7451,6 +7522,91 @@ def test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill(tmp_path)
         (project / "skills.lock").read_text(encoding="utf-8")
     )["skills"]["adam/tricky"]
     assert gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(installed) == locked
+
+
+def test_both_digest_implementations_refuse_a_symlink(tmp_path):
+    """Bind the hook's `digest_dir` and the generator on the symlink rule.
+
+    `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill` binds
+    the two on content they must both HASH the same. This binds them on the one
+    input they must both REFUSE — the other half of the same contract, and the
+    half that a re-implementation is most likely to drop, because refusing is
+    the behaviour with no output to compare.
+
+    TRICKY_SKILL deliberately does NOT carry the symlink: a fixture that is
+    refused cannot also be the fixture that proves the two agree on a digest,
+    so the symlink case needs its own registry or it would delete the coverage
+    it was added to extend.
+
+    The hook side is asserted through the VERDICT rather than by calling
+    `digest_dir`: the hook is the side that consumes locks authored elsewhere,
+    so what matters is not that its hasher errors but that a symlink-bearing
+    skill ends up NOT INSTALLED and reported — fail-closed, with the unverified
+    bytes removed rather than left live in ~/.claude/skills for the model to
+    load on turn one.
+    """
+    root = tmp_path / "registry"
+    root.mkdir(parents=True)
+    sha = make_registry(root, {"adam/alpha": SKILL_A})
+    # The symlink is added to the registry's WORKING TREE and committed, which
+    # is how it would really arrive: git tracks a symlink as mode 120000, so
+    # this is reachable from ordinary committed content, not just a local write.
+    #
+    # RELATIVE, and that is the whole point of the fixture. An ABSOLUTE target
+    # never reaches the digest at all — `materialize` extracts the pinned ref
+    # through tarfile, which refuses "a link to an absolute path" outright, so
+    # a fixture built that way tests tarfile's guard and reports it as this
+    # one. Measured while writing this test: the absolute form failed here with
+    # `'plugins/adam/skills/alpha/link' is a link to an absolute path`, from
+    # `git archive`, before `digest_skill_dir` was ever called. A relative
+    # symlink extracts cleanly and lands in the tree the digest walks, which is
+    # exactly the gap #132 is about.
+    skill_dir = root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha"
+    _write(skill_dir / "payload" / "extra.md", "a subtree the digest never saw\n")
+    (skill_dir / "link").symlink_to("payload", target_is_directory=True)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "add a symlink")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         check=True, capture_output=True, text=True).stdout.strip()
+    # The symlink really is committed as one (mode 120000), not materialised as
+    # a copy by this machine's git — otherwise the fixture proves nothing.
+    modes = subprocess.run(["git", "-C", str(root), "ls-files", "-s"],
+                           check=True, capture_output=True, text=True).stdout
+    assert "120000" in modes, f"git did not record a symlink here:\n{modes}"
+
+    # GENERATOR side: it refuses to WRITE a lock naming such a skill, which is
+    # this repo's usual posture — don't emit a lock the hook would reject.
+    project = tmp_path / "project"
+    project.mkdir()
+    proc = run_generator("--repo", str(root), "--registry",
+                         root.resolve().as_uri(), "--ref", sha,
+                         "--bundles", "adam", "-o", str(project / "skills.lock"))
+    assert proc.returncode != 0, proc.stdout
+    assert "symlink in skill directory" in (proc.stderr + proc.stdout)
+    assert not (project / "skills.lock").exists(), \
+        "a refused digest must not leave a lock behind"
+
+    # HOOK side: hand it a lock that names the skill anyway (an attacker does
+    # not run our generator), and the install must fail closed.
+    (project / ".git").mkdir()
+    _write(project / "skills.lock", json.dumps({
+        "registry": "fixture/registry",
+        "ref": sha,
+        "bundles": ["adam"],
+        "skills": {"adam/alpha": gsl.LOCK_DIGEST_PREFIX + "0" * 64},
+        "generated_from": sha,
+        "sources": [{"name": "fixture/registry",
+                     "url": root.resolve().as_uri(),
+                     "ref": sha, "bundles": ["adam"]}],
+    }, indent=2) + "\n")
+    home = tmp_path / "home"
+    hook = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert hook.returncode == 0, hook.stderr
+    verdict = _verdict(hook)
+    assert not verdict.startswith("skills: 1/1 "), verdict
+    installed = home / ".claude" / "skills" / "alpha"
+    assert not installed.exists(), \
+        f"unverified bytes were left in place: {verdict}"
 
 
 def test_hook_bundle_override_narrows_what_is_installed(tmp_path):
