@@ -9520,10 +9520,34 @@ def _run_hook_unprivileged(home: Path, project_dir: Path,
     )
 
 
+def _undecodable_name(raw: bytes) -> str:
+    """A filesystem name carrying a byte that is not valid UTF-8, or skip.
+
+    `os.fsdecode` is what raises here, not the mkdir: on Windows it decodes
+    strict UTF-8 and a lone 0xff is a UnicodeDecodeError before any path is
+    touched. Measured in CI — a guard wrapped around only the mkdir let the
+    test die in the fixture on every Windows run.
+    """
+    try:
+        return os.fsdecode(raw)
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError):  # pragma: no cover
+        pytest.skip("this platform cannot represent an undecodable filename")
+
+
 def _unsearchable_child(parent: Path, name: str, carries_lock: bool = True) -> Path:
-    """A child repo whose permissions this hook cannot get past."""
+    """A child repo whose permissions this hook cannot get past.
+
+    The mkdir is guarded because one caller passes a CONTROL-CHARACTER name,
+    and Windows refuses those at the filesystem layer (WinError 123) before any
+    of this hook's behaviour is reached. Skipping there is right — the DAC
+    branch is unreachable on Windows anyway — but it has to happen without the
+    fixture raising first.
+    """
     child = parent / name
-    child.mkdir(parents=True)
+    try:
+        child.mkdir(parents=True)
+    except (OSError, ValueError):  # pragma: no cover - platform gate
+        pytest.skip(f"this filesystem will not hold the name {name!r}")
     (child / ".git").mkdir()
     if carries_lock:
         (child / "skills.lock").write_text("{}", encoding="utf-8")
@@ -9644,7 +9668,7 @@ def test_two_children_differing_by_an_undecodable_byte_do_not_render_alike(tmp_p
     project = tmp_path / "project"
     project.mkdir()
     honest = project / "zz repo"
-    hostile = project / os.fsdecode(b"zz\xffrepo")
+    hostile = project / _undecodable_name(b"zz\xffrepo")
     for child in (honest, hostile):
         try:
             child.mkdir()
@@ -9691,7 +9715,7 @@ def test_a_refused_lock_is_not_reported_as_an_invalid_one(tmp_path):
     staged = tmp_path / "staged"
     make_project(staged, registry, sha)
     try:
-        child = project / os.fsdecode(b"aa\xffrepo")
+        child = project / _undecodable_name(b"aa\xffrepo")
         shutil.move(str(staged), str(child))
     except (UnicodeEncodeError, OSError):
         pytest.skip("this filesystem cannot hold an undecodable name")
@@ -9730,6 +9754,56 @@ def test_a_genuinely_unparseable_lock_still_says_regenerate_it(tmp_path):
     assert "DEGRADED" in verdict, verdict
     assert "generate_skills_lock.py" in verdict, verdict
     assert len(verdict.splitlines()) == 1, verdict
+
+
+def test_a_long_path_does_not_truncate_the_rest_of_a_rejection_reason(tmp_path):
+    """The bound is on the ATOM, so a long path cannot crowd out the message.
+
+    This exists because the first version of that bound clamped the whole
+    REASON, and the "claimed by two sources" message interpolates a registry
+    URL and THEN a position like `sources[1]`. A long path filled the budget
+    and the verdict stopped before the position — losing the one part that
+    names which source was at fault, in a healthy rejection with nothing
+    hostile in it. #134 asked for a bound that does not change what a verdict
+    says on a healthy run; that was not one.
+
+    IT WAS INVISIBLE TO THE LINUX LANE. `/tmp/pytest-of-root/...` is short
+    enough to fit, so the sibling test that caught it
+    (`…_cannot_desync_the_streams`) passed here and failed only on Windows,
+    where the temp path is `C:/Users/runneradmin/AppData/Local/Temp/…`. So the
+    length is made explicit here rather than inherited from the platform, and
+    the class is now catchable on any of them.
+    """
+    deep = tmp_path
+    for _ in range(6):                       # a path no bound may spend itself on
+        deep = deep / ("d" * 40)
+    deep.mkdir(parents=True)
+    registry = deep / "registry-one"
+    sha = make_registry(registry, {"adam/alpha": SKILL_A})
+    parent = deep / "repos"
+    parent.mkdir()
+    _child_repo(parent, "repo-a", registry, sha)
+    hostile = parent / "repo-b"
+    hostile.mkdir()
+    (hostile / ".git").mkdir()
+    # Not registry-shaped, so `read_lock` names it by POSITION — and the
+    # position is the last thing interpolated, hence the first thing lost.
+    _write(hostile / "skills.lock", json.dumps({
+        "registry": registry.resolve().as_uri(),
+        "ref": sha,
+        "bundles": ["adam"],
+        "sources": [{"registry": "not a registry at all",
+                     "ref": "0" * 40, "bundles": ["adam"]}],
+        "skills": {},
+    }, indent=2) + "\n")
+
+    verdict = _verdict(_run_hook(tmp_path / "home", parent,
+                                 {"SKILLS_BOOTSTRAP_FORCE": "1"}))
+    assert "claimed by two sources" in verdict, verdict
+    assert "sources[1]" in verdict, \
+        f"the position was truncated away by a long path: {verdict}"
+    # And the bound is still doing its job on the same run.
+    assert len(verdict) < 4000, len(verdict)
 
 
 def test_a_repo_derived_fragment_cannot_amplify_the_verdict(tmp_path):

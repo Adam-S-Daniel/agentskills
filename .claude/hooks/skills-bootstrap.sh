@@ -1204,15 +1204,44 @@ UNPRINTABLE = re.compile("[\x00\ud800-\udfff]")
 # places on purpose — this reader is a heredoc, so it cannot import the shell
 # variable, and a number derived at runtime would be one more thing to get
 # wrong. `test_a_repo_derived_fragment_cannot_amplify_the_verdict` binds them.
-MAX_REASON = 160
+MAX_ATOM = 160
+# The BACKSTOP for a whole rejection reason, deliberately far looser than
+# MAX_ATOM and deliberately not the primary bound. A reason is a sentence THIS
+# READER composes around bounded atoms, so bounding the sentence is the same
+# mistake the bash side already made once: it truncates the hook`s own words
+# and leaves whichever borrowed value came first.
+#
+# Measured, and only on Windows, which is why it is written down: the
+# "claimed by two sources" message interpolates a registry URL and THEN a
+# position like `sources[1]`. Under a 160-character bound on the SENTENCE, a
+# long Windows temp path filled the budget and the verdict stopped before
+# `sources[1]` — losing the one part naming which source was at fault, in a
+# healthy rejection with nothing hostile in it. #134 asked for a bound that
+# does not change what a verdict says on a healthy run; that was not one.
+MAX_REASON = 2000
+
+
+def bounded(value, limit=MAX_ATOM):
+    """A repo-derived VALUE, bounded, ready to interpolate into a message.
+
+    THE ATOM, NEVER THE SENTENCE. Lock content has no length of its own — one
+    padded skill key produced 200,338 bytes of `additionalContext` while the
+    session read `1/1 ... installed` — so the value is cut here, where it is
+    still just a value, and every message keeps its own wording intact however
+    long the thing it is quoting was.
+
+    The elision is SAID rather than silent: a value cut at a fixed width with
+    no marker reads as the whole value, and a reader then goes looking for a
+    path or a skill name that was never there.
+    """
+    text = value if isinstance(value, str) else str(value)
+    if len(text) > limit:
+        return "%s... (%d more)" % (text[:limit], len(text) - limit)
+    return text
 
 
 def clamp_reason(text):
-    """`text`, bounded, with the elision SAID rather than silent.
-
-    A reason cut at a fixed width with no marker reads as the whole reason, and
-    the reader then acts on a sentence that stops mid-clause.
-    """
+    """A whole reason, bounded as a BACKSTOP — see MAX_REASON."""
     if len(text) > MAX_REASON:
         return "%s... (%d more)" % (text[:MAX_REASON], len(text) - MAX_REASON)
     return text
@@ -1593,7 +1622,7 @@ def read_lock(lock_path):
                     taking = where
                 raise LockRejected(
                     "lock: bundle %r is claimed by two sources, %s and %s; a bundle has "
-                    "one registry and one layout" % (bundle, held, taking))
+                    "one registry and one layout" % (bounded(bundle), bounded(held), bounded(taking)))
             claim[bundle] = len(sources)
         sources.append({
             "name": raw.get("registry") or "",
@@ -1606,7 +1635,8 @@ def read_lock(lock_path):
     for key in sorted(skills):
         digest = skills[key]
         if not re.fullmatch(NAME + "/" + NAME, key):
-            raise LockRejected("lock: skill key %r is not '<bundle>/<skill>'" % key)
+            raise LockRejected("lock: skill key %r is not '<bundle>/<skill>'"
+                               % bounded(key))
         # BOTH shapes, normalised to bare hex. A committed lock of bare 64-hex
         # values trips gitleaks' `generic-api-key` rule: a keyword-bearing skill
         # basename (`secrets`, `oauth`, `token`, `api-…`) is the keyword, and the
@@ -1648,7 +1678,7 @@ def read_lock(lock_path):
         matched = (re.fullmatch(r"(?:sha256:)?([0-9a-f]{64})", digest)
                    if isinstance(digest, str) else None)
         if not matched:
-            raise LockRejected("lock: skill %r has no sha256 digest" % key)
+            raise LockRejected("lock: skill %r has no sha256 digest" % bounded(key))
         digest = matched.group(1)
         bundle, name = key.split("/", 1)
         # `synced/` is the claude.ai account-sync channel's own directory inside
@@ -1715,7 +1745,7 @@ def read_lock(lock_path):
                 "lock: skill %r would install over ~/.claude/skills/synced, the "
                 "claude.ai account-sync directory — this hook never installs a skill "
                 "by that name, and that store is not its to replace or delete; rename "
-                "the skill directory in the registry that ships it" % key)
+                "the skill directory in the registry that ships it" % bounded(key))
         # Checked BEFORE the AGENTSKILLS_BUNDLE filter below: narrowing a session
         # to one bundle must not be able to hide an unroutable row in the rest of
         # the lock. A bundle nobody claims has no registry, no ref and no layout,
@@ -1724,7 +1754,7 @@ def read_lock(lock_path):
             raise LockRejected(
                 "lock: skill %r names bundle %r, which no source claims; list it in the "
                 "top-level 'bundles' or in a source's 'bundles' — this hook does not "
-                "guess which registry a bundle comes from" % (key, bundle))
+                "guess which registry a bundle comes from" % (bounded(key), bounded(bundle)))
         if only_bundle and bundle != only_bundle:
             continue
         index = claim[bundle]
