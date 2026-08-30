@@ -9756,40 +9756,48 @@ def test_a_genuinely_unparseable_lock_still_says_regenerate_it(tmp_path):
     assert len(verdict.splitlines()) == 1, verdict
 
 
-def test_a_long_path_does_not_truncate_the_rest_of_a_rejection_reason(tmp_path):
-    """The bound is on the ATOM, so a long path cannot crowd out the message.
+def test_a_long_value_does_not_truncate_the_rest_of_a_rejection_reason(tmp_path):
+    """The bound is on the ATOM, so one long value cannot crowd out the message.
 
     This exists because the first version of that bound clamped the whole
     REASON, and the "claimed by two sources" message interpolates a registry
-    URL and THEN a position like `sources[1]`. A long path filled the budget
+    and THEN a position like `sources[1]`. A long registry filled the budget
     and the verdict stopped before the position — losing the one part that
     names which source was at fault, in a healthy rejection with nothing
     hostile in it. #134 asked for a bound that does not change what a verdict
     says on a healthy run; that was not one.
 
-    IT WAS INVISIBLE TO THE LINUX LANE. `/tmp/pytest-of-root/...` is short
-    enough to fit, so the sibling test that caught it
-    (`…_cannot_desync_the_streams`) passed here and failed only on Windows,
-    where the temp path is `C:/Users/runneradmin/AppData/Local/Temp/…`. So the
-    length is made explicit here rather than inherited from the platform, and
-    the class is now catchable on any of them.
+    IT WAS INVISIBLE TO THE LINUX LANE. The sibling test that caught it
+    (`…_cannot_desync_the_streams`) inherits its length from the temp path:
+    `/tmp/pytest-of-root/…` fits, `C:/Users/runneradmin/AppData/Local/Temp/…`
+    does not, so it passed here and failed only on Windows.
+
+    THE LENGTH COMES FROM LOCK CONTENT, NOT FROM THE FILESYSTEM, and the first
+    version of this test got that wrong in a way worth recording. It built a
+    deliberately deep directory instead — which reproduced the bug on Linux and
+    then broke Windows outright, because six 40-character components plus the
+    runner`s temp prefix exceeds `MAX_PATH` and `git init` exits 128. Driving
+    the length from the lock`s own `registry` field is both portable and a
+    truer statement of the class: the amplification vector #134 is about is
+    repo-CONTROLLED content, and an incidentally-long temp path was only ever
+    standing in for it.
     """
-    deep = tmp_path
-    for _ in range(6):                       # a path no bound may spend itself on
-        deep = deep / ("d" * 40)
-    deep.mkdir(parents=True)
-    registry = deep / "registry-one"
+    registry = tmp_path / "registry-one"
     sha = make_registry(registry, {"adam/alpha": SKILL_A})
-    parent = deep / "repos"
+    parent = tmp_path / "repos"
     parent.mkdir()
     _child_repo(parent, "repo-a", registry, sha)
     hostile = parent / "repo-b"
     hostile.mkdir()
     (hostile / ".git").mkdir()
-    # Not registry-shaped, so `read_lock` names it by POSITION — and the
-    # position is the last thing interpolated, hence the first thing lost.
+    # URL-shaped so it is used verbatim as the claiming source`s name, and long
+    # enough to exhaust any bound applied to the sentence rather than to it.
+    long_registry = "file:///" + "L" * 400
+    # The second source is NOT registry-shaped, so `read_lock` names it by
+    # POSITION — and the position is the last thing interpolated, hence the
+    # first thing a sentence-level clamp loses.
     _write(hostile / "skills.lock", json.dumps({
-        "registry": registry.resolve().as_uri(),
+        "registry": long_registry,
         "ref": sha,
         "bundles": ["adam"],
         "sources": [{"registry": "not a registry at all",
@@ -9801,9 +9809,11 @@ def test_a_long_path_does_not_truncate_the_rest_of_a_rejection_reason(tmp_path):
                                  {"SKILLS_BOOTSTRAP_FORCE": "1"}))
     assert "claimed by two sources" in verdict, verdict
     assert "sources[1]" in verdict, \
-        f"the position was truncated away by a long path: {verdict}"
-    # And the bound is still doing its job on the same run.
+        f"the position was truncated away by a long value: {verdict}"
+    # The honest sibling still delivered, and the bound is still doing its job.
+    assert verdict.startswith("skills: 1/1 "), verdict
     assert len(verdict) < 4000, len(verdict)
+    assert len(verdict.splitlines()) == 1, verdict
 
 
 def test_a_repo_derived_fragment_cannot_amplify_the_verdict(tmp_path):
