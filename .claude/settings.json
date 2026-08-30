@@ -11,6 +11,16 @@
             "timeout": 90
           }
         ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/fleet-memory.sh\"",
+            "timeout": 30
+          }
+        ]
       }
     ]
   }
