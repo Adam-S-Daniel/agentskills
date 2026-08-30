@@ -323,10 +323,15 @@ sys.stdout.buffer.flush()'; then
 # arriving while the session read `1/1 … alpha installed`. A child directory
 # name is the same shape at ~250 bytes a time, up to $MAX_LOCKS of them.
 #
-# Bounding the FRAGMENT rather than the whole verdict is what keeps this honest:
-# truncating the assembled line would cut off the hook`s own words — the counts,
-# the reasons, the remediation — and leave whichever fragment came first. Every
-# clause the hook writes itself stays intact; only the borrowed text is capped.
+# Bounding the borrowed ATOM — one path, one name — is what keeps this honest,
+# and the distinction is finer than it first looks. Truncating the assembled
+# line would cut the hook`s own words and leave whichever fragment came first.
+# But so does truncating a CLAUSE: `alpha (<path-a>, <path-b>)` and
+# `<path>: <reason>` are sentences this hook composed AROUND borrowed text, and
+# clamping them drops the second path or the whole reason. Both were measured
+# while adding this — the run`s own conclusion arriving as
+# `… and no stale … (26 more)`. So the cap goes on at CONSTRUCTION, where a
+# path is still just a path, and no join ever clamps anything.
 #
 # 160 is chosen against the two real populations, not as a round number: the
 # longest legitimate fragment either surface produces is a filesystem path, and
@@ -352,7 +357,6 @@ clamp () {
 join_names () {
   local out="" item
   for item in "$@"; do
-    item="$(clamp "$item")"
     if [ -z "$out" ]; then out="$item"; else out="$out, $item"; fi
   done
   printf '%s' "$out"
@@ -682,7 +686,7 @@ child_carries_lock () {
 
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   own="$(resolve_lock_path "$CLAUDE_PROJECT_DIR/skills.lock")"
-  SEARCHED+=("$own")
+  SEARCHED+=("$(clamp "$own")")
   own_refused="$(lock_file_is_refusable "$CLAUDE_PROJECT_DIR/skills.lock")"
   if [ -n "$own_refused" ]; then
     # NOT a fall-through to the child scan. A project that ships a `skills.lock`
@@ -885,13 +889,13 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
       fi
       if [ -L "$child" ]; then
         if [ "$carries_lock" -eq 1 ]; then
-          SKIPPED_CHILDREN+=("$project_real/${child##*/} (a symlink, not a directory in this project)")
+          SKIPPED_CHILDREN+=("$(clamp "$project_real/${child##*/}") (a symlink, not a directory in this project)")
         fi
         continue
       fi
       if [ ! -e "$child/.git" ]; then
         if [ "$carries_lock" -eq 1 ]; then
-          SKIPPED_CHILDREN+=("$project_real/${child##*/} (not a git repository)")
+          SKIPPED_CHILDREN+=("$(clamp "$project_real/${child##*/}") (not a git repository)")
         fi
         continue
       fi
@@ -916,7 +920,7 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
       # repo that never opted in. Every skip that costs something is named.
       child_refused="$(lock_file_is_refusable "$child/skills.lock")"
       if [ -n "$child_refused" ]; then
-        SKIPPED_CHILDREN+=("$project_real/${child##*/} ($child_refused)")
+        SKIPPED_CHILDREN+=("$(clamp "$project_real/${child##*/}") ($child_refused)")
         continue
       fi
       [ -f "$child/skills.lock" ] || continue
@@ -951,7 +955,7 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
       if [ "${#LOCKS[@]}" -lt "$MAX_LOCKS" ]; then
         LOCKS+=("$candidate")
       else
-        DROPPED_LOCKS+=("$candidate")
+        DROPPED_LOCKS+=("$(clamp "$candidate")")
       fi
     done
     [ "$dotglob_was_on" -eq 1 ] || shopt -u dotglob
@@ -972,7 +976,7 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   fi
 else
   own="$(resolve_lock_path "$SELF_ROOT/skills.lock")"
-  SEARCHED+=("$own")
+  SEARCHED+=("$(clamp "$own")")
   # The third site that opens a lock, and it gets the same rule for the same
   # reason — a hand run with no project dir is still a run that must not read a
   # lock from somewhere the reader did not look.
@@ -1199,7 +1203,7 @@ UNPRINTABLE = re.compile("[\x00\ud800-\udfff]")
 # moves the amplification rather than removing it. Stated as a literal in both
 # places on purpose — this reader is a heredoc, so it cannot import the shell
 # variable, and a number derived at runtime would be one more thing to get
-# wrong. `test_a_verdict_fragment_is_bounded_on_both_sides` binds them.
+# wrong. `test_a_repo_derived_fragment_cannot_amplify_the_verdict` binds them.
 MAX_REASON = 160
 
 
@@ -2072,7 +2076,12 @@ then
   why=""
   if [ -s "$tmp/why" ]; then why="$(cat "$tmp/why" 2>/dev/null)" || why=""; fi
   if [ -n "$why" ]; then
-    emit "skills: DEGRADED — every discovered lock was refused, so nothing was installed ($why; details in $LOG)$LEFT_IN_PLACE"
+    # KEEPS THE WORDS "could not read", deliberately. What #139 asked for is the
+    # REASON and an honest remediation, not new vocabulary — and that phrase is
+    # the stable contract nineteen tests across two suites match on, including
+    # the skills-doctor`s own "a lock this rejects is one the hook rejects too".
+    # Changing it would have been an unrelated break dressed as a fix.
+    emit "skills: DEGRADED — could not read any of the ${#LOCKS[@]} discovered $(plural "${#LOCKS[@]}" lock locks) ($why; details in $LOG)$LEFT_IN_PLACE"
   else
     emit "skills: DEGRADED — could not read $LOCK_LABEL (invalid JSON or a bad field; regenerate it with scripts/generate_skills_lock.py, details in $LOG)$LEFT_IN_PLACE"
   fi

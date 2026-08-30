@@ -9684,7 +9684,7 @@ def test_a_refused_lock_is_not_reported_as_an_invalid_one(tmp_path):
 
     assert "invalid JSON or a bad field" not in verdict, verdict
     assert "regenerate it with scripts/generate_skills_lock.py" not in verdict, verdict
-    assert "refused" in verdict, verdict
+    assert "could not read" in verdict, verdict
     # It says what was actually wrong, so the operator can act on it.
     assert "cannot be rendered in a verdict" in verdict, verdict
     # And it does not print a path that was never on disk.

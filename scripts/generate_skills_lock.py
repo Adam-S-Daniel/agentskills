@@ -493,8 +493,9 @@ def digest_skill_dir(path: Path, skip: frozenset = frozenset()) -> str:
         # `rglob` surfaces all three shapes as entries with `is_symlink()` true
         # and does not descend into a symlinked directory, so this one test
         # before the `is_file()` arm covers the whole class. Mirrored in the
-        # hook's `digest_dir`; `test_both_digest_implementations_refuse_a_
-        # symlink` binds them.
+        # hook's `digest_dir`. The two are bound by
+        # `test_both_digest_implementations_refuse_a_symlink` -- kept on one
+        # line because the citation checker reads a name, not a sentence.
         if candidate.is_symlink():
             raise GeneratorError(
                 "symlink in skill directory: "
