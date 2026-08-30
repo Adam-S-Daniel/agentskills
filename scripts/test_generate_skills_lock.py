@@ -193,6 +193,23 @@ def test_digest_changes_when_a_payload_file_changes(tmp_path):
     assert gsl.digest_skill_dir(skill) != before
 
 
+def _make_symlink(link: Path, target, to_directory: bool = False) -> None:
+    """Create a REAL symlink, or skip.
+
+    Deliberately not `_symlink_to_dir`, which falls back to a directory
+    JUNCTION on Windows. A junction is the right substitute where what is
+    being pinned is that `resolve()` follows it — but these tests are about
+    `is_symlink()`, and Python reports False for a junction, so the fallback
+    would quietly exercise the opposite of the case under test and pass.
+    `os.symlink` needs Developer Mode or elevation on Windows (WinError 1314),
+    which is not reasonable to require, so the honest answer there is a skip.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=to_directory)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform gate
+        pytest.skip("this platform does not permit creating symlinks")
+
+
 # --- symlinks are refused, not digested (#132) -----------------------------
 # The defect these pin: `is_file()` FOLLOWS symlinks, so a symlink to a
 # DIRECTORY and a DANGLING symlink both answered false and contributed NO
@@ -218,13 +235,13 @@ def test_the_generator_refuses_a_symlink_in_a_skill_directory(tmp_path, shape):
     if shape == "to-a-directory":
         outside = tmp_path / "outside"
         _write(outside / "payload.md", "a whole subtree the digest never saw\n")
-        (skill / "link").symlink_to(outside, target_is_directory=True)
+        _make_symlink(skill / "link", outside, to_directory=True)
     elif shape == "to-a-file":
         outside = tmp_path / "outside.md"
         _write(outside, "bytes that live outside the directory\n")
-        (skill / "link").symlink_to(outside)
+        _make_symlink(skill / "link", outside)
     else:
-        (skill / "link").symlink_to(tmp_path / "nothing-is-here")
+        _make_symlink(skill / "link", tmp_path / "nothing-is-here")
 
     with pytest.raises(gsl.GeneratorError) as excinfo:
         gsl.digest_skill_dir(skill)
@@ -249,7 +266,7 @@ def test_the_collision_a_symlink_used_to_buy_is_gone(tmp_path):
     _write(tampered / "SKILL.md", "body\n")
     smuggled = tmp_path / "smuggled"
     _write(smuggled / "extra.md", "content the digest was blind to\n")
-    (tampered / "link").symlink_to(smuggled, target_is_directory=True)
+    _make_symlink(tampered / "link", smuggled, to_directory=True)
 
     honest_digest = gsl.digest_skill_dir(honest)
     with pytest.raises(gsl.GeneratorError):
@@ -7563,7 +7580,7 @@ def test_both_digest_implementations_refuse_a_symlink(tmp_path):
     # exactly the gap #132 is about.
     skill_dir = root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha"
     _write(skill_dir / "payload" / "extra.md", "a subtree the digest never saw\n")
-    (skill_dir / "link").symlink_to("payload", target_is_directory=True)
+    _make_symlink(skill_dir / "link", "payload", to_directory=True)
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "add a symlink")
     sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -9585,7 +9602,7 @@ def test_a_child_carrying_a_lock_in_any_shape_is_named_when_skipped(tmp_path, sh
     elif shape == "a directory":
         (child / "skills.lock").mkdir()
     else:
-        (child / "skills.lock").symlink_to(project / "nothing-is-here")
+        _make_symlink(child / "skills.lock", project / "nothing-is-here")
 
     proc = _run_hook(tmp_path / "home", project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
     verdict = _verdict(proc)
