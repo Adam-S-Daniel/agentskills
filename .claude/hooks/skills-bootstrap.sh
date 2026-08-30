@@ -180,14 +180,48 @@ import json, os, re, sys
 # A space, matching `_write_records` and the printf fallback below: it cannot
 # end a line and leaves the reader something that still reads as text. On every
 # healthy run this is a no-op.
+#
+# EXCEPT FOR SURROGATES, WHICH ARE RENDERED INJECTIVELY, and that exception is
+# what stops one child directory IMPERSONATING another inside the model`s
+# trusted context. Replacing them with a space is lossy in exactly the wrong
+# direction: `aa\xffrepo` and `aa repo` both became `aa repo`, so two distinct
+# children rendered IDENTICALLY on all four bash-built label surfaces
+# (`SKIPPED_CHILDREN`, `DROPPED_LOCKS`, `SEARCHED`, `LOCK_LABEL`), none of which
+# passes through the reader`s own "cannot be decoded, cannot be named" rule.
+# Measured: two children, one honest and one carrying an undecodable byte where
+# the space goes, produced the same rendered skip \u2014 so a hostile sibling could
+# make the verdict blame an honest one, and the dropped-lock clause could name a
+# path that was not the one dropped.
+#
+# The fix does NOT need bash to validate UTF-8, which is what made this look
+# expensive: by the time a name reaches here, `os.environ` has already done the
+# identification via surrogateescape, which maps each undecodable BYTE 0xNN to
+# U+DC00+NN. Rendering that back as `<0xNN>` is reversible, so two different
+# byte strings can no longer collide, and a reader sees WHICH byte was there
+# rather than a space that reads like part of the name. Other lone surrogates
+# cannot come from surrogateescape at all; they get their code point rather than
+# a byte, so the mapping stays total and unambiguous.
+#
+# The line-forging characters keep the space \u2014 those are not an identity
+# question, and a `<0x0a>` in a verdict would be noise on the one class where
+# the count, not the character, is the report.
 FORGES_A_LINE = re.compile("[\x00-\x1f\x7f\x85\u2028\u2029\ud800-\udfff]")
+
+
+def render_unprintable(match):
+    ch = match.group(0)
+    if "\udc80" <= ch <= "\udcff":
+        return "<0x%02x>" % (ord(ch) - 0xdc00)
+    if "\ud800" <= ch <= "\udfff":
+        return "<u+%04x>" % ord(ch)
+    return " "
 # SCRUBBED ONCE, USED TWICE. `additionalContext` and `systemMessage` carry the
 # same sentence to two different readers, and binding them to one expression is
 # what makes "the operator and the agent were told the same thing" a property of
 # the code rather than of whoever edits it next. Scrubbing them separately would
 # let a future edit harden one and leave the other \u2014 and the user-visible one is
 # the worse half to leave open.
-safe = FORGES_A_LINE.sub(" ", os.environ["SKILLS_VERDICT"])
+safe = FORGES_A_LINE.sub(render_unprintable, os.environ["SKILLS_VERDICT"])
 payload = json.dumps({
     # NO APOSTROPHES ANYWHERE IN THIS PYTHON BLOCK. It is the body of a
     # single-quoted bash string, so one apostrophe in a comment ends the
@@ -280,9 +314,45 @@ sys.stdout.buffer.flush()'; then
 }
 
 # join_names <name>... — ", "-joined list for the verdict.
+# MAX_FRAGMENT — the longest a single repo-derived fragment may be in a verdict.
+#
+# The verdict is one line of prose the model reads as TRUSTED session context,
+# so same-line attacker text is most of the channel, and a fragment taken from
+# repo content has no natural length bound at all. Measured: one padded skill
+# key in a rejected lock produced **200,775 bytes** of `additionalContext`,
+# arriving while the session read `1/1 … alpha installed`. A child directory
+# name is the same shape at ~250 bytes a time, up to $MAX_LOCKS of them.
+#
+# Bounding the FRAGMENT rather than the whole verdict is what keeps this honest:
+# truncating the assembled line would cut off the hook`s own words — the counts,
+# the reasons, the remediation — and leave whichever fragment came first. Every
+# clause the hook writes itself stays intact; only the borrowed text is capped.
+#
+# 160 is chosen against the two real populations, not as a round number: the
+# longest legitimate fragment either surface produces is a filesystem path, and
+# the longest path in this fleet`s own locks is well under half of it, while
+# PATH_MAX on Linux is 4096 — so a cap at 4096 would bound nothing that matters.
+# On every healthy run this is a no-op, which is the property to preserve.
+MAX_FRAGMENT=160
+
+# clamp <text> — <text>, shortened to $MAX_FRAGMENT with the elision SAID.
+#
+# The marker is deliberately visible and counted: a fragment silently cut at a
+# fixed width reads as a complete name, and the reader would take a truncated
+# path for a real one and go looking for it.
+clamp () {
+  local text="$1"
+  if [ "${#text}" -gt "$MAX_FRAGMENT" ]; then
+    printf '%s… (%d more)' "${text:0:$MAX_FRAGMENT}" "$(( ${#text} - MAX_FRAGMENT ))"
+  else
+    printf '%s' "$text"
+  fi
+}
+
 join_names () {
   local out="" item
   for item in "$@"; do
+    item="$(clamp "$item")"
     if [ -z "$out" ]; then out="$item"; else out="$out, $item"; fi
   done
   printf '%s' "$out"
@@ -533,7 +603,23 @@ SEARCHED=()
 DROPPED_LOCKS=()
 SCOPE=""
 # Set when the child enumeration could not be completed — see the block below.
+#
+# AN ARRAY, JOINED AT THE END, because this used to be a bare assignment and
+# three unsearchable children therefore reported as one: each `continue`
+# overwrote the last, so the verdict named the final child and silently dropped
+# the rest. `SKIPPED_CHILDREN` already accumulated; this is the same treatment,
+# and the scalar below is still what every `[ -n "$scan_incomplete" ]` test
+# reads so no call site had to learn about the array.
+SCAN_INCOMPLETE=()
 scan_incomplete=""
+# How many child repositories carry a lock this run DELIBERATELY did not read,
+# because the project directory had its own. Kept apart from $scan_incomplete
+# because it suppresses the prune for a DIFFERENT reason and must not borrow
+# that clause`s words: nothing here failed. The scan was not incomplete, it was
+# not attempted — "could not fully enumerate" would be a false statement about a
+# run that chose not to look, and the operator would go hunting a permissions
+# problem that does not exist.
+unread_child_locks=0
 # Children that CARRIED a skills.lock this run refused to read, with the reason,
 # and the count of those whose own NAME is why. They are apart because one of
 # them can be named in the verdict and the other cannot: see `unsafe_children`.
@@ -565,6 +651,35 @@ lock_file_is_refusable () {
   fi
 }
 
+# child_carries_lock <child> — true if the child carries a skills.lock IN ANY
+# SHAPE. ONE ANSWER, USED BY EVERY ARM, and that is the whole point of it being
+# a function rather than a test repeated five times.
+#
+# The arms that decide whether to NAME a skipped child were asking `[ -f
+# "$child/skills.lock" ]`, and `-f` is false for a DANGLING symlink and for a
+# DIRECTORY named `skills.lock`. The newest arm already knew this — its own
+# comment says testing `-f` first "drops both SILENTLY, and a repo that still
+# ships a lock then reads exactly like a repo that never opted in" — but the
+# three OLDER arms (the control-character one, the symlinked-child one, and the
+# not-a-git-repository one) were never brought along. So a child carrying a
+# non-regular lock was dropped with nothing said whenever it also tripped one of
+# those three, and the prune-suppression cost landed inconsistently: the same
+# shape suppressed pruning in one arm and not in another, decided by whether a
+# `.git` happened to be present.
+#
+# `-e` covers a regular file, a directory and a live symlink; `-L` adds the
+# dangling one, which `-e` cannot see. Together they answer "did this repo opt
+# in", which is the question every arm is actually asking — separately from
+# "may this lock be read", which stays `lock_file_is_refusable`'s job.
+#
+# THE CALLER MUST HAVE ESTABLISHED SEARCHABILITY FIRST. Every test here answers
+# false inside a directory this hook may not search, which is indistinguishable
+# from a genuine absence — see the walk below, where that probe now comes first
+# for exactly this reason.
+child_carries_lock () {
+  [ -e "$1/skills.lock" ] || [ -L "$1/skills.lock" ]
+}
+
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   own="$(resolve_lock_path "$CLAUDE_PROJECT_DIR/skills.lock")"
   SEARCHED+=("$own")
@@ -579,6 +694,56 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
     SCOPE="; the project directory's own skills.lock was not read ($own_refused)"
   elif [ -f "$own" ]; then
     LOCKS=("$own")
+    # A PROJECT WITH ITS OWN LOCK STILL HAS TO ASK WHETHER IT IS THE WHOLE
+    # SESSION. Discovery is "own lock if the project has one, else every child
+    # repository's" — and because the child walk lives entirely in that `else`,
+    # taking this branch used to mean no child was ever enumerated. None of the
+    # four `authority_lost` conditions could fire either, since all four are
+    # about things the walk FOUND. So `claims.nul` survived at full scope, the
+    # orphan prune ran against a session this run had not looked at, and every
+    # skill the child repos had installed was reaped — under a clean `— OK`,
+    # with no DEGRADED and no problem clause. Measured: two child repos present
+    # and valid throughout, then ONE file added at the parent level, and the
+    # next run removed both their skills while reporting `1/1 … — OK`.
+    #
+    # This is NOT the residual ADR 0007 already documents. That one is
+    # cross-session ("a union session installs the union, a later single-repo
+    # session reaps the names its own lock lacks"); here there is no later
+    # session — same project directory, same children, present and readable, in
+    # a run that simply declined to look at them. It matters more under a
+    # user-scope wiring, where one `$HOME` alternates between "project dir = the
+    # parent, N child locks" and "project dir = one repo, its own lock", and
+    # every crossing reaps the other shape's skills.
+    #
+    # The rule this extends is the one already written above for an incomplete
+    # enumeration: INSTALLING ON PARTIAL INFORMATION IS FINE; DELETING ON IT IS
+    # NOT. A project that did not enumerate its children cannot account for the
+    # session, so it claims authority over nothing — it installs its own lock's
+    # skills and prunes none. "A lockless project is a project that did not opt
+    # in" does not cover a project that DID, which is why the own-lock branch
+    # needs its own answer rather than inheriting the `else` branch's.
+    #
+    # Deliberately a CHEAP probe, not the full walk: this asks only whether any
+    # immediate child is a git repository carrying a lock in any shape. It reads
+    # no lock, names no child, and changes nothing about what gets installed —
+    # its single effect is to suppress the prune and say so.
+    if [ -r "$CLAUDE_PROJECT_DIR" ] && [ -x "$CLAUDE_PROJECT_DIR" ]; then
+      dotglob_was_on=0
+      shopt -q dotglob && dotglob_was_on=1
+      shopt -s dotglob
+      unpruned_children=0
+      for child in "$CLAUDE_PROJECT_DIR"/*/; do
+        [ -d "$child" ] || continue
+        child="${child%/}"
+        [ -x "$child" ] && [ -r "$child" ] || continue
+        [ -e "$child/.git" ] || continue
+        if child_carries_lock "$child"; then
+          unpruned_children=$((unpruned_children + 1))
+        fi
+      done
+      [ "$dotglob_was_on" -eq 1 ] || shopt -u dotglob
+      unread_child_locks="$unpruned_children"
+    fi
   else
     # A DISCOVERY SCAN THAT MISSES A REPO MUST NOT MAKE THAT REPO'S SKILLS
     # REAPABLE. This is the AGENTSKILLS_BUNDLE rule one level up: narrowing
@@ -600,7 +765,7 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
     # knowable rather than uncertain. A clean scan that finds ZERO child locks
     # is likewise not an error — it is the ordinary no-lock case below.
     if [ ! -r "$CLAUDE_PROJECT_DIR" ] || [ ! -x "$CLAUDE_PROJECT_DIR" ]; then
-      scan_incomplete="$CLAUDE_PROJECT_DIR cannot be read or searched"
+      SCAN_INCOMPLETE+=("$CLAUDE_PROJECT_DIR cannot be read or searched")
     fi
     # `*/` matches directories only, and bash sorts a glob (LC_COLLATE) — the
     # ORDER is load-bearing, not tidiness: the install record lets the last
@@ -632,7 +797,6 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
       # it), so a symlink guard written against the glob's own spelling compiles,
       # reads correctly, and silently never fires.
       child="${child%/}"
-      children=$((children + 1))
       # A NAME IS NOT TRUSTED TEXT, and it is rejected HERE rather than escaped
       # on the way out. Child directory names flow into `additionalContext` —
       # the model's trusted session context — through the `across N locks (…)`
@@ -658,32 +822,75 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
       #
       # So the three are matched as their literal UTF-8 byte sequences, which no
       # locale can reinterpret, ALONGSIDE the class rather than instead of it.
+      # THE NAME IS CLASSIFIED HERE AND ECHOED NOWHERE, so that every arm below
+      # can consult one flag instead of each re-deciding whether this name is
+      # safe to print. The rejection reasoning is unchanged and is written out
+      # above; what moved is only WHEN it is decided, because the searchability
+      # probe now has to run before any question about the lock and must not
+      # itself echo an unsafe name.
+      name_is_unsafe=0
       case "$child" in
         *[[:cntrl:]]* | *$'\xc2\x85'* | *$'\xe2\x80\xa8'* | *$'\xe2\x80\xa9'*)
-          if [ -f "$child/skills.lock" ]; then
-            unsafe_children=$((unsafe_children + 1))
-          fi
-          continue
+          name_is_unsafe=1
           ;;
       esac
+      # SEARCHABILITY FIRST — BEFORE the name arms, not merely before the `.git`
+      # test. The old ordering put the control-character and symlink arms above
+      # this probe, and each decided whether to NAME the child by asking
+      # `[ -f "$child/skills.lock" ]` — a test that cannot see through a
+      # directory it may not search. So a child that was BOTH unsearchable AND
+      # either symlinked or control-character-named was dropped with nothing
+      # said and `$scan_incomplete` left empty: measured as uid 65534, a
+      # control-character-named unsearchable child carrying a lock reported a
+      # clean `skills: 1/1 … — OK` and never incremented `unsafe_children`.
+      # That is the worst combination available — a child whose NAME is an
+      # injection attempt made completely invisible by also removing its
+      # permissions, against a design whose stated mitigation is "the count is
+      # the report".
+      #
+      # The original reason for this probe preceding the `.git` test is
+      # unchanged and still applies: `[ -e ]` inside an unsearchable directory
+      # answers false, so testing for the repository first would report an
+      # unsearchable CLONE as "not a git repository" — a named, final-sounding
+      # skip — instead of suppressing the prune.
+      if [ ! -x "$child" ] || [ ! -r "$child" ]; then
+        # NAMED ONLY IF THE NAME IS SAFE. This clause is pure bash and reaches
+        # `additionalContext` without passing the reader`s sanitiser, so the
+        # arm that exists to keep a hostile name out of the verdict cannot be
+        # allowed to leak it through the incomplete-scan clause instead. The
+        # count and the project directory are the report, exactly as in the
+        # control-character arm itself.
+        if [ "$name_is_unsafe" -eq 1 ]; then
+          SCAN_INCOMPLETE+=("a child directory of $project_real whose name holds a control character cannot be read or searched")
+        else
+          SCAN_INCOMPLETE+=("$project_real/${child##*/} cannot be read or searched")
+        fi
+        continue
+      fi
+      # SEARCHED, and counted only now: `children` used to be incremented at the
+      # top of the loop, so "also searched the N immediate child directories"
+      # counted the ones this walk refused to search as well — overstating, in a
+      # clause whose whole job is to say what was covered.
+      children=$((children + 1))
+      # From here the child is searchable, so this answer is knowable rather
+      # than a false negative — see `child_carries_lock` for why it is asked
+      # once instead of five times, and what the three older arms were missing.
+      carries_lock=0
+      if child_carries_lock "$child"; then carries_lock=1; fi
+      if [ "$name_is_unsafe" -eq 1 ]; then
+        if [ "$carries_lock" -eq 1 ]; then
+          unsafe_children=$((unsafe_children + 1))
+        fi
+        continue
+      fi
       if [ -L "$child" ]; then
-        if [ -f "$child/skills.lock" ]; then
+        if [ "$carries_lock" -eq 1 ]; then
           SKIPPED_CHILDREN+=("$project_real/${child##*/} (a symlink, not a directory in this project)")
         fi
         continue
       fi
-      # BEFORE the `.git` test, and the order is load-bearing: `[ -e ]` inside a
-      # directory this hook cannot search answers false, so testing for the
-      # repository first would report an unsearchable CLONE as "not a git
-      # repository" — a named, final-sounding skip — instead of setting
-      # $scan_incomplete, and the prune would then run against a session it
-      # could not enumerate. That is the reap this variable exists to prevent.
-      if [ ! -x "$child" ] || [ ! -r "$child" ]; then
-        scan_incomplete="$project_real/${child##*/} cannot be read or searched"
-        continue
-      fi
       if [ ! -e "$child/.git" ]; then
-        if [ -f "$child/skills.lock" ]; then
+        if [ "$carries_lock" -eq 1 ]; then
           SKIPPED_CHILDREN+=("$project_real/${child##*/} (not a git repository)")
         fi
         continue
@@ -748,6 +955,12 @@ if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
       fi
     done
     [ "$dotglob_was_on" -eq 1 ] || shopt -u dotglob
+    # The array collapsed to the scalar every later test reads. Done once, here,
+    # so `[ -n "$scan_incomplete" ]` keeps its meaning at all four call sites
+    # without any of them learning that several reasons can now accumulate.
+    if [ "${#SCAN_INCOMPLETE[@]}" -gt 0 ]; then
+      scan_incomplete="$(join_names "${SCAN_INCOMPLETE[@]}")"
+    fi
     SCOPE="; also searched the $children immediate child $(plural "$children" directory directories) of $CLAUDE_PROJECT_DIR"
     # Said HERE too, not only in the problem clause far below: this branch can
     # end at the no-lock verdict, which exits, and "searched 0 children" would
@@ -980,6 +1193,26 @@ only_bundle = os.environ.get("AGENTSKILLS_BUNDLE") or ""
 # C3 shadowing guard FIRES and names the winner — where the wide class installed
 # nothing and the pre-coupling version silently overwrote a repo-owned skill.
 UNPRINTABLE = re.compile("[\x00\ud800-\udfff]")
+
+# THE SAME NUMBER THE BASH SIDE CLAMPS TO, and it has to be: a fragment can
+# reach the verdict through either surface, so a bound applied on one side only
+# moves the amplification rather than removing it. Stated as a literal in both
+# places on purpose — this reader is a heredoc, so it cannot import the shell
+# variable, and a number derived at runtime would be one more thing to get
+# wrong. `test_a_verdict_fragment_is_bounded_on_both_sides` binds them.
+MAX_REASON = 160
+
+
+def clamp_reason(text):
+    """`text`, bounded, with the elision SAID rather than silent.
+
+    A reason cut at a fixed width with no marker reads as the whole reason, and
+    the reader then acts on a sentence that stops mid-clause.
+    """
+    if len(text) > MAX_REASON:
+        return "%s... (%d more)" % (text[:MAX_REASON], len(text) - MAX_REASON)
+    return text
+
 
 lock_paths = []
 lock_labels = []
@@ -1513,6 +1746,14 @@ staged = []
 claims = set()
 accepted = []
 rejected = []
+# Labels whose refusal REGENERATING CANNOT FIX. The whole-run verdict offers
+# "regenerate it with scripts/generate_skills_lock.py", which is the right
+# instruction for a lock whose CONTENT is wrong and a false one for a lock
+# refused because of the PATH it was found at — the file is valid, and an
+# operator following that advice regenerates a good lock forever. Tracked as a
+# set rather than inferred from the message text, so the classification cannot
+# drift when a message is reworded.
+unremediable = set()
 # (kind, subject, detail) for the verdict's own problem clauses. Kept as its own
 # stream rather than folded into `skills.nul` because that record's five fields
 # are a byte-level contract with every `read -r -d ''` chain that walks it — in
@@ -1535,6 +1776,7 @@ for lock_index, lock_path in enumerate(lock_paths):
         # Inside the loop, so it lands in `rejected` with a reason and degrades
         # only this lock — and above every other read, so nothing is fetched or
         # staged for a lock whose own path this run cannot name.
+        unremediable.add(len(rejected))
         rejected.append((label, "lock: this path carries bytes that cannot be "
                                 "rendered in a verdict, so it cannot be named "
                                 "or matched against the repo that supplied it"))
@@ -1606,7 +1848,15 @@ for lock_index, lock_path in enumerate(lock_paths):
         # KeyboardInterrupt must still propagate. The whole-run `sys.exit` at
         # the bottom of this reader is a SystemExit, and swallowing it here
         # would turn "not one lock could be read" into a silent success.
-        rejected.append((label, str(exc) or exc.__class__.__name__))
+        # CLAMPED, and the reason is amplification rather than tidiness. These
+        # messages `%r`-quote lock CONTENT, and a skill key has no length
+        # bound, so one padded key produced 200,775 bytes of
+        # `additionalContext` — arriving while the session read
+        # `1/1 … alpha installed`. `%r` escapes control characters, so no line
+        # is forged; the prose simply lands verbatim and at any size. The cap
+        # is stated once in MAX_REASON below and mirrors the bash-side
+        # `clamp`, so a fragment is bounded whichever surface renders it.
+        rejected.append((label, clamp_reason(str(exc) or exc.__class__.__name__)))
         # To stderr as well as to `rejected.nul`: stderr is $LOG, which is where
         # every verdict sends the operator, and it is the only surface that ever
         # states WHICH field was wrong.
@@ -1719,6 +1969,36 @@ rows = [record for _sort, record in emitted]
 # the lock" verdict, which carries $LEFT_IN_PLACE and runs no purge — so exiting
 # BEFORE any stream is written is what makes that verdict true.
 if not accepted:
+    # WHY, not just THAT. Bash`s whole-run verdict was a fixed sentence —
+    # "invalid JSON or a bad field; regenerate it with
+    # scripts/generate_skills_lock.py" — and for a lock REFUSED on some other
+    # ground that sentence is false in three ways at once: the lock is valid,
+    # the remediation does nothing (so the operator regenerates a good lock
+    # forever), and the path it prints may not even exist, because `emit`
+    # scrubbed an undecodable byte out of it.
+    #
+    # The reasons already exist in `rejected`; they were simply never reachable
+    # from the one verdict that needed them, because this reader exits BEFORE
+    # writing its streams — deliberately, since that is what makes the
+    # "nothing was touched" half of that verdict true. So they go to a small
+    # ADVISORY file instead of a framed stream: bash reads it only to phrase the
+    # verdict, no count is declared for it, and its absence falls back to the
+    # old sentence. Nothing about the purge decision changes.
+    #
+    # Scrubbed and clamped like every other borrowed fragment: a label can carry
+    # surrogates (which `open(encoding="utf-8")` would refuse outright) and a
+    # reason has no length bound of its own.
+    try:
+        with open(os.path.join(out_dir, "why"), "w", encoding="utf-8",
+                  newline="") as handle:
+            reasons = "; ".join(
+                "%s: %s" % (UNPRINTABLE.sub(" ", label), clamp_reason(reason))
+                for label, reason in rejected)[:2000]
+            if any(at not in unremediable for at in range(len(rejected))):
+                reasons += "; regenerate it with scripts/generate_skills_lock.py"
+            handle.write(reasons)
+    except OSError:
+        pass  # advisory only -- the verdict still prints, with its old wording
     sys.exit("lock: none of the %d discovered lock(s) could be read" % len(lock_paths))
 
 
@@ -1781,7 +2061,21 @@ with open(os.path.join(out_dir, "meta"), "w", encoding="utf-8",
     handle.write("%d\n%d\n%d\n%d\n" % (len(sources), len(rows), len(accepted), len(rejected)))
 PY
 then
-  emit "skills: DEGRADED — could not read $LOCK_LABEL (invalid JSON or a bad field; regenerate it with scripts/generate_skills_lock.py, details in $LOG)$LEFT_IN_PLACE"
+  # THE REASON, WHEN THE READER LEFT ONE. The fixed sentence below is right for
+  # a lock that genuinely would not PARSE and wrong for one that was REFUSED —
+  # and "regenerate it" is worse than unhelpful there, because it is an
+  # instruction that cannot work. A lone repo whose DIRECTORY NAME cannot be
+  # decoded is the measured case: its lock is valid, the reader refuses it
+  # because the scrubbed label would no longer match the path bash wrote (which
+  # silently disables the C3 shadowing guard for that repo), and the old verdict
+  # told the operator to regenerate a file that was never the problem.
+  why=""
+  if [ -s "$tmp/why" ]; then why="$(cat "$tmp/why" 2>/dev/null)" || why=""; fi
+  if [ -n "$why" ]; then
+    emit "skills: DEGRADED — every discovered lock was refused, so nothing was installed ($why; details in $LOG)$LEFT_IN_PLACE"
+  else
+    emit "skills: DEGRADED — could not read $LOCK_LABEL (invalid JSON or a bad field; regenerate it with scripts/generate_skills_lock.py, details in $LOG)$LEFT_IN_PLACE"
+  fi
 fi
 
 # A discovery scan that could not be completed claims authority over NOTHING.
@@ -1789,7 +2083,7 @@ fi
 # every recorded install into a "keep" — the run still installs what it found and
 # deletes nothing, which is the safe direction. See the enumeration block above
 # for why a missed repo must not have its skills reaped.
-if [ -n "$scan_incomplete" ]; then
+if [ -n "$scan_incomplete" ] || [ "$unread_child_locks" -gt 0 ]; then
   : >"$tmp/claims.nul"
 fi
 
@@ -2068,7 +2362,13 @@ elif [ "${#DROPPED_LOCKS[@]}" -gt 0 ]; then
 elif [ "${#DROPPED_ROW[@]}" -gt 0 ]; then
   authority_lost="${#DROPPED_ROW[@]} $(plural "${#DROPPED_ROW[@]}" skill skills) went uninstalled past the registry-fetch cap"
 elif [ -n "$SKIPPED_CLAUSE" ]; then
-  authority_lost="a child directory carrying a skills.lock was not read"
+  # BOTH kinds of skipped child, summed. $SKIPPED_CLAUSE is set by either
+  # `SKIPPED_CHILDREN` (nameable) or `unsafe_children` (counted, never named),
+  # and it can be set by the second ALONE — so counting only the first would
+  # render "0 child directories ... were not read" on exactly the run where the
+  # count is the entire report.
+  skipped_total=$(( ${#SKIPPED_CHILDREN[@]} + unsafe_children ))
+  authority_lost="$skipped_total child $(plural "$skipped_total" directory directories) carrying a skills.lock $(plural "$skipped_total" was were) not read"
 fi
 if [ -n "$authority_lost" ]; then
   : >"$tmp/claims.nul"
@@ -2880,7 +3180,7 @@ fi
 # truncation nobody is told about looks exactly like a registry that had nothing
 # to give.
 if [ "${#DROPPED_LOCKS[@]}" -gt 0 ]; then
-  problems+=("${#DROPPED_LOCKS[@]} discovered $(plural "${#DROPPED_LOCKS[@]}" lock locks) past the $MAX_LOCKS-lock cap were not read ($(join_names "${DROPPED_LOCKS[@]}"))")
+  problems+=("${#DROPPED_LOCKS[@]} discovered $(plural "${#DROPPED_LOCKS[@]}" lock locks) past the $MAX_LOCKS-lock cap $(plural "${#DROPPED_LOCKS[@]}" was were) not read ($(join_names "${DROPPED_LOCKS[@]}"))")
 fi
 # A child that HAD a lock and was refused by the discovery trust rules. It
 # degrades for the ordinary reason: a repo in this session declared skills and
@@ -2937,7 +3237,21 @@ fi
 # What is NOT said here is which skill was spared: nothing was removed, so there
 # is no action to report. The clause names why the run declined, which is the
 # part the reader can fix.
-if [ -n "$authority_lost" ] && [ -z "$scan_incomplete" ]; then
+# A PROJECT THAT DID NOT LOOK AT ITS CHILDREN CANNOT ACCOUNT FOR THE SESSION.
+# Its own clause rather than a share of the one above, because nothing failed
+# here: discovery is "own lock if the project has one, else every child
+# repository`s", so taking the own-lock branch means the children were never
+# enumerated — and none of the `authority_lost` conditions can fire either,
+# since all four are about things the walk FOUND. That combination used to reap
+# every skill the child repos had installed under a clean `— OK`.
+#
+# Says what it did NOT read, and does not pretend the scan broke: an operator
+# told "could not fully enumerate" would go looking for a permissions problem
+# that is not there.
+if [ "$unread_child_locks" -gt 0 ]; then
+  problems+=("$PROJECT_DIR has its own skills.lock, so the $unread_child_locks child $(plural "$unread_child_locks" repository repositories) carrying one $(plural "$unread_child_locks" was were) not read and no stale skill was removed this run")
+fi
+if [ -n "$authority_lost" ] && [ -z "$scan_incomplete" ] && [ "$unread_child_locks" -eq 0 ]; then
   problems+=("$authority_lost, so this run could not tell which skills the session still wants and no stale skill was removed")
 fi
 
