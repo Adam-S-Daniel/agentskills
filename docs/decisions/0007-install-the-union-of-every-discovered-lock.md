@@ -65,6 +65,49 @@ session decide what gets written into `$HOME`.
 > reads correctly do nothing: `*/` leaves a TRAILING SLASH, and `[ -L "dir/" ]`
 > is FALSE even when `dir` is a symlink.
 
+> **AMENDMENT, 2026-08-30 — what the `.git` predicate actually buys
+> ([#133](https://github.com/Adam-S-Daniel/agentskills/issues/133)).** The
+> paragraph above is correct about what the predicate CLOSED and wrong about
+> what it can be leaned on for. It was cited as restoring "a lockless project is
+> a project that did not opt in", and that claim was in turn cited as what makes
+> a user-scope wiring of this hook safe to place. **`.git` does not support that
+> weight, and this ADR no longer asks it to.**
+>
+> `.git` is a **hygiene signal, not a trust signal.** It reliably stops the
+> ACCIDENTAL case, which is the common one and worth having: a repo's own
+> `testdata/skills.lock`, `vendor/skills.lock` or `.claude/skills.lock` no
+> longer contributes to a session. Measured with a control — with the `.git`
+> test stripped, an unmarked `testdata/` child installs its lock's skills under
+> a clean `skills: 1/1 … — OK`.
+>
+> What it does not stop is anyone who can create a directory under
+> `$CLAUDE_PROJECT_DIR`, and the threat model already treats directory names
+> there as attacker-controlled, which entails creating them:
+>
+> - **A committed submodule contributes.** Measured: a superproject with no lock
+>   of its own, a submodule at `vendor/`, consumed as
+>   `git clone --recurse-submodules`. `vendor/.git` is a *file* reading
+>   `gitdir: ../.git/modules/vendor`, and `-e` accepts it deliberately — that is
+>   how worktrees spell it. A submodule is exactly the "vendored copy" the
+>   guard's own rationale names as what it excludes, and it is reachable from
+>   committed content: one `.gitmodules` entry.
+> - **Locally it costs one zero-byte file.** `mkdir testdata && touch
+>   testdata/.git` restores the pre-fix behaviour. (git refuses to *track* a path
+>   component named `.git`, which is why the submodule is the PR route and
+>   `touch` the local-write route.)
+>
+> So the sentence to carry forward is the narrow one: **the predicate excludes
+> fixtures and vendored trees by accident, not by adversary.** Any argument that
+> a user-scope wiring is safe needs a different support — this one does not
+> carry it, and the question is re-opened rather than answered.
+>
+> Deliberately NOT fixed by tightening the predicate. Requiring a plausible
+> clone (a readable `.git/HEAD`, a configured remote) raises the cost from one
+> zero-byte file to a slightly larger fake and still is not a trust boundary —
+> it would buy the appearance of one, which is worse than the honest statement
+> above. If a trust boundary is ever needed here it has to come from something
+> the project directory's contents cannot forge.
+
 ### Three destination cases, not one
 
 `~/.claude/skills/` is FLAT: one name, one directory, one owner. **A destination
@@ -326,6 +369,38 @@ symlinks — predates this work and is
 > in-session residual the CORRECTION above does not cover), and
 > [#136](https://github.com/Adam-S-Daniel/agentskills/issues/136)
 > (`scan_incomplete` under-reports).
+>
+> **RESOLVED, 2026-08-30 — all four, plus #138 and #139 from round 4.** Kept as
+> a record of what each decision WAS, since the issues are closed and a reader
+> arriving here should not have to reconstruct them:
+>
+> - **#133** — decided as the AMENDMENT above: `.git` buys hygiene, not trust,
+>   and this ADR no longer cites it as what makes a user-scope wiring safe. No
+>   code change; tightening the predicate would buy the appearance of a trust
+>   boundary without the substance.
+> - **#134** — every repo-derived ATOM in a verdict is now bounded (160
+>   characters, elision stated). The cap goes on at construction rather than on
+>   any joined clause: a clause that EMBEDS a path is the hook's own sentence,
+>   and clamping it truncates the run's own conclusion. 201,902 bytes of
+>   `additionalContext` from one padded skill key became 1,515.
+> - **#135** — a project directory with its own lock AND child repositories
+>   carrying locks now claims authority over NOTHING: it installs its own lock's
+>   skills and prunes none, saying so in its own words rather than borrowing the
+>   incomplete-scan clause (nothing failed; the run declined to look). This
+>   closes the second in-session residual, so the CORRECTION above should now be
+>   read as enumerating the in-session cases COMPLETELY.
+> - **#136** — `scan_incomplete` accumulates instead of overwriting (three
+>   unsearchable children reported as one), and the searchability probe moved
+>   above the name arms, which had been deciding whether to name a child with a
+>   test that cannot see into a directory it may not search.
+> - **#138** — one `child_carries_lock` probe answers "did this repo opt in, in
+>   any shape" for all five arms; three of them had tested bare `-f`, so a
+>   non-regular lock read exactly like no lock.
+> - **#139** — the whole-run verdict distinguishes a lock that would not PARSE
+>   from one that was REFUSED, and offers "regenerate it" only where that can
+>   work. Undecodable bytes render as `<0xNN>` rather than a space, so two
+>   children can no longer render identically and a hostile one cannot make the
+>   verdict blame an honest sibling.
 >
 > **What round 3 established as SOUND**, with controls, so a fourth round need not
 > re-run it: the widened `except Exception` swallows nothing it should not,
