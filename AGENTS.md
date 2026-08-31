@@ -200,3 +200,28 @@ marketplace `renames` map is append-only.
 - Depth, including the negative-control rule that keeps "the exploit stopped
   working" from being mistaken for "the harness stopped working", is in
   [`docs/experiments/E4-federated-bundle-delivery.md`](docs/experiments/E4-federated-bundle-delivery.md).
+
+### Skill changes get recorded, and evals gate them
+
+The method (instrument classes, fixture mining, harness rules) is skills-evals'
+`DESIGN.md`, "Scaling to the registry"; these are the two hooks that live here:
+
+- **Every skill-content change appends an entry to
+  [`docs/skill-impact.md`](docs/skill-impact.md)** — creations, edits,
+  renames, removals, and **rejected proposals** — in the same PR as the
+  change (for a rejection, a follow-up commit linking the closed PR). Git
+  records what landed; that file records motivation, eval result, and what
+  was tried and turned down, which is the part the next session cannot
+  re-derive.
+- **Graduation gate:** a skill graduating into this registry ships with at
+  least one eval fixture in skills-evals (`evals/<skill>/`), and the
+  graduation PR's definition of done includes a green `with_skill` arm.
+- **Touch gate:** a PR that edits an existing SKILL.md either runs that
+  skill's eval (report exit code and counts) or adds its first fixture.
+  Skills in DESIGN.md's deliberate-non-coverage table are exempt — the
+  table is the record of why.
+- **A new or touched skill adds a `PURPOSE.md` beside `SKILL.md`** mapping
+  it to the incidents/patterns that motivated it — maintenance context only,
+  never loaded at inference. Do **not** mass-backfill `PURPOSE.md` across
+  untouched skills: every added file moves that skill's digest, which stales
+  `skills.lock` in every consumer until re-pinned. On-touch only.
