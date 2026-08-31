@@ -251,10 +251,60 @@ jobs:
           # that test skips; with full history it passes. Same reason the
           # consistency job above needs it. Do not shorten this.
           fetch-depth: 0
+      # DOCS-ONLY EARLY SKIP, in-job on purpose. `pytest-windows` is a REQUIRED
+      # status check, so a `paths:` filter on the trigger would leave that
+      # context missing — pending forever — on any PR the filter excludes;
+      # test_ci_reports_on_every_pull_request guards the trigger, and this step
+      # is where the salience decision is allowed to live instead. The check
+      # still reports on every PR; a docs-only one just reports in runner-boot
+      # time instead of the ~17 minutes the Windows suite costs.
+      #
+      # The inert list is an ALLOWLIST and the polarity fails open: the suites
+      # run in full unless EVERY changed file matches. Measured 2026-08-31
+      # before this landed: no suite this job runs reads any inert path — the
+      # citation meta-test (test_every_test_this_repo_cites_by_name_exists)
+      # scans only tracked *.py/*.sh, and no test reads the real
+      # README/AGENTS/CLAUDE/STRATEGY or docs/. plugins/**/*.md is deliberately
+      # NOT inert: SKILL.md and PURPOSE.md feed the digests and lock checks.
+      # scripts/test_ci_workflow.py pins this step byte-identical across both
+      # pytest jobs, pins the regex, and executes the body against fixture
+      # repos in both directions — change the list there and here together.
+      - name: Decide whether the suites need to run
+        id: salient
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${EVENT_NAME} event - running the full suite."
+            exit 0
+          fi
+          if ! changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Could not diff the PR range - running the full suite."
+            exit 0
+          fi
+          echo "Changed files:"
+          printf '%s\n' "$changed" | sed 's/^/  /'
+          # grep -v prints the NON-inert survivors and exits 1 when every line
+          # matched (the skip case) - the status is discarded on purpose; the
+          # emptiness test below is the verdict, not grep's exit code. No -q,
+          # so there is no early-exit SIGPIPE race either.
+          salient=$(printf '%s\n' "$changed" | grep -vE '^(docs/.*\.md|README\.md|AGENTS\.md|CLAUDE\.md|STRATEGY\.md|\.claude/memory/.*\.md)$' || true)
+          if [ -n "$salient" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Every changed file is inert documentation - reporting success without running the suites."
+          fi
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
         with:
           python-version: '3.12'
       - name: Install Python dependencies
+        if: steps.salient.outputs.run == 'true'
         # The scripts/ suites import the modules under test, so this job needs
         # their third-party deps and not just pytest. It gets them the same way
         # every other job does — see requirements-dev.txt.
@@ -300,6 +350,7 @@ jobs:
       # picked up with no edit here — which a hand-listed job is exactly what
       # this comment's opening paragraph says goes wrong.
       - name: Run every test suite in the repo
+        if: steps.salient.outputs.run == 'true'
         run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q
 
   # The same suites on Windows, because until #98 they could not run there at
@@ -345,10 +396,46 @@ jobs:
           # test SKIPS rather than fails, and the end-to-end install path goes
           # silently untested while this job stays green.
           fetch-depth: 0
+      # Byte-identical to the ubuntu job's step of the same id — see the
+      # comment there for why the skip lives in-job and what makes the list
+      # safe. test_ci_workflow.py pins the two bodies equal, so an edit to one
+      # that misses the other fails the suite rather than drifting.
+      - name: Decide whether the suites need to run
+        id: salient
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${EVENT_NAME} event - running the full suite."
+            exit 0
+          fi
+          if ! changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA"); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Could not diff the PR range - running the full suite."
+            exit 0
+          fi
+          echo "Changed files:"
+          printf '%s\n' "$changed" | sed 's/^/  /'
+          # grep -v prints the NON-inert survivors and exits 1 when every line
+          # matched (the skip case) - the status is discarded on purpose; the
+          # emptiness test below is the verdict, not grep's exit code. No -q,
+          # so there is no early-exit SIGPIPE race either.
+          salient=$(printf '%s\n' "$changed" | grep -vE '^(docs/.*\.md|README\.md|AGENTS\.md|CLAUDE\.md|STRATEGY\.md|\.claude/memory/.*\.md)$' || true)
+          if [ -n "$salient" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Every changed file is inert documentation - reporting success without running the suites."
+          fi
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
         with:
           python-version: '3.12'
-      - run: python3 -m pip install -r requirements-dev.txt
+      - if: steps.salient.outputs.run == 'true'
+        run: python3 -m pip install -r requirements-dev.txt
       # `core.autocrlf` is true by default on Windows runners. .gitattributes
       # (`* -text`) is what keeps the checkout byte-identical to Linux's, and
       # every digest in skills.lock depends on that holding — so assert it
@@ -360,6 +447,7 @@ jobs:
             exit 1
           fi
       - name: Run every test suite in the repo
+        if: steps.salient.outputs.run == 'true'
         run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q
 
   shellcheck:
