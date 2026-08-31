@@ -82,11 +82,6 @@ marketplace `renames` map is append-only.
 
 ### Operational gotchas
 
-- `gh api ... --jq '<filter>'` on an HTTP error prints the raw error JSON body
-  to stdout — the jq filter never runs — and exits 1, so `out=$(cmd) || true`
-  captures that garbage instead of an empty result. Discard output on failure
-  explicitly: `out=$(cmd) || out=""`. This silently broke sync.sh's
-  `default_sections` once.
 - Eval skill installs need the nested path: copy `plugins/<name>/skills/<name>/`
   into `.claude/skills/<name>/`. Copying the outer plugin directory buries
   `SKILL.md` and the skill silently never loads.
