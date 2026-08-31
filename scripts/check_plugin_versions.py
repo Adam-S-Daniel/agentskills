@@ -44,7 +44,8 @@ answering "what does the file on disk say NOW", which is not "at base"
 however the caller phrases the question. The version is always PARSED as
 JSON, never grepped: a version-string line scan reads clean on a manifest it
 was never pointed at, which is the exact failure this repo has already been
-bitten by once (see AGENTS.md, "the watch finished" / `python3 test_foo.py`).
+bitten by once (see AGENTS.md, "the watch finished", and the pytest module
+run as a plain script that exited 0 having asserted nothing).
 
 Usage:
   python3 scripts/check_plugin_versions.py --base <ref-or-sha>
