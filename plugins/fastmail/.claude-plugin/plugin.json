@@ -1,6 +1,6 @@
 {
   "name": "fastmail",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Fastmail email skills: browser-driven email workflows (search, read, compose, reply) and sending-identity management via the fastmail-actions workflows.",
   "author": { "name": "Adam Daniel" }
 }
