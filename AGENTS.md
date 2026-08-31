@@ -150,6 +150,30 @@ marketplace `renames` map is append-only.
   reads as "the repo's dependencies are broken" rather than "one of them is
   undeletable". Measured on `remote_mobile`, 2026-08-25.
 
+  **And the flag really does leave the pinned version importable — measured,
+  because the obvious worry is real and the answer is not obvious.**
+  `--ignore-installed` does not remove Debian's copy; it installs alongside it,
+  so both are on disk and which one wins is a `sys.path` ORDER question rather
+  than an install question. It wins: pip lands the pinned wheel in
+  `/usr/local/lib/python3.11/dist-packages`, Debian's lives in
+  `/usr/lib/python3/dist-packages`, and the former precedes the latter, so
+  `import yaml` gives **6.0.3** — `requirements-dev.txt`'s pin — with the full
+  suite green (1943 passed, 11 skipped). Verified 2026-08-30 on a hosted
+  session that started with `yaml` at Debian's 6.0.1 and `pytest`,
+  `jsonschema` and `markdown_it` all absent.
+
+  That distinction is the whole reason to write this down. A hook that
+  installed only the three genuinely-MISSING modules would exit 0 and look
+  correct while leaving the session testing against unpinned `pyyaml` 6.0.1 —
+  the shape that appears to work is the shape that silently reintroduces the
+  bug. So the acceptance test is never "the install exited 0"; it is
+  `python3 -c "import yaml; print(yaml.__version__)"` reporting the pinned
+  version, then the canonical gate read from `$?` unpiped.
+
+  A **venv** is the other measured-good answer and costs a `PATH`/interpreter
+  decision every later step in the session has to honour;
+  `--break-system-packages` was not tried and the name is the warning.
+
 - **A long background run is not a baseline if you edit while it runs.** The
   suite takes ~5.5 minutes, and several meta-tests READ THE SOURCE FROM DISK at
   run time rather than from the collected module — `test_every_test_this_repo_cites_by_name_exists`

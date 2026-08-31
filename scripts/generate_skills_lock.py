@@ -464,8 +464,47 @@ def digest_skill_dir(path: Path, skip: frozenset = frozenset()) -> str:
         raise GeneratorError(f"not a directory: {path}")
     entries = []
     for candidate in root.rglob("*"):
+        # A SYMLINK IS REFUSED, NOT DIGESTED, and refusing is what keeps this
+        # digest a COMMITMENT TO THE DIRECTORY rather than to a subset of it.
+        # `is_file()` FOLLOWS symlinks, so before this guard a symlink to a
+        # DIRECTORY and a DANGLING symlink both answered false and were skipped
+        # by the `not is_file()` arm below — contributing no manifest entry at
+        # all, not the link name and not the target. Two materially different
+        # skill directories therefore produced the SAME digest, and the hook
+        # installed the tampered one under a digest that verified. The old
+        # comment ("broken symlinks carry none either") stated the intent
+        # correctly for the dangling case and was silent on the one that costs:
+        # a symlink to a directory is not "no bytes", it is a whole subtree
+        # this walk never sees. A symlink to a FILE is refused too — it does
+        # contribute an entry, but the bytes it commits to live OUTSIDE the
+        # directory, so the digest stops being a statement about this tree.
+        #
+        # Refusing rather than re-encoding is what makes this a NON-EVENT for
+        # the fleet: measured across all three registries that feed a lock
+        # (agentskills `plugins/`, cms-platform `skills/`, agentskills-private)
+        # there are ZERO symlinks under any skill directory, so no digest any
+        # committed `skills.lock` names changes. That is what lets this land
+        # without the coordinated fleet-wide re-pin a change to the digest
+        # ENCODING would have forced, and without the forward/backward pin trap
+        # the `sha256:` prefix rollout had to be sequenced around. If a bundle
+        # ever genuinely needs a symlink, THAT is the change that has to carry
+        # the migration — and it will be visible, because this refuses.
+        #
+        # `rglob` surfaces all three shapes as entries with `is_symlink()` true
+        # and does not descend into a symlinked directory, so this one test
+        # before the `is_file()` arm covers the whole class. Mirrored in the
+        # hook's `digest_dir`. The two are bound by
+        # `test_both_digest_implementations_refuse_a_symlink` -- kept on one
+        # line because the citation checker reads a name, not a sentence.
+        if candidate.is_symlink():
+            raise GeneratorError(
+                "symlink in skill directory: "
+                f"{candidate.relative_to(root).as_posix()} (in {path}) — a "
+                "digest cannot commit to a symlink's target, so a skill "
+                "directory may not contain one"
+            )
         if not candidate.is_file():
-            continue  # directories carry no bytes; broken symlinks carry none either
+            continue  # directories carry no bytes
         if candidate in skip:
             continue
         entries.append((candidate.relative_to(root).as_posix(), candidate))

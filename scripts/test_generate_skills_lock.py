@@ -193,6 +193,94 @@ def test_digest_changes_when_a_payload_file_changes(tmp_path):
     assert gsl.digest_skill_dir(skill) != before
 
 
+def _make_symlink(link: Path, target, to_directory: bool = False) -> None:
+    """Create a REAL symlink, or skip.
+
+    Deliberately not `_symlink_to_dir`, which falls back to a directory
+    JUNCTION on Windows. A junction is the right substitute where what is
+    being pinned is that `resolve()` follows it — but these tests are about
+    `is_symlink()`, and Python reports False for a junction, so the fallback
+    would quietly exercise the opposite of the case under test and pass.
+    `os.symlink` needs Developer Mode or elevation on Windows (WinError 1314),
+    which is not reasonable to require, so the honest answer there is a skip.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=to_directory)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform gate
+        pytest.skip("this platform does not permit creating symlinks")
+
+
+# --- symlinks are refused, not digested (#132) -----------------------------
+# The defect these pin: `is_file()` FOLLOWS symlinks, so a symlink to a
+# DIRECTORY and a DANGLING symlink both answered false and contributed NO
+# manifest entry — meaning two materially different directories could carry
+# one digest, and the hook would install the tampered one under a digest that
+# verified. The digest is the primitive the whole delivery design rests on
+# ("what it installs is pinned and integrity-checked by skills.lock"), and the
+# payload is instruction text the model loads on turn one, so a digest that is
+# not a commitment to the directory makes that verification decorative.
+
+@pytest.mark.parametrize("shape", ["to-a-directory", "to-a-file", "dangling"])
+def test_the_generator_refuses_a_symlink_in_a_skill_directory(tmp_path, shape):
+    """Every symlink shape is refused, including the two that carried no bytes.
+
+    Parametrised over the shapes rather than asserted on one, because the two
+    that were INVISIBLE to the old walk are precisely the two a single-shape
+    test would have been most likely to omit: a symlink to a file was at least
+    present in the manifest, while the directory and dangling shapes were
+    skipped outright.
+    """
+    skill = tmp_path / "skill"
+    _write(skill / "SKILL.md", "body\n")
+    if shape == "to-a-directory":
+        outside = tmp_path / "outside"
+        _write(outside / "payload.md", "a whole subtree the digest never saw\n")
+        _make_symlink(skill / "link", outside, to_directory=True)
+    elif shape == "to-a-file":
+        outside = tmp_path / "outside.md"
+        _write(outside, "bytes that live outside the directory\n")
+        _make_symlink(skill / "link", outside)
+    else:
+        _make_symlink(skill / "link", tmp_path / "nothing-is-here")
+
+    with pytest.raises(gsl.GeneratorError) as excinfo:
+        gsl.digest_skill_dir(skill)
+    # The message names the offending path, because "regenerate the lock" is
+    # not actionable when the reason is one entry in a tree of them.
+    assert "symlink in skill directory" in str(excinfo.value)
+    assert "link" in str(excinfo.value)
+
+
+def test_the_collision_a_symlink_used_to_buy_is_gone(tmp_path):
+    """Two different trees must not reach one digest.
+
+    This is #132's actual claim, asserted directly rather than through the
+    refusal: before the guard, `honest` and `tampered` below digested
+    IDENTICALLY — the symlinked subtree contributed nothing at all — so a lock
+    row written for one verified the other. The assertion is that this is now
+    impossible to express, not merely that it hashes differently.
+    """
+    honest = tmp_path / "honest"
+    _write(honest / "SKILL.md", "body\n")
+    tampered = tmp_path / "tampered"
+    _write(tampered / "SKILL.md", "body\n")
+    smuggled = tmp_path / "smuggled"
+    _write(smuggled / "extra.md", "content the digest was blind to\n")
+    _make_symlink(tampered / "link", smuggled, to_directory=True)
+
+    honest_digest = gsl.digest_skill_dir(honest)
+    with pytest.raises(gsl.GeneratorError):
+        gsl.digest_skill_dir(tampered)
+
+    # The control: with the symlink replaced by the SAME content as a real
+    # directory, the two trees differ and so do their digests. Without this,
+    # the test above would also pass against an implementation that refused
+    # every directory, which would be a guard that proved nothing.
+    (tampered / "link").unlink()
+    _write(tampered / "link" / "extra.md", "content the digest was blind to\n")
+    assert gsl.digest_skill_dir(tampered) != honest_digest
+
+
 def test_digest_changes_on_a_one_byte_edit_in_a_nested_file(tmp_path):
     skill = tmp_path / "skill"
     _write(skill / "SKILL.md", "body\n")
@@ -7453,6 +7541,91 @@ def test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill(tmp_path)
     assert gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(installed) == locked
 
 
+def test_both_digest_implementations_refuse_a_symlink(tmp_path):
+    """Bind the hook's `digest_dir` and the generator on the symlink rule.
+
+    `test_the_hooks_digest_agrees_with_the_generators_on_a_tricky_skill` binds
+    the two on content they must both HASH the same. This binds them on the one
+    input they must both REFUSE — the other half of the same contract, and the
+    half that a re-implementation is most likely to drop, because refusing is
+    the behaviour with no output to compare.
+
+    TRICKY_SKILL deliberately does NOT carry the symlink: a fixture that is
+    refused cannot also be the fixture that proves the two agree on a digest,
+    so the symlink case needs its own registry or it would delete the coverage
+    it was added to extend.
+
+    The hook side is asserted through the VERDICT rather than by calling
+    `digest_dir`: the hook is the side that consumes locks authored elsewhere,
+    so what matters is not that its hasher errors but that a symlink-bearing
+    skill ends up NOT INSTALLED and reported — fail-closed, with the unverified
+    bytes removed rather than left live in ~/.claude/skills for the model to
+    load on turn one.
+    """
+    root = tmp_path / "registry"
+    root.mkdir(parents=True)
+    sha = make_registry(root, {"adam/alpha": SKILL_A})
+    # The symlink is added to the registry's WORKING TREE and committed, which
+    # is how it would really arrive: git tracks a symlink as mode 120000, so
+    # this is reachable from ordinary committed content, not just a local write.
+    #
+    # RELATIVE, and that is the whole point of the fixture. An ABSOLUTE target
+    # never reaches the digest at all — `materialize` extracts the pinned ref
+    # through tarfile, which refuses "a link to an absolute path" outright, so
+    # a fixture built that way tests tarfile's guard and reports it as this
+    # one. Measured while writing this test: the absolute form failed here with
+    # `'plugins/adam/skills/alpha/link' is a link to an absolute path`, from
+    # `git archive`, before `digest_skill_dir` was ever called. A relative
+    # symlink extracts cleanly and lands in the tree the digest walks, which is
+    # exactly the gap #132 is about.
+    skill_dir = root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam") / "alpha"
+    _write(skill_dir / "payload" / "extra.md", "a subtree the digest never saw\n")
+    _make_symlink(skill_dir / "link", "payload", to_directory=True)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "add a symlink")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         check=True, capture_output=True, text=True).stdout.strip()
+    # The symlink really is committed as one (mode 120000), not materialised as
+    # a copy by this machine's git — otherwise the fixture proves nothing.
+    modes = subprocess.run(["git", "-C", str(root), "ls-files", "-s"],
+                           check=True, capture_output=True, text=True).stdout
+    assert "120000" in modes, f"git did not record a symlink here:\n{modes}"
+
+    # GENERATOR side: it refuses to WRITE a lock naming such a skill, which is
+    # this repo's usual posture — don't emit a lock the hook would reject.
+    project = tmp_path / "project"
+    project.mkdir()
+    proc = run_generator("--repo", str(root), "--registry",
+                         root.resolve().as_uri(), "--ref", sha,
+                         "--bundles", "adam", "-o", str(project / "skills.lock"))
+    assert proc.returncode != 0, proc.stdout
+    assert "symlink in skill directory" in (proc.stderr + proc.stdout)
+    assert not (project / "skills.lock").exists(), \
+        "a refused digest must not leave a lock behind"
+
+    # HOOK side: hand it a lock that names the skill anyway (an attacker does
+    # not run our generator), and the install must fail closed.
+    (project / ".git").mkdir()
+    _write(project / "skills.lock", json.dumps({
+        "registry": "fixture/registry",
+        "ref": sha,
+        "bundles": ["adam"],
+        "skills": {"adam/alpha": gsl.LOCK_DIGEST_PREFIX + "0" * 64},
+        "generated_from": sha,
+        "sources": [{"name": "fixture/registry",
+                     "url": root.resolve().as_uri(),
+                     "ref": sha, "bundles": ["adam"]}],
+    }, indent=2) + "\n")
+    home = tmp_path / "home"
+    hook = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert hook.returncode == 0, hook.stderr
+    verdict = _verdict(hook)
+    assert not verdict.startswith("skills: 1/1 "), verdict
+    installed = home / ".claude" / "skills" / "alpha"
+    assert not installed.exists(), \
+        f"unverified bytes were left in place: {verdict}"
+
+
 def test_hook_bundle_override_narrows_what_is_installed(tmp_path):
     """AGENTSKILLS_BUNDLE filters the lock; it never widens beyond it."""
     root = tmp_path / "registry"
@@ -9292,6 +9465,403 @@ def test_another_repos_lock_does_not_reap_this_ones_skills(tmp_path):
 # --------------------------------------------------------------------------
 
 
+_SETPRIV = shutil.which("setpriv")
+
+
+def _run_hook_unprivileged(home: Path, project_dir: Path,
+                           extra_env: dict = None) -> subprocess.CompletedProcess:
+    """Run the hook as a uid that DAC actually applies to.
+
+    ROOT IGNORES DAC, so a `chmod 0o000` directory is still readable and
+    searchable by a root harness — every `[ ! -x ]` / `[ ! -r ]` branch in the
+    hook is unreachable, and a test written for one passes by never entering
+    it. That is not hypothetical: this repo had NO test for the unsearchable
+    child at all, which is how #136 stayed open long enough to grow a second
+    half.
+
+    So when the suite is root, the hook is launched through `setpriv` as
+    nobody, and the fixture is opened up to let it work. When the suite is
+    already unprivileged the run is ordinary. Only "root with no setpriv"
+    skips, and it says which of the two it is rather than reporting a pass.
+    """
+    if BASH is None:
+        pytest.skip("no POSIX bash on this machine")
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits do not model Windows ACLs")
+    home.mkdir(parents=True, exist_ok=True)
+    tmpdir = home / "tmp"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(home),
+        "TMPDIR": str(tmpdir),
+        "GIT_TERMINAL_PROMPT": "0",
+        "CLAUDE_PROJECT_DIR": str(project_dir),
+    }
+    env.update(extra_env or {})
+    argv = [BASH, str(HOOK)]
+    if os.geteuid() == 0:
+        if _SETPRIV is None:
+            pytest.skip("running as root and setpriv is absent, so no DAC "
+                        "branch of the hook is reachable from this harness")
+        # Everything the unprivileged run has to write to or walk through. The
+        # deliberately-unreadable child directories are NOT touched: they are
+        # the fixture.
+        for path in (home, tmpdir, project_dir, *project_dir.parents):
+            try:
+                if path.is_dir() and os.stat(path).st_mode & 0o7 != 0o7:
+                    path.chmod(0o777)
+            except (PermissionError, FileNotFoundError):
+                break
+        argv = [_SETPRIV, "--reuid=65534", "--regid=65534", "--clear-groups"] + argv
+    return subprocess.run(
+        argv, input='{"hook_event_name":"SessionStart","source":"startup"}',
+        env=env, capture_output=True, text=True,
+    )
+
+
+def _undecodable_name(raw: bytes) -> str:
+    """A filesystem name carrying a byte that is not valid UTF-8, or skip.
+
+    `os.fsdecode` is what raises here, not the mkdir: on Windows it decodes
+    strict UTF-8 and a lone 0xff is a UnicodeDecodeError before any path is
+    touched. Measured in CI — a guard wrapped around only the mkdir let the
+    test die in the fixture on every Windows run.
+    """
+    try:
+        return os.fsdecode(raw)
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError):  # pragma: no cover
+        pytest.skip("this platform cannot represent an undecodable filename")
+
+
+def _unsearchable_child(parent: Path, name: str, carries_lock: bool = True) -> Path:
+    """A child repo whose permissions this hook cannot get past.
+
+    The mkdir is guarded because one caller passes a CONTROL-CHARACTER name,
+    and Windows refuses those at the filesystem layer (WinError 123) before any
+    of this hook's behaviour is reached. Skipping there is right — the DAC
+    branch is unreachable on Windows anyway — but it has to happen without the
+    fixture raising first.
+    """
+    child = parent / name
+    try:
+        child.mkdir(parents=True)
+    except (OSError, ValueError):  # pragma: no cover - platform gate
+        pytest.skip(f"this filesystem will not hold the name {name!r}")
+    (child / ".git").mkdir()
+    if carries_lock:
+        (child / "skills.lock").write_text("{}", encoding="utf-8")
+    child.chmod(0o000)
+    return child
+
+
+def test_every_unsearchable_child_is_named_not_just_the_last(tmp_path):
+    """`scan_incomplete` accumulates; it used to be an assignment.
+
+    Three unsearchable children reported as ONE, because each `continue`
+    overwrote the previous reason rather than appending to it — so the verdict
+    named the last child walked and silently dropped the rest, while claiming to
+    say why the session could not be enumerated.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    for name in ("zz-a", "zz-b", "zz-c"):
+        _unsearchable_child(project, name)
+    verdict = _verdict(_run_hook_unprivileged(tmp_path / "home", project,
+                                              {"SKILLS_BOOTSTRAP_FORCE": "1"}))
+    for name in ("zz-a", "zz-b", "zz-c"):
+        assert name in verdict, f"{name} was dropped from: {verdict}"
+
+
+def test_an_unsearchable_child_with_an_unsafe_name_is_still_reported(tmp_path):
+    """The worst combination: an injection-shaped NAME plus no permissions.
+
+    The control-character arm sat ABOVE the searchability probe and decided
+    whether to count the child by asking `[ -f "$child/skills.lock" ]` — a test
+    that answers false inside a directory it may not search. So a child could be
+    made completely invisible by ALSO removing its permissions: measured as uid
+    65534, a control-character-named unsearchable child carrying a lock produced
+    a clean `skills: 1/1 … — OK` and never incremented `unsafe_children`. That
+    is a total bypass of a guard whose stated mitigation is "the count is the
+    report".
+
+    Both halves are asserted, because fixing one by breaking the other is the
+    obvious wrong turn: the run must SAY it could not enumerate, and must still
+    not echo the offending name.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    _unsearchable_child(project, "zz\x01evil")
+    verdict = _verdict(_run_hook_unprivileged(tmp_path / "home", project,
+                                              {"SKILLS_BOOTSTRAP_FORCE": "1"}))
+    assert "cannot be read or searched" in verdict, \
+        f"the child was dropped in silence: {verdict}"
+    assert "\x01" not in verdict, verdict
+    assert "evil" not in verdict, \
+        f"the unsafe name reached the verdict through the skip clause: {verdict}"
+    assert len(verdict.splitlines()) == 1, verdict
+
+
+@pytest.mark.parametrize("shape", ["regular", "a directory", "dangling symlink"])
+def test_a_child_carrying_a_lock_in_any_shape_is_named_when_skipped(tmp_path, shape):
+    """"Every skip that costs something is named" — in all the arms, not two.
+
+    Round 3 added two arms testing `[ -L ] || ([ -e ] && [ ! -f ])` before
+    `[ -f ]`, on its own reasoning that `-f` "is false for a dangling symlink
+    and for a directory named skills.lock, so testing -f first drops both
+    SILENTLY". The three OLDER arms kept the bare `-f`. So a child shipping a
+    NON-REGULAR lock read exactly like a child that never opted in, whenever it
+    also tripped one of those three — and the prune-suppression cost landed
+    inconsistently, decided by whether a `.git` happened to be present.
+
+    `regular` is the positive control: identical fixture, ordinary lock file,
+    which was correctly named before and must stay named now.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    child = project / "zz"                 # NOT a git repo -> the oldest arm
+    child.mkdir()
+    if shape == "regular":
+        (child / "skills.lock").write_text("{}", encoding="utf-8")
+    elif shape == "a directory":
+        (child / "skills.lock").mkdir()
+    else:
+        _make_symlink(child / "skills.lock", project / "nothing-is-here")
+
+    proc = _run_hook(tmp_path / "home", project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    verdict = _verdict(proc)
+    assert "zz (not a git repository)" in verdict, \
+        f"a repo that shipped a lock read as one that never opted in: {verdict}"
+
+
+def test_a_child_carrying_no_lock_at_all_is_not_named(tmp_path):
+    """The negative control for the three tests above.
+
+    Without it, `child_carries_lock` answering true unconditionally would
+    satisfy every one of them — a guard wired to a constant. The rule is "every
+    skip that COSTS SOMETHING is named", so a child that never opted in must
+    still pass unmentioned.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "zz").mkdir()               # non-git, and no lock in any shape
+    verdict = _verdict(_run_hook(tmp_path / "home", project,
+                                 {"SKILLS_BOOTSTRAP_FORCE": "1"}))
+    assert "zz" not in verdict, verdict
+
+
+def test_two_children_differing_by_an_undecodable_byte_do_not_render_alike(tmp_path):
+    """A hostile child must not be able to impersonate an honest sibling.
+
+    `emit` replaced every lone surrogate with a SPACE, and `os.environ` produces
+    one per undecodable byte via surrogateescape — so `zz\\xffrepo` and
+    `zz repo` both rendered as `zz repo` on all four bash-built label surfaces,
+    none of which passes through the reader's own "cannot be decoded, cannot be
+    named" rule. Two distinct children therefore appeared identically inside the
+    model's trusted context, letting one make the verdict blame the other.
+
+    Surrogates now render as `<0xNN>`, which is reversible, so the collision is
+    not merely unlikely — it is unrepresentable. Both names are asserted present
+    and distinct, rather than just asserting inequality, so a rendering that
+    dropped one entirely could not pass.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    honest = project / "zz repo"
+    hostile = project / _undecodable_name(b"zz\xffrepo")
+    for child in (honest, hostile):
+        try:
+            child.mkdir()
+        except (UnicodeEncodeError, OSError):
+            pytest.skip("this filesystem cannot hold an undecodable name")
+        (child / "skills.lock").write_text("{}", encoding="utf-8")
+
+    verdict = _verdict(_run_hook(tmp_path / "home", project,
+                                 {"SKILLS_BOOTSTRAP_FORCE": "1"}))
+    assert "zz repo (not a git repository)" in verdict, verdict
+    assert "zz<0xff>repo (not a git repository)" in verdict, verdict
+    assert len(verdict.splitlines()) == 1, verdict
+
+
+def test_a_refused_lock_is_not_reported_as_an_invalid_one(tmp_path):
+    """A REFUSED lock and an UNPARSEABLE one are different verdicts (#139).
+
+    When no lock could be accepted, bash printed one fixed sentence: "could not
+    read <path> (invalid JSON or a bad field; regenerate it with
+    scripts/generate_skills_lock.py)". For a lone repo whose DIRECTORY NAME
+    cannot be decoded, every clause of that is wrong:
+
+      * the lock is VALID — the directory name is the problem, and the verdict
+        never said so;
+      * the remediation therefore does nothing, and an operator following it
+        regenerates a good lock forever;
+      * the path printed does not exist, because `emit` had scrubbed the
+        undecodable byte into a space (`aa\\xffrepo` printed as `aa repo`).
+
+    The reasons already existed in the reader's `rejected` list; they were just
+    unreachable from the one verdict that needed them, because the reader exits
+    before writing its streams. It now leaves them in a small advisory file.
+
+    The fixture is STAGED AND MOVED rather than generated in place: the
+    generator is run through `subprocess` with `text=True`, and it echoes its
+    output path, so generating directly under an undecodable name kills the
+    harness with a UnicodeDecodeError before the hook is ever reached. That is
+    a property of this test's plumbing, not of the hook.
+    """
+    registry = tmp_path / "registry"
+    sha = make_registry(registry, {"adam/alpha": SKILL_A})
+    project = tmp_path / "repos"
+    project.mkdir()
+    staged = tmp_path / "staged"
+    make_project(staged, registry, sha)
+    try:
+        child = project / _undecodable_name(b"aa\xffrepo")
+        shutil.move(str(staged), str(child))
+    except (UnicodeEncodeError, OSError):
+        pytest.skip("this filesystem cannot hold an undecodable name")
+
+    verdict = _verdict(_run_hook(tmp_path / "home", project,
+                                 {"SKILLS_BOOTSTRAP_FORCE": "1"}))
+
+    assert "invalid JSON or a bad field" not in verdict, verdict
+    assert "regenerate it with scripts/generate_skills_lock.py" not in verdict, verdict
+    assert "could not read" in verdict, verdict
+    # It says what was actually wrong, so the operator can act on it.
+    assert "cannot be rendered in a verdict" in verdict, verdict
+    # And it does not print a path that was never on disk.
+    assert "aa repo" not in verdict, verdict
+    assert len(verdict.splitlines()) == 1, verdict
+    # Fail-closed is unchanged: nothing was installed, nothing was purged.
+    assert "LEFT IN PLACE" in verdict, verdict
+
+
+def test_a_genuinely_unparseable_lock_still_says_regenerate_it(tmp_path):
+    """The control for the test above.
+
+    Splitting the verdict in two is only an improvement if the ORIGINAL half
+    still fires where it was right. A lock that truly will not parse is exactly
+    the case where "regenerate it" is the correct instruction, and a fix that
+    replaced that sentence everywhere would have removed the repo's most useful
+    remediation while looking like a clarification.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / "skills.lock").write_text("{not json at all", encoding="utf-8")
+
+    verdict = _verdict(_run_hook(tmp_path / "home", project,
+                                 {"SKILLS_BOOTSTRAP_FORCE": "1"}))
+    assert "DEGRADED" in verdict, verdict
+    assert "generate_skills_lock.py" in verdict, verdict
+    assert len(verdict.splitlines()) == 1, verdict
+
+
+def test_a_long_value_does_not_truncate_the_rest_of_a_rejection_reason(tmp_path):
+    """The bound is on the ATOM, so one long value cannot crowd out the message.
+
+    This exists because the first version of that bound clamped the whole
+    REASON, and the "claimed by two sources" message interpolates a registry
+    and THEN a position like `sources[1]`. A long registry filled the budget
+    and the verdict stopped before the position — losing the one part that
+    names which source was at fault, in a healthy rejection with nothing
+    hostile in it. #134 asked for a bound that does not change what a verdict
+    says on a healthy run; that was not one.
+
+    IT WAS INVISIBLE TO THE LINUX LANE. The sibling test that caught it
+    (`…_cannot_desync_the_streams`) inherits its length from the temp path:
+    `/tmp/pytest-of-root/…` fits, `C:/Users/runneradmin/AppData/Local/Temp/…`
+    does not, so it passed here and failed only on Windows.
+
+    THE LENGTH COMES FROM LOCK CONTENT, NOT FROM THE FILESYSTEM, and the first
+    version of this test got that wrong in a way worth recording. It built a
+    deliberately deep directory instead — which reproduced the bug on Linux and
+    then broke Windows outright, because six 40-character components plus the
+    runner`s temp prefix exceeds `MAX_PATH` and `git init` exits 128. Driving
+    the length from the lock`s own `registry` field is both portable and a
+    truer statement of the class: the amplification vector #134 is about is
+    repo-CONTROLLED content, and an incidentally-long temp path was only ever
+    standing in for it.
+    """
+    registry = tmp_path / "registry-one"
+    sha = make_registry(registry, {"adam/alpha": SKILL_A})
+    parent = tmp_path / "repos"
+    parent.mkdir()
+    _child_repo(parent, "repo-a", registry, sha)
+    hostile = parent / "repo-b"
+    hostile.mkdir()
+    (hostile / ".git").mkdir()
+    # URL-shaped so it is used verbatim as the claiming source`s name, and long
+    # enough to exhaust any bound applied to the sentence rather than to it.
+    long_registry = "file:///" + "L" * 400
+    # The second source is NOT registry-shaped, so `read_lock` names it by
+    # POSITION — and the position is the last thing interpolated, hence the
+    # first thing a sentence-level clamp loses.
+    _write(hostile / "skills.lock", json.dumps({
+        "registry": long_registry,
+        "ref": sha,
+        "bundles": ["adam"],
+        "sources": [{"registry": "not a registry at all",
+                     "ref": "0" * 40, "bundles": ["adam"]}],
+        "skills": {},
+    }, indent=2) + "\n")
+
+    verdict = _verdict(_run_hook(tmp_path / "home", parent,
+                                 {"SKILLS_BOOTSTRAP_FORCE": "1"}))
+    assert "claimed by two sources" in verdict, verdict
+    assert "sources[1]" in verdict, \
+        f"the position was truncated away by a long value: {verdict}"
+    # The honest sibling still delivered, and the bound is still doing its job.
+    assert verdict.startswith("skills: 1/1 "), verdict
+    assert len(verdict) < 4000, len(verdict)
+    assert len(verdict.splitlines()) == 1, verdict
+
+
+def test_a_repo_derived_fragment_cannot_amplify_the_verdict(tmp_path):
+    """One padded skill key produced 200KB of `additionalContext` (#134).
+
+    The verdict is a single line of prose the model reads as trusted session
+    context, so same-line attacker text is most of the channel — and a fragment
+    taken from repo content had no length bound at all. `read_lock`'s messages
+    `%r`-quote lock CONTENT, and a skill key has no bound, so one key inflated
+    the verdict to 200,338 bytes here — arriving while the session read
+    `1/1 … alpha installed`, i.e. under a run reporting success. `%r` escapes
+    control characters, so no line is forged; the prose simply lands verbatim
+    and at any size.
+
+    Three assertions, and the second is the one that keeps the fix honest: the
+    verdict must be SMALL, must still END with the hook's own closing words
+    (bounding the assembled line instead of the fragment would truncate the
+    hook's own reasoning and leave the attacker's text), and must still say the
+    lock was rejected at all.
+    """
+    registry = tmp_path / "registry"
+    sha = make_registry(registry, {"adam/alpha": SKILL_A})
+    project = tmp_path / "project"
+    project.mkdir()
+    _child_repo(project, "aa-honest", registry, sha)
+    hostile = project / "zz-bad"
+    hostile.mkdir()
+    (hostile / ".git").mkdir()
+    # Rejected for its skill KEY alone, so the reason is the `%r`-quoted key.
+    (hostile / "skills.lock").write_text(json.dumps({
+        "registry": "a/b", "ref": sha, "bundles": ["adam"],
+        "skills": {"A" * 200000: gsl.LOCK_DIGEST_PREFIX + "0" * 64},
+        "generated_from": sha,
+    }), encoding="utf-8")
+
+    proc = _run_hook(tmp_path / "home", project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    verdict = _verdict(proc)
+
+    assert len(verdict) < 4000, (
+        f"a repo-derived fragment amplified the verdict to {len(verdict)} bytes")
+    assert verdict.endswith("no stale skill was removed"), verdict
+    assert "rejected" in verdict, verdict
+    # The honest sibling still delivered — the bound is on the rendering, not on
+    # what the run does.
+    assert verdict.startswith("skills: 1/1 "), verdict
+    assert len(verdict.splitlines()) == 1, verdict
+
+
 def _child_repo(parent: Path, name: str, registry_root: Path, sha: str) -> Path:
     """A child repo of `parent` carrying a lock that pins `registry_root`.
 
@@ -9445,6 +10015,14 @@ def test_a_project_with_its_own_lock_ignores_its_child_repos_locks(tmp_path):
     The `across N locks` clause is asserted ABSENT for the same reason the
     counts are: with one lock the verdict must be the one this hook has always
     printed, with no wording acquired to describe a shape it is not in.
+
+    It also PRUNES NOTHING, and says so. A run that takes this branch never
+    enumerates the children at all — the child walk lives entirely in the
+    `else` — so it cannot account for the session, and the rule the incomplete
+    scan already follows applies unchanged: installing on partial information
+    is fine, deleting on it is not. Asserting the clause here rather than only
+    in the two-run test below is deliberate; the reap it prevents is invisible
+    on a single run, which is exactly how it survived (#135).
     """
     one = tmp_path / "registry-one"
     one_sha = make_registry(one, {"adam/alpha": SKILL_A})
@@ -9459,10 +10037,80 @@ def test_a_project_with_its_own_lock_ignores_its_child_repos_locks(tmp_path):
     assert proc.returncode == 0, proc.stderr
     verdict = _verdict(proc)
     assert verdict.startswith("skills: 1/1 "), verdict
-    assert verdict.endswith("OK"), verdict
     assert "across" not in verdict, verdict
     assert (home / ".claude" / "skills" / "alpha" / "SKILL.md").is_file(), verdict
     assert not (home / ".claude" / "skills" / "gamma").exists(), verdict
+    # Named in its OWN words, not the incomplete-scan clause's: nothing failed
+    # here, so "could not fully enumerate" would send the reader after a
+    # permissions problem that does not exist.
+    assert "has its own skills.lock" in verdict, verdict
+    assert "no stale skill was removed" in verdict, verdict
+    assert "could not fully enumerate" not in verdict, verdict
+
+
+def test_a_project_that_acquires_its_own_lock_does_not_reap_its_children(tmp_path):
+    """The reap #135 measured, asserted across the two runs that expose it.
+
+    One run cannot see this. The sibling test above asserts the INSTALL shape on
+    a single run — `1/1`, no `across`, gamma absent — and that is all it could
+    ever check, so the defect lived underneath a passing test.
+
+    The shape: discovery is "own lock if the project has one, else every child
+    repository's". Because the child walk lives entirely in that `else`, a
+    project that acquires its own lock stops enumerating its children — and none
+    of the four `authority_lost` conditions can fire either, since all four are
+    about things the walk found. `claims.nul` therefore survived at full scope,
+    the orphan prune ran at full scope, and every skill the children had
+    installed was deleted under a clean `— OK`: no DEGRADED, no problem clause.
+    It was the only route found that reaps while reporting success.
+
+    ONE FILE is the whole difference between the two runs. That matters under a
+    user-scope wiring, where a single `$HOME` alternates between "project dir =
+    the parent, N child locks" and "project dir = one repo, its own lock", and
+    on the unfixed hook every crossing reaped the other shape's skills.
+
+    This is NOT ADR 0007's documented residual, which is cross-session ("a union
+    session installs the union, a later single-repo session reaps the names its
+    own lock lacks"). Here there is no later session: same project directory,
+    same two children, present and readable throughout, in a run that declined
+    to look at them.
+    """
+    one = tmp_path / "registry-one"
+    one_sha = make_registry(one, {"adam/alpha": SKILL_A})
+    two = tmp_path / "registry-two"
+    two_sha = make_registry(two, {"adam/beta": SKILL_B})
+    three = tmp_path / "registry-three"
+    three_sha = make_registry(three, {"adam/gamma": SKILL_C})
+    project = tmp_path / "project"
+    _child_repo(project, "repo-a", one, one_sha)
+    _child_repo(project, "repo-b", two, two_sha)
+    home = tmp_path / "home"
+
+    first = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert first.returncode == 0, first.stderr
+    assert _verdict(first).startswith("skills: 2/2 "), _verdict(first)
+    skills = home / ".claude" / "skills"
+    assert (skills / "alpha").is_dir() and (skills / "beta").is_dir()
+
+    # The single file that used to cost both children their skills.
+    make_project(project, three, three_sha)
+    second = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert second.returncode == 0, second.stderr
+    verdict = _verdict(second)
+
+    assert (skills / "gamma").is_dir(), verdict      # the new lock still installs
+    assert (skills / "alpha").is_dir(), \
+        f"repo-a's skill was reaped by a run that never looked at it: {verdict}"
+    assert (skills / "beta").is_dir(), \
+        f"repo-b's skill was reaped by a run that never looked at it: {verdict}"
+    # And it is not silent about having declined — the half that makes the
+    # surviving behaviour explainable rather than merely lucky.
+    assert "2 child repositories" in verdict, verdict
+    assert "no stale skill was removed" in verdict, verdict
+    # The children really were still there to be read, so this is a decision
+    # about scope and not a failure to reach them.
+    assert (project / "repo-a" / "skills.lock").is_file()
+    assert (project / "repo-b" / "skills.lock").is_file()
 
 
 def test_one_malformed_sibling_lock_degrades_only_its_own_skills(tmp_path):

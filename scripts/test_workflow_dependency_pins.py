@@ -176,8 +176,69 @@ DIRECTORY_CHANGERS = frozenset({"cd", "pushd", "popd"})
 # swallowed text names pip, so it is reported rather than passed — and the fix
 # is to reword the comment. Narrowing it would take a shell parser this file
 # deliberately does not have.
+#
+# THE DELIMITER IS A WORD, NOT AN IDENTIFIER, and reading it as one was the
+# same defect as the missing `<<\PY` above — a delimiter grammar NARROWER than
+# bash's, one spelling at a time. `[A-Za-z_][A-Za-z0-9_]*` rejects every
+# delimiter that does not look like a C identifier, and bash accepts all of
+# these (measured, each opening a body and terminating on its own line):
+#
+#     <<'2PY'      digit-initial
+#     <<'P.Y'      a dot
+#     <<'P-Y'      a dash
+#
+# For each, the redirect was not recognised, the body was never lifted, and
+# `subprocess.run(['pip', 'install', 'x'])` tokenised as ordinary words with
+# no `pip` command token — `scan_shell_body` returned `([], [])`, a silent
+# pass, which is the one outcome this file promises never to produce. Round 2
+# fixed a spelling; this fixes the grammar, which is why it is written as
+# three alternatives rather than one widened class.
+#
+# The quoted forms take anything up to the closing quote, because that is what
+# bash does and the quotes make it unambiguous. The unquoted and `\`-escaped
+# form takes a word of the characters that can appear in one without ending
+# it. Widening cannot open a NEW silent pass: recognising more redirects lifts
+# more bodies, and a lifted body naming pip is REPORTED. It widens the
+# false-positive the block above already documents and accepts, in the same
+# fail-closed direction.
+# `<<(?!<)` — A HERESTRING IS NOT A HEREDOC. `<<<` feeds one WORD to stdin and
+# has no delimiter and no body, and the quoted alternatives below would happily
+# read `bash <<< 'some text'` as a heredoc opened with the delimiter
+# `some text`, swallowing every following line while hunting a terminator that
+# does not exist. BOTH guards are needed and the lookahead alone is not
+# enough: in `<<<` the regex simply starts one character later, matching the
+# second and third `<` as a `<<` whose next character is a space. Measured —
+# the phantom heredoc survived the first attempt at this fix. Caught while
+# widening the class above: the fail-closed
+# direction held (the swallowed region names pip, so it is REPORTED), but a
+# checkable install downgraded to an unreadable blob, which is a real loss of
+# precision. The lookahead is what keeps `<<` and `<<<` apart.
+#
+# The quoted delimiters also take no WHITESPACE. Bash technically permits it,
+# but a delimiter with a space in it is pathological, and allowing one is
+# precisely what let a herestring argument pose as a delimiter.
 HEREDOC = re.compile(
-    r"<<-?\s*(?:\\|(['\"]))?([A-Za-z_][A-Za-z0-9_]*)(?(1)\1)")
+    r"(?<!<)<<(?!<)-?\s*(?:"
+    r"'([^'\s]+)'"
+    r'|"([^"\s]+)"'
+    r"|\\?([A-Za-z0-9_][A-Za-z0-9_.+-]*)"
+    r")")
+
+# A HERESTRING IS STDIN TEXT TOO, and it was reaching the scanner as shell.
+# `bash <<< 'pip install pyyaml==6.0.1'` really installs, and it was a SILENT
+# PASS — `scan_shell_body` returned `([], [])` — by a route neither heredoc fix
+# touches: `PUNCTUATION` is `();<>|&\n` and `is_separator` is true when EVERY
+# character of a token is in it, so `<<<` reads as a command SEPARATOR. The
+# stream split into `['bash']` and `['pip install pyyaml==6.0.1']`, which put
+# the interpreter and its payload in different commands — so the
+# INTERPRETER-plus-PIP_WORD rule, which exists for exactly this shape, could
+# never see them together.
+#
+# Handled the way the heredoc is, rather than by making `<<<` a non-separator:
+# its operand is text handed to a command on stdin, so it is LIFTED and checked
+# as text. Changing the separator set would alter how every other redirection
+# parses, to fix one whose operand happens to be code.
+HERESTRING = re.compile(r"<<<\s*('[^']*'|\"[^\"]*\"|[^\s;|&()<>]+)")
 
 # A token that names the pip program: `pip`, `pip3`, `pip3.11`, and the same
 # reached by path. Deliberately a full match — `pipefail` and `pip_ok=no` both
@@ -198,9 +259,19 @@ PIP_SUBCOMMANDS_THAT_INSTALL_NOTHING = frozenset({
 # '<code>'` and `python -c '<code>'` are shell's blind spot: the code arrives
 # as one quoted token, so no `pip` token and no `install` token exist for any
 # shell parser to find.
+# `eval` IS IN THIS LIST AND IS NOT A PROGRAM, deliberately. It is a bash
+# builtin, so it has no path and never appears as `/usr/bin/eval` — but it has
+# exactly the shape this class exists to catch: it takes the code to run as
+# one quoted token, so `eval 'pip install pyyaml==6.0.1'` really installs and
+# has no `pip` COMMAND token for any tokeniser to find. Measured before it was
+# added: `scan_shell_body` returned `([], [])` — a silent pass of an unpinned
+# install. Grouping it with the interpreters rather than giving it its own arm
+# is the point: what matters is not that a program is spawned but that code
+# arrives as an argument, and `sh -c`, `python -c` and `eval` are one class
+# under that reading.
 INTERPRETER = re.compile(
     r"(?:[^\s]*/)?(?:python[0-9]*(?:\.[0-9]+)*"
-    r"|sh|bash|dash|zsh|ksh|fish|perl|ruby|node)")
+    r"|sh|bash|dash|zsh|ksh|fish|perl|ruby|node)|eval")
 # `pip` as a word, so `pipefail` and `pipeline` are not it. `set -o pipefail`
 # is in this repo's workflows and `bash -c 'set -o pipefail; ...'` must not
 # read as an install hidden in an argument.
@@ -428,10 +499,19 @@ def split_heredocs(body: str):
     while index < len(lines):
         line = lines[index]
         index += 1
+        for herestring in HERESTRING.finditer(line):
+            operand = herestring.group(1)
+            if operand[:1] in ("'", '"') and operand[-1:] == operand[:1]:
+                operand = operand[1:-1]
+            bodies.append(operand)
+        line = HERESTRING.sub(" ", line)
         matches = list(HEREDOC.finditer(line))
         shell_lines.append(HEREDOC.sub(" ", line))
         for match in matches:
-            delimiter = match.group(2)
+            # Whichever of the three delimiter alternatives matched. Written as
+            # a scan rather than a fixed group number so adding a spelling
+            # cannot silently renumber the others out from under this.
+            delimiter = next(group for group in match.groups() if group is not None)
             tabbed = match.group(0).startswith("<<-")
             collected = []
             while index < len(lines):
@@ -547,8 +627,9 @@ def classify_command(tokens):
     if (any(INTERPRETER.fullmatch(token) for token in tokens)
             and any(PIP_WORD.search(token) for token in tokens)):
         return "unplaceable", (
-            "runs an interpreter over a token naming pip. `sh -c '<code>'` "
-            "and `python -c '<code>'` pass their code as one quoted token, so "
+            "runs an interpreter over a token naming pip. `sh -c '<code>'`, "
+            "`python -c '<code>'` and `eval '<code>'` pass their code as one "
+            "quoted token, so "
             "a pip install inside it is not a shell command at all and "
             "nothing here can read it. Put the install in its own `run:` line."
         )
@@ -594,8 +675,9 @@ def scan_shell_body(body: str, shell=None, strict: bool = True):
     for heredoc in heredocs:
         if PIP_HINT.search(heredoc):
             unplaceable.append((heredoc.strip(), (
-                "is a heredoc body naming pip or an install. A heredoc is "
-                "text handed to a command on stdin, not shell, and this file "
+                "is a heredoc or herestring body naming pip or an install. "
+                "Both are text handed to a command on stdin, not shell, and "
+                "this file "
                 "cannot tell whether the command reading it is an interpreter "
                 "that will run the install. Put the install in its own `run:` "
                 "line, outside the heredoc."
@@ -1364,6 +1446,89 @@ def test_a_heredoc_that_never_ends_reports_what_it_swallowed(body):
     found, unplaceable = scan_shell_body(body)
     assert found == []
     assert len(unplaceable) == 1, unplaceable
+
+
+@pytest.mark.parametrize("delimiter", ["2PY", "P.Y", "P-Y", "9EOF", "p+y"])
+def test_a_heredoc_delimiter_is_a_word_not_an_identifier(delimiter):
+    """ROUND 4. The delimiter grammar was narrower than bash's, again.
+
+    Round 2 found `<<\\PY` — one missing SPELLING of a quoted delimiter — and
+    fixed that spelling. The class stayed `[A-Za-z_][A-Za-z0-9_]*`, which is a
+    C identifier, and a bash heredoc delimiter is a WORD. Every delimiter here
+    was measured opening a real heredoc under bash 5.2 and terminating on its
+    own line, and for every one of them the redirect went unrecognised, the
+    body was never lifted, and `subprocess.run(['pip', 'install', 'x'])`
+    tokenised as ordinary words in a command with no `pip` token —
+    `scan_shell_body` returned `([], [])`, a silent pass of an unpinned
+    install.
+
+    Parametrised on the shape of the delimiter rather than written once,
+    because fixing a spelling is exactly what round 2 did and what left this
+    open: the test has to be about the grammar.
+    """
+    body = ("python3 - <<'%s'\nimport subprocess\n"
+            "subprocess.run(['pip', 'install', 'x'])\n%s" % (delimiter, delimiter))
+    found, unplaceable = scan_shell_body(body)
+    assert found == []
+    assert len(unplaceable) == 1, unplaceable
+
+
+def test_eval_is_an_interpreter_even_though_it_is_not_a_program():
+    """ROUND 4. `eval 'pip install …'` installs, with no `pip` command token.
+
+    `eval` is a bash builtin, so it never appears as `/usr/bin/eval` and was
+    absent from a class built out of interpreter PROGRAMS — but it has exactly
+    the shape that class exists for: the code to run arrives as one quoted
+    token. Measured before the fix: `([], [])`.
+    """
+    found, unplaceable = scan_shell_body("eval 'pip install pyyaml==6.0.1'")
+    assert found == []
+    assert len(unplaceable) == 1, unplaceable
+
+    # The negative control, and it is not decoration: `eval` is matched as a
+    # whole token, so a word that merely STARTS with it must stay quiet, or
+    # this guard would red every workflow that mentions evaluating anything.
+    assert scan_shell_body("echo evaluate the install plan") == ([], [])
+
+
+def test_a_herestring_is_stdin_text_not_a_command_separator():
+    """ROUND 4. `bash <<< 'pip install …'` was silent, by a third route.
+
+    Neither heredoc fix reaches this one. `PUNCTUATION` is `();<>|&\\n` and
+    `is_separator` is true when EVERY character of a token is in it, so `<<<`
+    read as a command SEPARATOR: the stream split into `['bash']` and
+    `['pip install pyyaml==6.0.1']`, putting the interpreter and its payload in
+    different commands, so the INTERPRETER-plus-PIP_WORD rule that exists for
+    precisely this shape could never see them together. Measured: `([], [])`.
+    """
+    found, unplaceable = scan_shell_body("bash <<< 'pip install pyyaml==6.0.1'")
+    assert found == []
+    assert len(unplaceable) == 1, unplaceable
+
+    # A herestring naming nothing is not evidence of anything.
+    assert scan_shell_body("cat <<< 'hello world'") == ([], [])
+
+
+def test_a_herestring_does_not_open_a_phantom_heredoc():
+    """The regression the round-4 fix introduced, and its control.
+
+    Widening the heredoc delimiter to accept quoted words let `bash <<< 'some
+    text'` parse as a heredoc opened with the delimiter `some text`, swallowing
+    every following line while hunting a terminator that does not exist. It
+    failed CLOSED — the swallowed region names pip, so it was reported — but a
+    checkable install had been downgraded to an unreadable blob, which is a
+    real loss of precision.
+
+    `(?<!<)<<(?!<)` is what keeps `<<` and `<<<` apart, and BOTH guards are
+    needed: with only the lookahead the regex starts one character later and
+    matches the second and third `<` as a `<<` followed by a space. Measured —
+    the phantom survived the first attempt at this fix.
+    """
+    found, unplaceable = scan_shell_body(
+        "bash <<< 'hello'\npip install pyyaml==6.0.1")
+    assert not unplaceable, unplaceable
+    assert [install_operands(args) for _, args in found] == [
+        ([], ["pyyaml==6.0.1"], [])]
 
 
 def test_a_terminated_heredoc_hands_back_the_commands_after_it():

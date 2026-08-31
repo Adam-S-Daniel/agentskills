@@ -97,3 +97,4 @@ Optional sections for high-impact decisions:
 | [0005](0005-resolve-hooks-only-from-cwd-and-user-settings.md) | Resolve hooks only from the cwd and user settings chains | Accepted (open questions answered by 0007) |
 | [0006](0006-drive-the-account-store-drift-loop-from-one-published-artifact.md) | Drive the account-store drift loop from one published artifact, read by two repos on their own schedules | Accepted |
 | [0007](0007-install-the-union-of-every-discovered-lock.md) | Install the union of every discovered lock in a multi-repo session | Accepted |
+| [0008](0008-refuse-symlinks-in-a-skill-directory.md) | Refuse symlinks in a skill directory rather than digest them | Accepted |
