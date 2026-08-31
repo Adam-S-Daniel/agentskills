@@ -148,6 +148,44 @@ jobs:
       # green on the finished PR.
       - name: Check skills.lock still describes the current bundle
         run: python3 scripts/generate_skills_lock.py --check-current
+      # ADR 0009 (docs/decisions/0009-bump-bundle-versions-on-every-release.md):
+      # `claude plugin update` gates ONLY on the declared `version` string, and
+      # every bundle has shipped `1.0.0` forever — so a content change that
+      # never bumps it is invisible to that command forever, no matter how far
+      # the bundle moves. This step is the enforcement half: it fails when a
+      # PR touches files under plugins/<bundle>/ without also raising that
+      # bundle's version (in BOTH plugin.json and .claude-plugin/plugin.json)
+      # above its value at the PR base.
+      #
+      # PR-ONLY, deliberately: the gate's whole question is "changed since
+      # WHAT", and a push/schedule/workflow_dispatch run has no PR base to
+      # diff against at all — github.event.pull_request.base.sha does not
+      # exist on those events. Gating the STEP (rather than narrowing the
+      # job's trigger) keeps this job reporting on every event same as
+      # today, the same always-run-and-skip-inside shape this repo already
+      # uses for the pytest jobs' docs-only skip, just for a simpler reason
+      # here: this job publishes no required status context, so there is no
+      # "pending forever" hazard to design around — the step is scoped to
+      # pull_request purely because it has nothing to compare against
+      # otherwise.
+      #
+      # The base sha travels through `env:` and is read back as a shell
+      # variable, never interpolated into the `run:` body directly —
+      # AGENTS.md forbids `${{ github.event.* }}` inside `run:` because the
+      # rendered command is echoed to a public log. It happens to be a commit
+      # sha here, nothing sensitive, but the rule is applied uniformly rather
+      # than re-argued per field.
+      #
+      # Needs the SAME `fetch-depth: 0` this job's checkout already sets, and
+      # for the same reason as the lock checks above: check_plugin_versions.py
+      # reads the base version out of the git object store
+      # (`git show <base>:<path>`), and a shallow clone simply does not
+      # contain that commit.
+      - name: Check bundle versions moved when bundle content did
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/check_plugin_versions.py --base "$BASE_SHA"
 
   skills-conformance:
     runs-on: ubuntu-latest
