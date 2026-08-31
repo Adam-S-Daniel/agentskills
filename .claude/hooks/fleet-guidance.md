@@ -832,17 +832,39 @@ there for measured reasons), and drop it.
 
 - **absent** → `claude plugin marketplace add Adam-S-Daniel/agentskills`, then
   install the bundles the machine wants (`adam` at minimum).
-- **present but behind** → `claude plugin marketplace update agentskills`.
-- **present and current** → do nothing and say nothing.
+- **marketplace behind** → `claude plugin marketplace update agentskills`.
+- **marketplace current, INSTALL behind** → the common case, and the one the
+  obvious check cannot see. Below.
+- **both current** → do nothing and say nothing.
 
-"Behind" is a git question, not a guess: the marketplace is a clone under
-`~/.claude/plugins/`. **Find it rather than assuming a path** — this account has
-already been bitten once by encoding a clone location as a constant — then
-compare `git -C <clone> rev-parse HEAD` against
-`git ls-remote https://github.com/Adam-S-Daniel/agentskills refs/heads/main`.
-Equal means current. The `--json` output may also carry an updated-at or commit
-field; read what your build actually prints rather than trusting a field name
-from here.
+"Behind" is two questions, and the obvious one is the wrong one. The
+**marketplace clone** (`~/.claude/plugins/marketplaces/<name>/`) is a git clone
+— **find it rather than assuming a path**, this account has already been bitten
+once by encoding a clone location as a constant. When `known_marketplaces.json`
+sets `"autoUpdate": true` on it, it refreshes itself every session and is
+essentially always current. The **installed bundle**
+(`~/.claude/plugins/cache/<marketplace>/<bundle>/<version>/`) is a snapshot
+taken at install time, and never moves on its own.
+
+So comparing the clone's `HEAD` against `git ls-remote` — the check this file
+prescribed until 2026-08-31 — reads GREEN permanently by construction while the
+install rots beside it. Measured on `ZENDA` that day: clone current to the
+commit, install **381 commits** behind, the prescribed check clean throughout.
+Same shape as `$?` belonging to `tail` rather than to `gh pr checks`.
+
+Ask the install, which records its own provenance:
+`~/.claude/plugins/installed_plugins.json` carries a `gitCommitSha` per entry.
+`git -C <clone> merge-base --is-ancestor <that sha> HEAD` succeeding means the
+install is behind; `git -C <clone> rev-list --count <sha>..HEAD` says by how far.
+
+**`claude plugin update` may not fix it, and will say it did.** It gates on the
+declared `version` string alone, so a registry that never bumps it makes
+`update` a permanent no-op — agentskills' bundles sat at `1.0.0` from the day
+the field appeared until 2026-08-31 (that repo's ADR 0009). When the recorded
+sha is behind and `update` reports currency, uninstall and reinstall the bundle
+instead. Measured the same day: the version-keyed cache directory survives the
+uninstall, and the reinstall repopulates it from the clone regardless — all
+nine skills came back digest-equal to `main`.
 
 Two things to say afterwards, because both surprise people: an update changes
 what loads **next** session, not this one, and a marketplace refresh moves the
