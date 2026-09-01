@@ -21,6 +21,18 @@ that area.
   what you ran. New behaviour gets a test; a bug fix gets a regression test.
 - Tests must be deterministic — no sleeps, no network, no reliance on
   wall-clock time.
+- **A lint or check that reasons about code SHAPE — which functions/`test()`
+  blocks exist, whether one call sits inside another's scope, what a call's
+  arguments are — parses a real AST, never a regex or line scan.** Regex on
+  source is brittle: it false-matches tokens inside comments or strings,
+  misreads across line breaks, and is blind to interpolation — a regex cannot
+  see a *variable* value like `` page.goto(`…#/collections/${col}`) ``, which
+  is exactly how a guard gap shipped undetected in `cms-platform` (the
+  jodidaniel host-loop incident). Parse with a real parser for the language in
+  play — `acorn`/`acorn-walk` for JS, the `yaml` package for YAML/config, never
+  a hand-rolled scanner for either. Regex stays fine for a genuinely lexical
+  concern — a version string, a leaf token's own content — never for code or
+  config structure.
 
 ## Anything you name gets its link
 
