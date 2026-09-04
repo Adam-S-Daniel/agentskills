@@ -111,6 +111,9 @@ Repo locations are host-specific — match the convention of the machine you're 
   (for example `D:\repos\adam-s-daniel\wsl-automation`). Clone new repos there, and
   assume existing repos live there rather than under the user profile
   (`C:\Users\<user>\...`).
+- **Any Windows host with WSL**: PowerShell run from WSL inherits the elevation
+  of the session that launched WSL, and an agent's session is not elevated —
+  the `windows-elevation-from-wsl` skill (`adam-local`) has the procedure.
 
 ## Sessions get cut off
 
