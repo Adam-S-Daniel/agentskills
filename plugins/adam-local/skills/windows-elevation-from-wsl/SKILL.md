@@ -1,14 +1,15 @@
 ---
 name: windows-elevation-from-wsl
 description: >-
-  Handle "Access is denied" from powershell.exe or pwsh.exe run inside WSL on
-  ZENDA — Register-ScheduledTask / Set-ScheduledTask on a
+  Handle "Access is denied" from powershell.exe or pwsh.exe run inside WSL —
+  Register-ScheduledTask / Set-ScheduledTask on a
   RunLevel=HighestAvailable task, a service change (Set-Service, Stop-Service,
   New-Service), an LSA rights grant such as "Log on as a batch job"
   (SeBatchLogonRight, secedit, ntrights), an HKLM registry write, or any other
   change to Windows state from a WSL session. Use it BEFORE attempting such a
-  write from WSL and the moment one is denied. A WSL-launched PowerShell holds a
-  filtered, non-elevated token: reads succeed (Get-ScheduledTask, Get-Service,
+  write from WSL and the moment one is denied. PowerShell run from WSL inherits
+  the elevation of the session that launched WSL, and an agent's session is
+  not elevated: reads succeed (Get-ScheduledTask, Get-Service,
   the registry) so the surface looks available, writes that need elevation
   fail, and no flag, retry, Start-Process -Verb RunAs, schtasks, sudo, SYSTEM
   principal or downgraded RunLevel fixes it. Compose the command from WSL,
@@ -16,26 +17,31 @@ description: >-
   the exact line for an elevated Windows prompt and say it needs elevation.
 license: MIT
 compatibility: >-
-  A WSL session on a Windows host (ZENDA) that drives Windows through
-  powershell.exe / pwsh.exe via interop. Not applicable on Claude.ai web,
-  hosted sandboxes, macOS or plain Linux, and not needed in a Claude Code
-  session that already runs elevated on the Windows side.
+  A WSL session on a Windows host that drives Windows through powershell.exe /
+  pwsh.exe via interop. Not applicable on Claude.ai web, hosted sandboxes,
+  macOS or plain Linux, and not needed in a session whose WSL was itself
+  launched from an elevated Windows prompt.
 ---
 
 # Windows elevation from WSL
 
-You are in WSL on `ZENDA`, you ran `powershell.exe` or `pwsh.exe` to change
-something on the Windows side, and it answered **`Access is denied`** — or you
+You are in WSL on a Windows host, you ran `powershell.exe` or `pwsh.exe` to
+change something on the Windows side, and it answered **`Access is denied`** — or you
 are about to run such a write and want to skip that step. This skill is the
 whole procedure. It is short because the fix is not on the WSL side.
 
 ## What is actually happening
 
-A process launched from WSL through Windows interop inherits a **filtered,
-non-elevated token**, even when the Windows account is a local administrator.
-Nothing that process can do raises a UAC prompt: there is no console session
-for the prompt to appear in, so the elevation request fails outright rather
-than waiting for a click.
+A process launched from WSL through Windows interop inherits the token of the
+session that launched WSL. An agent's WSL session is started by a scheduled
+task (an S4U or Interactive principal with no `RunLevel`), by a launcher, or
+by a terminal opened normally — never from an elevated prompt — so the
+inherited token is **filtered and non-elevated**, even when the Windows
+account is a local administrator. Nothing that process can do raises a UAC
+prompt: there is no console session for the prompt to appear in, so the
+elevation request fails outright rather than waiting for a click. The only
+thing that changes the token is how WSL was launched, which is the operator's
+to change, not the agent's.
 
 The failure is **asymmetric**, which is what makes it easy to misread:
 
@@ -132,6 +138,6 @@ works from here.*
 ## Where the rule lives
 
 The fleet guidance's "Workstation layout" carries a one-clause pointer at this
-skill for `ZENDA`; this file is the procedure. The repo where it was learned
+skill for any Windows host with WSL; this file is the procedure. The repo where it was learned
 (`wsl-automation`) keeps only what is specific to its scheduled tasks in its
 own `AGENTS.md`.
