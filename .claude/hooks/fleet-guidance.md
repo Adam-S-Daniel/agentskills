@@ -447,8 +447,8 @@ refresh does not move a federated bundle. Neither check belongs in a repo's
   cms-platform-managed repos (`cms-platform`, `adamdaniel.ai`,
   `jodidaniel.com`), kept for Decap publishing. Squash strands commits a
   lockfile pins by sha (2026-08-15: `cannot resolve ref`).
-- **A closing keyword beside an issue number closes it from any commit
-  message, backticks or not** (a merge-time `--body` or `PR_BODY` too),
-  unseen by the PR's linked issues: cms-platform#283 closed unfixed via
-  `78617e1` (tests: _agent-guidance#132). Keep the keyword off the number
-  anywhere; after merging, check that issues meant to stay open are.
+- **A closing keyword before `#N` or an issue/PR URL, any repo, closes it,
+  PRs too**, from a PR body or any commit message (`--body`, `PR_BODY`);
+  don't count on backticks, and linked issues won't show it
+  (cms-platform#283 via `78617e1`, _agent-guidance#136 by cms-platform#434).
+  Keep the keyword off both; after merging, check what should stay open is.
