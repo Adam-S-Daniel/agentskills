@@ -173,8 +173,7 @@ hold before writing.
   under it is synchronous (no `enable_pr_auto_merge`).
 - **Fewer tools is not less dangerous.** Both merge, push and delete, and the
   subset one's reach cannot be inferred from the session's repo list
-  (2026-08-19: `github-mcp` 404s on private `repo-settings`). **A 404 means
-  "not visible to THIS connector"** — re-check on the other.
+  (2026-08-19: `github-mcp` 404s on private `repo-settings`).
 
 Prefer `mcp__github__`; use `github-mcp` only when the other cannot see a
 repo, say so, and name the connector in every verification.
@@ -199,13 +198,12 @@ exists, so every 404 is ambiguous: gone, or invisible to that credential.
 
 ## The fleet spans TWO owners, and a scoped search will not say so
 
-`Adam-S-Daniel` and `jodidaniel`, both in `SYNC_OWNERS` in _agent-guidance's
-`sync.yml` and its sibling workflows. A query scoped to
-one owner returns a **plausible, complete-shaped, wrong** result (2026-08-25:
-a `user:Adam-S-Daniel` code search "proved" jodidaniel.com had no
-`skills.lock`).
+`Adam-S-Daniel` and `jodidaniel`, both in `SYNC_OWNERS` (_agent-guidance's
+`sync.yml` and sibling workflows): enumerate it, never hardcode one. A
+query scoped to one owner returns a **plausible, complete-shaped, wrong**
+result (2026-08-25: a `user:Adam-S-Daniel` code search "proved"
+jodidaniel.com had no `skills.lock`).
 
-- **Enumerate owners; never hardcode one.** `SYNC_OWNERS` is the list.
 - **Prefer the fleet's registries** (`repos.yml`, `fleet.yml`,
   `cron_coverage.fleet`) **to a search index**; a zero result is weak evidence.
 - **To ask whether repo X has file Y, ask the repo** (`git ls-remote`, the
@@ -445,10 +443,12 @@ refresh does not move a federated bundle. Neither check belongs in a repo's
 - Concise commit messages that explain *why*; one logical change per commit.
 - Do not amend published commits or force-push shared branches.
 - **Merge with a merge commit — `gh pr merge --merge`.** Squash and rebase
-  are disabled on every fleet repo (`--squash` fails; do not offer it); only
-  the three cms-platform-managed repos (`cms-platform`, `adamdaniel.ai`,
-  `jodidaniel.com`) keep squash for the Decap publish chain, and `--merge`
-  works there too. Squash strands the pre-merge commits a lockfile pins by
-  sha (2026-08-15: `generate_skills_lock.py --check` fails, `cannot resolve
-  ref`). Enforced as code in `repo-settings`' `fleet.yml` and
-  `cms-platform`'s `repo-settings.yml`.
+  are off (`--squash` fails; do not offer it) except the three
+  cms-platform-managed repos (`cms-platform`, `adamdaniel.ai`,
+  `jodidaniel.com`), kept for Decap publishing. Squash strands commits a
+  lockfile pins by sha (2026-08-15: `cannot resolve ref`).
+- **A closing keyword beside an issue number closes it from any commit
+  message, backticks or not** (a merge-time `--body` or `PR_BODY` too),
+  unseen by the PR's linked issues: cms-platform#283 closed unfixed via
+  `78617e1` (tests: _agent-guidance#132). Keep the keyword off the number
+  anywhere; after merging, check that issues meant to stay open are.
