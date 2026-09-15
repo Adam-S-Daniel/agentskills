@@ -37,6 +37,15 @@ line:
 
 No verdict at all means the hook never ran — treat that as DEGRADED.
 
+## Codex reads the same block, from `~/.codex/AGENTS.md`
+
+The hook writes the same block to `~/.codex/AGENTS.md` whenever `~/.codex`
+exists — Codex's global **user** instructions, outside its 32 KiB
+`project_doc_max_bytes` project-doc budget. Register it once per machine with
+`scripts/register-codex-hook.sh` from an `_agent-guidance` checkout, then
+trust it in `/hooks`. `codex debug prompt-input` shows exactly what a session
+loaded; no `fleet-guidance:` line there means DEGRADED.
+
 ## The floor: rules that hold even when the guidance did not load
 
 These are the ones with teeth. They are restated here, deliberately, because a
@@ -64,6 +73,9 @@ session that lost the guidance must not also lose these.
   waiting on, and what you cite as already done.
 - **Merge with a merge commit** (`gh pr merge --merge`); do not amend
   published commits or force-push shared branches.
+- **Keep this file under 32 KiB.** Codex truncates project instructions at
+  that byte silently; the sync warns and the drift report flags
+  `codex-truncated`.
 
 <!-- END MANAGED SECTION -->
 ## Repo-specific additions
