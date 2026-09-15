@@ -42,9 +42,9 @@
 #   ~/.claude/CLAUDE.md   (or $CLAUDE_CONFIG_DIR/CLAUDE.md) — Claude Code's
 #                         user memory. Always.
 #   ~/.codex/AGENTS.md    (or $CODEX_HOME/AGENTS.md) — Codex's global USER
-#                         instructions, and ONLY when that directory already
-#                         exists. A machine without Codex installed gets
-#                         nothing new; this hook never creates ~/.codex.
+#                         instructions. Normal hook mode writes it only when
+#                         that directory already exists; explicit Codex Cloud
+#                         mode creates the home because setup is the lifecycle.
 #
 # The Codex destination is the GLOBAL one on purpose. Codex reads the AGENTS.md
 # chain from the project root down to cwd under a running byte budget,
@@ -65,17 +65,27 @@
 # A developer's own ~/.claude/CLAUDE.md or ~/.codex/AGENTS.md is theirs;
 # everything outside the markers is preserved byte-for-byte in both.
 #
+# CODEX CLOUD MODE
+# ----------------
+# `--codex-cloud` is called directly from environment setup and maintenance.
+# It exits before the legacy hook path below, targets Codex only, selects a
+# nonempty AGENTS.override.md when present, persists its verdict inside the
+# managed block, and returns nonzero on a delivery failure. It uses Python's
+# byte-oriented and atomic file operations so content outside an existing
+# block is unchanged and a failed replacement never truncates the destination.
+#
 # STDIN AND STDOUT
 # ----------------
-# Claude Code runs this as a SessionStart hook; so does Codex, through a
-# user-level entry registered once per machine by
+# With no arguments Claude Code runs this as a SessionStart hook; so does Codex,
+# through a user-level entry registered once per machine by
 # `scripts/register-codex-hook.sh`. Codex passes the hook event as one JSON
 # object on stdin — this script never reads stdin, which is part of what makes
 # one file correct for both harnesses — and adds a command hook's plain-text
 # stdout to the session as developer context. So the single verdict line below
 # is what a Codex session sees, exactly as a Claude session does.
 #
-# It always exits 0. A guidance delivery that breaks the session is worse than
+# In its normal hook mode it always exits 0. A guidance delivery that breaks
+# the session is worse than
 # one that degrades, and the repo stub is the floor: every repo still carries
 # the load-bearing rules inline, so a DEGRADED session is diminished, not blind.
 # The verdict line below is what keeps that degradation VISIBLE rather than
@@ -85,6 +95,16 @@
 # the one that failed.
 set -uo pipefail
 
+CODEX_CLOUD=0
+case "$#:${1-}" in
+    0:) ;;
+    1:--codex-cloud) CODEX_CLOUD=1 ;;
+    *)
+        echo "fleet-guidance: DEGRADED — unknown argument; expected no arguments or --codex-cloud"
+        exit 2
+        ;;
+esac
+
 BEGIN_MARK='<!-- BEGIN FLEET GUIDANCE (managed by _agent-guidance) — DO NOT EDIT -->'
 END_MARK='<!-- END FLEET GUIDANCE -->'
 
@@ -93,6 +113,185 @@ END_MARK='<!-- END FLEET GUIDANCE -->'
 # context in the repo that carries it.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || HOOK_DIR=""
 PAYLOAD="${FLEET_GUIDANCE_PAYLOAD:-$HOOK_DIR/fleet-guidance.md}"
+CODEX_DEST_DIR="${CODEX_HOME:-$HOME/.codex}"
+
+# One spelling policy serves both execution modes. Character classes keep the
+# comparison case-insensitive without adding an external command to the
+# shell-only legacy path.
+case "${FLEET_GUIDANCE_SKIP:-}" in
+    ""|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) FLEET_GUIDANCE_SKIP_ENABLED=0 ;;
+    *) FLEET_GUIDANCE_SKIP_ENABLED=1 ;;
+esac
+
+if [ "$CODEX_CLOUD" -eq 1 ]; then
+    cloud_result="$(python3 - \
+        "$CODEX_DEST_DIR" "$PAYLOAD" "$BEGIN_MARK" "$END_MARK" \
+        "$FLEET_GUIDANCE_SKIP_ENABLED" 2>/dev/null <<'PY'
+import hashlib
+import os
+import pathlib
+import stat
+import sys
+import tempfile
+
+
+class Refusal(Exception):
+    pass
+
+
+def refuse(reason):
+    raise Refusal(reason)
+
+
+def marker_span(raw, begin, end):
+    begins = []
+    ends = []
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        bare = line.rstrip(b"\r\n")
+        if bare == begin:
+            begins.append(offset)
+        if bare == end:
+            ends.append(offset + len(line))
+        offset += len(line)
+    if raw.count(begin) != len(begins) or raw.count(end) != len(ends):
+        refuse("effective global instructions have malformed fleet-guidance markers")
+    if not begins and not ends:
+        return None
+    if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
+        refuse("effective global instructions have malformed fleet-guidance markers")
+    return begins[0], ends[0]
+
+
+def regular_readable(path, label):
+    try:
+        info = path.lstat()
+    except OSError:
+        refuse(f"could not inspect {label}")
+    if not stat.S_ISREG(info.st_mode) or not os.access(path, os.R_OK):
+        refuse(f"{label} is not a readable regular file")
+    return info
+
+
+try:
+    codex_home = pathlib.Path(sys.argv[1])
+    payload_path = pathlib.Path(sys.argv[2])
+    begin = sys.argv[3].encode()
+    end = sys.argv[4].encode()
+    skip = sys.argv[5] == "1"
+
+    payload = b""
+    if not skip:
+        try:
+            payload = payload_path.read_bytes()
+        except OSError:
+            refuse("fleet-guidance payload is missing or unreadable")
+        if not payload:
+            refuse("fleet-guidance payload is empty")
+        if begin in payload or end in payload or any(
+            line.startswith(b"fleet-guidance:") for line in payload.splitlines()
+        ):
+            refuse("fleet-guidance payload contains a reserved marker or verdict")
+
+    try:
+        codex_home.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        refuse("could not create Codex home")
+    if not codex_home.is_dir():
+        refuse("Codex home is not a directory")
+
+    override = codex_home / "AGENTS.override.md"
+    agents = codex_home / "AGENTS.md"
+    if os.path.lexists(override):
+        override_info = regular_readable(override, "AGENTS.override.md")
+        target = override if override_info.st_size > 0 else agents
+    else:
+        target = agents
+    label = "~/.codex/AGENTS.override.md" if target == override else "~/.codex/AGENTS.md"
+
+    original = b""
+    original_mode = None
+    if os.path.lexists(target):
+        target_info = regular_readable(target, "effective global instructions")
+        original_mode = stat.S_IMODE(target_info.st_mode)
+        try:
+            original = target.read_bytes()
+        except OSError:
+            refuse("could not read effective global instructions")
+
+    span = marker_span(original, begin, end)
+    if skip:
+        body = (
+            b"fleet-guidance: skipped (FLEET_GUIDANCE_SKIP set) "
+            + "— Codex Cloud setup and maintenance".encode()
+            + b"\n"
+        )
+        verdict = f"fleet-guidance: skipped (FLEET_GUIDANCE_SKIP set) — persisted in {label}"
+    else:
+        version = hashlib.sha256(payload).hexdigest()[:8]
+        payload_body = payload if payload.endswith(b"\n") else payload + b"\n"
+        persisted = (
+            f"fleet-guidance: installed (v{version}, {len(payload)} bytes) "
+            "— Codex Cloud setup and maintenance"
+        ).encode()
+        body = (
+            f"<!-- fleet-guidance-version: {version} -->\n".encode()
+            + persisted
+            + b"\n"
+            + payload_body
+        )
+    block = begin + b"\n" + body + end + b"\n"
+
+    if span is None:
+        separator = b"" if not original or original.endswith(b"\n") else b"\n"
+        candidate = original + separator + block
+    else:
+        candidate = original[:span[0]] + block + original[span[1]:]
+
+    changed = candidate != original
+    if changed:
+        temporary = None
+        try:
+            fd, temporary = tempfile.mkstemp(prefix=".fleet-guidance-", dir=target.parent)
+            if original_mode is not None:
+                os.fchmod(fd, original_mode)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(candidate)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            temporary = None
+        except OSError:
+            refuse("could not write effective global instructions")
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+    if skip:
+        print(verdict)
+    elif changed:
+        print(f"fleet-guidance: installed (v{version}, {len(payload)} bytes) -> {label}")
+    else:
+        print(f"fleet-guidance: current (v{version}, {len(payload)} bytes) — {label}")
+except Refusal as exc:
+    print(f"fleet-guidance: DEGRADED — {exc}")
+    raise SystemExit(1)
+except Exception:
+    print("fleet-guidance: DEGRADED — unexpected Cloud setup failure")
+    raise SystemExit(1)
+PY
+)"
+    cloud_status=$?
+    if [ -z "$cloud_result" ]; then
+        cloud_result="fleet-guidance: DEGRADED — Python 3 is unavailable for Codex Cloud setup"
+        cloud_status=1
+    fi
+    printf '%s\n' "$cloud_result"
+    exit "$cloud_status"
+fi
 
 # ── Destinations ───────────────────────────────────────────────────────────
 #
@@ -102,7 +301,6 @@ PAYLOAD="${FLEET_GUIDANCE_PAYLOAD:-$HOOK_DIR/fleet-guidance.md}"
 # message names the resolved path instead, because those have to be actionable.
 CLAUDE_DEST_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CLAUDE_DEST="$CLAUDE_DEST_DIR/CLAUDE.md"
-CODEX_DEST_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_DEST="$CODEX_DEST_DIR/AGENTS.md"
 # shellcheck disable=SC2088  # the tilde is LITERAL here on purpose: these two
 # are prose shown to a human, never paths anything opens. The paths are the
@@ -222,12 +420,13 @@ strip_managed_block() {
 # session sitting in the file and still loading — an opt-out that does not opt
 # you out, which is worse than none because it looks like it worked.
 #
-# `0`, `false`, `no` and `off` are honoured as OFF. Treating any non-empty
-# value as ON would make `FLEET_GUIDANCE_SKIP=0` mean "skip", and a flag whose
-# disabled spelling enables it is a trap worth two lines of code to avoid.
-case "${FLEET_GUIDANCE_SKIP:-}" in
-    ""|0|false|FALSE|no|NO|off|OFF) ;;
-    *)
+# `0`, `false`, `no` and `off` are honoured as OFF, case-insensitively. Treating
+# any non-empty value as ON would make `FLEET_GUIDANCE_SKIP=0` mean "skip", and
+# a flag whose disabled spelling enables it is a trap worth two lines of code
+# to avoid.
+case "$FLEET_GUIDANCE_SKIP_ENABLED" in
+    0) ;;
+    1)
         removed=""      # destinations a block was actually removed from
         present=0       # destinations that exist at all
         for i in "${!DEST_PATHS[@]}"; do
