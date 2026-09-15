@@ -270,13 +270,13 @@ CLOSED without `gitleaks` on `PATH`, which a fresh container lacks
 
 ## Dependency updates
 
-Dependabot runs with a **minimum package age** (`cooldown`): `default-days: 7`,
-`semver-major-days: 30`. Version updates only (a security advisory bypasses
-it); unset `cooldown` is **not** "no wait" (GitHub's implicit minimum is 3
-days); `semver-minor-days` / `semver-patch-days` stay undefined and fall back
-to `default-days`. A package you add or bump **by hand** has no automation
-watching it: check `npm view <pkg> time --json`, take the newest release that
-has cleared 7 days, pin it exact (no caret).
+Dependabot `cooldown`: `default-days: 7` always, `semver-major-days: 30` where
+supported, never `github-actions` (#133). Version updates only (an advisory
+bypasses it); unset `cooldown` isn't "no wait" (GitHub's implicit minimum: 3
+days); `semver-minor-days` / `semver-patch-days` stay undefined, falling back
+to `default-days`. A package added or bumped **by hand** has no automation
+watching it: check `npm view <pkg> time --json`, take the newest release past
+7 days, pin it exact (no caret).
 
 ## A name you choose becomes data a scanner reads
 
