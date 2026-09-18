@@ -378,7 +378,44 @@ TARGET_MARKETPLACES = {
         "autoUpdate": True,
     },
 }
-TARGET_ENABLED_PLUGINS = {"adam@agentskills": True}
+# adam-local joins adam here as of ADR 0010. It is machine-bound, so it was
+# never in a lock and never marketplace-installed; the account store was the
+# only thing delivering it, and E5 measured that channel's sync-skills copy 127
+# lines behind the registry. Enabling it from the marketplace gives the
+# machine-bound bundle the pinned, version-gated delivery the cloud-safe one
+# has always had -- and it must land WITH the opt-out below, never after it:
+# opting a laptop out of the account sync while adam-local is not installed
+# takes sync-skills off that terminal altogether.
+TARGET_ENABLED_PLUGINS = {
+    "adam@agentskills": True,
+    "adam-local@agentskills": True,
+}
+
+# ADR 0010: pinned channels own the terminal.
+#
+# Claude Code 2.1.273+ downloads every skill enabled on the claude.ai account
+# into a terminal session signed in with it. On a converged machine that is 21
+# more always-on descriptions (~3,236 tok, measured 2026-09-18), three of them
+# a second copy of a skill this machine already has pinned -- and it puts the
+# one channel that drifts in front of sync-skills, the one skill that must run
+# on the laptop.
+#
+# False, the JSON boolean: the CLI honours only `false`, so a string "false"
+# or a 0 is an opt-out that silently does not happen. Only user, local or
+# managed settings are read for it, which is why this belongs here and cannot
+# be done from a repo's .claude/settings.json -- and why a CLOUD session is
+# unaffected by this line and keeps syncing.
+#
+# The price, stated where the change is: this also removes Anthropic's
+# docx/pptx/xlsx/pdf skills from laptop terminals. The pinned way back is
+# Anthropic's own marketplace plugin; that is an owner call, not this script's.
+#
+# syncClaudeAiPlugins is deliberately NOT set. The plugin bucket under
+# ~/.claude/plugins/synced/ is empty -- nothing is enabled on the account --
+# so there is nothing measured to decide from, and E6 (#160) exists to measure
+# it. A deferral has to be visible in the artefact, so the key is absent
+# rather than written either way.
+TARGET_SETTINGS = {"syncClaudeAiSkills": False}
 
 
 def deep_merge(dst, src):
@@ -418,6 +455,8 @@ if settings is not None:
 
     settings.setdefault("enabledPlugins", {})
     deep_merge(settings["enabledPlugins"], TARGET_ENABLED_PLUGINS)
+
+    deep_merge(settings, TARGET_SETTINGS)
 
     if settings == original:
         print("settings: unchanged")
