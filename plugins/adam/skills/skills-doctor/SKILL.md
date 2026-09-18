@@ -95,8 +95,8 @@ others see.
 ```bash
 ls -1 ~/.claude/skills/                    # personal store: hook-installed or hand-placed
 cat ~/.claude/skills/.skills-bootstrap-installed.json   # the hook's own account of what IT installed
-ls -1 ~/.claude/skills/synced/             # account store (claude.ai uploads)
-cat ~/.claude/skills/synced/manifest.json  # per skill: skillId, source, updatedAt
+ls -1 ~/.claude/skills/synced/*/           # account store (claude.ai uploads)
+cat ~/.claude/skills/synced/*/manifest.json  # per skill: skillId, source, updatedAt
 claude plugin list --json                  # installed bundles + the commit SHA each resolved to
 ```
 
@@ -357,7 +357,7 @@ verdict.
 CRLF, the registry is LF, so a raw `diff` or hash marks *every* skill as drifted:
 
 ```bash
-diff <(tr -d '\r' < ~/.claude/skills/synced/<skill>/SKILL.md) \
+diff <(tr -d '\r' < ~/.claude/skills/synced/<org>_<account>/<skill>/SKILL.md) \
      <(tr -d '\r' < <registry>/plugins/adam/skills/<skill>/SKILL.md)
 ```
 
@@ -437,6 +437,18 @@ figure. No remediation is performed — recommend, do not do.
 
 ## Traps that will mislead you
 
+- **The account store is BUCKETED PER ACCOUNT, one level below where it used
+  to be.** Claude Code 2.1.273+ writes
+  `~/.claude/skills/synced/<organizationUuid>_<accountUuid>/`, holding
+  `manifest.json` and one directory per skill, with an empty
+  `.bucket-<organizationUuid>_<accountUuid>` marker file beside it; older CLIs
+  wrote `~/.claude/skills/synced/manifest.json` flat. `ls ~/.claude/skills/synced/`
+  on a current CLI shows the marker and one directory and **no skills** — which
+  reads exactly like an account with no uploads. `check_provenance.py` resolves
+  the bucket itself (`oauthAccount` in `~/.claude.json`, then
+  `$CLAUDE_CODE_ACCOUNT_UUID`) and refuses rather than guessing when a machine
+  has more than one; when you look by hand, glob the bucket. Issue #157 is
+  where both tools were measured reporting a false clean over 21 skills.
 - **`~/.claude/skills/synced/` cannot be seeded or simulated.** It is
   manifest-gated: writing a directory there does nothing at all. You can only
   observe it, so never "test" a hypothesis about the account channel by

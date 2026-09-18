@@ -6324,3 +6324,224 @@ def test_account_drift_does_not_consult_a_lock_or_the_project(tmp_path, capsys):
     _registry(reg, "writing-adrs", "body\n")
     code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
     assert code == 0, capsys.readouterr().out
+
+
+# =====================================================================================
+# The account store's bucket layout (#157)
+# =====================================================================================
+#
+# Claude Code >= 2.1.273 writes the mirror to
+# `~/.claude/skills/synced/<organizationUuid>_<accountUuid>/`. Reading the flat
+# path on such a machine finds nothing, and this script's answer to "nothing"
+# is "the account with no uploads looks like this" — a FALSE CLEAN printed over
+# 21 skills sitting on disk (measured, issue #157).
+
+ORG_UUID = "29094e6a-eeb7-4d76-982e-84e62238e605"
+ACCT_UUID = "d11d9c2e-1772-4767-9197-f59d6fe0ab5a"
+OTHER_ORG = "11111111-2222-3333-4444-555555555555"
+OTHER_ACCT = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+
+
+def bucket_copy(store: Path, name: str, body: str = "line one\nline two\n",
+                bucket: str = None, crlf: bool = True, marker: bool = True) -> Path:
+    """`account_copy`, but into a per-account BUCKET as current CLIs write one.
+
+    The empty `.bucket-<id>` marker file beside the directory is written too:
+    it is part of the measured layout and is what lets a reader tell a bucket
+    from a skill whose basename happens to be UUID-shaped.
+    """
+    bucket = bucket or (ORG_UUID + "_" + ACCT_UUID)
+    root = store / prov.ACCOUNT_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    if marker:
+        (root / (".bucket-" + bucket)).write_bytes(b"")
+    skill = root / bucket / name
+    skill.mkdir(parents=True, exist_ok=True)
+    text = f"---\nname: {name}\n---\n{body}"
+    (skill / "SKILL.md").write_bytes(
+        text.encode("utf-8").replace(b"\n", b"\r\n") if crlf else text.encode("utf-8"))
+    (root / bucket / "manifest.json").write_text(
+        json.dumps({"lastUpdated": 1789713628092, "skills": [
+            {"description": "d", "name": name, "skillId": "s", "source": "custom",
+             "updatedAt": "2026-09-18T06:00:00Z"}]}),
+        encoding="utf-8")
+    return skill
+
+
+def write_cli_config(path: Path, org: str, account: str) -> Path:
+    path.write_text(json.dumps({"oauthAccount": {
+        "organizationUuid": org, "accountUuid": account}}), encoding="utf-8")
+    return path
+
+
+def test_a_bucketed_account_store_is_compared_not_called_empty(tmp_path, capsys,
+                                                               monkeypatch):
+    """#157's headline for this script: `--account-drift` printed "holds no
+    skills — nothing to compare … 0 drifted" and exited 0 while the bucket one
+    level down held 21. A clean verdict over an unread directory."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    bucket_copy(store, "writing-adrs", "same text\n")
+    _registry(reg, "writing-adrs", "same text\n")
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "holds no skills" not in out, out
+    assert "identical" in out, out
+    assert code == 0, out
+
+
+def test_a_bucketed_content_change_is_still_drift(tmp_path, capsys, monkeypatch):
+    """The negative control: finding the bucket must not also make everything in
+    it read as clean."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    bucket_copy(store, "writing-adrs", "the old text\n")
+    _registry(reg, "writing-adrs", "the NEW text\n")
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "DRIFTED" in out, out
+    assert code == 1, out
+
+
+def test_a_flat_account_store_is_still_compared(tmp_path, capsys, monkeypatch):
+    """Older CLIs wrote `synced/<name>/` with no bucket. The same code has to
+    keep running on whichever CLI the machine has."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    _account(store, "writing-adrs", "same text\n", crlf=True)
+    _registry(reg, "writing-adrs", "same text\n")
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "identical" in out, out
+    assert code == 0, out
+
+
+def test_the_drift_header_names_the_bucket_it_read(tmp_path, capsys, monkeypatch):
+    """The header is the reader's only statement of WHAT was compared. Naming
+    `synced/` while reading `synced/<org>_<account>/` makes a two-account
+    machine's report unfalsifiable."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    bucket_copy(store, "writing-adrs", "same text\n")
+    _registry(reg, "writing-adrs", "same text\n")
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+    prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert ORG_UUID + "_" + ACCT_UUID in out, out
+
+
+def test_two_buckets_resolve_to_the_signed_in_account(tmp_path, capsys, monkeypatch):
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    bucket_copy(store, "writing-adrs", "the old text\n")
+    bucket_copy(store, "writing-adrs", "same text\n",
+                bucket=OTHER_ORG + "_" + OTHER_ACCT)
+    _registry(reg, "writing-adrs", "same text\n")
+    monkeypatch.setattr(prov, "CLI_CONFIG_FILE",
+                        write_cli_config(tmp_path / "claude.json", OTHER_ORG, OTHER_ACCT))
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "identical" in out, out
+    assert code == 0, out
+
+
+def test_two_buckets_fall_back_to_the_account_uuid_in_the_environment(
+        tmp_path, capsys, monkeypatch):
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    bucket_copy(store, "writing-adrs", "same text\n")
+    bucket_copy(store, "writing-adrs", "the old text\n",
+                bucket=OTHER_ORG + "_" + OTHER_ACCT)
+    _registry(reg, "writing-adrs", "same text\n")
+    monkeypatch.setattr(prov, "CLI_CONFIG_FILE", tmp_path / "absent.json")
+    monkeypatch.setenv("CLAUDE_CODE_ACCOUNT_UUID", ACCT_UUID)
+
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    out = capsys.readouterr().out
+    assert "identical" in out, out
+    assert code == 0, out
+
+
+def test_two_buckets_and_no_signal_cannot_run(tmp_path, capsys, monkeypatch):
+    """2 is "cannot run", and it is the only honest code here: picking a bucket
+    would compare against another account's store, and 0 would repeat the very
+    false clean this section exists to remove."""
+    store, reg = tmp_path / "store", tmp_path / "reg"
+    bucket_copy(store, "writing-adrs", "same text\n")
+    bucket_copy(store, "writing-adrs", "same text\n",
+                bucket=OTHER_ORG + "_" + OTHER_ACCT)
+    _registry(reg, "writing-adrs", "same text\n")
+    monkeypatch.setattr(prov, "CLI_CONFIG_FILE", tmp_path / "absent.json")
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+    code = prov.main(["--skills-dir", str(store), "--account-drift", str(reg)])
+    captured = capsys.readouterr()
+    assert code == 2, captured.out
+    assert "0 drifted" not in captured.out, captured.out
+    both = captured.out + captured.err
+    assert ORG_UUID + "_" + ACCT_UUID in both, both
+    assert OTHER_ORG + "_" + OTHER_ACCT in both, both
+
+
+def test_a_bucketed_account_copy_still_shadows_a_personal_one(tmp_path, capsys,
+                                                              ephemeral, monkeypatch):
+    """The other half of #157 for this script. The shadow comparison is the
+    default report's account question, and it reads the same directory
+    `--account-drift` does — so the bucket hid every shadow too."""
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+    store = tmp_path / "skills"
+    store.mkdir()
+    skill = store / "writing-adrs"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: writing-adrs\n---\nline one\nline two\n",
+        encoding="utf-8", newline="")
+    bucket_copy(store, "writing-adrs")
+    write_record(store, "writing-adrs")
+    lock = write_lock(tmp_path / "skills.lock", store, "writing-adrs")
+
+    code, out = run(store, lock, capsys)
+    assert code == 0, out
+    assert "[shadowed-by-the-account-store] writing-adrs" in out, out
+
+
+def test_the_bucket_resolution_matches_the_uploaders(tmp_path, monkeypatch):
+    """The binding that keeps this file's bucket rule a copy of sync-skills'.
+
+    Both tools read the same directory on the same machine, and this one cannot
+    import the other — it ships into a `~/.claude/skills` with no sync-skills in
+    it — so the resolution is re-declared. A re-declaration that drifts does not
+    fail loudly: the two tools would disagree about WHICH ACCOUNT they are
+    reporting on, and each would look internally consistent while doing it.
+
+    Bound behaviourally rather than by constant name: the same tree is put in
+    front of both, and they have to name the same directory.
+    """
+    up = _uploader()
+    assert prov.BUCKET_NAME_RE.pattern == up.BUCKET_NAME_RE.pattern
+    assert prov.BUCKET_MARKER_PREFIX == up.BUCKET_MARKER_PREFIX
+
+    store = tmp_path / "skills"
+    root = store / prov.ACCOUNT_DIR
+    for bucket in (ORG_UUID + "_" + ACCT_UUID, OTHER_ORG + "_" + OTHER_ACCT):
+        (root / bucket).mkdir(parents=True)
+        (root / bucket / "manifest.json").write_text("{}", encoding="utf-8")
+        (root / (".bucket-" + bucket)).write_bytes(b"")
+    config = write_cli_config(tmp_path / "claude.json", OTHER_ORG, OTHER_ACCT)
+    monkeypatch.setattr(prov, "CLI_CONFIG_FILE", config)
+    monkeypatch.setattr(up, "CLI_CONFIG_FILE", config)
+    monkeypatch.setattr(up, "ACCOUNT_SKILLS_DIR", root)
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+    assert prov.account_store_path(store) == up.account_mirror_dir()
+
+    # And they refuse together, which is the half that matters: one tool
+    # guessing while the other declines is how a "clean" verdict gets paired
+    # with a real one and read as agreement.
+    monkeypatch.setattr(prov, "CLI_CONFIG_FILE", tmp_path / "absent.json")
+    monkeypatch.setattr(up, "CLI_CONFIG_FILE", tmp_path / "absent.json")
+    assert prov.account_store_path(store) is None
+    assert up.account_mirror_dir() is None
