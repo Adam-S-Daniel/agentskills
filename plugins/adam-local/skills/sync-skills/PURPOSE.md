@@ -49,6 +49,17 @@ is the index.
   everything above exists: a confident wrong answer costs more here than an
   error does.
 
+- **Refresh advice that could not work on either branch** — issue #158 and
+  ADR 0010. `CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'` was the documented way
+  to refresh the mirror. From CLI 2.1.273 a syncing terminal refreshes itself,
+  making the line a no-op dressed as a prerequisite; and on a machine
+  `setup.sh` has converged, ADR 0010 sets `syncClaudeAiSkills: false`, so
+  there is no mirror for it to refresh at all. Advice that works on neither
+  branch is worse than none: it sends the reader to re-run a command and
+  conclude the tool is broken. The verify and record halves now run from a
+  cloud session — which always has the mirror and cannot opt out — and the
+  upload half still needs the laptop, because it needs a browser.
+
 ## Eval status
 
 Deferred by decision, not by omission: skills-evals' `DESIGN.md` deliberate
