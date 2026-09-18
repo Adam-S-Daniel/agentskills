@@ -3879,3 +3879,196 @@ class TestBasisTravelsWithTheVerdict:
         assert proc.returncode == 0, proc.stderr
         assert "in-sync (asserted)" in proc.stderr, proc.stderr
         assert json.loads(proc.stdout)["in_sync_asserted"] == ["alpha"]
+
+
+# ---------------------------------------------------------------------------
+# The account mirror's bucket layout (#157)
+# ---------------------------------------------------------------------------
+
+UUID_A = "29094e6a-eeb7-4d76-982e-84e62238e605"
+UUID_B = "d11d9c2e-1772-4767-9197-f59d6fe0ab5a"
+UUID_C = "11111111-2222-3333-4444-555555555555"
+UUID_D = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+
+
+def write_bucket(root: Path, bucket_id: str, skills=("alpha",), last_updated=None):
+    """A mirror bucket as Claude Code >=2.1.273 writes one.
+
+    The empty `.bucket-<id>` marker file beside the directory is part of the
+    layout, not decoration: it is what tells a reader the directory below is a
+    bucket rather than a skill whose name happens to look like two UUIDs.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / (".bucket-" + bucket_id)).write_text("", encoding="utf-8")
+    bucket = root / bucket_id
+    bucket.mkdir(parents=True, exist_ok=True)
+    if last_updated is None:
+        last_updated = int(
+            datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000
+        )
+    for name in skills:
+        skill = bucket / name
+        skill.mkdir(parents=True, exist_ok=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: %s\ndescription: d\n---\n# %s\n" % (name, name),
+            encoding="utf-8",
+        )
+    (bucket / "manifest.json").write_text(
+        json.dumps({
+            "lastUpdated": last_updated,
+            "skills": [
+                {"description": "d", "name": name, "skillId": "s-" + name,
+                 "source": "custom", "updatedAt": "2026-09-18T06:00:00Z"}
+                for name in skills
+            ],
+        }),
+        encoding="utf-8",
+    )
+    return bucket
+
+
+class TestAccountMirrorBucketLayout:
+    """#157: the mirror moved to `synced/<org>_<account>/` and reading the flat
+    path found nothing — which `--verify` reported as a missing manifest and
+    `--record-account-state` would have recorded as "never uploaded"."""
+
+    def test_a_bucketed_mirror_is_found(self, tmp_path, monkeypatch):
+        root = tmp_path / "synced"
+        write_bucket(root, UUID_A + "_" + UUID_B, skills=("alpha",))
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", root)
+
+        manifest = sync_skills.account_manifest()
+        assert manifest is not None
+        assert [s["name"] for s in manifest["skills"]] == ["alpha"]
+        assert sync_skills.account_skill_payload("alpha") is not None
+
+    def test_a_flat_mirror_is_still_read(self, tmp_path, monkeypatch):
+        """Older CLIs wrote `synced/manifest.json`; the laptop may still have one."""
+        root = tmp_path / "synced"
+        (root / "alpha").mkdir(parents=True)
+        (root / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\n", encoding="utf-8")
+        (root / "manifest.json").write_text(
+            json.dumps({"lastUpdated": 1, "skills": [{"name": "alpha"}]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", root)
+
+        assert sync_skills.account_manifest() is not None
+        assert sync_skills.account_skill_payload("alpha") is not None
+
+    def test_two_buckets_resolve_to_the_signed_in_one(self, tmp_path, monkeypatch):
+        root = tmp_path / "synced"
+        write_bucket(root, UUID_A + "_" + UUID_B, skills=("alpha",))
+        write_bucket(root, UUID_C + "_" + UUID_D, skills=("beta",))
+        config = tmp_path / "claude.json"
+        config.write_text(json.dumps({"oauthAccount": {
+            "organizationUuid": UUID_C, "accountUuid": UUID_D}}), encoding="utf-8")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", root)
+        monkeypatch.setattr("sync_skills.CLI_CONFIG_FILE", config)
+        monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+        manifest = sync_skills.account_manifest()
+        assert manifest is not None
+        assert [s["name"] for s in manifest["skills"]] == ["beta"]
+
+    def test_two_buckets_fall_back_to_the_account_uuid_in_the_environment(
+        self, tmp_path, monkeypatch
+    ):
+        root = tmp_path / "synced"
+        write_bucket(root, UUID_A + "_" + UUID_B, skills=("alpha",))
+        write_bucket(root, UUID_C + "_" + UUID_D, skills=("beta",))
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", root)
+        monkeypatch.setattr("sync_skills.CLI_CONFIG_FILE", tmp_path / "absent.json")
+        monkeypatch.setenv("CLAUDE_CODE_ACCOUNT_UUID", UUID_B)
+
+        manifest = sync_skills.account_manifest()
+        assert manifest is not None
+        assert [s["name"] for s in manifest["skills"]] == ["alpha"]
+
+    def test_two_buckets_and_no_signal_refuses_rather_than_picking_one(
+        self, tmp_path, monkeypatch
+    ):
+        """Never "the newest": a wrong bucket verifies against another account's
+        store and reports a confident, wrong verdict."""
+        root = tmp_path / "synced"
+        write_bucket(root, UUID_A + "_" + UUID_B, skills=("alpha",))
+        write_bucket(root, UUID_C + "_" + UUID_D, skills=("beta",))
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", root)
+        monkeypatch.setattr("sync_skills.CLI_CONFIG_FILE", tmp_path / "absent.json")
+        monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+        resolved = sync_skills.resolve_account_mirror()
+        assert resolved.path is None
+        assert sync_skills.account_manifest() is None
+        assert sync_skills.account_skill_payload("alpha") is None
+        # The message names the candidates, so the operator can say which.
+        stale = sync_skills.check_mirror_freshness(sync_skills.account_manifest())
+        assert stale is not None
+        assert UUID_A + "_" + UUID_B in stale
+        assert UUID_C + "_" + UUID_D in stale
+
+    def test_the_freshness_error_names_the_bucket_it_actually_looked_in(
+        self, tmp_path, monkeypatch
+    ):
+        """The old message named `synced/manifest.json` on a machine whose
+        manifest is one level down, sending the reader to the wrong file."""
+        root = tmp_path / "synced"
+        bucket = write_bucket(root, UUID_A + "_" + UUID_B, skills=("alpha",))
+        (bucket / "manifest.json").unlink()
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", root)
+
+        stale = sync_skills.check_mirror_freshness(sync_skills.account_manifest())
+        assert stale is not None
+        assert str(bucket / "manifest.json") in stale
+
+    def test_is_update_sees_a_bucketed_copy(self, repo_with_skills, tmp_path, monkeypatch):
+        """`is_update` asks the mirror whether the account already holds a skill.
+        Blind to the bucket, every skill read as NEW and would 409 on upload."""
+        root = tmp_path / "synced"
+        write_bucket(root, UUID_A + "_" + UUID_B, skills=("skill-a",))
+        monkeypatch.setattr("sync_skills.STATE_FILE", tmp_path / "no-state.json")
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", root)
+        monkeypatch.setattr("sync_skills.get_org_id_hint", lambda: None)
+
+        result = prepare([repo_with_skills], skill_names=["skill-a"])
+        assert result["skills"][0]["is_update"] is True
+
+    def test_record_account_state_reads_the_bucket(self, tmp_path, monkeypatch):
+        root = tmp_path / ".claude" / "skills" / "synced"
+        write_bucket(root, UUID_A + "_" + UUID_B, skills=("alpha",))
+        declared = write_declaration(tmp_path / "declared.txt", ["alpha"])
+        state = tmp_path / "account-state.json"
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).parent.parent / "sync_skills.py"),
+             "--record-account-state", "--account-state", str(state),
+             "--account-list", str(declared)],
+            capture_output=True,
+            env={**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)},
+            **TEXT,
+        )
+        assert proc.returncode == 0, proc.stderr + proc.stdout
+        recorded = json.loads(state.read_text(encoding="utf-8"))
+        assert recorded["skills"]["alpha"]["digest"] is not None
+        assert recorded["skills"]["alpha"]["basis"] == "observed"
+
+    def test_record_account_state_refuses_an_unresolvable_mirror(
+        self, tmp_path, monkeypatch
+    ):
+        """Recording against a mirror we could not pick writes a file claiming
+        every declared skill was never uploaded — the false clean, committed."""
+        root = tmp_path / ".claude" / "skills" / "synced"
+        write_bucket(root, UUID_A + "_" + UUID_B, skills=("alpha",))
+        write_bucket(root, UUID_C + "_" + UUID_D, skills=("alpha",))
+        declared = write_declaration(tmp_path / "declared.txt", ["alpha"])
+        state = tmp_path / "account-state.json"
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ACCOUNT_UUID"}
+        env["HOME"] = str(tmp_path)
+        env["USERPROFILE"] = str(tmp_path)
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).parent.parent / "sync_skills.py"),
+             "--record-account-state", "--account-state", str(state),
+             "--account-list", str(declared)],
+            capture_output=True, env=env, **TEXT,
+        )
+        assert proc.returncode != 0, proc.stdout
+        assert not state.exists(), "an unresolved mirror must write nothing"
