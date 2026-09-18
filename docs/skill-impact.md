@@ -77,6 +77,44 @@ no backfill is planned; the file adds the fields git does not capture.
 
 ## 2026-09-18 — adam/skills-doctor — edit
 
+- Motivation: terminal sessions sync the claude.ai account store from CLI
+  2.1.273+, so the drifting channel reaches every surface rather than only the
+  ones with no lock coverage, and ADR 0010's answer makes a laptop and a cloud
+  session load different sets on purpose
+  ([#158](https://github.com/Adam-S-Daniel/agentskills/issues/158)).
+- Change: new `--account-channel` mode reporting the settings-chain verdict for
+  `syncClaudeAiSkills`/`syncClaudeAiPlugins` (only the boolean `false` counts
+  as an opt-out; absent is reported as still syncing), every account skill
+  whose bare name another copy here also delivers and which owns the short
+  name, and what an opt-out left in `.trash/`. Reports only, never repairs.
+  Branch `claude/own-the-terminal-skill-channel`, stacked on
+  `claude/account-mirror-bucket-layout`; no PR number — see the 2026-09-18
+  entries below for why.
+- Eval: skills-evals `evals/skills-doctor/bucketed-account-store` (the fixture
+  the entry below added). `--arm objective-only` on the pristine seed exits 1,
+  1/5 checks; on a reference answer exits 0, 5/5. The A/B arms were not run —
+  no model access for them in this session, so no delta is claimed.
+- Outcome: open as of 2026-09-18 — branch pushed and verified on the remote.
+
+## 2026-09-18 — adam-local/sync-skills — edit
+
+- Motivation: the documented `CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'` refresh
+  is wrong on both branches of ADR 0010 — a syncing terminal refreshes itself,
+  and a converged laptop has no mirror to refresh
+  ([#158](https://github.com/Adam-S-Daniel/agentskills/issues/158)).
+- Change: the verify and record steps move to a cloud session, which always has
+  the mirror and cannot opt out, and say why; the same correction lands in the
+  freshness error, the `--record-account-state` refusal, `--report-issue`'s
+  help and the tracking-issue body it writes. The upload half still names the
+  laptop, because it still needs a browser. Branch
+  `claude/own-the-terminal-skill-channel`.
+- Eval: exempt (DESIGN.md non-coverage table) — "defer: machine-bound
+  (WSL/WPF/browser surfaces)".
+- Outcome: open as of 2026-09-18 — branch pushed and verified on the remote.
+
+
+## 2026-09-18 — adam/skills-doctor — edit
+
 - Motivation: Claude Code 2.1.273+ buckets the claude.ai account store at
   `synced/<organizationUuid>_<accountUuid>/`, so `--account-drift` read the
   flat path, found nothing, and printed "holds no skills — nothing to
