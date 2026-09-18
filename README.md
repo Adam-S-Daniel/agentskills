@@ -269,7 +269,11 @@ write is the delivery channel for ephemeral surfaces. What works where:
   [ADR 0007](docs/decisions/0007-install-the-union-of-every-discovered-lock.md),
   and [`docs/multi-repo-delivery.md`](docs/multi-repo-delivery.md) for the
   wiring such a session needs before any of it runs.
-- **The claude.ai account store** — `~/.claude/skills/synced/`, populated by
+- **The claude.ai account store** — `~/.claude/skills/synced/<organizationUuid>_<accountUuid>/`
+  on Claude Code 2.1.273+ (a `.bucket-<organizationUuid>_<accountUuid>` marker
+  file sits beside it; older CLIs wrote `~/.claude/skills/synced/` flat, and the
+  tools here read whichever a machine has — see
+  [#157](https://github.com/Adam-S-Daniel/agentskills/issues/157)), populated by
   uploading skills as ZIPs via Settings → Capabilities. This is the *only*
   channel that reaches claude.ai chat, Cowork, Claude in Chrome, and mobile —
   and it loads in Claude Code on the web / cloud sessions too, alongside
