@@ -19,12 +19,24 @@ this registry, see [`STRATEGY.md`](STRATEGY.md).
 
 ## Install — Claude Code
 
-Add the marketplace once, then install whichever bundles you want:
+One command, on **Claude Code v2.1.275 or later** — it resolves the source,
+offers to add the marketplace, then installs the bundle:
+
+```bash
+/plugin install adam --marketplace Adam-S-Daniel/agentskills
+```
+
+On older CLIs, add the marketplace first and install by `plugin@marketplace`:
 
 ```bash
 /plugin marketplace add Adam-S-Daniel/agentskills
 /plugin install adam@agentskills
-# opt-in bundles:
+```
+
+Either way the marketplace is added once, so the opt-in bundles install from it
+by name:
+
+```bash
 /plugin install adam-local@agentskills
 /plugin install fastmail@agentskills
 /plugin install cms-platform@agentskills   # federated — fetched from Adam-S-Daniel/cms-platform
