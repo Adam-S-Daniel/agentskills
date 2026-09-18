@@ -3010,6 +3010,161 @@ def registry_copy(registry: Path, name: str) -> Optional[Path]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# The account sync channel, per surface (#158, ADR 0010)
+# ---------------------------------------------------------------------------
+#
+# From Claude Code 2.1.273+ a terminal session signed in with the account
+# downloads every skill enabled on it and loads them as
+# `anthropic-skills:<name>`. ADR 0010 opts durable machines out and leaves
+# cloud sessions syncing — they cannot opt out, the key is read only from user,
+# local or managed settings and never from a repo's — so two surfaces now load
+# different sets ON PURPOSE. A difference on purpose still has to be reported,
+# or it gets rediscovered by whoever next asks why a skill does not trigger
+# here and does there.
+
+SYNC_SKILLS_KEY = "syncClaudeAiSkills"
+SYNC_PLUGINS_KEY = "syncClaudeAiPlugins"
+
+# Where the CLI reads these two from. A repo's `.claude/settings.json` is NOT
+# in this list and its absence is the point: a repo cannot opt its sessions
+# out, so reading one here would report a setting that does nothing.
+def default_settings_chain() -> List[Path]:
+    home = Path.home() / ".claude"
+    return [Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
+            Path("/etc/claude-code/managed-settings.json"),
+            home / "settings.json",
+            home / "settings.local.json"]
+
+# What the CLI does with a synced copy after an opt-out: moves it here, where
+# it is neither loaded nor gone. Reported because a directory in that state
+# looks like a half-finished install to anyone who finds it without knowing
+# why it exists.
+TRASH_DIR = ".trash"
+
+
+class SyncVerdict(NamedTuple):
+    """What one sync key is set to, and which file said so.
+
+    `off` is True only for the JSON boolean `false`. The CLI honours nothing
+    else, so a string "false" or a 0 is an opt-out that silently does not
+    happen — and a doctor that reported one as an opt-out would certify the
+    exact state it exists to catch. `raw` keeps the offending value so the
+    report can show it rather than merely disagree with the reader.
+    """
+    key: str
+    off: bool
+    source: Optional[Path]
+    raw: object
+    unreadable: List[Path]
+
+
+def read_sync_verdict(key: str, chain: List[Path]) -> SyncVerdict:
+    """Whether anything in `chain` turns `key` off.
+
+    PRECEDENCE IS NOT MODELLED, deliberately. Only `false` is honoured, and it
+    is honoured from user, local or managed alike, so "does some file in the
+    chain say false" is the entire question. Inventing an order between them
+    would be a claim about the CLI that nothing here measured, and it could
+    only ever change the answer in cases where the honest answer is already
+    "off".
+    """
+    seen_raw, source, unreadable = None, None, []
+    for path in chain:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            unreadable.append(path)
+            continue
+        if not isinstance(data, dict) or key not in data:
+            continue
+        value = data[key]
+        if value is False:
+            return SyncVerdict(key, True, path, value, unreadable)
+        # Remembered rather than returned: a later file may still say false,
+        # and this one is only interesting if none does.
+        seen_raw, source = value, path
+    return SyncVerdict(key, False, source, seen_raw, unreadable)
+
+
+def sync_verdict_line(verdict: SyncVerdict) -> List[str]:
+    lines = []
+    if verdict.off:
+        lines.append(f"  {verdict.key:<22} opted out (false) in {verdict.source}")
+    elif verdict.source is None:
+        lines.append(f"  {verdict.key:<22} syncing — not set anywhere in the "
+                     f"chain, and the key defaults to ON, so nothing setting it "
+                     f"and it being off are opposite answers")
+    else:
+        lines.append(f"  {verdict.key:<22} syncing — {verdict.source} sets it to "
+                     f"{verdict.raw!r}, and the CLI honours only the boolean "
+                     f"false, so this is not an opt-out")
+    for path in verdict.unreadable:
+        lines.append(f"  {'':<22} NOT READ: {path} could not be parsed, so what "
+                     f"it says about this key is unknown")
+    return lines
+
+
+def account_channel_report(skills_dir: Path, chain: List[Path]) -> Tuple[List[str], int]:
+    """(lines, exit code) for what the account sync is doing on this surface.
+
+    Reports three things and repairs none of them, which is this script's whole
+    posture: the settings-chain verdict for both keys, every account skill
+    whose bare name another copy here also delivers, and whatever an earlier
+    opt-out left in `.trash/`.
+    """
+    lines: List[str] = []
+    for key in (SYNC_SKILLS_KEY, SYNC_PLUGINS_KEY):
+        lines += sync_verdict_line(read_sync_verdict(key, chain))
+
+    lines.append("")
+    store = resolve_account_store(skills_dir)
+    if store.path is None:
+        lines.append(f"  {store.reason}")
+        # 2 is "cannot run" for the same reason --account-drift uses it: the
+        # duplicate half of this report was not measured, and a report that
+        # merely omitted it would read as "no duplicates".
+        return lines, 2
+
+    account = skill_names(store.path)
+    personal = set(scan(skills_dir)[1])
+    shared = sorted(account & personal)
+    if not account:
+        lines.append(f"  the account store {store.path} holds no skills, so "
+                     f"nothing it delivers can collide with anything here.")
+    elif not shared:
+        lines.append(f"  {len(account)} skill(s) arrive from the account store "
+                     f"and none shares a bare name with a copy in "
+                     f"{skills_dir} — nothing is shadowed.")
+    else:
+        lines.append(f"  {len(shared)} of {len(account)} account skill(s) share "
+                     f"a bare name with a copy in {skills_dir}:")
+        for name in shared:
+            lines.append(f"    {name:<40} the copy in {skills_dir} owns "
+                         f"`{name}`; the account copy stays loaded as "
+                         f"`anthropic-skills:{name}`")
+        lines.append("")
+        lines.append("  That is the DOCUMENTED rule and not something this "
+                     "disk proves: a same-named local, plugin or bundled skill "
+                     "keeps the short name and the synced copy keeps the long "
+                     "one. Nothing on disk or in any log records which one a "
+                     "given turn read.")
+
+    trash = skills_dir / TRASH_DIR
+    trashed = sorted(skill_names(trash))
+    lines.append("")
+    if trashed:
+        lines.append(f"  {trash} holds {len(trashed)} skill(s) an opt-out moved "
+                     f"aside — loaded by nothing, deleted by nothing: "
+                     f"{', '.join(trashed)}")
+    else:
+        lines.append(f"  {trash} holds nothing (no opt-out has moved a synced "
+                     f"copy aside here, or one never had to).")
+    return lines, 0
+
+
 class DriftReport(NamedTuple):
     """`account_drift`'s answer, with "could not run" kept separate from "0".
 
@@ -3548,6 +3703,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "content is the only honest drift signal there is — "
                              "a timestamp comparison re-flags every skill any "
                              "restructure commit moved")
+    parser.add_argument("--account-channel", action="store_true",
+                        help="report what the claude.ai account sync is doing "
+                             "on THIS surface — the settings-chain verdict for "
+                             "syncClaudeAiSkills/Plugins, every account skill "
+                             "whose bare name another copy here also delivers, "
+                             "and what an opt-out left in .trash/ — instead of "
+                             "the provenance report. Terminal sessions sync "
+                             "from 2.1.273+ and cloud sessions cannot opt out, "
+                             "so the answer differs per surface (ADR 0010)")
+    parser.add_argument("--settings", default=None, metavar="PATH",
+                        action="append",
+                        help="a settings file --account-channel should read "
+                             "instead of the real user/local/managed chain. "
+                             "Repeatable, and ordered as given. Only user, "
+                             "local and managed settings are consulted for "
+                             "these keys, so a repo's .claude/settings.json is "
+                             "deliberately not in the default chain")
     args = parser.parse_args(argv)
 
     skills_dir = Path(args.skills_dir).expanduser()
@@ -3582,6 +3754,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
         print(f"  {report.drifted} drifted")
         return 1 if report.drifted else 0
+    if args.account_channel:
+        chain = ([Path(entry).expanduser() for entry in args.settings]
+                 if args.settings else default_settings_chain())
+        lines, code = account_channel_report(skills_dir, chain)
+        print("ACCOUNT CHANNEL  " + skills_dir.as_posix()
+              + "  (surface " + read_surface()[0] + ")")
+        print("  reports only; nothing here is repaired. See "
+              "`account_channel_report`.")
+        print()
+        print("\n".join(lines))
+        return code
+
     project_dir = Path(args.project_dir).expanduser()
     record_path = skills_dir / RECORD_NAME
     surface = read_surface()

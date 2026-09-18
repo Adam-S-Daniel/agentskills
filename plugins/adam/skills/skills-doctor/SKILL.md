@@ -100,6 +100,10 @@ cat ~/.claude/skills/synced/*/manifest.json  # per skill: skillId, source, updat
 claude plugin list --json                  # installed bundles + the commit SHA each resolved to
 ```
 
+On a terminal, add a sixth: `--account-channel` below, because from 2.1.273+
+the account store loads there too and `ls` alone cannot tell you whether it is
+switched on.
+
 The sixth signal is **the session's own skill listing** — the names offered to
 the Skill tool in this context. It is the only signal that says what the model
 can actually *trigger*, and it is the authority when it disagrees with disk.
@@ -365,6 +369,47 @@ That compares one file. `--account-drift` compares every file an upload
 carries — so it also catches a payload dropped from one side, which a
 `SKILL.md` diff cannot see — and applies the upload filter to both sides, so a
 `__pycache__` in the working tree is not mistaken for a divergence.
+
+### Which surface the account channel is on
+
+From Claude Code 2.1.273+ a **terminal** session signed in with the account
+downloads every skill enabled on it and loads them as
+`anthropic-skills:<name>`. That used to be a cloud/chat/mobile-only channel.
+[ADR 0010](../../../../docs/decisions/0010-let-pinned-channels-own-the-terminal.md)
+opts durable machines out via `setup.sh` and leaves cloud sessions syncing —
+they **cannot** opt out, because the key is read only from user, local or
+managed settings and never from a repo's — so two surfaces now load different
+sets on purpose. Report which one you are on before concluding anything about
+why a skill does or does not trigger:
+
+```bash
+python3 "$SKILL_DIR/scripts/check_provenance.py" --account-channel
+```
+
+It reports three things and repairs none of them:
+
+1. **the settings-chain verdict** for `syncClaudeAiSkills` and
+   `syncClaudeAiPlugins`, naming the file each was read from. Absent is not
+   `false`: the keys default to ON, so "nothing sets it" and "it is off" are
+   opposite answers and print differently. Only the JSON boolean `false` is an
+   opt-out — a string `"false"` is reported as **still syncing**, because that
+   is what the CLI does with it;
+2. **every account skill whose bare name another copy here also delivers**, and
+   which copy owns the short name. The local copy keeps `<name>` and the
+   account copy stays loaded as `anthropic-skills:<name>`. That is the
+   documented rule, stated as a rule — nothing on disk records which one a
+   given turn actually read;
+3. **what an opt-out left in `.trash/`** — copies that are loaded by nothing
+   and deleted by nothing, which look like a half-finished install to anyone
+   who finds them without knowing why.
+
+Precedence between managed, user and local settings is deliberately **not**
+modelled: only `false` is honoured and it is honoured from any of them, so
+"does some file in the chain say false" is the whole question.
+
+`syncClaudeAiPlugins` is reported but no decision has been made about it —
+[#160](https://github.com/Adam-S-Daniel/agentskills/issues/160) (E6) is the
+experiment that would.
 
 ### Missing payloads
 

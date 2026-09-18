@@ -6545,3 +6545,146 @@ def test_the_bucket_resolution_matches_the_uploaders(tmp_path, monkeypatch):
     monkeypatch.setattr(up, "CLI_CONFIG_FILE", tmp_path / "absent.json")
     assert prov.account_store_path(store) is None
     assert up.account_mirror_dir() is None
+
+
+# =====================================================================================
+# --account-channel — what the account sync is doing on THIS surface (#158, ADR 0010)
+# =====================================================================================
+#
+# Terminal sessions sync the account store from 2.1.273+. ADR 0010 opts durable
+# machines out and leaves cloud sessions syncing, so two surfaces now load
+# different sets ON PURPOSE — and the doctor has to report which, or the
+# difference gets rediscovered by whoever next asks "why does this skill not
+# trigger here".
+
+
+def write_settings(path: Path, **keys) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(keys), encoding="utf-8")
+    return path
+
+
+def test_the_account_channel_reports_the_setting_it_read(tmp_path, capsys):
+    store = tmp_path / "store"
+    bucket_copy(store, "writing-adrs")
+    user = write_settings(tmp_path / "user.json", syncClaudeAiSkills=False)
+
+    code = prov.main(["--skills-dir", str(store), "--account-channel",
+                      "--settings", str(user)])
+    out = flat(capsys.readouterr().out)
+    assert code == 0, out
+    assert "syncClaudeAiSkills" in out
+    assert str(user) in out, "the verdict has to name the file it was read from"
+
+
+def test_a_machine_that_has_not_opted_out_is_reported_as_syncing(tmp_path, capsys):
+    """Absent is not false. The key defaults to ON, so "nothing sets it" and
+    "it is off" are opposite answers and must not print the same."""
+    store = tmp_path / "store"
+    bucket_copy(store, "writing-adrs")
+    user = write_settings(tmp_path / "user.json", model="claude-opus-5")
+
+    prov.main(["--skills-dir", str(store), "--account-channel",
+               "--settings", str(user)])
+    out = flat(capsys.readouterr().out)
+    assert "syncing" in out.lower()
+    assert "not set" in out.lower()
+
+
+def test_only_false_counts_as_an_opt_out(tmp_path, capsys):
+    """The CLI honours only `false`. A truthy stand-in — the string "false",
+    a 0 — is an opt-out that silently does not happen, and a doctor that
+    reported it as one would certify the very state it exists to catch."""
+    store = tmp_path / "store"
+    bucket_copy(store, "writing-adrs")
+    user = write_settings(tmp_path / "user.json", syncClaudeAiSkills="false")
+
+    prov.main(["--skills-dir", str(store), "--account-channel",
+               "--settings", str(user)])
+    out = flat(capsys.readouterr().out)
+    assert "syncing" in out.lower()
+    assert "'false'" in out or '"false"' in out, out
+
+
+def test_any_file_in_the_chain_saying_false_turns_it_off(tmp_path, capsys):
+    """Precedence is not modelled and deliberately so: only `false` is honoured
+    from user, local OR managed, so "some file in the chain says false" is the
+    whole question and inventing an order would be a claim nothing measured."""
+    store = tmp_path / "store"
+    bucket_copy(store, "writing-adrs")
+    user = write_settings(tmp_path / "user.json", model="claude-opus-5")
+    managed = write_settings(tmp_path / "managed.json", syncClaudeAiSkills=False)
+
+    prov.main(["--skills-dir", str(store), "--account-channel",
+               "--settings", str(user), "--settings", str(managed)])
+    out = flat(capsys.readouterr().out)
+    assert "opted out" in out.lower()
+    assert str(managed) in out
+
+
+def test_the_plugin_switch_is_reported_too(tmp_path, capsys):
+    """ADR 0010 defers the plugin channel to E6 (#160). Deferred is not
+    unreported: the reader still has to be able to see what it is set to."""
+    store = tmp_path / "store"
+    bucket_copy(store, "writing-adrs")
+    user = write_settings(tmp_path / "user.json", syncClaudeAiSkills=False)
+
+    prov.main(["--skills-dir", str(store), "--account-channel",
+               "--settings", str(user)])
+    out = flat(capsys.readouterr().out)
+    assert "syncClaudeAiPlugins" in out
+
+
+def test_each_duplicate_names_which_copy_owns_the_short_name(tmp_path, capsys):
+    """#158 (b). The short-name rule is the documented one and the report
+    states it AS a rule rather than as something disk proved — the same
+    restraint the shadow note keeps."""
+    store = tmp_path / "store"
+    make_skill(store, "writing-adrs")
+    bucket_copy(store, "writing-adrs")
+    bucket_copy(store, "docx")
+    user = write_settings(tmp_path / "user.json", model="claude-opus-5")
+
+    prov.main(["--skills-dir", str(store), "--account-channel",
+               "--settings", str(user)])
+    out = flat(capsys.readouterr().out)
+    assert "writing-adrs" in out
+    assert "anthropic-skills:writing-adrs" in out, (
+        "the long name is how the account copy stays reachable; a reader who "
+        "does not know it cannot tell the two apart")
+    # docx collides with nothing, so it is not a duplicate and must not be
+    # listed as one.
+    assert "anthropic-skills:docx" not in out, out
+
+
+def test_the_trash_left_by_an_opt_out_is_reported(tmp_path, capsys):
+    """#158 (c). After an opt-out the CLI moves the synced copies to
+    `.trash/`, which is neither loaded nor gone — a state that looks like a
+    half-finished install to anyone who finds it without knowing why."""
+    store = tmp_path / "store"
+    (store / ".trash" / "writing-adrs").mkdir(parents=True)
+    (store / ".trash" / "writing-adrs" / "SKILL.md").write_text(
+        "---\nname: writing-adrs\n---\n", encoding="utf-8")
+    user = write_settings(tmp_path / "user.json", syncClaudeAiSkills=False)
+
+    prov.main(["--skills-dir", str(store), "--account-channel",
+               "--settings", str(user)])
+    out = flat(capsys.readouterr().out)
+    assert ".trash" in out
+    assert "writing-adrs" in out
+
+
+def test_the_account_channel_reports_and_never_repairs(tmp_path, capsys):
+    """The skill's whole posture, asserted rather than trusted: no mode of this
+    script writes, and a reporting mode that started to would be the first."""
+    store = tmp_path / "store"
+    skill = make_skill(store, "writing-adrs")
+    bucket_copy(store, "writing-adrs")
+    user = write_settings(tmp_path / "user.json", model="claude-opus-5")
+    before = {p: p.read_bytes() for p in sorted(store.rglob("*")) if p.is_file()}
+
+    prov.main(["--skills-dir", str(store), "--account-channel",
+               "--settings", str(user)])
+    after = {p: p.read_bytes() for p in sorted(store.rglob("*")) if p.is_file()}
+    assert after == before
+    assert skill.exists()
