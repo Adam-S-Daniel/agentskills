@@ -6688,3 +6688,27 @@ def test_the_account_channel_reports_and_never_repairs(tmp_path, capsys):
     after = {p: p.read_bytes() for p in sorted(store.rglob("*")) if p.is_file()}
     assert after == before
     assert skill.exists()
+
+
+def test_the_account_channel_cannot_run_on_an_unresolvable_store(tmp_path, capsys,
+                                                                 monkeypatch):
+    """The duplicate half of the report is a measurement, so a store nobody
+    could pick must not produce the sentence "nothing is shadowed" — which is
+    what omitting the section quietly would have said. 2 is "cannot run", the
+    same code --account-drift uses for the same reason."""
+    store = tmp_path / "store"
+    bucket_copy(store, "writing-adrs")
+    bucket_copy(store, "writing-adrs", bucket=OTHER_ORG + "_" + OTHER_ACCT)
+    user = write_settings(tmp_path / "user.json", syncClaudeAiSkills=False)
+    monkeypatch.setattr(prov, "CLI_CONFIG_FILE", tmp_path / "absent.json")
+    monkeypatch.delenv("CLAUDE_CODE_ACCOUNT_UUID", raising=False)
+
+    code = prov.main(["--skills-dir", str(store), "--account-channel",
+                      "--settings", str(user)])
+    out = flat(capsys.readouterr().out)
+    assert code == 2, out
+    assert "nothing is shadowed" not in out, out
+    # The settings verdict WAS measured and is still reported: refusing the
+    # half that could not be measured must not throw away the half that could.
+    assert "opted out" in out.lower(), out
+    assert ORG_UUID + "_" + ACCT_UUID in out and OTHER_ORG + "_" + OTHER_ACCT in out
