@@ -13,6 +13,7 @@ exists to serve. That gap is the whole remaining question, and it needs the UI
 step in §3.
 
 - Surface: Claude Code on the web, cloud session `session_015qdErtu4Sm8Bf3MJjdtvgs`, CLI `2.1.276`, 2026-09-18
+- **Addendum, 2026-09-20 (§2.8)** — re-measured from a laptop terminal on CLI `2.1.278`. Six plugins are now syncing from the account, so §2.1's empty-bucket baseline is superseded. Read §2.8 before acting on §3.
 - Account `d11d9c2e-1772-4767-9197-f59d6fe0ab5a`, bucket `29094e6a-…_d11d9c2e-…`
 - Nothing was enabled, installed, uploaded or added on the account to produce this document. Everything in §2 is either a container-local probe (§2.6) or a read of state that was already there.
 - [#158](https://github.com/Adam-S-Daniel/agentskills/issues/158) waits on this answer for its `syncClaudeAiPlugins` line; §5 is written to be the input to that decision.
@@ -398,10 +399,107 @@ into the repo.
 
 ### 2.7 What could not be measured from here
 
-- Whether claude.ai offers this account any marketplace (§2.3 — wrong session type).
-- The shape of a synced plugin's on-disk record, and whether a `plugins/synced/manifest.json` analogue exists. The bucket is empty, so there is nothing to read.
-- Whether `syncClaudeAiPlugins: false` really populates `~/.claude/plugins/.trash/`. With an empty bucket there is nothing to move, and setting it would have disturbed the 21 skills this session is running on.
-- Everything in §1.2's last two rows. No amount of shell in a cloud session can see Claude in Chrome or a phone.
+- Whether claude.ai offers this account any marketplace (§2.3 — wrong session type). **Answered 2026-09-20 — see §2.8.**
+- The shape of a synced plugin's on-disk record, and whether a `plugins/synced/manifest.json` analogue exists. The bucket is empty, so there is nothing to read. **Answered 2026-09-20 — see §2.8.**
+- Whether `syncClaudeAiPlugins: false` really populates `~/.claude/plugins/.trash/`. With an empty bucket there is nothing to move, and setting it would have disturbed the 21 skills this session is running on. **Still open**, and §2.8 narrows why: the directory still does not exist, because nothing has been turned off yet.
+- Everything in §1.2's last two rows. No amount of shell in a cloud session can see Claude in Chrome or a phone. **Still open — this is the experiment**, though §2.8 makes it much cheaper to run.
+
+### 2.8 Re-measured two days later on the durable machine — the zero baseline is already gone
+
+> Taken 2026-09-20 from a laptop terminal on `ZENDA` (WSL), CLI **2.1.278**, same
+> account, same bucket id. §2.1–§2.7 stand exactly as recorded — they were true on
+> 2026-09-18 from a cloud session. This is a second surface two days later, and it
+> moves three of them. Kept as an addendum rather than folded into §2.1, because
+> "the bucket was empty and two days later it was not" is the more useful fact.
+
+**Six plugins are now enabled on the account and synced into a terminal session.**
+
+| Plugin | `plugin list` version | `manifest.json` version | `marketplaceName` | `installationPreference` |
+|---|---|---|---|---|
+| `pdf-viewer` | 0.2.0 | 0037 | `knowledge-work-plugins` | `available` |
+| `productivity` | 1.3.1 | 0039 | `knowledge-work-plugins` | `available` |
+| `design` | 1.2.0 | 0038 | `knowledge-work-plugins` | `available` |
+| `finance` | 1.3.0 | 0038 | `knowledge-work-plugins` | `available` |
+| `engineering` | 1.2.0 | 0038 | `knowledge-work-plugins` | `available` |
+| `data` | 1.1.0 | 0038 | `knowledge-work-plugins` | `available` |
+
+Every one carries `marketplaceName: knowledge-work-plugins` — the Knowledge Work
+marketplace that [Use plugins in Claude](https://support.claude.com/en/articles/13837440-use-plugins-in-claude)
+says is "added by default". **Nothing this session did produced them**, and that
+default-marketplace provenance is consistent with their having arrived on their
+own — but whether they were enabled by hand on claude.ai between the two
+measurements is not something a shell can see. So the measured claim is *the
+channel is live on this account*, not *the channel turned itself on*. Their
+skills load namespaced as
+`<plugin>:<skill>` — `design:design-critique`, `engineering:code-review`,
+`pdf-viewer:view-pdf` — and `adam@agentskills` sits beside them as the one
+non-synced install.
+
+**`plugins/synced/manifest.json` exists, and ADR 0002's C8 extends to plugins.**
+§2.7 listed its shape as unreadable. It reads now, and it is the plugin analogue
+of the five-field skill record §2.4 re-measured. Each per-plugin entry carries
+seven fields — `pluginId`, `name`, `description`, `version`, `updatedAt`,
+`marketplaceName`, `installationPreference` — and a `<name>.meta.json` sidecar
+beside each directory carries three: `server_plugin_id`, `marketplace_name`,
+`installation_preference`. **Nothing repo-scope-shaped in either.** So ADR 0002's
+structural objection — Claude Code has no channel on which to receive a scope —
+holds for the plugin channel too, measured rather than argued by analogy. §1.4 is
+confirmed from the CLI side at the same time: the installation-preference
+vocabulary does reach the client, and all six read `available`.
+
+**§2.3's open question is answered, and the answer is a separation.**
+`claude plugin marketplace list` on this laptop terminal — the right session type,
+on 2.1.278, well past the 2.1.273 floor — lists four GitHub marketplaces and **no
+`From claude.ai:` section at all**, while six plugins sync from claude.ai in that
+same session. Plugin sync and the claude.ai marketplace listing are therefore
+independent mechanisms: plugins arrive without any marketplace being offered to
+the CLI. §2.3 was right to refuse the cloud reading and right that it needed a
+terminal — and the terminal says the two do not travel together. A session that
+inferred "no account plugins" from a missing `From claude.ai:` heading would have
+been wrong in exactly the way §2.3 warned about, on the other side of the same
+coin.
+
+**A plugin that ships MCP servers understates its own cost.** `design@synced`
+reports `Always-on: ~617 tok` for 7 skills (~88/skill) and lists 9 MCP servers
+with the note `tool schemas resolved at runtime; not counted`. §2.5's arithmetic
+is unaffected — all three of this repo's bundles ship skills and nothing else —
+but that number cannot be extended to a bundle that ever gains an MCP server, and
+a budget built from `plugin details` alone would miss the larger half.
+
+**Two version namespaces, and they disagree by construction.**
+`claude plugin list --json` reports `design@synced` at `1.2.0`, the plugin's own
+`plugin.json` value; `manifest.json` records `"version": "0038"`, the account
+store's serial. Both are correct and they are not comparable. A drift check that
+diffs one against the other compares different things and reports drift forever;
+[ADR 0009](../decisions/0009-bump-bundle-versions-on-every-release.md)'s bump
+discipline governs the first field only.
+
+**`~/.claude/plugins/.trash/` still does not exist**, while
+`~/.claude/skills/.trash/` does. Consistent with §1.3 — trash is written on a
+removal or opt-out event, and no plugin has been turned off on this account yet —
+so §1.3's `.trash` row stays documented-and-not-witnessed.
+
+**What this does to §3, which is the part worth acting on.** The protocol was
+written against a zero baseline, so every reading needed an uploaded probe first.
+For the one question that actually matters, it no longer does:
+
+- **The control arm is now free, and needs no upload.** Six account plugins are
+  already enabled, so on any surface the question *does this surface receive
+  account plugins at all?* can be asked directly: is `design:design-critique`,
+  `engineering:code-review` or `pdf-viewer:view-pdf` offered there? Nothing to
+  add, nothing to tear down, nothing one-way.
+- **Chrome and mobile can therefore be answered first, in minutes.** If those
+  skills are absent on a surface, that surface does not receive account plugins
+  and no personal upload will change it — a strong negative, obtained for free.
+- **A present result still needs the probe.** These six are Anthropic's own,
+  arriving through a default marketplace. That a surface renders *them* does not
+  prove it would render a **personal** upload or a repo-synced personal
+  marketplace, which is what this experiment is actually about. A positive on the
+  free control promotes the question rather than closing it, and steps 2–5 run as
+  written.
+
+That asymmetry is the whole value of the change: the cheap check can only produce
+the answer that ends the experiment, never the one that flatters it.
 
 ---
 
@@ -426,9 +524,13 @@ something it should.** Concretely, on each surface run both arms before writing
 down a verdict:
 
 - **Positive arm** — the probe plugin's `e6-probe`.
-- **Control arm** — an account *skill* already known to reach that surface. Use
-  `rename-pdfs` (on the account since April, `source: custom`) or any of §2.4's
-  `custom` ten.
+- **Control arm, cheapest first** — a skill from one of the account *plugins*
+  already syncing (§2.8): `design:design-critique`, `engineering:code-review`,
+  `pdf-viewer:view-pdf`. This controls the **plugin** channel directly, which the
+  original control could not, and it needs no upload. Fall back to an account
+  *skill* — `rename-pdfs`, on the account since April, `source: custom` — when you
+  need to separate "no plugins on this surface" from "no account content here at
+  all".
 
 | Positive | Control | Verdict |
 |---|---|---|
@@ -444,9 +546,10 @@ is what cost E2 two false negatives.
 ### Steps
 
 1. **Baseline, before enabling anything.** Open a cloud session and run §2.1's
-   four commands. Expect `[]`, "No marketplaces configured", and an empty plugins
-   bucket. If the bucket is already non-empty, something changed since
-   2026-09-18 — stop and re-measure, this protocol assumes a zero baseline.
+   four commands. **Do not expect `[]`** — §2.8 measured six account plugins
+   syncing on 2026-09-20, so the zero baseline this protocol was first written
+   against is gone. Record what the bucket holds, confirm it against §2.8's
+   table, and treat that set as the free control arm below.
 
 2. **Enable the probe.** claude.ai → **Customize** → **Plugins** → **Personal
    plugins** → **+** → upload the probe plugin file. Do not add the repo as a
@@ -572,9 +675,14 @@ Concretely, pending §3:
 3. **Keep `sync-skills`, `--verify` and ADR 0006's loop running unchanged** until
    §3 returns. None of them can be retired on a documentation reading, and E5 is
    the standing evidence that this channel family rots when nothing checks it.
-4. **Run §3 step 6 first if time is short.** Outcome E kills the interesting
-   version of the proposal in one click and costs two minutes; the five-surface
-   sweep only matters if the repo-synced route works at all.
+4. **Cheapest first, and §2.8 has changed the order.** The six already-synced
+   account plugins make the Chrome and mobile question answerable with no upload
+   at all: check whether `design:design-critique` or `pdf-viewer:view-pdf` is
+   offered on those two surfaces before doing anything else. An absent result ends
+   the experiment for that surface; a present one still needs the probe, because
+   those six are Anthropic's through a default marketplace rather than a personal
+   upload. Then §3 step 6 — outcome E kills the interesting version of the
+   proposal in one click and costs two minutes.
 
 ADR 0002 does not change today. What changes when §3 returns is one consequence —
 "Uploading is close to a one-way door" — and only for a channel that did not exist
