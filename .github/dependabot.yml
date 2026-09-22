@@ -1,0 +1,28 @@
+# Dependabot for this repo.
+#
+# github-actions only: onboards weekly bumps for the SHA-pinned actions
+# across .github/workflows/*.yml. One cooldown block carries two different
+# waits:
+#   - default-days: 7 — this account's standing cooling-off convention for
+#     third-party action SHAs (see cms-platform/AGENTS.md, "SHA-pin every
+#     workflow `uses:`"), matching cms-platform's own .github/dependabot.yml.
+#   - exclude below — a cms-platform release is this account's own code,
+#     gated by its own required checks before a tag ever exists, so it is
+#     exempted from that 7-day wait; only third-party actions keep it
+#     (https://github.com/Adam-S-Daniel/cms-platform/issues/424).
+#
+# No semver-major-days (or any semver-*-days key): GitHub's Dependabot
+# options reference does not support per-SemVer-tier cooldown for the
+# github-actions ecosystem — adding one is a schema validation error that
+# disables the WHOLE FILE, not a key Dependabot quietly ignores.
+# dependabot/dependabot-core#14628 is the open upstream request to add the
+# support.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      exclude: ["Adam-S-Daniel/cms-platform/*"]
