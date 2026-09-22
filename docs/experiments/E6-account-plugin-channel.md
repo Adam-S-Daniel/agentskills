@@ -14,7 +14,8 @@ step in §3.
 
 - Surface: Claude Code on the web, cloud session `session_015qdErtu4Sm8Bf3MJjdtvgs`, CLI `2.1.276`, 2026-09-18
 - **Addendum, 2026-09-20 (§2.8)** — re-measured from a laptop terminal on CLI `2.1.278`. Six plugins are now syncing from the account, so §2.1's empty-bucket baseline is superseded. Read §2.8 before acting on §3.
-- Account `d11d9c2e-1772-4767-9197-f59d6fe0ab5a`, bucket `29094e6a-…_d11d9c2e-…`
+- **Addendum, 2026-09-22 (§2.9)** — re-measured on the same laptop from Windows (CLI `2.1.278`) and WSL (CLI `2.1.280`). A claude.ai-hosted `My Uploads` marketplace now exists, four uploaded skills now carry a `backingPluginId`, plugin `.trash` is written on an ordinary update, and the six synced plugins cost ~3,944 always-on tokens in every terminal session — which changes §4's and §5's `syncClaudeAiPlugins` line.
+- Account `d11d9c2e-…`, bucket `29094e6a-…_d11d9c2e-…`
 - Nothing was enabled, installed, uploaded or added on the account to produce this document. Everything in §2 is either a container-local probe (§2.6) or a read of state that was already there.
 - [#158](https://github.com/Adam-S-Daniel/agentskills/issues/158) waits on this answer for its `syncClaudeAiPlugins` line; §5 is written to be the input to that decision.
 
@@ -105,7 +106,7 @@ The asymmetry with a source-synced marketplace is worth stating plainly, because
 it is the strongest single argument in this document: **with a repo-synced
 personal marketplace, `git rm` becomes a delete.** Today, removing a skill from
 this registry leaves an unversioned orphan on the account — the exact condition
-PR #62 had to clean up. If the account's copy is a marketplace sync of this repo,
+[PR #62](https://github.com/Adam-S-Daniel/agentskills/pull/62) had to clean up. If the account's copy is a marketplace sync of this repo,
 removing the directory removes it from the sync's next read, and Claude Code
 "removes [it] at the next sync" everywhere it landed.
 
@@ -288,8 +289,8 @@ Composition, by `source`, for the record:
 | `anthropic-example` | 7 | `doc-coauthoring`, `docs`, `import-memory`, `learn`, `skill-creator`, `theme-factory`, `web-artifacts-builder` |
 | `anthropic` | 4 | `docx`, `pdf`, `pptx`, `xlsx` |
 
-`CLAUDE_CODE_ACCOUNT_UUID` is `d11d9c2e-1772-4767-9197-f59d6fe0ab5a`, which is the
-second half of the bucket name. The first half, `29094e6a-…`, is an organization
+`CLAUDE_CODE_ACCOUNT_UUID` (`d11d9c2e-…`, elided here as the bucket's org half is)
+is the second half of the bucket name. The first half, `29094e6a-…`, is an organization
 id that exists even though this is a personal account — so the bucket layout does
 not tell you whether an account has an org, and a script must not infer plan from
 it.
@@ -328,7 +329,7 @@ Three notes on that table. First, ADR 0002 quoted "~1,479 always-on tokens for 8
 skills (~185/skill)" for `adam`; it is now ~1,895 for 9 (~211/skill), so the
 per-skill figure has grown ~14% and a design that budgets from the old number is
 already wrong. Second, the overshoot lands on **every** surface — chat, Cowork,
-mobile — where #54's warning applies that at the default budget the least-used
+mobile — where [#54](https://github.com/Adam-S-Daniel/agentskills/issues/54)'s warning applies that at the default budget the least-used
 descriptions are silently dropped, so this is not only a cost but a
 discoverability risk to the skills that are supposed to be there. Third, per §1.6
 it costs nothing extra in a Claude Code session that installs the same bundle from
@@ -401,7 +402,7 @@ into the repo.
 
 - Whether claude.ai offers this account any marketplace (§2.3 — wrong session type). **Answered 2026-09-20 — see §2.8.**
 - The shape of a synced plugin's on-disk record, and whether a `plugins/synced/manifest.json` analogue exists. The bucket is empty, so there is nothing to read. **Answered 2026-09-20 — see §2.8.**
-- Whether `syncClaudeAiPlugins: false` really populates `~/.claude/plugins/.trash/`. With an empty bucket there is nothing to move, and setting it would have disturbed the 21 skills this session is running on. **Still open**, and §2.8 narrows why: the directory still does not exist, because nothing has been turned off yet.
+- Whether `syncClaudeAiPlugins: false` really populates `~/.claude/plugins/.trash/`. With an empty bucket there is nothing to move, and setting it would have disturbed the 21 skills this session is running on. **Still open**, and §2.8 narrows why: the directory still does not exist, because nothing has been turned off yet. **Narrowed again 2026-09-22 — see §2.9:** on the Windows side of the laptop `plugins/.trash/` exists, written by ordinary updates, so trash-on-update is witnessed and only trash-on-opt-out stays open.
 - Everything in §1.2's last two rows. No amount of shell in a cloud session can see Claude in Chrome or a phone. **Still open — this is the experiment**, though §2.8 makes it much cheaper to run.
 
 ### 2.8 Re-measured two days later on the durable machine — the zero baseline is already gone
@@ -501,6 +502,122 @@ For the one question that actually matters, it no longer does:
 That asymmetry is the whole value of the change: the cheap check can only produce
 the answer that ends the experiment, never the one that flatters it.
 
+### 2.9 Re-measured 2026-09-22 — a `My Uploads` marketplace, and uploads that now carry a plugin id
+
+> Taken 2026-09-22 about 17:30 UTC on the same laptop, `ZENDA`, from both of its
+> homes: Windows (`%USERPROFILE%\.claude`, CLI **2.1.278**) and WSL
+> (`/home/passp/.claude`, CLI **2.1.280**). Read-only: `claude --version`,
+> `claude plugin list --json`, `claude plugin marketplace list`,
+> `claude plugin details <name>@synced`, and reads of the two synced buckets and
+> the two `.trash` directories. Nothing was added, enabled or written. §2.8 stands
+> as recorded; this moves four of its readings.
+
+**The same six plugins, in both homes.** `claude plugin list --json` returns the
+six `@synced` ids of §2.8's table, at the same `plugin.json` versions, in both
+homes; WSL adds `adam@agentskills` (user scope), Windows has no non-synced install.
+The Windows `manifest.json` has moved on since §2.8 while the WSL copy has not
+(its bucket was last written 2026-09-20 22:29 UTC, which is §2.8's reading):
+
+| Plugin | `plugin.json` version (both homes) | manifest serial, WSL (2026-09-20) | manifest serial, Windows (2026-09-22) | `generation` (Windows) |
+|---|---|---|---|---|
+| `pdf-viewer` | 0.2.0 | 0037 | 0037 | — |
+| `productivity` | 1.3.1 | 0039 | 0040 | 3 |
+| `design` | 1.2.0 | 0038 | 0039 | 2 |
+| `finance` | 1.3.0 | 0038 | 0039 | 3 |
+| `engineering` | 1.2.0 | 0038 | 0039 | 2 |
+| `data` | 1.1.0 | 0038 | 0039 | 3 |
+
+Five serials advanced, all stamped `updatedAt` 2026-09-21 ~19:33 UTC, and none of
+the `plugin.json` versions moved. That is §2.8's two-namespaces warning observed
+in motion rather than argued: the account serial changes on a server-side
+re-publish that the plugin's own version does not record. It is also the first
+witnessed auto-update on this channel — nothing on the laptop asked for it —
+though it is Anthropic's default marketplace updating, not a personal one, so it
+says nothing yet about §1.5's branch-vs-pin question for a repo-synced
+marketplace.
+
+**The per-plugin record grew an eighth field.** Five of the six Windows entries
+carry `generation`, which §2.8's seven-field list did not have; the directory for
+a later generation is named `<name>~g<N>`. Still nothing repo-scope-shaped. The
+bucket holds nine plugin directories for six manifest entries: `data`, `finance`
+and `productivity` from 2026-09-20 sit beside their current `~g3` directories.
+
+**`plugins/.trash/` exists on Windows, and an update writes it.** It holds eight
+directories, every one a superseded generation of one of the six
+(`design~g2`, `engineering~g2`, `pdf-viewer~g2` at 2026-09-20 21:05 UTC; `design`,
+`engineering`, `data~g2`, `finance~g2`, `productivity~g2` at 2026-09-22 17:04 UTC).
+No plugin was turned off. So §2.8's reading — "trash is written on a removal or
+opt-out event" — was incomplete: a generation rollover writes it too. The WSL
+home still has no `plugins/.trash/`, consistent with its bucket not having synced
+since 2026-09-20. §1.3's point survives intact — `.trash` is machine-local and
+touches nothing on the account — but "something is in `.trash`" is no longer
+evidence that anything was removed.
+
+**The `From claude.ai:` section appears on Windows, and it names a new marketplace.**
+
+```console
+$ claude plugin marketplace list          # Windows, 2.1.278
+From claude.ai:
+  ❯ claudeai-my-uploads (listed as "My Uploads") — hosted on claude.ai, your uploads · not added
+    Add: claude plugin marketplace add --claudeai claudeai-my-uploads
+```
+
+The section is driven by a `.marketplaces.json` sidecar in the plugins bucket. On
+Windows it holds one row — `"name": "My Uploads"`, `"scope": "account"`,
+`"source": {"source": "claudeai"}`, `updated_at` 2026-09-21T22:47:03Z; on WSL,
+written 2026-09-20, `"rows": []`. So §2.8's WSL terminal printed no section
+because the account had no claude.ai-hosted marketplace to list at the time, not
+only because the two mechanisms are separate. §2.8's narrower claim still holds —
+the six `knowledge-work-plugins` plugins sync and are never listed in that section
+— but the section's absence on 2026-09-20 was a reading of `rows: []`. The
+sidecar's `scope` field is the first scope-shaped field anywhere in either bucket,
+and its value is `account`: it scopes a marketplace to the account, not to a repo,
+so ADR 0002's C8 still holds. The marketplace is `not added`, and this session
+did not add it.
+
+**Four uploaded skills now carry a plugin id.** The skills manifest — 21 records,
+in both homes — has a sixth field, `backingPluginId`, on four of the ten
+skills §2.4 counted as `custom`:
+
+| Skill | `source` | `backingPluginId` present | `updatedAt` |
+|---|---|---|---|
+| `wj-next-break` | **`plugin`** | yes | 2026-05-11 |
+| `pdf-ocr-audit` | **`plugin`** | yes | 2026-04-05 |
+| `writing-adrs` | `custom` | yes | 2026-08-18 |
+| `sync-cc-settings-between-wsl-and-windows` | `custom` | yes | 2026-08-18 |
+
+So §2.4's composition is now `custom` 8, `plugin` 2, `anthropic-example` 7,
+`anthropic` 4. The four plugin ids are distinct and none is among the six in
+`plugins/synced/manifest.json`, and no `updatedAt` moved — the skills were not
+re-uploaded. **Inferred, not measured:** claude.ai has begun representing
+individually uploaded skills as plugins, probably the contents of the `My Uploads`
+marketplace, which would mean the ZIP channel and the plugin channel converge
+server-side whatever this repo decides. What caused it cannot be seen from a
+shell; whether anything was uploaded or changed on the account between 2026-09-20
+and 2026-09-21 22:47 UTC is a question for the account owner (§3 step 0).
+
+**The six synced plugins are not free, and they load in every repo.**
+`claude plugin details <name>@synced` on Windows:
+
+| Plugin | Skills | MCP servers (not counted) | Always-on |
+|---|---|---|---|
+| `pdf-viewer` | 5 | 1 | ~226 |
+| `productivity` | 4 | 9 | ~352 |
+| `design` | 7 | 9 | ~617 |
+| `finance` | 8 | 6 | ~752 |
+| `engineering` | 10 | 10 | ~871 |
+| `data` | 10 | 8 | ~1,126 |
+| **total** | **44** | **43** | **~3,944** |
+
+That is ~3,944 always-on tokens plus 43 MCP server declarations, added to every
+terminal session on this machine in every repo — this repo included. It is ADR
+0002's objection ("every CI and workflow skill would load in every unrelated repo
+as pure context cost") arriving through the plugin channel, with Anthropic's
+plugins rather than ours. It does not disturb §1.6: none of the six shares a name
+with a local bundle, so nothing is doubled. But it falsifies the premise of §4's
+and §5's original `syncClaudeAiPlugins` line — "with an empty bucket it does
+nothing today" — and both are corrected below.
+
 ---
 
 ## 3. The UI protocol
@@ -544,6 +661,15 @@ and "I was signed into the wrong account in Chrome" produce the same note, which
 is what cost E2 two false negatives.
 
 ### Steps
+
+0. **Look before touching anything (added 2026-09-22, §2.9).** claude.ai →
+   **Customize** → **Plugins** → **Personal plugins**: does a `My Uploads`
+   marketplace appear, and does it list `wj-next-break`, `pdf-ocr-audit`,
+   `writing-adrs` or `sync-cc-settings-between-wsl-and-windows` as plugins?
+   Record whether anything was uploaded or changed on the account between
+   2026-09-20 and 2026-09-21 22:47 UTC. Read only — change nothing. If uploaded
+   skills are already plugins server-side, §3's probe can be one of them rather
+   than a new upload.
 
 1. **Baseline, before enabling anything.** Open a cloud session and run §2.1's
    four commands. **Do not expect `[]`** — §2.8 measured six account plugins
@@ -590,10 +716,13 @@ is what cost E2 two false negatives.
 
 5. **Test removal — the ADR 0002 question.** Turn the probe off on claude.ai.
    Re-run step 3 on one UI surface and step 4 in a *new* cloud session. Expect the
-   plugin gone from the bucket. Then set `syncClaudeAiPlugins: false` on the
-   laptop, restart, and check `~/.claude/plugins/.trash/` — that distinguishes the
-   machine-local undo from the account delete (§1.3), and it is the one claim in
-   §1.3 nothing here has witnessed.
+   plugin gone from the bucket. Then set `syncClaudeAiPlugins: false` in the
+   laptop's **user** settings (`~/.claude/settings.json` — the docs move synced
+   plugins to `.trash` only "in user or managed settings", so a local-settings
+   `false` would stop loading them without trashing anything), restart, and check
+   `~/.claude/plugins/.trash/` — that distinguishes the machine-local undo from the
+   account delete (§1.3). Because §2.9 found update-driven entries already there,
+   list `.trash` before flipping the switch and diff after; only new entries count.
 
 6. **Test the repo-synced marketplace, and the pin question.** **Customize** →
    **Plugins** → **+** → **Add marketplace** → **Add from a repository** →
@@ -632,10 +761,15 @@ is what cost E2 two false negatives.
   [#158](https://github.com/Adam-S-Daniel/agentskills/issues/158)'s central
   complaint — the same bundle paid for twice in a converged terminal — does not
   arise for plugins. Whatever #158 decides about `syncClaudeAiSkills`, the
-  argument does not carry across to `syncClaudeAiPlugins`, and its "leave
-  `syncClaudeAiPlugins` alone until E6" line can be resolved to **leave it unset**:
-  with an empty bucket it does nothing today, and if a bundle is ever enabled the
-  synced copy is dropped wherever the marketplace copy is installed.
+  doubling argument does not carry across to `syncClaudeAiPlugins`: if a bundle
+  is ever enabled on the account, the synced copy is dropped wherever the
+  marketplace copy is installed. **But unset is no longer free** (corrected
+  2026-09-22). The first version of this line resolved #158 to "leave it unset"
+  on the grounds that "with an empty bucket it does nothing today"; §2.8 and §2.9
+  falsified the premise. Unset now loads six Anthropic plugins — ~3,944 always-on
+  tokens and 43 MCP server declarations — into every terminal session in every
+  repo. That is a cost of *which plugins are enabled on the account*, not of the
+  switch, so the switch is still the wrong lever for it (§5 item 2).
 
 - **The channel is still invisible to CI**, for exactly the reason
   [ADR 0006](../decisions/0006-drive-the-account-store-drift-loop-from-one-published-artifact.md)
@@ -665,13 +799,22 @@ marketplace accepts a public repo (§3 step 6, outcome E).
 Concretely, pending §3:
 
 1. **Do not enable `adam` on the account.** It ships six CI/platform skills to
-   chat for ~1,230 always-on tokens (§2.5) and is verbatim the alternative ADR
+   chat for ~1,230 always-on tokens (the sum of those six rows in
+   `claude plugin details adam@agentskills`'s per-component table, re-read
+   2026-09-22; the bundle total there is ~1,897, §2.5's ~1,895 within rounding) and is verbatim the alternative ADR
    0002 rejected. If this channel is adopted it wants a dedicated personal bundle,
    which means the `renames` map, which means an adversarial round.
 2. **Leave `syncClaudeAiPlugins` unset** in `setup.sh`'s convergence block — the
-   answer #158 is waiting for. Unset is the safe default: the bucket is empty, the
-   collision rule is exclusive, and the per-plugin `"<name>@synced": false` opt-out
-   exists if one ever needs turning off.
+   answer #158 is waiting for — **but not because it is free** (corrected
+   2026-09-22; the original reason, "the bucket is empty", stopped being true on
+   2026-09-20). The collision rule is still exclusive, so our bundles are never
+   doubled. What unset costs today is the six Anthropic plugins of §2.9, ~3,944
+   always-on tokens in every repo. `false` would remove that cost only by closing
+   the channel this experiment is evaluating, on that machine, for every future
+   personal plugin too. The narrower levers fit the cost better: turn a plugin off
+   on claude.ai (every surface, reversible) or `"<name>@synced": false` in user
+   settings (one machine). Which of the six are worth their tokens is the account
+   owner's call, and #158 should record it rather than inherit a default.
 3. **Keep `sync-skills`, `--verify` and ADR 0006's loop running unchanged** until
    §3 returns. None of them can be retired on a documentation reading, and E5 is
    the standing evidence that this channel family rots when nothing checks it.
