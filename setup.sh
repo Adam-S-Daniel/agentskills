@@ -3,7 +3,12 @@
 #
 # This repo is a Claude Code *plugin marketplace*: skills ship in bundle
 # plugins under plugins/<bundle>/skills/<skill>/. Claude Code users can
-# install a bundle with
+# install a bundle with one command (Claude Code v2.1.275 or later)
+#
+#   /plugin install adam --marketplace Adam-S-Daniel/agentskills
+#
+# which offers to add the marketplace before installing — or, on older CLIs,
+# with the two-step form
 #
 #   /plugin marketplace add Adam-S-Daniel/agentskills
 #   /plugin install adam@agentskills
