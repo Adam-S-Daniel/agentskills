@@ -1,4 +1,4 @@
-# 0010. Remove `wj-next-break` from the registry and the account store
+# 0011. Remove `wj-next-break` from the registry and the account store
 
 - **Status:** Accepted
 - **Date:** 2026-09-22
@@ -38,12 +38,15 @@ orphan for either arm to carry.
 - `sync_skills.py --account-drift` and `--verify` both key their checks off
   skills the registry still declares (`account-skills.txt`) and still holds a
   directory for (`_skill_dir`). With the skill removed from both, neither
-  check has any way to see a lingering account copy — so if the manual UI
-  deletion in the Decision above does not actually happen, nothing in this
-  registry or its CI will surface that. `account-state.json`'s recorded
-  `wj-next-break` entry is left in place, byte-identical, for the same
-  reason: nothing reads it once the skill is undeclared, so removing it would
-  be motion without effect.
+  check has any way to see a lingering account copy, so nothing in this
+  registry or its CI would notice if the UI deletion had not happened. It
+  did: the owner deleted the account copy on 2026-09-23, and the laptop's
+  synced account manifest (`~/.claude/skills/synced/<bucket>/manifest.json`,
+  rewritten 2026-09-23 02:45 UTC) dropped from 21 skills to 20, with no
+  `wj-next-break` entry or directory. `account-state.json`'s `wj-next-break`
+  entry is removed too. Nothing reads it once the skill is undeclared, but
+  that file records what the account holds, and the account no longer holds
+  this.
 - `setup.sh` only removes a stale per-agent skill link (`remove_stale_repo_link`)
   as a side effect of relinking a skill it still wants to link elsewhere; it
   never runs for a skill removed outright. A machine that previously ran

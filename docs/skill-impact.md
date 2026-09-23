@@ -83,8 +83,9 @@ no backfill is planned; the file adds the fields git does not capture.
   that never existed in its directory (ADR 0002).
 - Change: removed from the registry (`plugins/adam-local/skills/wj-next-break/`
   deleted, its two `skills_waivers.yml` waivers retired, `account-skills.txt`
-  and the README table entry dropped, ADR 0010 records the decision); the
-  claude.ai account copy is deleted by hand in the UI, outside this PR.
+  and the README table entry dropped, ADR 0011 records the decision); the
+  claude.ai account copy was deleted by hand in the UI on 2026-09-23 and
+  confirmed gone from the laptop's synced account manifest.
   PR pending.
 - Eval: exempt (DESIGN.md non-coverage table — "skip, wall-clock/calendar-bound;
   low value to freeze").

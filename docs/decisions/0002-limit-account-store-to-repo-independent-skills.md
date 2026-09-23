@@ -1,6 +1,6 @@
 # 0002. Limit the claude.ai account store to personal, repo-independent skills
 
-- **Status:** Accepted (partially superseded by [0010](0010-remove-wj-next-break-from-registry-and-account.md) — the wj-next-break decisions only)
+- **Status:** Accepted (partially superseded by [0011](0011-remove-wj-next-break-from-registry-and-account.md) — the wj-next-break decisions only)
 - **Date:** 2026-08-14
 - **Deciders:** Adam Daniel
 

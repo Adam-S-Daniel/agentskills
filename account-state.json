@@ -50,12 +50,6 @@
       "updatedAt": "2026-08-24T12:40:43.194109Z",
       "files": 6
     },
-    "wj-next-break": {
-      "basis": "observed",
-      "digest": "sha256:9a9094f22482d3f6af7e4428d386ac5f9ac67ee1bc8b366e5eec8bc8285e6e3d",
-      "updatedAt": "2026-05-11T23:30:32.710469Z",
-      "files": 1
-    },
     "writing-adrs": {
       "basis": "observed",
       "digest": "sha256:8977fb056ea016f18537e554407aac3c1bbadff4fcb3f95ce983437dfb474f95",

@@ -54,7 +54,7 @@ embed secrets or PII:
 
 - `wj-next-break` — a public high school's bell schedule. Personal interest, but
   not sensitive. **Public is correct.** (Removed from the registry by
-  [ADR 0010](docs/decisions/0010-remove-wj-next-break-from-registry-and-account.md),
+  [ADR 0011](docs/decisions/0011-remove-wj-next-break-from-registry-and-account.md),
   2026-09-22 — no longer a current skill.)
 - `fastmail` — drives email through a live, already-authenticated Claude-in-Chrome
   session; the `SKILL.md` carries no credentials of its own. **Public is correct.**
