@@ -91,6 +91,22 @@ no backfill is planned; the file adds the fields git does not capture.
   low value to freeze").
 - Outcome: pending merge.
 
+## 2026-09-22 — adam-local/sync-cc-settings-between-wsl-and-windows — edit
+
+- Motivation: review [#170](https://github.com/Adam-S-Daniel/agentskills/issues/170)
+  found three data-corrupting merge bugs: arrays collapsed (`["x"]` to `"x"`,
+  `[]` to `null`), `[s]kip` deleted the key from both files, and OS-bound keys
+  such as `hooks` were copied across OSes without asking.
+- Change: arrays survive every path; skip keeps each file's own value; a
+  per-file list of command-, path- and OS-bound keys (plus
+  `syncClaudeAiSkills`/`syncClaudeAiPlugins` and
+  `permissions.additionalDirectories`) is never copied across;
+  `permissions.ask` is unioned; `-DryRun` prints key names and markers, never
+  values. SKILL.md corrected and its known limitations documented; first
+  pytest tests, driven through `pwsh` (PR #171).
+- Eval: exempt (DESIGN.md non-coverage table: defer, machine-bound)
+- Outcome: pending merge
+
 ## 2026-09-18 — adam/skills-doctor — edit
 
 - Motivation: terminal sessions sync the claude.ai account store from CLI

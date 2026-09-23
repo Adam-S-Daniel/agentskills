@@ -379,22 +379,23 @@ reusable-workflow ref is for review to catch.
 
 ## Skills ecosystem
 
-- The canonical registry is `github.com/Adam-S-Daniel/agentskills`: bundles
-  `adam` (general-purpose, cloud-safe; default-on), `adam-local`
-  (machine-bound) and `fastmail`, each holding `skills/<skill>/`; invoke as
-  `/adam:<skill>`; that repo's `setup.sh` sets up a local machine.
-- **A `git push` that suddenly fails in EVERY repo is one repo's problem:**
-  `setup.sh`'s GLOBAL sync-skills pre-push hook went stale after a bundle
-  restructure. Re-run `bash setup.sh` from the registry checkout.
+- The registry is `Adam-S-Daniel/agentskills`: bundles `adam`
+  (general-purpose, cloud-safe; default-on), `adam-local` (machine-bound)
+  and `fastmail`, each with `skills/<skill>/`; invoke as `/adam:<skill>`;
+  its `setup.sh` sets up a machine.
+- **A `git push` failing in EVERY repo** means `setup.sh`'s GLOBAL
+  sync-skills pre-push hook is stale: re-run `bash setup.sh` in the registry.
 - Cloud/ephemeral sessions get **no** plugins from repo-declared settings
-  (agentskills' `docs/decisions/0001`); a repo's own `skills.lock` plus the
-  `skills-bootstrap` SessionStart hook installs the bundles the lock names,
-  digest-verified, and the session opens with a `skills:` verdict — read it.
-- **Adoption is opt-in and double-keyed:** an allowlist entry in
-  `_agent-guidance`'s `repos.yml` AND a `skills.lock` the repo committed
-  itself (the sync never writes one). A repo may be deliberately out — look
-  for `skills.lock` rather than guess. Bundles cost always-on context, so
-  this stays per-repo.
+  (agentskills' ADR 0001): the repo's `skills.lock` and `skills-bootstrap`
+  SessionStart hook install the bundles, digest-verified; read the
+  `skills:` verdict at session start.
+- **Adoption is opt-in and double-keyed:** an entry in `_agent-guidance`'s
+  `repos.yml` AND a `skills.lock` the repo committed itself (the sync never
+  writes one). Bundles cost always-on context, so a repo may be deliberately
+  out — check for `skills.lock`, don't guess.
+- **Terminals (CLI 2.1.273+) load the claude.ai account store too**, as
+  `anthropic-skills:<name>`; `setup.sh` opts a machine out
+  (`syncClaudeAiSkills: false`), cloud sessions can't (agentskills' ADR 0010).
 - New reusable skills graduate **into** the registry (sensitive ones into
   `agentskills-private`); a long skill splits across files.
 
