@@ -1,15 +1,18 @@
 # E6 — Can plugins on the claude.ai account replace the skill ZIP uploads?
 
-**Status: open.** One free check remains: whether Claude in Chrome and the
-mobile app show account plugins. Everything else is answered below.
+**Status: open — one upload test left.** On 2026-09-23 Adam confirmed that
+Claude in Chrome and the iOS app both offer account plugins (§3). What remains
+is whether a plugin *he* uploads reaches them too, not just Anthropic's (§5
+step 3).
 
-**Short answer: not yet a replacement, but worth adding.** A plugin enabled on
+**Short answer: a likely replacement, pending one test.** A plugin enabled on
 the claude.ai account reaches chat on the web, the Desktop Chat tab, Cowork and
-every Claude Code session, and unlike the ZIP uploads it can be deleted. No
-documentation says whether it reaches Claude in Chrome or the mobile app, and
-those two are exactly the surfaces the ZIP uploads exist for
-([ADR 0002](../decisions/0002-limit-account-store-to-repo-independent-skills.md)).
-So `sync-skills` stays until those two are checked.
+every Claude Code session, and unlike the ZIP uploads it can be deleted. Claude
+in Chrome and the iOS app, the two surfaces the ZIP uploads exist for
+([ADR 0002](../decisions/0002-limit-account-store-to-repo-independent-skills.md)),
+also offer Anthropic's plugins. If a personal test plugin reaches them too, the
+plugin channel covers everything the ZIP uploads do. `sync-skills` stays until
+that test is done.
 
 Tracked in [#160](https://github.com/Adam-S-Daniel/agentskills/issues/160).
 [#158](https://github.com/Adam-S-Daniel/agentskills/issues/158) waits on the
@@ -24,8 +27,8 @@ added on the account to produce this document.
 |---|---|---|
 | chat (web), Desktop Chat tab, Cowork | yes | yes — documented |
 | Claude Code terminal and cloud sessions | yes | yes — documented and measured |
-| **Claude in Chrome** | yes | **unknown** |
-| **Mobile app** | yes | **unknown** |
+| **Claude in Chrome** | yes | **yes** for Anthropic's plugins (measured 2026-09-23); a personal plugin is untested |
+| **Mobile app (iOS)** | yes | **yes** for Anthropic's plugins (measured 2026-09-23); a personal plugin is untested |
 | Can be deleted | only by hand in the UI; the uploader has no delete | yes, at four layers (§2.3) |
 | Needs an uploader | yes — a browser session, one skill at a time | no, if a personal marketplace can sync from this repo (§5 step 4) |
 | Pinned to a commit | no — whatever was last uploaded | no — follows the latest version (§2.4) |
@@ -158,10 +161,21 @@ per-skill record has five, plus `backingPluginId` on four. The only `scope` fiel
 anywhere says `account`. So [ADR 0002](../decisions/0002-limit-account-store-to-repo-independent-skills.md)'s
 finding, that account content cannot be scoped to a repo, holds for plugins too.
 
+### 3.4 Chrome and iOS, checked by Adam (2026-09-23)
+
+| Surface | Account plugin `design:design-critique` | Control: uploaded skill `rename-pdfs` | Verdict |
+|---|---|---|---|
+| Claude in Chrome side panel | offered in the prompt box's `/` list | offered | counts: Chrome receives account plugins |
+| iOS app | works | works | counts: iOS receives account plugins |
+
+Both plugin results are from Anthropic's default `knowledge-work-plugins`
+marketplace. They show that the surfaces load account plugins, but not yet
+that a plugin Adam uploads himself arrives the same way.
+
 ## 4. What is still unknown
 
-1. **Do Claude in Chrome and the mobile app show account plugins?** This is the
-   deciding question. It is free to check (§5 steps 1–2).
+1. **Does a personal plugin reach Chrome and iOS too?** This is the deciding
+   question now (§5 step 3).
 2. Does a personal marketplace accept a public repo, and does it follow `main`?
 3. Does `syncClaudeAiPlugins: false` move plugins to `.trash`? This is documented
    but not yet witnessed.
@@ -174,14 +188,10 @@ finding, that account content cannot be scoped to a repo, holds for plugins too.
 "not found" counts only if, on the same surface in the same sitting, a known
 control *is* found. Otherwise the result is void.
 
-1. **Claude in Chrome** (free, nothing uploaded). Open the side panel and type
-   `/`, or ask by name, for `design:design-critique`, `engineering:code-review`
-   or `pdf-viewer:view-pdf`. For the control, check `rename-pdfs`, an uploaded
-   skill.
-2. **Mobile app**: the same check.
-3. **Only if step 1 or 2 finds a plugin:** upload a throwaway test plugin whose
-   one skill replies with a unique token, and repeat the check on all five
-   surfaces. The six Anthropic plugins arrive through a default marketplace, so
+1. **Claude in Chrome** — **done 2026-09-23: found** (§3.4).
+2. **Mobile app** — **done 2026-09-23 on iOS: found** (§3.4).
+3. **Next:** upload a throwaway test plugin whose one skill replies with a
+   unique token, and repeat the check on all five surfaces. The six Anthropic plugins arrive through a default marketplace, so
    they don't prove a *personal* plugin would. Then turn the test plugin off and
    confirm it disappears everywhere.
 4. **Only if step 3 passes:** add `Adam-S-Daniel/agentskills` as a personal
@@ -200,9 +210,11 @@ control *is* found. Otherwise the result is void.
 
 1. **Keep `sync-skills`, `--verify` and the
    [ADR 0006](../decisions/0006-drive-the-account-store-drift-loop-from-one-published-artifact.md)
-   drift loop unchanged** until §5 steps 1–2 are done.
-2. **Do the Chrome and mobile check next.** It is free, reversible, and the most
-   likely outcome ends the experiment.
+   drift loop unchanged** until §5 step 3 is done.
+2. **Run the upload test next (§5 step 3).** Chrome and iOS both passed the
+   free check, so this one test now decides whether the plugin channel can
+   replace the uploader. Upload one throwaway plugin, check all five surfaces,
+   then delete it. Deletion is documented, so nothing is left behind.
 3. **Do not enable this repo's bundles on the account** (§3.2).
 4. **For #158: leave `syncClaudeAiPlugins` unset, but not because it is free.**
    [ADR 0010](../decisions/0010-let-pinned-channels-own-the-terminal.md)
