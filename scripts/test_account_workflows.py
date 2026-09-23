@@ -4117,8 +4117,8 @@ class TestTheAuditStepAnnouncesEveryDegradedVerdict:
         catch-all left the full verifier at 945 passed while the `case` quietly
         swallowed a status account_zip_selection.py has never heard of, which
         is verbatim the divergence the test below exists to prevent. The
-        one-line form is not hypothetical either: setup.sh:69, :70 and :270 all
-        use it, and so does record-account-upload.yml.
+        one-line form is not hypothetical either: setup.sh:74, :75, :274, :275
+        and :317 all use it, and so does record-account-upload.yml.
         The asymmetry ran the wrong way as well - reformatting the CORRECT
         `*)` arm onto one line made the same scan report that the catch-all was
         MISSING, so it accused on a harmless reformat and stayed quiet on a
