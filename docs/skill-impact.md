@@ -81,7 +81,7 @@ no backfill is planned; the file adds the fields git does not capture.
   retiring ZENDA laptop in two places, the same host-specific text b2a3a5b took
   out of windows-elevation-from-wsl.
 - Change: both passages say "a Windows host" instead; nothing else changes
-  (PR pending, branch `claude/sync-skills-host-agnostic`).
+  ([#173](https://github.com/Adam-S-Daniel/agentskills/pull/173)).
 - Eval: exempt (DESIGN.md non-coverage table) — "defer: machine-bound
   (WSL/WPF/browser surfaces)".
 - Outcome: open as of 2026-09-23.
@@ -103,6 +103,22 @@ no backfill is planned; the file adds the fields git does not capture.
   held until the roster seats claude-opus-5-5 beside claude-sonnet-5 with a
   claude-fable-5-1 judge.
 - Outcome: merged 2026-09-23 — both PRs.
+
+## 2026-09-22 — adam-local/sync-cc-settings-between-wsl-and-windows — edit
+
+- Motivation: review [#170](https://github.com/Adam-S-Daniel/agentskills/issues/170)
+  found three data-corrupting merge bugs: arrays collapsed (`["x"]` to `"x"`,
+  `[]` to `null`), `[s]kip` deleted the key from both files, and OS-bound keys
+  such as `hooks` were copied across OSes without asking.
+- Change: arrays survive every path; skip keeps each file's own value; a
+  per-file list of command-, path- and OS-bound keys (plus
+  `syncClaudeAiSkills`/`syncClaudeAiPlugins` and
+  `permissions.additionalDirectories`) is never copied across;
+  `permissions.ask` is unioned; `-DryRun` prints key names and markers, never
+  values. SKILL.md corrected and its known limitations documented; first
+  pytest tests, driven through `pwsh` (PR #171).
+- Eval: exempt (DESIGN.md non-coverage table: defer, machine-bound)
+- Outcome: pending merge
 
 ## 2026-09-18 — adam/skills-doctor — edit
 
