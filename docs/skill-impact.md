@@ -87,7 +87,7 @@ no backfill is planned; the file adds the fields git does not capture.
   `permissions.additionalDirectories`) is never copied across;
   `permissions.ask` is unioned; `-DryRun` prints key names and markers, never
   values. SKILL.md corrected and its known limitations documented; first
-  pytest tests, driven through `pwsh` (PR pending).
+  pytest tests, driven through `pwsh` (PR #171).
 - Eval: exempt (DESIGN.md non-coverage table: defer, machine-bound)
 - Outcome: pending merge
 
