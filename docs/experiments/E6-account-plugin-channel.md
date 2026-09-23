@@ -1,8 +1,11 @@
 # E6 — Can plugins on the claude.ai account replace the skill ZIP uploads?
 
-**Status: open — one test left, for local Cowork** (§4).
+**Status: open — only the update-speed test is left** (§5 step 5).
 
-**Short answer: almost, but not for local Cowork yet.** On 2026-09-23 Adam
+**Short answer: yes, through a marketplace synced from a repo.** A plugin in a
+repo-synced personal marketplace reached local Cowork too (§3.6), so one
+channel now covers every surface the ZIP uploads serve. The history of how we
+got there: On 2026-09-23 Adam
 uploaded a throwaway personal plugin, `e6-probe`. Its skill returned its unique
 token in the iOS app, the Claude in Chrome side panel, claude.ai chat,
 claude.ai Cowork and the Desktop Chat tab (§3.5). Those include both surfaces
@@ -34,7 +37,7 @@ added on the account to produce this document.
 | Claude Code terminal and cloud sessions | yes | yes — documented and measured |
 | **Claude in Chrome** | yes | **yes**, including a personal upload (measured 2026-09-23) |
 | **Mobile app (iOS)** | yes | **yes**, including a personal upload (measured 2026-09-23) |
-| **Desktop Cowork (local)** | yes (`rename-pdfs`, measured 2026-09-23) | **no** for a personal upload; **yes** for Anthropic's marketplace plugins (measured 2026-09-23); a repo-synced marketplace is untested |
+| **Desktop Cowork (local)** | yes (`rename-pdfs`, measured 2026-09-23) | **no** for an uploaded plugin; **yes** for a plugin from a repo-synced marketplace, once enabled in the Desktop app too (measured 2026-09-23, §3.6) |
 | Can be deleted | only by hand in the UI; the uploader has no delete | yes, at four layers (§2.3) |
 | Needs an uploader | yes — a browser session, one skill at a time | no — a public repo is accepted as a personal marketplace (measured 2026-09-23) |
 | Pinned to a commit | no — whatever was last uploaded | no — follows the latest version (§2.4) |
@@ -223,13 +226,41 @@ That is also how Claude Code behaves (above). The support article says the
 Cowork tab "sources its skills, plugins, and connectors from this Customize
 configuration", but it doesn't say which marketplaces.
 
+### 3.6 A repo-synced marketplace reaches local Cowork (2026-09-23)
+
+A throwaway public repo,
+[`Adam-S-Daniel/e6-probe-marketplace`](https://github.com/Adam-S-Daniel/e6-probe-marketplace),
+holds a one-plugin marketplace. Its skill replied with `E6-REPO-8LIV5EH3`.
+Adam added the repo at
+[claude.ai/customize/plugins](https://claude.ai/customize/plugins) and added
+`e6-probe` from it there. Every check succeeded, with one wrinkle:
+
+- **The marketplace syncs to the Desktop app; enabling a plugin does not.**
+  After `e6-probe` was added on claude.ai, it was still missing from local
+  Cowork. In the Desktop app's own plugin settings, `e6-probe-marketplace`
+  was already listed, and `e6-probe` had to be added and enabled there. After
+  that the token came back in local Cowork. So which plugins are enabled is
+  tracked separately on claude.ai and in the Desktop app, but the marketplace
+  list is shared.
+- The control (`rename-pdfs`) and a second surface also passed in the same
+  sitting.
+
+This is why the uploaded plugin in §3.5 never reached local Cowork: it lives
+in the `My Uploads` marketplace, which the Desktop app doesn't list, so there
+was nothing to enable there.
+
+**It changes §3.2's worry about adding this repo.** Adding a marketplace
+makes its plugins *available*, not enabled, and each app enables them
+separately. So this repo could be the personal marketplace. Only a dedicated
+personal plugin would be enabled; the three existing bundles would sit there
+unused.
+
 ## 4. What is still unknown
 
-1. **Does a plugin from a repo-synced personal marketplace reach local
-   Cowork?** This now decides the switch (§5 step 4). If yes, one channel
-   covers every surface. If no, local Cowork keeps needing uploaded skills.
-2. Does a repo-synced marketplace follow `main`, and how fast does a push
-   arrive?
+1. How fast does a push to the repo arrive on each surface, and does it need
+   a `version` bump? (§5 step 5)
+2. Does the Desktop app's enabled state survive an update of the plugin, or
+   does each update need re-enabling?
 3. Does `syncClaudeAiPlugins: false` move plugins to `.trash`? This is
    documented but not yet witnessed; it isn't needed for the decision.
 4. What the four `backingPluginId`s on uploaded skills are. Nothing depends on
@@ -245,19 +276,16 @@ control *is* found. Otherwise the result is void.
 2. **Mobile app** — **done 2026-09-23 on iOS: found** (§3.4).
 3. **Upload test** — **done 2026-09-23**: token on five surfaces, not in local
    Cowork (control found there), deletion confirmed (§3.5).
-4. **Next — a repo-synced probe in local Cowork.** Put a probe plugin in a
-   *separate, throwaway* public repo that is a one-plugin marketplace, not in
-   this repo: adding this repo would bring all three bundles onto the account
-   (§3.2). Add that repo at
-   [claude.ai/customize/plugins](https://claude.ai/customize/plugins) → "+" →
-   Add marketplace → Add from a repository, and enable the probe if it isn't
-   enabled already. Check its token in local Cowork, with `rename-pdfs` as the
-   control, and on one other surface. Then push a change to the token and time
-   how long it takes to arrive. Remove the marketplace and delete the repo
-   afterwards.
+4. **Repo-synced probe in local Cowork** — **done 2026-09-23: found**, after
+   enabling it in the Desktop app too (§3.6). It used a separate throwaway
+   repo, so that this repo's three bundles never reached the account.
+5. **Update speed — in progress.** At 2026-09-23 19:41:55 UTC the probe's
+   token was changed to `E6-PUSH-9P3RFBY2` and its version bumped from 0.0.1
+   to 0.0.2 (commits `2e8b50f`, `404f7dd`). Record when each surface first
+   returns the new token, and whether local Cowork kept `e6-probe` enabled.
+   Then remove the marketplace on claude.ai and in the Desktop app, and
+   delete the repo.
 
-| Result | Meaning | Action |
-|---|---|---|
 | Step 4 result | Meaning | Action |
 |---|---|---|
 | Repo-synced probe found in local Cowork (control found) | One channel covers every surface, with delete and no uploader | **Retire the uploader** in favour of a dedicated personal plugin synced from the repo. New ADR amending ADR 0002's "one-way door" consequence. |
@@ -268,13 +296,16 @@ control *is* found. Otherwise the result is void.
 
 1. **Keep `sync-skills`, `--verify` and the
    [ADR 0006](../decisions/0006-drive-the-account-store-drift-loop-from-one-published-artifact.md)
-   drift loop unchanged** until §5 step 4 is done. Local Cowork gets personal
-   content only as uploaded skills today, and that is where the PDF skills run.
-2. **Run §5 step 4 next.** If a repo-synced plugin reaches local Cowork, plan
-   the switch to a dedicated personal plugin holding exactly the skills the
-   account carries today (§3.2), synced from the repo and deletable. Creating
-   it moves skills between bundles, which touches the append-only `renames`
-   map, so it needs the adversarial review round in AGENTS.md before merge.
+   drift loop unchanged** until the switch below has landed and been checked
+   on every surface.
+2. **Switch to a dedicated personal plugin in a repo-synced marketplace.** It
+   would hold exactly the skills the account carries today (§3.2), sync from
+   the repo, update on push, and be deletable. Enable it once on claude.ai and
+   once in the Desktop app (§3.6). This repo can be the marketplace, because
+   adding a marketplace enables nothing by itself. Creating the plugin moves
+   skills between bundles, which touches the append-only `renames` map. So it
+   needs its own ADR, amending ADR 0002's "one-way door" consequence, and the
+   adversarial review round in AGENTS.md before merge.
 3. **Do not enable this repo's bundles on the account** (§3.2).
 4. **For #158: leave `syncClaudeAiPlugins` unset, but not because it is free.**
    [ADR 0010](../decisions/0010-let-pinned-channels-own-the-terminal.md)
