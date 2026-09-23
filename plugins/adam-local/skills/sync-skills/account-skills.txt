@@ -55,5 +55,4 @@ pdf-ocr-audit
 rename-pdfs
 sync-cc-settings-between-wsl-and-windows
 sync-skills
-wj-next-break
 writing-adrs

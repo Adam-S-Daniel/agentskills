@@ -16,8 +16,9 @@
 #      agentskills, which is the only reason they are waived rather than fixed.
 #
 # Adding a waiver for a defect in THIS repo requires a reason better than "it is
-# red" — see the wj-next-break entries below, which carry an explicit owner
-# decision (ADR 0002).
+# red" — the two wj-next-break entries that used to justify this rule carried an
+# explicit owner decision (ADR 0002) and were retired, along with the skill
+# itself, by ADR 0011.
 #
 # If you add a duplicate waiver, PIN ITS VERDICT via `match:`. Without that pin a
 # waiver keyed on klass+registry+basename keeps matching after a mirror silently
@@ -36,8 +37,9 @@
 # (cms-platform v0.1.83 dropped the rsync transport and fixed its skill defects;
 # adamdaniel.ai#3109 deleted its 15 mirrored skills), and the census did force
 # the deletion. But it reported TWENTY-ONE stale waivers, not fourteen. All 21
-# were deleted in one pass, and the two wj-next-break entries below are now the
-# entire file.
+# were deleted in one pass, and the two wj-next-break entries were the entire
+# file from then until ADR 0011 retired them on 2026-09-22 (the skill itself
+# was removed from the registry in the same change), leaving this file empty.
 #
 # The forecast was low because it modelled only one way a waiver can die — the
 # duplicate being REMOVED. A waiver goes stale whenever its finding stops being
@@ -62,28 +64,9 @@
 # number right instead of the prose above it.
 # ---------------------------------------------------------------------------
 
-waivers:
-  # --- agentskills: descoped by the owner -----------------------------------
-  # `wj-next-break` instructs the agent to run two scripts that have never
-  # existed in its directory. Owner directive, 2026-08-14: "Forget the WJ bell
-  # schedule skill" — do not research the bell times, do not write the payload.
-  # The skill is NOT deleted: it also exists in the claude.ai account store,
-  # which has no delete API, so removing it from git would re-orphan the account
-  # copy — exactly the unversioned-orphan problem PR #62 just fixed. It stays
-  # under version control, visibly broken, tracked by #63.
-  - klass: dangling-payload-ref
-    registry: agentskills
-    path: plugins/adam-local/skills/wj-next-break/SKILL.md
-    match: "scripts/next_break.py"
-    reason: >-
-      Descoped by owner directive 2026-08-14. Skill retained in git so the
-      claude.ai account copy stays version-controlled (no account delete API).
-    issue: https://github.com/Adam-S-Daniel/agentskills/issues/63
-  - klass: dangling-payload-ref
-    registry: agentskills
-    path: plugins/adam-local/skills/wj-next-break/SKILL.md
-    match: "scripts/test_next_break.py"
-    reason: >-
-      Descoped by owner directive 2026-08-14. Skill retained in git so the
-      claude.ai account copy stays version-controlled (no account delete API).
-    issue: https://github.com/Adam-S-Daniel/agentskills/issues/63
+# No waivers are currently declared. The `wj-next-break` dangling-payload-ref
+# pair that lived here (descoped by owner directive 2026-08-14, ADR 0002) was
+# retired by ADR 0011 (2026-09-22) when the skill itself was removed from the
+# registry — its account-store copy is now deleted by hand instead of kept
+# under version control, so there is nothing left to waive.
+waivers: []
