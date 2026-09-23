@@ -2531,10 +2531,16 @@ class TestReportAccountUploadGap:
         sync_skills.report_account_upload_gap(gap_pending("alpha"), repo=self.REPO)
 
         body = fake.created_bodies()[0]
-        assert "CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'" in body
+        # Was: the CLAUDE_CODE_SYNC_SKILLS refresh, asserted to come first.
+        # ADR 0010 (#158) makes that line wrong on both branches -- a syncing
+        # terminal refreshes itself, and an opted-out laptop has nothing to
+        # refresh -- so the ordering claim is now about WHERE the mirror is
+        # read rather than about a command that precedes the upload.
+        assert "cloud session" in body.lower()
         assert "--prepare --skill NAME --zip-dir" in body
-        # The refresh must come BEFORE the upload command, not merely appear.
-        assert body.index("CLAUDE_CODE_SYNC_SKILLS") < body.index("--prepare --skill")
+        # The read still has to come BEFORE the upload command, not merely
+        # appear: that was the point of the original ordering assertion.
+        assert body.lower().index("cloud session") < body.index("--prepare --skill")
 
     def test_issue_never_names_a_skill_outside_the_declaration(self, monkeypatch):
         """The issue is derived from the declaration; it is not a second one."""
@@ -4072,3 +4078,50 @@ class TestAccountMirrorBucketLayout:
         )
         assert proc.returncode != 0, proc.stdout
         assert not state.exists(), "an unresolved mirror must write nothing"
+
+
+class TestTheRefreshAdviceMatchesTheSurface:
+    """ADR 0010 (#158): the env-var refresh is wrong on both branches now.
+
+    On a terminal that still syncs, the mirror refreshes itself at session
+    start and every ~10 minutes, so the line is a no-op dressed as a
+    prerequisite. On a laptop `setup.sh` has opted out, there is no mirror for
+    it to refresh at all, so following it produces nothing and explains
+    nothing. Advice that cannot work on either branch is worse than silence:
+    it sends the reader to re-run a command and conclude the tool is broken.
+    """
+
+    def test_the_freshness_error_does_not_prescribe_the_env_var(self, tmp_path,
+                                                                monkeypatch):
+        root = tmp_path / "synced"
+        write_bucket(root, UUID_A + "_" + UUID_B, skills=("alpha",),
+                     last_updated=1)  # long stale, so the guard fires
+        monkeypatch.setattr("sync_skills.ACCOUNT_SKILLS_DIR", root)
+
+        stale = sync_skills.check_mirror_freshness(sync_skills.account_manifest())
+        assert stale is not None
+        assert "CLAUDE_CODE_SYNC_SKILLS" not in stale, stale
+        assert "cloud session" in stale.lower(), stale
+
+    def test_the_tracking_issue_body_sends_the_reader_to_a_cloud_session(self):
+        body = sync_skills.build_upload_issue_body(["alpha"])
+        assert "CLAUDE_CODE_SYNC_SKILLS" not in body, body
+        assert "cloud session" in body.lower(), body
+        # The upload half still needs the laptop and the issue must keep
+        # saying so: only the CHECKING half moved.
+        assert "laptop" in body.lower(), body
+
+    def test_the_record_refusal_does_not_prescribe_the_env_var(self, tmp_path):
+        declared = write_declaration(tmp_path / "declared.txt", ["alpha"])
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).parent.parent / "sync_skills.py"),
+             "--record-account-state",
+             "--account-state", str(tmp_path / "state.json"),
+             "--account-list", str(declared)],
+            capture_output=True,
+            env={**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)},
+            **TEXT,
+        )
+        assert proc.returncode != 0
+        assert "CLAUDE_CODE_SYNC_SKILLS" not in proc.stderr, proc.stderr
+        assert "cloud session" in proc.stderr.lower(), proc.stderr

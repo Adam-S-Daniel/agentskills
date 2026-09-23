@@ -36,6 +36,19 @@ record rather than inferring, and it **reports, never repairs**.
   and REFUSES with exit 2 when a machine has several and nothing says which is
   this session's.
 
+- **#158 — the drifting channel reached the terminal.** Claude Code 2.1.273+
+  syncs the account store into every terminal session signed in with the
+  account. E5 §7 had called the exposure "the exact inverse of the delivery" —
+  the channel that drifts served the surfaces with no lock coverage — and that
+  stopped being true: it now serves all of them, `sync-skills` included, which
+  is the one skill that must run on the laptop. ADR 0010 opts durable machines
+  out and leaves cloud sessions syncing, because they cannot opt out, so two
+  surfaces now load different sets on purpose. `--account-channel` reports
+  which: the settings-chain verdict for both keys, every account skill whose
+  bare name another copy also delivers, and what an opt-out left in `.trash/`.
+  A difference on purpose still has to be reported, or it is rediscovered by
+  whoever next asks why a skill triggers here and not there.
+
 ## Why it is `adam`
 
 Cloud-safe: it reads the session it is standing in and needs no browser, no

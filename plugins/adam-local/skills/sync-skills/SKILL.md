@@ -520,9 +520,19 @@ two accounts over time it picks the bucket matching `oauthAccount` in
 `~/.claude.json`, then `$CLAUDE_CODE_ACCOUNT_UUID`, and **refuses** if neither
 resolves rather than guessing (issue #157).
 
-```bash
-CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'
-```
+**How you refresh it depends on the machine, and on ADR 0010.** The old
+`CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'` line is now wrong on both branches:
+
+| Surface | What refreshes the mirror |
+|---|---|
+| **Cloud session** (or any terminal still syncing) | nothing — it downloads at session start and re-checks every ~10 min. Run `--verify` straight away. |
+| **A laptop `setup.sh` has converged** | nothing can. ADR 0010 sets `syncClaudeAiSkills: false` there, so there is no mirror to refresh and the env var has nothing to act on. **Run the verify from a cloud session instead.** |
+
+That second row is why the verify and record steps moved: since
+[#157](https://github.com/Adam-S-Daniel/agentskills/issues/157) a cloud session
+reads the bucketed mirror correctly, and a cloud session cannot opt out of the
+sync, so it is the surface that always has one. The upload half still needs the
+laptop — it needs a browser — but the checking half no longer does.
 
 Then run:
 
@@ -623,14 +633,16 @@ GitHub tracking issue for skills that `account-skills.txt` declares and the
 account store does not hold:
 
 ```bash
-CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'                     # 1. refresh
-python3 "$SKILL_DIR/sync_skills.py" --verify --all --report-issue   # 2. verify + report
+# From a CLOUD session, which always has the mirror and refreshes it itself:
+python3 "$SKILL_DIR/sync_skills.py" --verify --all --report-issue
 ```
 
-**Run it in that order, and only in that order.** The mode reads the same
-account mirror `--verify` does, so an un-refreshed mirror gives it the same
-pre-upload snapshot — and it will say so rather than guess (see the three
-states below). `--report-repo OWNER/NAME` overrides the destination, which
+**Run it against a mirror that post-dates the upload, and only that.** The mode
+reads the same account mirror `--verify` does, so a pre-upload snapshot gives
+it a pre-upload answer — and it will say so rather than guess (see the three
+states below). On a syncing surface the mirror re-checks claude.ai every ~10
+minutes, so an upload made moments ago may not be there yet; the freshness
+guard catches a mirror older than 6h, not one 3 minutes behind. `--report-repo OWNER/NAME` overrides the destination, which
 otherwise comes from this checkout's `origin` remote; there is no built-in
 fallback, because a guessed destination for a *write* files an issue in
 somebody else's repo. A malformed `--report-repo` value is refused by name
@@ -845,7 +857,8 @@ and the phone can only take the first:
   the account instead of taking your word for it:
 
   ```bash
-  CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'                     # refresh mirror
+  # From a CLOUD session: it always has the mirror, and since #157 it reads the
+  # bucketed layout. This step no longer needs the laptop at all.
   python3 "$SKILL_DIR/sync_skills.py" --record-account-state   # re-record
   ```
 
