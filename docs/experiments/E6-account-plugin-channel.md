@@ -295,10 +295,16 @@ control *is* found. Otherwise the result is void.
    | 23:09 | 3 h 27 min | claude.ai chat | old |
    | 23:10 | 3 h 28 min | local Cowork | old |
 
+   | 23:49 | 4 h 7 min | claude.ai chat | **new** (`E6-PUSH-9P3RFBY2`), after "Check for updates" on claude.ai |
+   | 23:51 | 4 h 9 min | local Cowork | old; the Desktop app's "Check for updates" failed ("Couldn't check for updates. Try again.") |
+
    The push is on the repo's default branch (checked through the GitHub API),
-   and the repo has no webhooks. **So automatic sync did not deliver a push
-   within 3½ hours.** An automatic update on push can't be assumed; the
-   switch plan has to include a way to force a sync.
+   and the repo has no webhooks. **Automatic sync did not deliver a push within
+   3½ hours.** On claude.ai the **"Check for updates"** button on the
+   marketplace works: it reported "Updated to 404f7dd", the exact commit
+   pushed, and the next chat returned the new token. So claude.ai's copy
+   follows a commit and needs a manual check to move. The Desktop app keeps
+   its own copy, and its check failed.
 
 | Step 4 result | Meaning | Action |
 |---|---|---|
