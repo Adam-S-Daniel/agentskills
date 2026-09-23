@@ -1,6 +1,6 @@
 # 0010. Let pinned channels own the terminal and leave the account channel the surfaces with nothing else
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-23)
 - **Date:** 2026-09-18
 - **Deciders:** Adam Daniel
 

@@ -99,4 +99,4 @@ Optional sections for high-impact decisions:
 | [0007](0007-install-the-union-of-every-discovered-lock.md) | Install the union of every discovered lock in a multi-repo session | Accepted |
 | [0008](0008-refuse-symlinks-in-a-skill-directory.md) | Refuse symlinks in a skill directory rather than digest them | Accepted |
 | [0009](0009-bump-bundle-versions-on-every-release.md) | Bump bundle versions on every release so `plugin update` can fire | Proposed |
-| [0010](0010-let-pinned-channels-own-the-terminal.md) | Let pinned channels own the terminal and leave the account channel the surfaces with nothing else | Proposed |
+| [0010](0010-let-pinned-channels-own-the-terminal.md) | Let pinned channels own the terminal and leave the account channel the surfaces with nothing else | Accepted |
