@@ -205,10 +205,14 @@ control *is* found. Otherwise the result is void.
    likely outcome ends the experiment.
 3. **Do not enable this repo's bundles on the account** (§3.2).
 4. **For #158: leave `syncClaudeAiPlugins` unset, but not because it is free.**
-   Setting it to `false` would also block any personal plugin this experiment
-   might adopt. The cost is the six Anthropic plugins (§3.1). The better lever is
-   turning off, on claude.ai, the ones not used. That applies to every surface
-   and is reversible.
+   [ADR 0010](../decisions/0010-let-pinned-channels-own-the-terminal.md)
+   settled #158 for *skills*: laptops that `setup.sh` manages set
+   `syncClaudeAiSkills: false`. It left plugins to this experiment because "the
+   bucket … is empty today", which stopped being true on 2026-09-20. Setting
+   `syncClaudeAiPlugins` to `false` would also block any personal plugin this
+   experiment might adopt. The cost is the six Anthropic plugins (§3.1). The
+   better lever is turning off, on claude.ai, the ones not used. That applies
+   to every surface and is reversible.
 5. **Ignore `My Uploads` and `backingPluginId` for now.** Neither is visible in
    the UI and nothing depends on them. Re-read them if the UI changes.
 
