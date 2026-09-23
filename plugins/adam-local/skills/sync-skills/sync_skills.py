@@ -67,8 +67,17 @@ REPO_HINT = (
 MAIN_BRANCH = "main"
 FETCH_TIMEOUT_SECONDS = 20
 
-# Local mirror of the claude.ai skill registry, refreshed by running
-# ``CLAUDE_CODE_SYNC_SKILLS=1 claude -p ...`` — what --verify checks against.
+# Local mirror of the claude.ai skill registry — what --verify checks against.
+#
+# WHAT REFRESHES IT changed with ADR 0010 (#158), and the old answer is now
+# wrong on both branches. It used to be ``CLAUDE_CODE_SYNC_SKILLS=1 claude -p``
+# from a laptop. Since CLI 2.1.273 a terminal session signed in with the
+# account downloads the store at start and re-checks every ~10 minutes, so on a
+# syncing surface that command is a no-op dressed as a prerequisite; and on a
+# machine setup.sh has converged, ADR 0010 sets ``syncClaudeAiSkills: false``,
+# so there is no mirror for it to refresh at all. A cloud session cannot opt
+# out and therefore always has one, which is where the checking half now runs.
+# The UPLOAD half still needs the laptop: it needs a browser.
 #
 # This is the mirror ROOT, not the directory the manifest lives in. Which one
 # that is depends on the CLI: see resolve_account_mirror() below.
@@ -1006,7 +1015,9 @@ def check_mirror_freshness(
     that never landed.
     """
     refresh = (
-        "refresh it with:  CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'"
+        "run this from a cloud session, which always has the mirror and "
+        "refreshes it itself; a converged laptop has opted out of the sync "
+        "(ADR 0010) and has no mirror to refresh"
     )
     if manifest is None:
         # The resolution refusal is its own sentence and outranks the generic
@@ -2002,9 +2013,11 @@ def _render_missing(missing: List[str]) -> str:
 def _remedy() -> str:
     """The concrete laptop recipe, in the order that actually works.
 
-    Written for someone who did not build this: the refresh comes FIRST
-    because every step after it reads the mirror, and skipping it is the
-    documented way to get a confident wrong answer (SKILL.md §7).
+    Written for someone who did not build this: reading the mirror comes
+    FIRST because every step after it reads the mirror, and checking against a
+    pre-upload snapshot is the documented way to get a confident wrong answer
+    (SKILL.md §7). Which surface to read it from is ADR 0010's answer, not a
+    command the reader runs.
     """
     script = "plugins/adam-local/skills/sync-skills/sync_skills.py"
     return (
@@ -2014,12 +2027,15 @@ def _remedy() -> str:
         "Chrome — it cannot be done from CI, which is why this is an issue "
         "and not a failing check. From a clean `main` checkout:\n"
         "\n"
-        "1. **Refresh the local account mirror first.** Everything below "
-        "reads it, and a stale mirror compares your uploads against a "
-        "pre-upload snapshot:\n"
+        "1. **Read the account mirror from a cloud session.** Everything "
+        "below reads it, and a stale mirror compares your uploads against a "
+        "pre-upload snapshot. A cloud session downloads the store at start "
+        "and re-checks every ~10 minutes; a laptop `setup.sh` has converged "
+        "has opted out of the sync entirely (ADR 0010) and has no mirror at "
+        "all, so there is nothing to refresh there:\n"
         "\n"
         "   ```bash\n"
-        "   CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'\n"
+        f"   python3 {script} --verify --all   # from a cloud session\n"
         "   ```\n"
         "\n"
         "2. **Build the ZIP and upload it** for each name above, following "
@@ -2034,8 +2050,7 @@ def _remedy() -> str:
         "account holds every declared skill:\n"
         "\n"
         "   ```bash\n"
-        "   CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'\n"
-        f"   python3 {script} --verify --all --report-issue\n"
+        f"   python3 {script} --verify --all --report-issue   # from a cloud session\n"
         "   ```\n"
         "\n"
         "Do **not** clear this by deleting the name from `account-skills.txt` "
@@ -2652,8 +2667,8 @@ def main() -> None:
             "computed across the WHOLE declaration, so a narrowed verify would "
             "drive a repo-wide write. Opt-in, best-effort and non-blocking - it "
             "never changes --verify's exit code and never fails the run. Needs "
-            "a refreshed mirror, so run the CLAUDE_CODE_SYNC_SKILLS refresh "
-            "first (SKILL.md section 7)"
+            "a mirror that post-dates the uploads, so run it from a cloud "
+            "session (SKILL.md section 7)"
         ),
     )
     parser.add_argument(
@@ -2752,10 +2767,12 @@ def main() -> None:
         if not resolved.path.is_dir():
             sys.exit(
                 f"ERROR: no account mirror at {resolved.path}. Only a "
-                f"session signed in to the claude.ai account has one - "
-                f"refresh it with `CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'` "
-                f"and re-run. Recording an absent mirror would write a file "
-                f"claiming every skill was never uploaded."
+                f"session signed in to the claude.ai account has one - run "
+                f"this from a cloud session, which always has one and cannot "
+                f"opt out of the sync. A converged laptop has opted out (ADR "
+                f"0010), so there is nothing there to refresh. Recording an "
+                f"absent mirror would write a file claiming every skill was "
+                f"never uploaded."
             )
         state = build_account_state(declared_now)
         state_path.write_text(
