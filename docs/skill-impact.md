@@ -104,6 +104,22 @@ no backfill is planned; the file adds the fields git does not capture.
   claude-fable-5-1 judge.
 - Outcome: merged 2026-09-23 — both PRs.
 
+## 2026-09-22 — adam-local/wj-next-break — remove
+
+- Motivation: owner directive, 2026-09-22 ("I want to remove wj-next-break
+  altogether"). The skill had been broken since 2026-08-14 — it names two
+  payload scripts, `scripts/next_break.py` and `scripts/test_next_break.py`,
+  that never existed in its directory (ADR 0002).
+- Change: removed from the registry (`plugins/adam-local/skills/wj-next-break/`
+  deleted, its two `skills_waivers.yml` waivers retired, `account-skills.txt`
+  and the README table entry dropped, ADR 0011 records the decision); the
+  claude.ai account copy was deleted by hand in the UI on 2026-09-23 and
+  confirmed gone from the laptop's synced account manifest.
+  PR #172.
+- Eval: exempt (DESIGN.md non-coverage table — "skip, wall-clock/calendar-bound;
+  low value to freeze").
+- Outcome: pending merge.
+
 ## 2026-09-22 — adam-local/sync-cc-settings-between-wsl-and-windows — edit
 
 - Motivation: review [#170](https://github.com/Adam-S-Daniel/agentskills/issues/170)

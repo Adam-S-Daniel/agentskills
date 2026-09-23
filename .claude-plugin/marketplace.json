@@ -13,9 +13,9 @@
     {
       "name": "adam-local",
       "source": "./plugins/adam-local",
-      "description": "Adam's machine-bound skills that need local resources (WSL/Windows homes, local files, a signed-in browser): PDF tooling, Claude Code session/settings/memory management, skill sync, school bell schedule.",
+      "description": "Adam's machine-bound skills that need local resources (WSL/Windows homes, local files, a signed-in browser): PDF tooling, Claude Code session/settings/memory management, skill sync.",
       "category": "claude-code",
-      "keywords": ["claude-code", "wsl", "windows", "sync", "settings", "memory", "skills", "claude-ai", "pdf", "ocr", "schedule"],
+      "keywords": ["claude-code", "wsl", "windows", "sync", "settings", "memory", "skills", "claude-ai", "pdf", "ocr"],
       "defaultEnabled": false
     },
     {
