@@ -22,7 +22,7 @@ session cookies.
 ## Locating the helper
 
 Clone locations are machine-specific — `~/repos/agentskills` on Linux/WSL,
-`D:\repos\adam-s-daniel\agentskills` on ZENDA (Windows) — so **don't
+`D:\repos\adam-s-daniel\agentskills` on a Windows host — so **don't
 hardcode either one**. Resolve the skill folder once and reuse it:
 
 ```bash
@@ -40,7 +40,7 @@ it lives in, claimed only for that checkout's own repo name.
 There are deliberately **no built-in clone locations**. A `~/repos/<name>`
 guess used to come first, which meant any directory sitting at that
 path — an empty folder, a half-finished clone, a junction — outranked the
-checkout the script was demonstrably running from. On ZENDA that guess
+checkout the script was demonstrably running from. On a Windows host that guess
 resolved an empty `~/repos/agentskills`, enumerated zero skills from it,
 and reported `no skills selected ... Pass --all` on a command line that
 already said `--all`. A path that merely exists is not evidence that it is

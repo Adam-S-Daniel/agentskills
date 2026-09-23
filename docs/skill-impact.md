@@ -75,6 +75,35 @@ no backfill is planned; the file adds the fields git does not capture.
 
 ---
 
+## 2026-09-23 — adam-local/sync-skills — edit
+
+- Motivation: the SKILL.md uploaded to the claude.ai account still named the
+  retiring ZENDA laptop in two places, the same host-specific text b2a3a5b took
+  out of windows-elevation-from-wsl.
+- Change: both passages say "a Windows host" instead; nothing else changes
+  ([#173](https://github.com/Adam-S-Daniel/agentskills/pull/173)).
+- Eval: exempt (DESIGN.md non-coverage table) — "defer: machine-bound
+  (WSL/WPF/browser surfaces)".
+- Outcome: open as of 2026-09-23.
+
+## 2026-09-23 — adam/skills-doctor — edit
+
+- Motivation: correcting entry for the four 2026-09-18 entries below, which
+  had no PR numbers because their session could not open PRs.
+- Change: none. Those entries landed as
+  [#162](https://github.com/Adam-S-Daniel/agentskills/pull/162) (bucket
+  layout, sync-skills and skills-doctor) and
+  [#163](https://github.com/Adam-S-Daniel/agentskills/pull/163) (ADR 0010,
+  both skills).
+- Eval: one paid A/B run of skills-evals
+  `evals/skills-doctor/bucketed-account-store`,
+  [run 35812851203](https://github.com/Adam-S-Daniel/skills-evals/actions/runs/35812851203):
+  with_skill 5/5 objective, judge 10.0 (claude-sonnet-5, $0.46);
+  without_skill hit the 600 s agent timeout, so no delta. Further runs are
+  held until the roster seats claude-opus-5-5 beside claude-sonnet-5 with a
+  claude-fable-5-1 judge.
+- Outcome: merged 2026-09-23 — both PRs.
+
 ## 2026-09-22 — adam-local/wj-next-break — remove
 
 - Motivation: owner directive, 2026-09-22 ("I want to remove wj-next-break
