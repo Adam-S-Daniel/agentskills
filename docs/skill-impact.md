@@ -86,7 +86,7 @@ no backfill is planned; the file adds the fields git does not capture.
   and the README table entry dropped, ADR 0011 records the decision); the
   claude.ai account copy was deleted by hand in the UI on 2026-09-23 and
   confirmed gone from the laptop's synced account manifest.
-  PR pending.
+  PR #172.
 - Eval: exempt (DESIGN.md non-coverage table — "skip, wall-clock/calendar-bound;
   low value to freeze").
 - Outcome: pending merge.
