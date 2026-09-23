@@ -53,7 +53,9 @@ Against the rule above, the current public skills are correctly placed — none
 embed secrets or PII:
 
 - `wj-next-break` — a public high school's bell schedule. Personal interest, but
-  not sensitive. **Public is correct.**
+  not sensitive. **Public is correct.** (Removed from the registry by
+  [ADR 0010](docs/decisions/0010-remove-wj-next-break-from-registry-and-account.md),
+  2026-09-22 — no longer a current skill.)
 - `fastmail` — drives email through a live, already-authenticated Claude-in-Chrome
   session; the `SKILL.md` carries no credentials of its own. **Public is correct.**
 - `sync-cc-settings-between-wsl-and-windows`, `sync-skills` — operate on local

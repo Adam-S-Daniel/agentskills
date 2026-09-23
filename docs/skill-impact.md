@@ -75,6 +75,21 @@ no backfill is planned; the file adds the fields git does not capture.
 
 ---
 
+## 2026-09-22 — adam-local/wj-next-break — remove
+
+- Motivation: owner directive, 2026-09-22 ("I want to remove wj-next-break
+  altogether"). The skill had been broken since 2026-08-14 — it names two
+  payload scripts, `scripts/next_break.py` and `scripts/test_next_break.py`,
+  that never existed in its directory (ADR 0002).
+- Change: removed from the registry (`plugins/adam-local/skills/wj-next-break/`
+  deleted, its two `skills_waivers.yml` waivers retired, `account-skills.txt`
+  and the README table entry dropped, ADR 0010 records the decision); the
+  claude.ai account copy is deleted by hand in the UI, outside this PR.
+  PR pending.
+- Eval: exempt (DESIGN.md non-coverage table — "skip, wall-clock/calendar-bound;
+  low value to freeze").
+- Outcome: pending merge.
+
 ## 2026-09-18 — adam/skills-doctor — edit
 
 - Motivation: Claude Code 2.1.273+ buckets the claude.ai account store at

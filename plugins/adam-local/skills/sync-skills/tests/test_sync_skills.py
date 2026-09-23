@@ -632,7 +632,6 @@ class TestLoadAccountDeclaration:
             "rename-pdfs",
             "sync-cc-settings-between-wsl-and-windows",
             "sync-skills",
-            "wj-next-break",
             "writing-adrs",
         }
 
