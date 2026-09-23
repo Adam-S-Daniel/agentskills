@@ -286,6 +286,20 @@ control *is* found. Otherwise the result is void.
    Then remove the marketplace on claude.ai and in the Desktop app, and
    delete the repo.
 
+   **Readings so far** (Adam; "Sync marketplace" on, which is the default):
+
+   | Time (UTC) | Since push | Surface | Token |
+   |---|---|---|---|
+   | 19:42 | 1 min | local Cowork | old (`E6-REPO-8LIV5EH3`) |
+   | 19:46 | 4 min | claude.ai chat | old |
+   | 23:09 | 3 h 27 min | claude.ai chat | old |
+   | 23:10 | 3 h 28 min | local Cowork | old |
+
+   The push is on the repo's default branch (checked through the GitHub API),
+   and the repo has no webhooks. **So automatic sync did not deliver a push
+   within 3½ hours.** An automatic update on push can't be assumed; the
+   switch plan has to include a way to force a sync.
+
 | Step 4 result | Meaning | Action |
 |---|---|---|
 | Repo-synced probe found in local Cowork (control found) | One channel covers every surface, with delete and no uploader | **Retire the uploader** in favour of a dedicated personal plugin synced from the repo. New ADR amending ADR 0002's "one-way door" consequence. |
