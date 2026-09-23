@@ -69,7 +69,160 @@ FETCH_TIMEOUT_SECONDS = 20
 
 # Local mirror of the claude.ai skill registry, refreshed by running
 # ``CLAUDE_CODE_SYNC_SKILLS=1 claude -p ...`` — what --verify checks against.
+#
+# This is the mirror ROOT, not the directory the manifest lives in. Which one
+# that is depends on the CLI: see resolve_account_mirror() below.
 ACCOUNT_SKILLS_DIR = Path.home() / ".claude" / "skills" / "synced"
+
+# The CLI's own config, read for the org/account the session is signed in as.
+# A constant rather than an inline ``Path.home() / ".claude.json"`` because the
+# bucket resolution below has to be testable against a fixture config without
+# moving ``$HOME`` out from under the rest of the process.
+CLI_CONFIG_FILE = Path.home() / ".claude.json"
+
+
+# ---------------------------------------------------------------------------
+# Where the mirror actually IS (issue #157)
+# ---------------------------------------------------------------------------
+#
+# Claude Code >= 2.1.273 buckets the mirror per signed-in org and account.
+# What was ``~/.claude/skills/synced/manifest.json`` is now
+# ``~/.claude/skills/synced/<organizationUuid>_<accountUuid>/manifest.json``,
+# with an empty ``.bucket-<organizationUuid>_<accountUuid>`` marker FILE beside
+# the directory. Measured on CLI 2.1.276, 2026-09-18: 21 skills in the bucket,
+# nothing at the flat path.
+#
+# Reading the flat path on such a machine finds nothing, and "nothing" is the
+# one answer this tool must never produce quietly: `--verify` errored with a
+# path that does not exist on any current CLI, and `--record-account-state`
+# would have written a recording claiming every declared skill was never
+# uploaded. That is the false-clean shape E5 is about, and issue #157 is where
+# both were measured.
+#
+# BUCKETS WIN OVER A FLAT manifest.json WHEN BOTH ARE PRESENT, deliberately.
+# An upgraded machine can keep an old flat manifest.json beside a new bucket,
+# and that leftover is by construction a PRE-upgrade snapshot — the exact
+# stale mirror check_mirror_freshness() exists to refuse. An older CLI has no
+# bucket at all, so it still reads its flat mirror and the same code runs on
+# whichever CLI the laptop has, which is what #157 asked for.
+_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+BUCKET_NAME_RE = re.compile(_UUID + "_" + _UUID)
+BUCKET_MARKER_PREFIX = ".bucket-"
+
+
+class AccountMirror(NamedTuple):
+    """Where to read the account mirror, or why we would not guess.
+
+    ``path is None`` means RESOLUTION REFUSED and is never the same as "the
+    account holds nothing": every caller treats it as unreadable, which is
+    loud, rather than as empty, which is the verdict this whole module exists
+    to withhold. ``reason`` carries the operator-facing sentence.
+    """
+    path: Optional[Path]
+    layout: str  # "flat" | "bucket" | "absent" | "ambiguous"
+    reason: Optional[str]
+
+
+def _looks_like_uuid(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(_UUID, value) is not None
+
+
+def account_bucket_id() -> Optional[str]:
+    """``<organizationUuid>_<accountUuid>`` for the CURRENT sign-in, or None.
+
+    Read from the CLI's own config, which is the same source
+    ``org_id_from_cli_config`` already trusts for the upload path and is
+    authoritative for the same reason: the mirror is produced by this CLI, so
+    the account named here is by construction the account whose bucket it
+    wrote.
+    """
+    try:
+        with open(CLI_CONFIG_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    oauth = data.get("oauthAccount") or {}
+    org, account = oauth.get("organizationUuid"), oauth.get("accountUuid")
+    if _looks_like_uuid(org) and _looks_like_uuid(account):
+        return f"{org}_{account}"
+    return None
+
+
+def discover_buckets(root: Path) -> List[Path]:
+    """Bucket directories under ``root``, sorted by name.
+
+    A directory counts as a bucket when its name is ``<uuid>_<uuid>`` AND it
+    either holds a manifest.json or has the CLI's own ``.bucket-<name>`` marker
+    file beside it. Requiring one of those two is what keeps an ordinary skill
+    directory — which a name-shaped coincidence could otherwise imitate — from
+    being read as a bucket, and the marker is what lets a bucket the CLI has
+    created but not yet filled still be FOUND (so its missing manifest reads as
+    "the mirror has not been written", not as "there is no mirror").
+    """
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return []
+    markers = {child.name[len(BUCKET_MARKER_PREFIX):] for child in children
+               if child.is_file() and child.name.startswith(BUCKET_MARKER_PREFIX)}
+    return [child for child in children
+            if child.is_dir() and BUCKET_NAME_RE.fullmatch(child.name)
+            and ((child / "manifest.json").is_file() or child.name in markers)]
+
+
+def resolve_account_mirror(root: Optional[Path] = None) -> AccountMirror:
+    """Which directory under the mirror root actually holds the manifest.
+
+    Resolution order, and why each step is where it is:
+
+    1. any bucket at all -> the bucketed layout is in use (see the section
+       comment for why a leftover flat manifest.json does not win here);
+    2. exactly one bucket -> that one, with no identity lookup needed;
+    3. several buckets -> the one the CURRENT sign-in names, from the CLI
+       config, then from ``$CLAUDE_CODE_ACCOUNT_UUID`` (which carries only the
+       account half, so it is matched as a suffix and only accepted when it
+       picks exactly one);
+    4. several buckets and no signal -> REFUSE, naming them. Never "the
+       newest": the wrong bucket is another account's store, and comparing
+       against it produces a confident wrong verdict rather than an error;
+    5. no bucket -> the root itself, which is the flat layout older CLIs
+       wrote and also the path an absent mirror resolves to, so "no mirror
+       here" keeps reading exactly as it did before.
+    """
+    root = root if root is not None else ACCOUNT_SKILLS_DIR
+    buckets = discover_buckets(root)
+    if not buckets:
+        return AccountMirror(root, "flat" if (root / "manifest.json").is_file()
+                             else "absent", None)
+    if len(buckets) == 1:
+        return AccountMirror(buckets[0], "bucket", None)
+
+    wanted = account_bucket_id()
+    if wanted:
+        for bucket in buckets:
+            if bucket.name == wanted:
+                return AccountMirror(bucket, "bucket", None)
+    account = (os.environ.get("CLAUDE_CODE_ACCOUNT_UUID") or "").strip()
+    if _looks_like_uuid(account):
+        matched = [b for b in buckets if b.name.endswith("_" + account)]
+        if len(matched) == 1:
+            return AccountMirror(matched[0], "bucket", None)
+
+    return AccountMirror(None, "ambiguous", (
+        f"the account mirror at {root} holds {len(buckets)} account buckets and "
+        f"nothing says which one this session is signed in as, so none was read: "
+        f"{', '.join(bucket.name for bucket in buckets)}. Neither "
+        f"`oauthAccount.organizationUuid`/`accountUuid` in {CLI_CONFIG_FILE} nor "
+        f"$CLAUDE_CODE_ACCOUNT_UUID resolved to exactly one of them. Sign in, or "
+        f"remove the buckets that are not this account's — picking one here "
+        f"would compare against somebody else's store and report a confident "
+        f"wrong verdict."
+    ))
+
+
+def account_mirror_dir() -> Optional[Path]:
+    """The resolved mirror directory, or None when resolution refused."""
+    return resolve_account_mirror().path
 
 # How stale the account mirror may be before --verify refuses to trust it.
 #
@@ -654,7 +807,8 @@ def is_update(name: str, state: Optional[Dict] = None) -> bool:
     """
     if state is None:
         state = load_state()
-    return (ACCOUNT_SKILLS_DIR / name).is_dir() or name in state
+    mirror = account_mirror_dir()
+    return (mirror is not None and (mirror / name).is_dir()) or name in state
 
 
 def prepare(
@@ -778,11 +932,17 @@ def skill_payload(skill_path: Path) -> Dict[str, bytes]:
 def account_skill_payload(name: str) -> Optional[Dict[str, bytes]]:
     """Return ``{relpath: bytes}`` under the local account-copy mirror.
 
-    Reads ``ACCOUNT_SKILLS_DIR / name``. Returns None if that directory
-    doesn't exist (skill was never uploaded, or the mirror hasn't been
-    refreshed since).
+    Reads ``<resolved mirror> / name`` (see ``resolve_account_mirror``).
+    Returns None if that directory doesn't exist (skill was never uploaded, or
+    the mirror hasn't been refreshed since) and equally when the mirror could
+    not be resolved at all — an unreadable mirror must never read as an empty
+    account, which is why every caller of this treats None as "not compared"
+    rather than "not uploaded".
     """
-    account_dir = ACCOUNT_SKILLS_DIR / name
+    mirror = account_mirror_dir()
+    if mirror is None:
+        return None
+    account_dir = mirror / name
     if not account_dir.is_dir():
         return None
     return {
@@ -793,8 +953,15 @@ def account_skill_payload(name: str) -> Optional[Dict[str, bytes]]:
 
 
 def account_manifest() -> Optional[Dict]:
-    """Parse the account mirror's manifest.json, or None if unreadable."""
-    path = ACCOUNT_SKILLS_DIR / "manifest.json"
+    """Parse the account mirror's manifest.json, or None if unreadable.
+
+    Unreadable includes "the mirror root holds several account buckets and we
+    would not guess between them" — see ``resolve_account_mirror``.
+    """
+    mirror = account_mirror_dir()
+    if mirror is None:
+        return None
+    path = mirror / "manifest.json"
     if not path.is_file():
         return None
     try:
@@ -842,9 +1009,15 @@ def check_mirror_freshness(
         "refresh it with:  CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'"
     )
     if manifest is None:
+        # The resolution refusal is its own sentence and outranks the generic
+        # one: "no manifest at <path>" would name a path we never looked at,
+        # and send the reader to refresh a mirror that is already there.
+        resolved = resolve_account_mirror()
+        if resolved.reason:
+            return resolved.reason
         return (
             f"account mirror manifest not found or unreadable at "
-            f"{ACCOUNT_SKILLS_DIR / 'manifest.json'} — {refresh}"
+            f"{resolved.path / 'manifest.json'} — {refresh}"
         )
     age = mirror_age_seconds(manifest, now)
     if age is None:
@@ -1021,7 +1194,7 @@ def verify(
                 print(
                     f"  FAIL      {name}  ({repo.name})  declared for the account "
                     f"store but NOT on it — the upload never happened (no copy in "
-                    f"{ACCOUNT_SKILLS_DIR})"
+                    f"{account_mirror_dir() or ACCOUNT_SKILLS_DIR})"
                 )
                 continue
 
@@ -2567,9 +2740,18 @@ def main() -> None:
                 "ERROR: the account-store membership declaration is missing or "
                 "unreadable, so there is nothing to record against."
             )
-        if not ACCOUNT_SKILLS_DIR.is_dir():
+        # Two different refusals, and they must not collapse into one. A
+        # mirror that is ABSENT and a mirror we declined to pick between are
+        # both "no digests to take", and recording either would write a file
+        # claiming every declared skill was never uploaded - `--account-drift`
+        # then reads that committed recording anywhere, CI included, so the
+        # false clean outlives the session that made it.
+        resolved = resolve_account_mirror()
+        if resolved.reason:
+            sys.exit(f"ERROR: {resolved.reason}")
+        if not resolved.path.is_dir():
             sys.exit(
-                f"ERROR: no account mirror at {ACCOUNT_SKILLS_DIR}. Only a "
+                f"ERROR: no account mirror at {resolved.path}. Only a "
                 f"session signed in to the claude.ai account has one - "
                 f"refresh it with `CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'` "
                 f"and re-run. Recording an absent mirror would write a file "

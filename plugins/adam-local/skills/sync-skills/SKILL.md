@@ -508,7 +508,17 @@ the only way to catch it is to check what actually landed on the
 account afterward.
 
 First, refresh the local mirror of the account store. This is what
-populates `~/.claude/skills/synced/`, and it's stale until you run it:
+populates it, and it's stale until you run it.
+
+**Where the mirror is.** Claude Code 2.1.273+ buckets it per signed-in
+account: `~/.claude/skills/synced/<organizationUuid>_<accountUuid>/`, holding
+`manifest.json` and one directory per skill, with an empty
+`.bucket-<organizationUuid>_<accountUuid>` marker file beside it. Older CLIs
+wrote `~/.claude/skills/synced/manifest.json` flat. `sync_skills.py` reads
+whichever this machine has and needs no flag for it; on a machine signed in to
+two accounts over time it picks the bucket matching `oauthAccount` in
+`~/.claude.json`, then `$CLAUDE_CODE_ACCOUNT_UUID`, and **refuses** if neither
+resolves rather than guessing (issue #157).
 
 ```bash
 CLAUDE_CODE_SYNC_SKILLS=1 claude -p 'ok'

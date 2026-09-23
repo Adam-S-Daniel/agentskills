@@ -57,7 +57,148 @@ LOCK_NAME = "skills.lock"
 # The claude.ai account-sync channel's own directory. It is manifest-gated and is
 # nobody else's to attribute, so it is excluded from the scan rather than reported
 # as an unattributed skill.
+#
+# This name is doing TWO jobs and only one of them moved. As the directory to
+# EXCLUDE from the personal store's scan — and to refuse as a lock destination —
+# it is unchanged: `~/.claude/skills/synced` is still what the CLI creates and
+# still not this hook's to install into. As the directory to READ account copies
+# out of, it is now one level too high: see `resolve_account_store` below.
 ACCOUNT_DIR = "synced"
+
+# The CLI's own config, read for the org/account this session is signed in as.
+# A module constant so a test can point the bucket resolution at a fixture
+# without moving `$HOME` out from under the rest of the process.
+CLI_CONFIG_FILE = Path.home() / ".claude.json"
+
+# Claude Code >= 2.1.273 buckets the account mirror per signed-in org and
+# account: the copies that were at `synced/<name>/` are at
+# `synced/<organizationUuid>_<accountUuid>/<name>/`, with an empty
+# `.bucket-<organizationUuid>_<accountUuid>` marker FILE beside the directory.
+# Measured on CLI 2.1.276, 2026-09-18 (issue #157).
+#
+# Why this is the dangerous shape rather than a cosmetic path change: every
+# account question this script asks is "does the account store ALSO hold this
+# name", and an unread directory answers no to all of them. `--account-drift`
+# printed "the account store … holds no skills — nothing to compare … 0 drifted"
+# and exited 0 over 21 skills on disk, and the shadow comparison — the whole of
+# #122 — went silent in the same way. A false clean, which is the one verdict
+# this script exists to withhold (E5).
+_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+BUCKET_NAME_RE = re.compile(_UUID + "_" + _UUID)
+BUCKET_MARKER_PREFIX = ".bucket-"
+
+
+class AccountStore(NamedTuple):
+    """Where the account copies are, or why we would not guess.
+
+    `path is None` is REFUSED, never empty. Every caller below treats it as
+    "not compared", which is loud, rather than as "the account holds nothing",
+    which is the sentence #157 was filed about.
+    """
+    path: Optional[Path]
+    layout: str  # "flat" | "bucket" | "absent" | "ambiguous"
+    reason: Optional[str]
+
+
+def _is_uuid(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(_UUID, value) is not None
+
+
+def account_bucket_id() -> Optional[str]:
+    """`<organizationUuid>_<accountUuid>` for the CURRENT sign-in, or None.
+
+    A hand-rolled read of the CLI's own config for `declared_name`'s reason:
+    this file ships into a `~/.claude/skills` where nothing is installed but
+    the standard library, so there is no sync-skills to import the same
+    resolution from. `test_the_bucket_resolution_matches_the_uploaders` binds
+    the two copies together so they cannot drift silently.
+    """
+    try:
+        with open(CLI_CONFIG_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    oauth = data.get("oauthAccount") or {}
+    org, account = oauth.get("organizationUuid"), oauth.get("accountUuid")
+    if _is_uuid(org) and _is_uuid(account):
+        return org + "_" + account
+    return None
+
+
+def discover_buckets(root: Path) -> List[Path]:
+    """Bucket directories under `root`, sorted by name.
+
+    A directory counts as a bucket when its name is `<uuid>_<uuid>` AND it
+    either holds a manifest.json or has the CLI's own `.bucket-<name>` marker
+    file beside it. One of the two is required so that an ordinary skill
+    directory cannot be read as a bucket by name shape alone; the marker is
+    what lets a bucket the CLI created but has not filled still be FOUND, so
+    its missing manifest reads as "not written yet" rather than "no mirror".
+    """
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return []
+    markers = {child.name[len(BUCKET_MARKER_PREFIX):] for child in children
+               if child.is_file() and child.name.startswith(BUCKET_MARKER_PREFIX)}
+    return [child for child in children
+            if child.is_dir() and BUCKET_NAME_RE.fullmatch(child.name)
+            and ((child / "manifest.json").is_file() or child.name in markers)]
+
+
+def resolve_account_store(skills_dir: Path) -> AccountStore:
+    """Which directory under `skills_dir/synced` actually holds account copies.
+
+    Resolution order, and why each step is where it is:
+
+    1. any bucket at all -> the bucketed layout is in use. Buckets win over a
+       leftover flat `synced/manifest.json`, because on an upgraded machine
+       that leftover is by construction a PRE-upgrade snapshot;
+    2. exactly one bucket -> that one, with no identity lookup needed, which is
+       every single-account machine including every cloud session here;
+    3. several buckets -> the one the CURRENT sign-in names, from the CLI
+       config, then from `$CLAUDE_CODE_ACCOUNT_UUID` (the account half only, so
+       it is matched as a suffix and accepted only when it picks exactly one);
+    4. several buckets and no signal -> REFUSE, naming them. Never "the
+       newest": another account's store compared against this registry produces
+       a confident wrong verdict, and this script reports rather than repairs,
+       so a wrong report is the whole of the damage it can do;
+    5. no bucket -> `synced/` itself, which is the flat layout older CLIs wrote
+       and also what an absent store resolves to, so "no account store here"
+       keeps reading exactly as it did before.
+    """
+    root = skills_dir / ACCOUNT_DIR
+    buckets = discover_buckets(root)
+    if not buckets:
+        return AccountStore(root, "flat" if (root / "manifest.json").is_file()
+                            else "absent", None)
+    if len(buckets) == 1:
+        return AccountStore(buckets[0], "bucket", None)
+
+    wanted = account_bucket_id()
+    if wanted:
+        for bucket in buckets:
+            if bucket.name == wanted:
+                return AccountStore(bucket, "bucket", None)
+    account = (os.environ.get("CLAUDE_CODE_ACCOUNT_UUID") or "").strip()
+    if _is_uuid(account):
+        matched = [b for b in buckets if b.name.endswith("_" + account)]
+        if len(matched) == 1:
+            return AccountStore(matched[0], "bucket", None)
+
+    return AccountStore(None, "ambiguous", (
+        "the account store %s holds %d account buckets and nothing says which "
+        "one this session is signed in as, so none was read: %s. Neither "
+        "`oauthAccount.organizationUuid`/`accountUuid` in %s nor "
+        "$CLAUDE_CODE_ACCOUNT_UUID resolved to exactly one of them. Nothing "
+        "below was compared against the account channel — this is not a clean "
+        "account verdict." % (root, len(buckets),
+                              ", ".join(b.name for b in buckets), CLI_CONFIG_FILE)))
+
+
+def account_store_path(skills_dir: Path) -> Optional[Path]:
+    """The resolved account-copy directory, or None when resolution refused."""
+    return resolve_account_store(skills_dir).path
 
 # The one difference the two delivery channels are known to have that is not a
 # difference in content: account-store copies are CRLF, the registry is LF. Only
@@ -2068,7 +2209,9 @@ def foreign_notes(skills_dir: Path, origins: Dict[str, Origin],
         if origin.kind != FOREIGN:
             continue
         if name in account:
-            theirs = declared_name(skills_dir / ACCOUNT_DIR / name)
+            account_dir = account_store_path(skills_dir)
+            theirs = (declared_name(account_dir / name)
+                      if account_dir is not None else None)
             if theirs == origin.declared:
                 collision = (
                     f"The account store does hold a {ACCOUNT_DIR}/{name}/, and "
@@ -2775,7 +2918,7 @@ def shadow_findings(skills_dir: Path, names: List[str], account: Set[str],
         if origins[name].kind not in OBSERVATION_ORIGINS["shadow"]:
             continue
         mine = skills_dir / name
-        theirs = skills_dir / ACCOUNT_DIR / name
+        theirs = (account_store_path(skills_dir) or skills_dir / ACCOUNT_DIR) / name
         both = (f"delivered by BOTH channels under one bare name — {mine} and "
                 f"{theirs}. Both present to the session's skill listing as "
                 f"`{name}`, the listing shows it once, and nothing there, on "
@@ -2867,7 +3010,20 @@ def registry_copy(registry: Path, name: str) -> Optional[Path]:
     return None
 
 
-def account_drift(skills_dir: Path, registries: List[Path]) -> Tuple[List[str], int]:
+class DriftReport(NamedTuple):
+    """`account_drift`'s answer, with "could not run" kept separate from "0".
+
+    `blocked` carries the reason the store could not be resolved, and it is a
+    third field rather than a magic `drifted` value because the two questions
+    are genuinely different: `drifted == 0` with `blocked is None` is a
+    measurement, and `drifted == 0` with a reason is the absence of one.
+    """
+    lines: List[str]
+    drifted: int
+    blocked: Optional[str]
+
+
+def account_drift(skills_dir: Path, registries: List[Path]) -> "DriftReport":
     """Compare every account-store copy against the same skill in a registry checkout.
 
     This exists because the procedure it replaces was a TIMESTAMP comparison, and a
@@ -2902,15 +3058,22 @@ def account_drift(skills_dir: Path, registries: List[Path]) -> Tuple[List[str], 
     """
     lines: List[str] = []
     drifted = 0
-    names = sorted(skill_names(skills_dir / ACCOUNT_DIR))
+    store = resolve_account_store(skills_dir)
+    if store.path is None:
+        # NOT `0 drifted`. An unread store and an empty one produce the same
+        # number of comparisons and must never produce the same verdict —
+        # that equivalence is #157's defect, one layer up from the path.
+        return DriftReport([f"  {store.reason}"], 0, store.reason)
+    names = sorted(skill_names(store.path))
     if not names:
-        return ([f"  the account store {skills_dir / ACCOUNT_DIR} holds no skills — "
-                 f"nothing to compare. It is manifest-gated, so this is what an "
-                 f"account with no uploads looks like and not a failure to read it."],
-                0)
+        return DriftReport(
+            [f"  the account store {store.path} holds no skills — "
+             f"nothing to compare. It is manifest-gated, so this is what an "
+             f"account with no uploads looks like and not a failure to read it."],
+            0, None)
 
     for name in names:
-        mine = skills_dir / ACCOUNT_DIR / name
+        mine = store.path / name
         found = next((hit for hit in (registry_copy(registry, name)
                                       for registry in registries) if hit), None)
         if found is None:
@@ -2929,7 +3092,7 @@ def account_drift(skills_dir: Path, registries: List[Path]) -> Tuple[List[str], 
             lines.append(f"  {name:42} DRIFTED from {found}")
             lines.append(f"  {'':42} account {ours[:12]} vs registry {theirs[:12]} "
                          f"(CRLF folded, upload filter applied)")
-    return lines, drifted
+    return DriftReport(lines, drifted, None)
 
 
 def store_findings(store_state: str, skills_dir: Path) -> List[Finding]:
@@ -3399,23 +3562,33 @@ def main(argv: Optional[List[str]] = None) -> int:
             sys.stderr.write("check_provenance.py: not a directory: "
                              + ", ".join(missing) + "\n")
             return 2
-        lines, drifted = account_drift(skills_dir, registries)
-        print("ACCOUNT DRIFT  " + skills_dir.joinpath(ACCOUNT_DIR).as_posix()
+        report = account_drift(skills_dir, registries)
+        store = resolve_account_store(skills_dir)
+        # The header is the reader's only statement of WHAT was compared, so it
+        # names the resolved bucket rather than the root a two-account machine
+        # shares between accounts.
+        print("ACCOUNT DRIFT  "
+              + (store.path or skills_dir / ACCOUNT_DIR).as_posix()
               + " vs " + ", ".join(str(entry) for entry in registries))
         print("  content is the verdict; `updatedAt` and commit dates are not "
               "consulted. See `account_drift`.")
         print()
-        print("\n".join(lines))
+        print("\n".join(report.lines))
         print()
-        print(f"  {drifted} drifted")
-        return 1 if drifted else 0
+        if report.blocked:
+            # 2 is "cannot run", the same code a missing registry path gets. A
+            # count printed here would be a measurement nobody took.
+            sys.stderr.write("check_provenance.py: " + report.blocked + "\n")
+            return 2
+        print(f"  {report.drifted} drifted")
+        return 1 if report.drifted else 0
     project_dir = Path(args.project_dir).expanduser()
     record_path = skills_dir / RECORD_NAME
     surface = read_surface()
 
     record = read_record(record_path)
     store_state, names = scan(skills_dir)
-    account = skill_names(skills_dir / ACCOUNT_DIR)
+    account = skill_names(account_store_path(skills_dir) or skills_dir / ACCOUNT_DIR)
     # Every lock is read BEFORE any of them is judged against, because the
     # foreign gate is store-wide: "some bundle here delivers this name" is a
     # question about all the locks at once, and asking it lock by lock is how the
