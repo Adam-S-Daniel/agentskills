@@ -181,13 +181,13 @@ def test_invalid_json_is_left_untouched(tmp_path):
     assert run_convergence(tmp_path) == '{"model": "claude-opus-5",,}'
 
 
-def test_the_adr_that_decided_this_is_on_disk_and_proposed():
+def test_the_adr_that_decided_this_is_on_disk_and_accepted():
     """The keys above are a decision, not a preference, and the decision is the
     ADR. A test that only checked the JSON would let the ADR be deleted or
     flipped to Rejected while the code kept converging its opposite."""
     adr = (REPO / "docs" / "decisions"
            / "0010-let-pinned-channels-own-the-terminal.md").read_text(encoding="utf-8")
-    assert re.search(r"^- \*\*Status:\*\* Proposed$", adr, re.M)
+    assert re.search(r"^- \*\*Status:\*\* Accepted\b", adr, re.M)
     assert "syncClaudeAiSkills" in adr and "adam-local@agentskills" in adr
     index = (REPO / "docs" / "decisions" / "README.md").read_text(encoding="utf-8")
     assert "0010-let-pinned-channels-own-the-terminal.md" in index
