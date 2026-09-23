@@ -1,18 +1,18 @@
 # E6 — Can plugins on the claude.ai account replace the skill ZIP uploads?
 
-**Status: open — one upload test left.** On 2026-09-23 Adam confirmed that
-Claude in Chrome and the iOS app both offer account plugins (§3). What remains
-is whether a plugin *he* uploads reaches them too, not just Anthropic's (§5
-step 3).
+**Status: open — the upload test passed; three small checks remain** (§4).
 
-**Short answer: a likely replacement, pending one test.** A plugin enabled on
-the claude.ai account reaches chat on the web, the Desktop Chat tab, Cowork and
-every Claude Code session, and unlike the ZIP uploads it can be deleted. Claude
-in Chrome and the iOS app, the two surfaces the ZIP uploads exist for
-([ADR 0002](../decisions/0002-limit-account-store-to-repo-independent-skills.md)),
-also offer Anthropic's plugins. If a personal test plugin reaches them too, the
-plugin channel covers everything the ZIP uploads do. `sync-skills` stays until
-that test is done.
+**Short answer: yes, it can replace the ZIP uploads.** On 2026-09-23 Adam
+uploaded a throwaway personal plugin, `e6-probe`. Its skill returned its unique
+token in the iOS app, the Claude in Chrome side panel, claude.ai chat,
+claude.ai Cowork and the Desktop Chat tab (§3.5). Those include both surfaces
+the ZIP uploads exist for
+([ADR 0002](../decisions/0002-limit-account-store-to-repo-independent-skills.md)).
+Plugins can also be deleted, which the ZIP uploads cannot. It did **not**
+appear in Desktop Cowork (the local Cowork tab), and that result counts only
+once a control is checked there. Personal uploads reach Claude Code only
+through the `My Uploads` marketplace, not the regular sync (§3.5).
+`sync-skills` stays until §4's checks are done.
 
 Tracked in [#160](https://github.com/Adam-S-Daniel/agentskills/issues/160).
 [#158](https://github.com/Adam-S-Daniel/agentskills/issues/158) waits on the
@@ -27,8 +27,9 @@ added on the account to produce this document.
 |---|---|---|
 | chat (web), Desktop Chat tab, Cowork | yes | yes — documented |
 | Claude Code terminal and cloud sessions | yes | yes — documented and measured |
-| **Claude in Chrome** | yes | **yes** for Anthropic's plugins (measured 2026-09-23); a personal plugin is untested |
-| **Mobile app (iOS)** | yes | **yes** for Anthropic's plugins (measured 2026-09-23); a personal plugin is untested |
+| **Claude in Chrome** | yes | **yes**, including a personal upload (measured 2026-09-23) |
+| **Mobile app (iOS)** | yes | **yes**, including a personal upload (measured 2026-09-23) |
+| Desktop Cowork (local) | not checked | **personal upload not found**; control not yet checked |
 | Can be deleted | only by hand in the UI; the uploader has no delete | yes, at four layers (§2.3) |
 | Needs an uploader | yes — a browser session, one skill at a time | no, if a personal marketplace can sync from this repo (§5 step 4) |
 | Pinned to a commit | no — whatever was last uploaded | no — follows the latest version (§2.4) |
@@ -172,15 +173,48 @@ Both plugin results are from Anthropic's default `knowledge-work-plugins`
 marketplace. They show that the surfaces load account plugins, but not yet
 that a plugin Adam uploads himself arrives the same way.
 
+### 3.5 The upload test: a personal plugin (2026-09-23)
+
+`e6-probe`: one plugin, one skill, which replies with exactly
+`E6-PROBE-GRMFYBS7`. Uploaded by Adam through Customize → Plugins → Personal
+plugins. The skill uploader rejects a plugin zip ("A skill cannot contain a
+plugin manifest"), so the two doors really are separate. The zip has to
+contain exactly one top-level folder.
+
+| Surface | Token returned |
+|---|---|
+| iOS app | **yes** |
+| Claude in Chrome side panel | **yes** |
+| claude.ai chat | **yes** |
+| claude.ai Cowork | **yes** |
+| Claude Desktop, Chat tab | **yes** |
+| Claude Desktop, Cowork tab (local) | **no** — counts only once a control (`design:design-critique` or `rename-pdfs`) is checked there in the same sitting |
+| Claude Code terminal (laptop) | not in the regular sync: at 18:16 UTC `claude plugin list` still showed only the six Anthropic plugins |
+
+**Where personal uploads live.** Since 2026-09-21 the command line has listed a
+claude.ai-hosted `My Uploads` marketplace (`claudeai-my-uploads`, "not added"),
+which the web UI does not show (§3). This test explains it: personal uploads
+sit in that marketplace, and the regular sync does not bring them to Claude
+Code. A machine gets them by adding it with
+`claude plugin marketplace add --claudeai claudeai-my-uploads` — **inferred**,
+not yet run. For Claude Code this matters little, because repos already install
+this registry's bundles through the marketplace, pinned (ADR 0010).
+
 ## 4. What is still unknown
 
-1. **Does a personal plugin reach Chrome and iOS too?** This is the deciding
-   question now (§5 step 3).
-2. Does a personal marketplace accept a public repo, and does it follow `main`?
-3. Does `syncClaudeAiPlugins: false` move plugins to `.trash`? This is documented
-   but not yet witnessed.
-4. What the CLI's `My Uploads` listing and the four `backingPluginId`s are.
-   Neither is visible in the UI.
+1. **Desktop Cowork:** is the missing token real? Check `design:design-critique`
+   and `rename-pdfs` there. If neither appears, the check failed and records
+   nothing. If a control appears but `e6-probe` doesn't, local Cowork doesn't
+   receive personal plugins.
+2. **Removal:** delete `e6-probe` on claude.ai and confirm it disappears from
+   at least one surface. This is the property that justifies switching.
+3. **Repo-synced route:** does a personal marketplace accept this public repo,
+   and does it follow `main`? This decides whether the uploader can go
+   entirely, or whether uploads just change from ZIP files to plugin files.
+4. Does `syncClaudeAiPlugins: false` move plugins to `.trash`? This is
+   documented but not yet witnessed; it isn't needed for the decision.
+5. What the four `backingPluginId`s on uploaded skills are. Nothing depends on
+   them.
 
 ## 5. How to finish it
 
@@ -190,13 +224,14 @@ control *is* found. Otherwise the result is void.
 
 1. **Claude in Chrome** — **done 2026-09-23: found** (§3.4).
 2. **Mobile app** — **done 2026-09-23 on iOS: found** (§3.4).
-3. **Next:** upload a throwaway test plugin whose one skill replies with a
-   unique token, and repeat the check on all five surfaces. The six Anthropic plugins arrive through a default marketplace, so
-   they don't prove a *personal* plugin would. Then turn the test plugin off and
-   confirm it disappears everywhere.
-4. **Only if step 3 passes:** add `Adam-S-Daniel/agentskills` as a personal
-   marketplace. Record whether a public repo is accepted, then how long a pushed
-   change takes to arrive.
+3. **Upload test** — **done 2026-09-23: token on five surfaces**, not in
+   Desktop Cowork (§3.5). Still to do: the Desktop Cowork control, then delete
+   `e6-probe` and confirm it disappears (§4 items 1–2).
+4. **Next:** add `Adam-S-Daniel/agentskills` as a personal marketplace
+   (Customize → Plugins → "+" → Add marketplace → Add from a repository).
+   Record whether a public repo is accepted, then how long a pushed change
+   takes to arrive. Remove the marketplace afterwards; this repo's bundles
+   should not stay on the account (§3.2).
 
 | Result | Meaning | Action |
 |---|---|---|
@@ -210,11 +245,13 @@ control *is* found. Otherwise the result is void.
 
 1. **Keep `sync-skills`, `--verify` and the
    [ADR 0006](../decisions/0006-drive-the-account-store-drift-loop-from-one-published-artifact.md)
-   drift loop unchanged** until §5 step 3 is done.
-2. **Run the upload test next (§5 step 3).** Chrome and iOS both passed the
-   free check, so this one test now decides whether the plugin channel can
-   replace the uploader. Upload one throwaway plugin, check all five surfaces,
-   then delete it. Deletion is documented, so nothing is left behind.
+   drift loop unchanged** until §4 items 1–3 are answered. Then retire them
+   in a new ADR that amends ADR 0002's "one-way door" consequence.
+2. **Plan the switch to a dedicated personal plugin.** It would hold exactly
+   the skills the account carries today (§3.2), be uploaded as one plugin file
+   or synced from the repo (§4 item 3), and be deletable. Creating it moves
+   skills between bundles, which touches the append-only `renames` map, so it
+   needs the adversarial review round in AGENTS.md before merge.
 3. **Do not enable this repo's bundles on the account** (§3.2).
 4. **For #158: leave `syncClaudeAiPlugins` unset, but not because it is free.**
    [ADR 0010](../decisions/0010-let-pinned-channels-own-the-terminal.md)
@@ -225,8 +262,10 @@ control *is* found. Otherwise the result is void.
    experiment might adopt. The cost is the six Anthropic plugins (§3.1). The
    better lever is turning off, on claude.ai, the ones not used. That applies
    to every surface and is reversible.
-5. **Ignore `My Uploads` and `backingPluginId` for now.** Neither is visible in
-   the UI and nothing depends on them. Re-read them if the UI changes.
+5. **Leave `My Uploads` un-added in Claude Code.** Terminals already get this
+   registry's skills pinned through the marketplace (ADR 0010). Adding it would
+   load personal uploads into every repo session, which is ADR 0002's
+   objection.
 
 ## 7. Reproducing (read-only)
 
