@@ -12087,9 +12087,12 @@ def test_the_generator_refuses_a_symlinked_skill_directory(tmp_path):
     link = root / "plugins" / "beta" / "skills" / "one"
     link.parent.mkdir(parents=True)
     try:
-        os.symlink("../../alpha/skills/one", link, target_is_directory=True)
+        # Native separators: a Windows symlink whose target uses '/' dangles.
+        os.symlink(os.path.join("..", "..", "alpha", "skills", "one"), link,
+                   target_is_directory=True)
     except (OSError, NotImplementedError):
         pytest.skip("this machine cannot create symlinks")
+    assert (link / "SKILL.md").is_file(), "the fixture link does not resolve"
     with pytest.raises(gsl.GeneratorError, match="is a symlink"):
         gsl.collect_skills(root, ["beta"])
 
@@ -12112,5 +12115,11 @@ def test_the_hook_reader_refuses_a_lock_naming_the_account_plugin(tmp_path, wher
 
 def test_the_two_unlockable_lists_agree():
     """The generator's constant and the hook's are one rule in two programs."""
-    block = _extract_hook_lock_reader()
-    assert f"UNLOCKABLE_BUNDLES = {gsl.UNLOCKABLE_BUNDLES!r}" in block
+    import ast
+    values = [
+        ast.literal_eval(node.value)
+        for node in ast.walk(ast.parse(_extract_hook_lock_reader()))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "UNLOCKABLE_BUNDLES" for t in node.targets)
+    ]
+    assert values == [gsl.UNLOCKABLE_BUNDLES]

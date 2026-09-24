@@ -111,9 +111,11 @@ def test_a_symlinked_skill_directory_is_not_scanned_twice(tmp_path):
     link = tmp_path / "plugins" / "personal" / "skills" / "good-skill"
     link.parent.mkdir(parents=True)
     try:
-        os.symlink("../../alpha/skills/good-skill", link, target_is_directory=True)
+        os.symlink(os.path.join("..", "..", "alpha", "skills", "good-skill"), link,
+                   target_is_directory=True)
     except (OSError, NotImplementedError):
         pytest.skip("this machine cannot create symlinks")
+    assert (link / "SKILL.md").is_file(), "the fixture link does not resolve"
     report = run_tool(tmp_path, [registry_entry("alpha", ".", "plugins/*/skills/*/SKILL.md")])
     assert report.errors == []
     assert report.skills_scanned == 1

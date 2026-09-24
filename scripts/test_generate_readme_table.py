@@ -151,7 +151,8 @@ def test_a_federated_bundle_renders_exactly_one_row_naming_its_repo(plugins_dir)
 def _link(path: Path, target: str, real: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if real:
-        os.symlink(target, path, target_is_directory=True)
+        # Native separators: a Windows symlink whose target uses '/' dangles.
+        os.symlink(target.replace("/", os.sep), path, target_is_directory=True)
     else:
         path.write_text(target, encoding="utf-8")
 

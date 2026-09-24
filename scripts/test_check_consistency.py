@@ -361,7 +361,10 @@ def make_link(path: Path, target: str, real: bool) -> None:
     (core.symlinks=true) or a file holding the target (core.symlinks=false)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if real:
-        os.symlink(target, path, target_is_directory=True)
+        # Native separators: a Windows symlink whose target uses '/' dangles.
+        os.symlink(target.replace("/", os.sep), path, target_is_directory=True)
+        assert (path / "SKILL.md").is_file() or not target.startswith("../../alpha/"), \
+            "the fixture link does not resolve"
     else:
         path.write_text(target, encoding="utf-8")
 
@@ -416,7 +419,8 @@ def test_a_declared_skill_with_no_link_is_reported(account_tree):
 
 def test_an_undeclared_link_is_reported(account_tree):
     errors = account_errors(account_tree, declared={"one"})
-    assert any("skills/two" in e and "not declared" in e for e in errors), errors
+    assert any(e.replace("\\", "/").endswith("skills/two is not declared in account-skills.txt")
+               for e in errors), errors
 
 
 def remove_link(path: Path) -> None:

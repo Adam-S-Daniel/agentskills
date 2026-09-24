@@ -377,7 +377,8 @@ def write_link(repo: Path, rel: str, target: str, real: bool) -> None:
     path = repo / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     if real:
-        os.symlink(target, path, target_is_directory=True)
+        # Native separators: a Windows symlink whose target uses '/' dangles.
+        os.symlink(target.replace("/", os.sep), path, target_is_directory=True)
         return
     _git(repo, "config", "core.symlinks", "false")
     path.write_text(target, encoding="utf-8", newline="")

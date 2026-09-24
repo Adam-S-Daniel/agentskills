@@ -1012,9 +1012,11 @@ class TestPluginLayout:
         link = repo_plugin_layout / "plugins" / "a-personal" / "skills" / "skill-a"
         link.parent.mkdir(parents=True)
         try:
-            os.symlink("../../skill-a/skills/skill-a", link, target_is_directory=True)
+            os.symlink(os.path.join("..", "..", "skill-a", "skills", "skill-a"), link,
+                       target_is_directory=True)
         except (OSError, NotImplementedError):
             pytest.skip("this machine cannot create symlinks")
+        assert (link / "SKILL.md").exists(), "the fixture link does not resolve"
         d = _skill_dir(repo_plugin_layout, "skill-a")
         assert d == repo_plugin_layout / "plugins" / "skill-a" / "skills" / "skill-a"
         assert get_all_skills(repo_plugin_layout) == ["skill-a", "skill-b"]

@@ -71,9 +71,11 @@ def test_a_symlinked_skill_directory_is_collected_once(tmp_path):
     link = plugins_dir / "personal" / "skills" / "one"
     link.parent.mkdir(parents=True)
     try:
-        os.symlink("../../alpha/skills/one", link, target_is_directory=True)
+        os.symlink(os.path.join("..", "..", "alpha", "skills", "one"), link,
+                   target_is_directory=True)
     except (OSError, NotImplementedError):
         pytest.skip("this machine cannot create symlinks")
+    assert (link / "SKILL.md").is_file(), "the fixture link does not resolve"
     assert collect(tmp_path, plugins_dir) == ["alpha/skills/one"]
 
 
