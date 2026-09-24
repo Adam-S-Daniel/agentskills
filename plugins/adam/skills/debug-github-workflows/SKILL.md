@@ -102,3 +102,23 @@ If `gh` commands fail silently in CI:
 - Verify the secret name matches: `${{ secrets.SECRET_NAME }}`
 - Check `permissions:` in the workflow YAML
 - Ensure the token has correct scopes (repo, read:org, etc.)
+
+### A Runs Listing Can Return a Stale Snapshot
+
+**Problem**: The per-workflow runs listing
+(`/actions/workflows/<id>/runs?event=schedule&per_page=20`) intermittently
+returned a snapshot about 3 weeks old, while the repo-wide listing
+(`/actions/runs?event=schedule&created>=…`), fetched seconds earlier, already
+held the recent runs. Not reproducible on retry (15/15 calls came back
+current) — an intermittent staleness, not a permanent API quirk. It caused
+false "no recent success" alerts
+([jodidaniel.com#264](https://github.com/jodidaniel/jodidaniel.com/issues/264),
+fixed in
+[cms-platform#459](https://github.com/Adam-S-Daniel/cms-platform/pull/459)).
+
+**Fix**: Before asserting absence — "no successful run", "no run at all" —
+from one runs listing, cross-check against a second, independent listing
+(per-workflow vs. repo-wide, or vice versa). A listing that omits a run
+another listing already returned is a stale read, which means "could not
+tell," never a finding. Also compare `run_attempt` and `updated_at` across the
+two to rule out a re-run being mistaken for a missing one.
