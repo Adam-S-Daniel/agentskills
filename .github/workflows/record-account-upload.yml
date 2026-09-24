@@ -36,7 +36,7 @@ jobs:
   record:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # The artifact's commit has to be reachable to digest the tree it was
           # built from; a shallow clone usually cannot see it.
