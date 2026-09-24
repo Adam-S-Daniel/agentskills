@@ -16,7 +16,9 @@ hardcoded):
   - every CURATED entry (source "./", the marketplace root, with
     "strict": false — the entry is the plugin's whole definition) lists
     existing plugins/<bundle>/skills/<skill> directories, is opt-in, carries
-    a version, and is not shadowed by a plugins/<name>/ directory;
+    a version, carries no key outside CURATED_ENTRY_KEYS, and is not shadowed
+    by a plugins/<name>/ directory — and while one exists, no default plugin
+    component (CURATED_ROOT_COMPONENTS) sits at the repository root;
   - the account plugin (ACCOUNT_PLUGIN, ADR 0012) lists exactly the skills
     account-skills.txt declares — that file stays the one declaration;
   - every plugins/*/skills/*/ directory contains a SKILL.md;
@@ -38,6 +40,7 @@ Usage:
 import argparse
 import importlib.util
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -60,6 +63,53 @@ CURATED_SOURCE = "./"
 # is DERIVED — it must equal the names in ACCOUNT_SKILLS_PATH, which stays the
 # single declaration of account membership that sync_skills.py --verify reads.
 ACCOUNT_PLUGIN = "adam-personal"
+
+# The display-only keys of a marketplace entry: what users SEE in listings, not
+# what the plugin loads (code.claude.com/docs/en/plugin-marketplaces, "Both the
+# entry and the plugin's own plugin.json can set the display fields
+# displayName, description, author, homepage, repository, license, and
+# keywords", plus the marketplace's own `category` and `tags`). A change to
+# one of these alone does not change what the plugin delivers, so
+# check_plugin_versions.py does not demand a bump for it.
+CURATED_DISPLAY_KEYS = frozenset({
+    "displayName", "description", "author", "homepage", "repository",
+    "license", "keywords", "category", "tags",
+})
+
+# Every key a curated entry may carry. CLOSED on purpose: a strict:false entry
+# is the plugin's whole definition, so `hooks`, `mcpServers`, `lspServers`,
+# `agents`, `commands`, `workflows`, `outputStyles`, `experimental`,
+# `userConfig`, `channels`, `dependencies`, `settings` ... added here would
+# become part of the account plugin — code that runs on every surface the
+# account reaches — with no check of this repo's looking at it. An allowlist,
+# not a denylist, so a component field the docs add next year is refused too.
+CURATED_ENTRY_KEYS = CURATED_DISPLAY_KEYS | {
+    "name", "source", "strict", "version", "defaultEnabled", "skills",
+}
+
+# Default component locations at a plugin root
+# (code.claude.com/docs/en/plugins-reference, "File locations reference", plus
+# the root SKILL.md single-skill layout). A curated entry's plugin root IS the
+# repository root. The docs give `skills` a marketplace-root exception; they do
+# not say strict:false suppresses default discovery of anything else. So none
+# of these may exist at the repo root while a curated entry does, or it would
+# join the account plugin silently.
+CURATED_ROOT_COMPONENTS = (
+    ".claude-plugin/plugin.json",
+    "SKILL.md",
+    "skills",
+    "commands",
+    "agents",
+    "workflows",
+    "output-styles",
+    "themes",
+    "hooks",
+    "monitors",
+    "bin",
+    ".mcp.json",
+    ".lsp.json",
+    "settings.json",
+)
 SYNC_SKILLS_DIR = PLUGINS_DIR / "adam-local" / "skills" / "sync-skills"
 ACCOUNT_SKILLS_PATH = SYNC_SKILLS_DIR / "account-skills.txt"
 
@@ -322,6 +372,14 @@ def _check_curated_entry(entry: dict, errors: List[str], plugins_dir: Path) -> N
         plugin.json to carry it, so the entry does.
     """
     name = entry["name"]
+    unknown = sorted(set(entry) - CURATED_ENTRY_KEYS)
+    if unknown:
+        errors.append(
+            f"marketplace.json entry '{name}' is curated but carries "
+            f"{', '.join(repr(key) for key in unknown)}; a curated entry may carry "
+            f"only {', '.join(sorted(CURATED_ENTRY_KEYS))} — anything else (hooks, "
+            "MCP/LSP servers, agents, commands ...) would join the plugin unchecked"
+        )
     if entry.get("strict") is not False:
         errors.append(
             f"marketplace.json entry '{name}' has source '{CURATED_SOURCE}' but not "
@@ -375,7 +433,13 @@ def _check_curated_entry(entry: dict, errors: List[str], plugins_dir: Path) -> N
         )
 
 
-def _load_account_declaration(path: Path) -> Optional[Set[str]]:
+class AccountDeclarationReaderMissing(Exception):
+    """sync_skills.py, or its load_account_declaration(), could not be loaded."""
+
+
+def _load_account_declaration(
+    path: Path, reader_path: Optional[Path] = None
+) -> Optional[Set[str]]:
     """Parse account-skills.txt with sync_skills.py's own reader.
 
     Loaded by path, not re-implemented: that reader is what `--verify` uses, so
@@ -383,13 +447,30 @@ def _load_account_declaration(path: Path) -> Optional[Set[str]]:
     the plugin and the declaration it is checked against would silently mean
     different things. sync_skills.py is stdlib-only with no import-time side
     effects beyond computing paths.
+
+    Raises AccountDeclarationReaderMissing, never a bare AttributeError or
+    FileNotFoundError, when the reader is gone — ADR 0012's phase 3 retires
+    sync-skills' upload path, and whoever does that must see this check name
+    what it depends on rather than crash.
     """
-    spec = importlib.util.spec_from_file_location(
-        "_sync_skills_account_declaration", SYNC_SKILLS_DIR / "sync_skills.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.load_account_declaration(path)
+    reader_path = reader_path or SYNC_SKILLS_DIR / "sync_skills.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_sync_skills_account_declaration", reader_path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no loader for {reader_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reader = module.load_account_declaration
+    except (OSError, ImportError, SyntaxError, AttributeError) as exc:
+        raise AccountDeclarationReaderMissing(
+            f"cannot load load_account_declaration() from {_rel(reader_path)} "
+            f"({type(exc).__name__}: {exc}); check_consistency.py reads "
+            "account-skills.txt with it (ADR 0012) — keep it, or move the parser "
+            "and point check_consistency.py's _load_account_declaration at its new home"
+        ) from exc
+    return reader(path)
 
 
 def expected_account_skill_paths(
@@ -441,7 +522,11 @@ def check_account_plugin(
         )
         return
     if declared is None:
-        declared = _load_account_declaration(ACCOUNT_SKILLS_PATH)
+        try:
+            declared = _load_account_declaration(ACCOUNT_SKILLS_PATH)
+        except AccountDeclarationReaderMissing as exc:
+            errors.append(str(exc))
+            return
     if declared is None:
         errors.append(f"{_rel(ACCOUNT_SKILLS_PATH)} is missing or unreadable")
         return
@@ -457,6 +542,29 @@ def check_account_plugin(
             f"marketplace.json entry '{ACCOUNT_PLUGIN}' lists '{path}', which "
             "account-skills.txt does not declare"
         )
+
+
+def check_curated_root_components(
+    marketplace: dict, errors: List[str], repo_root: Path = REPO_ROOT
+) -> None:
+    """No default plugin component may sit at the repo root while a curated
+    ("./") entry exists — see CURATED_ROOT_COMPONENTS."""
+    curated = [
+        entry.get("name") for entry in marketplace.get("plugins", [])
+        if isinstance(entry, dict) and classify_source(entry)[0] == "curated"
+    ]
+    if not curated:
+        return
+    for rel in CURATED_ROOT_COMPONENTS:
+        # lexists: a dangling symlink at one of these names is still something
+        # a loader might follow.
+        if os.path.lexists(repo_root / rel):
+            errors.append(
+                f"{rel} exists at the repository root, which is the plugin root of "
+                f"curated entr{'y' if len(curated) == 1 else 'ies'} "
+                f"{', '.join(repr(n) for n in curated)}; Claude Code may load it as "
+                "part of that plugin (ADR 0012) — move it or drop the curated entry"
+            )
 
 
 def check_marketplace_entries(
@@ -607,6 +715,7 @@ def main() -> None:
     errors: List[str] = []
     check_marketplace_entries(marketplace, errors)
     check_account_plugin(marketplace, errors)
+    check_curated_root_components(marketplace, errors)
     check_skill_md_present(errors)
     check_renames(marketplace, errors)
     check_unique_skill_basenames(errors)

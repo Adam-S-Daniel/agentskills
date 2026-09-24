@@ -78,7 +78,11 @@ from check_agent_plugins import CLAUDE_MANIFEST, ROOT_MANIFEST, discover_bundles
 
 # Same reuse for the curated entries (ADR 0012): "is this entry curated" and
 # "which directories make it up" have one answer, in check_consistency.py.
-from check_consistency import classify_source, curated_skill_paths  # noqa: E402
+from check_consistency import (  # noqa: E402
+    CURATED_DISPLAY_KEYS,
+    classify_source,
+    curated_skill_paths,
+)
 
 MARKETPLACE_REL = ".claude-plugin/marketplace.json"
 
@@ -337,6 +341,14 @@ def _entry_version(entry: dict, location: str) -> Tuple[str, Tuple[int, int, int
     return raw_version, parsed
 
 
+def _definition(entry: dict) -> dict:
+    """The part of a curated entry that decides what the plugin loads: every
+    key but the display keys, `version` and `skills` (compared separately, as
+    a set)."""
+    ignored = CURATED_DISPLAY_KEYS | {"version", "skills"}
+    return {key: value for key, value in entry.items() if key not in ignored}
+
+
 def check_curated_entries(
     repo_root: Path, base: str, problems: List[str], notices: List[str]
 ) -> int:
@@ -345,8 +357,10 @@ def check_curated_entries(
     A curated entry (source "./", "strict": false) has no plugin directory, so
     discover_bundles() never sees it — but `plugin update` gates on its version
     exactly as it does on a bundle's (ADR 0009). Its content is the skill
-    directories it lists, so: if any listed directory changed since `base`, or
-    the list itself did (a skill added or dropped), the entry's `version` in
+    directories it lists plus the entry's own non-display keys, so: if any
+    listed directory changed since `base`, or the list itself did (a skill
+    added or dropped), or any key outside CURATED_DISPLAY_KEYS and `version`
+    did (strict, defaultEnabled, a component field), the entry's `version` in
     marketplace.json must be strictly above its value at `base`. An entry that
     was not curated at `base` is new and needs no bump. Returns how many
     curated entries were checked.
@@ -382,6 +396,12 @@ def check_curated_entries(
         cur_paths = set(curated_skill_paths(entry))
         base_paths = set(curated_skill_paths(base_entry))
         membership_changed = cur_paths != base_paths
+        # Any other change to what the entry DEFINES — strict, defaultEnabled,
+        # or a component key check_consistency.py would refuse anyway — is a
+        # change to the plugin too. Only display keys and the version itself
+        # are exempt; the skills list is compared as a set above, so a reorder
+        # alone is not a change.
+        definition_changed = _definition(entry) != _definition(base_entry)
         changed: List[str] = []
         entry_problems: List[str] = []
         for skill_path in sorted(cur_paths | base_paths):
@@ -402,7 +422,7 @@ def check_curated_entries(
             problems.extend(entry_problems)
             continue
 
-        if not changed and not membership_changed:
+        if not changed and not membership_changed and not definition_changed:
             notices.append(f"{name}: unchanged since {base} — no bump required")
             continue
 
@@ -415,7 +435,12 @@ def check_curated_entries(
             problems.append(f"{name}: {exc}")
             continue
         if not (cur_parsed > base_parsed):
-            what = "its skills list changed" if membership_changed else "a listed skill changed"
+            if membership_changed:
+                what = "its skills list changed"
+            elif definition_changed:
+                what = "its entry changed beyond display fields"
+            else:
+                what = "a listed skill changed"
             problems.append(
                 f"{name}: {MARKETPLACE_REL} version did not increase although "
                 f"{what} — {base} has {base_raw!r}, working tree has {cur_raw!r}. "

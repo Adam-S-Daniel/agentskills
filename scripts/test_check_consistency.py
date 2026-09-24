@@ -419,6 +419,71 @@ def test_a_curated_entry_shadowed_by_a_plugin_directory_is_reported(curated_tree
     assert any("cannot be both" in e for e in errors_for(market, curated_tree))
 
 
+@pytest.mark.parametrize("key", [
+    "hooks", "mcpServers", "lspServers", "agents", "commands", "workflows",
+    "outputStyles", "monitors", "experimental", "settings", "userConfig",
+    "channels", "dependencies", "headersHelper", "metadata", "not-a-real-key",
+])
+def test_a_curated_entry_carrying_a_non_allowlisted_key_is_reported(curated_tree, key):
+    market = marketplace(local_entry("alpha"), curated_entry(**{key: {}}))
+    errors = errors_for(market, curated_tree)
+    assert any("may carry only" in e and repr(key) in e for e in errors), errors
+
+
+def test_every_allowlisted_key_is_accepted(curated_tree):
+    display = {key: "x" for key in cc.CURATED_DISPLAY_KEYS}
+    market = marketplace(local_entry("alpha"), curated_entry(**display))
+    assert errors_for(market, curated_tree) == []
+
+
+@pytest.mark.parametrize("rel", cc.CURATED_ROOT_COMPONENTS)
+def test_a_root_component_beside_a_curated_entry_is_reported(tmp_path, rel):
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if "." in Path(rel).name:
+        path.write_text("{}", encoding="utf-8")
+    else:
+        path.mkdir()
+    found = []
+    cc.check_curated_root_components(marketplace(curated_entry()), found, repo_root=tmp_path)
+    assert len(found) == 1 and found[0].startswith(f"{rel} exists at the repository root")
+
+
+def test_root_components_are_fine_without_a_curated_entry(tmp_path):
+    (tmp_path / "hooks").mkdir()
+    found = []
+    cc.check_curated_root_components(marketplace(local_entry("alpha")), found, repo_root=tmp_path)
+    assert found == []
+
+
+def test_the_shipped_root_carries_no_default_component():
+    found = []
+    cc.check_curated_root_components(cc.load_marketplace(), found)
+    assert found == []
+
+
+def test_a_missing_declaration_reader_is_a_named_error(tmp_path):
+    with pytest.raises(cc.AccountDeclarationReaderMissing, match="load_account_declaration"):
+        cc._load_account_declaration(cc.ACCOUNT_SKILLS_PATH, reader_path=tmp_path / "absent.py")
+
+
+def test_a_reader_without_the_function_is_a_named_error(tmp_path):
+    reader = tmp_path / "sync_skills.py"
+    reader.write_text("X = 1\n", encoding="utf-8")
+    with pytest.raises(cc.AccountDeclarationReaderMissing, match="AttributeError"):
+        cc._load_account_declaration(cc.ACCOUNT_SKILLS_PATH, reader_path=reader)
+
+
+def test_check_account_plugin_reports_a_missing_reader_instead_of_crashing(curated_tree, monkeypatch):
+    def missing(path):
+        raise cc.AccountDeclarationReaderMissing("cannot load load_account_declaration()")
+    monkeypatch.setattr(cc, "_load_account_declaration", missing)
+    market = marketplace(account_entry(["./plugins/alpha/skills/one"]))
+    found = []
+    cc.check_account_plugin(market, found, plugins_dir=curated_tree)
+    assert found == ["cannot load load_account_declaration()"]
+
+
 def account_errors(market, plugins_dir, declared):
     found = []
     cc.check_account_plugin(market, found, plugins_dir=plugins_dir, declared=declared)

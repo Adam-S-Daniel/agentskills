@@ -360,9 +360,10 @@ def test_no_bundles_found_fails(tmp_path):
 # changed => the entry's version in marketplace.json moved up.
 # ---------------------------------------------------------------------------
 
-def write_marketplace(repo_root: Path, curated_skills, version: str = "1.0.0") -> None:
+def write_marketplace(repo_root: Path, curated_skills, version: str = "1.0.0", **extra) -> None:
     """A marketplace.json with a local entry per bundle dir plus, when
-    curated_skills is not None, one curated entry named `personal`."""
+    curated_skills is not None, one curated entry named `personal` (with any
+    `extra` keys merged into it)."""
     plugins = [
         {"name": d.name, "source": f"./plugins/{d.name}"}
         for d in sorted((repo_root / "plugins").iterdir())
@@ -373,6 +374,7 @@ def write_marketplace(repo_root: Path, curated_skills, version: str = "1.0.0") -
             "name": "personal", "source": "./", "strict": False,
             "version": version, "defaultEnabled": False,
             "skills": list(curated_skills),
+            **extra,
         })
     _write(repo_root / ".claude-plugin" / "marketplace.json",
            {"name": "fixture", "plugins": plugins})
@@ -447,6 +449,64 @@ def test_curated_skills_list_changed_without_bump_fails(tmp_path):
     assert result.returncode != 0, result.stdout + result.stderr
     assert "FAIL: personal:" in result.stdout
     assert "skills list changed" in result.stdout
+
+
+@pytest.mark.parametrize("extra", [
+    {"hooks": {"SessionStart": []}},
+    {"mcpServers": {"x": {"command": "x"}}},
+    {"defaultEnabled": True},
+])
+def test_curated_entry_definition_changed_without_bump_fails(tmp_path, extra):
+    # No skill file and no list entry moved; the entry grew or flipped a key
+    # that changes what the plugin does, so the bump is owed.
+    repo, base = curated_fixture(tmp_path)
+    write_marketplace(repo, ["./plugins/alpha/skills/x"], **extra)
+
+    result = run_gate(base, repo)
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "FAIL: personal:" in result.stdout
+    assert "beyond display fields" in result.stdout
+
+
+def test_curated_entry_definition_changed_with_bump_passes(tmp_path):
+    repo, base = curated_fixture(tmp_path)
+    write_marketplace(repo, ["./plugins/alpha/skills/x"], version="1.1.0",
+                      hooks={"SessionStart": []})
+
+    result = run_gate(base, repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "personal: content changed" in result.stdout
+
+
+def test_curated_entry_display_fields_changed_needs_no_bump(tmp_path):
+    repo, base = curated_fixture(tmp_path)
+    write_marketplace(repo, ["./plugins/alpha/skills/x"],
+                      description="new words", category="c", keywords=["k"],
+                      tags=["t"], author={"name": "A"}, homepage="https://example.com",
+                      displayName="Personal", repository="https://example.com/r",
+                      license="MIT")
+
+    result = run_gate(base, repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "personal: unchanged" in result.stdout
+
+
+def test_curated_skills_reordered_needs_no_bump(tmp_path):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    write_bundle(repo, "alpha", "1.0.0")
+    write_bundle(repo, "beta", "1.0.0")
+    write_marketplace(repo, ["./plugins/alpha/skills/x", "./plugins/beta/skills/x"])
+    base = commit_all(repo, "base")
+    write_marketplace(repo, ["./plugins/beta/skills/x", "./plugins/alpha/skills/x"])
+
+    result = run_gate(base, repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "personal: unchanged" in result.stdout
 
 
 def test_curated_entry_new_since_base_needs_no_bump(tmp_path):
