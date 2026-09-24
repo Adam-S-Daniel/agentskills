@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # entry local or federated". A second copy of that classification here is
 # exactly how the README and the consistency gate would come to disagree about
 # which bundles exist.
-from check_consistency import classify_source, curated_skill_paths, load_marketplace  # noqa: E402
+from check_consistency import classify_source, linked_skill_entries, load_marketplace  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGINS_DIR = REPO_ROOT / "plugins"
@@ -159,16 +159,18 @@ def federated_row(plugin: dict, repo: str) -> str:
     return _row(plugin_name, invocation, _first_sentence(plugin.get("description", "")))
 
 
-def curated_row(plugin: dict) -> str:
-    """The single row a curated plugin (source "./", ADR 0012) contributes.
+def linked_row(plugin: dict, names: List[str]) -> str:
+    """The single row a plugin of skill LINKS (ADR 0012) contributes.
 
     Its skills are bundle skills already rendered once under their bundle, so
     one row per skill here would list each of them twice. The row names them
-    instead, by directory basename, in the entry's order.
+    instead, by entry name, sorted. The entries are read as links whether the
+    checkout holds real symlinks or core.symlinks=false text files, so the
+    README renders identically on Linux and Windows.
     """
     plugin_name = plugin["name"]
-    names = ", ".join(f"`{path.rstrip('/').rsplit('/', 1)[-1]}`" for path in curated_skill_paths(plugin))
-    invocation = f"`/{plugin_name}:<skill>` — serves, in place: {names}"
+    listed = ", ".join(f"`{name}`" for name in names)
+    invocation = f"`/{plugin_name}:<skill>` — serves, in place: {listed}"
     return _row(plugin_name, invocation, _first_sentence(plugin.get("description", "")))
 
 
@@ -191,11 +193,13 @@ def collect_plugin_rows(
         plugin_name = plugin.get("name")
         kind, detail = classify_source(plugin)
         if kind == "local":
-            rows = local_rows(plugin, plugins_dir)
+            links = sorted(
+                name for name, target in
+                linked_skill_entries(plugins_dir / plugin_name).items() if target is not None
+            )
+            rows = [linked_row(plugin, links)] if links else local_rows(plugin, plugins_dir)
         elif kind == "federated":
             rows = [federated_row(plugin, detail)]
-        elif kind == "curated":
-            rows = [curated_row(plugin)] if curated_skill_paths(plugin) else []
         else:
             problems.append(
                 f"marketplace.json entry '{plugin_name}' {detail} — it cannot be "

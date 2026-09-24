@@ -13,14 +13,12 @@ hardcoded):
     entry (both directions);
   - every FEDERATED entry (a plugin root in another repo) is well-formed and
     is not shadowed by a local plugins/<name>/ directory of the same name;
-  - every CURATED entry (source "./", the marketplace root, with
-    "strict": false — the entry is the plugin's whole definition) lists
-    existing plugins/<bundle>/skills/<skill> directories, is opt-in, carries
-    a version, carries no key outside CURATED_ENTRY_KEYS, and is not shadowed
-    by a plugins/<name>/ directory — and while one exists, no default plugin
-    component (CURATED_ROOT_COMPONENTS) sits at the repository root;
-  - the account plugin (ACCOUNT_PLUGIN, ADR 0012) lists exactly the skills
-    account-skills.txt declares — that file stays the one declaration;
+  - the account plugin (ACCOUNT_PLUGIN, ADR 0012) is a plugin of SKILL
+    LINKS: plugins/adam-personal/skills/<name> is a git symlink to
+    ../../<bundle>/skills/<name> for exactly the names account-skills.txt
+    declares (that file stays the one declaration), every link resolves to a
+    real skill directory, the folder holds nothing but its manifests and
+    skills/, and its marketplace entry is opt-in and adds no components;
   - every plugins/*/skills/*/ directory contains a SKILL.md;
   - if marketplace.json has a "renames" map ({old-name: new-name-or-null},
     append-only forever — users may update from any old version), every
@@ -29,7 +27,9 @@ hardcoded):
     resolver's 16-hop depth limit, with no cycles, no self-mappings, and
     no key that shadows a current plugin name;
   - skill directory basenames are unique across the whole repo, since they
-    key setup.sh's per-agent symlinks and claude.ai skill uploads;
+    key setup.sh's per-agent symlinks and claude.ai skill uploads — a
+    symlinked skill entry is a second NAME for a skill, not a second skill,
+    and is not counted (see is_linked_skill_entry);
   - optionally, that no skill basename collides with one in another repo
     with the same plugins/*/skills/* layout (--private-registry PATH).
 
@@ -50,76 +50,39 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 PLUGINS_DIR = REPO_ROOT / "plugins"
 
-# The `source` of a CURATED entry: the marketplace root itself. With
-# "strict": false the entry is the plugin's entire definition and its `skills`
-# list is the complete set it loads (code.claude.com/docs/en/plugin-marketplaces,
-# "list specific subdirectories instead so each entry loads only its own
-# skills"). No other root spelling is accepted, so there is one shape to reason
-# about rather than several that mean the same thing.
-CURATED_SOURCE = "./"
-
-# The one curated entry this repo ships (ADR 0012): the skills the owner's
-# claude.ai account carries, served in place from their bundles. Its skill list
-# is DERIVED — it must equal the names in ACCOUNT_SKILLS_PATH, which stays the
-# single declaration of account membership that sync_skills.py --verify reads.
+# The account plugin (ADR 0012): the skills the owner's claude.ai account
+# carries, as a real plugin folder whose skills/<name> entries are git symlinks
+# (mode 120000) to ../../<bundle>/skills/<name>. claude.ai builds the plugin from
+# GitHub and resolves the links server-side (measured 2026-09-24, E6 §3.7); its
+# skill set is DERIVED — it must equal the names in ACCOUNT_SKILLS_PATH, which
+# stays the single declaration of account membership that sync_skills.py
+# --verify reads.
 ACCOUNT_PLUGIN = "adam-personal"
 
 # The display-only keys of a marketplace entry: what users SEE in listings, not
 # what the plugin loads (code.claude.com/docs/en/plugin-marketplaces, "Both the
 # entry and the plugin's own plugin.json can set the display fields
 # displayName, description, author, homepage, repository, license, and
-# keywords", plus the marketplace's own `category` and `tags`). A change to
-# one of these alone does not change what the plugin delivers, so
-# check_plugin_versions.py does not demand a bump for it.
-CURATED_DISPLAY_KEYS = frozenset({
+# keywords", plus the marketplace's own `category` and `tags`).
+DISPLAY_KEYS = frozenset({
     "displayName", "description", "author", "homepage", "repository",
     "license", "keywords", "category", "tags",
 })
 
-# Every key a curated entry may carry. CLOSED on purpose: a strict:false entry
-# is the plugin's whole definition, so `hooks`, `mcpServers`, `lspServers`,
-# `agents`, `commands`, `workflows`, `outputStyles`, `experimental`,
-# `userConfig`, `channels`, `dependencies`, `settings` ... added here would
-# become part of the account plugin — code that runs on every surface the
-# account reaches — with no check of this repo's looking at it. An allowlist,
-# not a denylist, so a component field the docs add next year is refused too.
-CURATED_ENTRY_KEYS = CURATED_DISPLAY_KEYS | {
-    "name", "source", "strict", "version", "defaultEnabled", "skills",
-}
+# Every key the account plugin's marketplace ENTRY may carry. Narrowed from the
+# curated-entry allowlist it replaces rather than dropped: with the default
+# strict mode, plugin.json is the authority but an entry can still ADD skills,
+# hooks, MCP servers and the rest on top of it — code that would run on every
+# surface the account reaches. `version` is refused too: plugin.json carries
+# it, and the docs warn that a plugin.json version silently masks an entry's.
+ACCOUNT_ENTRY_KEYS = DISPLAY_KEYS | {"name", "source", "defaultEnabled"}
 
-# Default component locations at a plugin root
-# (code.claude.com/docs/en/plugins-reference, "File locations reference", plus
-# the root SKILL.md single-skill layout). A curated entry's plugin root IS the
-# repository root. The docs give `skills` a marketplace-root exception; they do
-# not say strict:false suppresses default discovery of anything else. So none
-# of these may exist at the repo root while a curated entry does, or it would
-# join the account plugin silently.
-CURATED_ROOT_COMPONENTS = (
-    ".claude-plugin/plugin.json",
-    "SKILL.md",
-    "skills",
-    "commands",
-    "agents",
-    "workflows",
-    "output-styles",
-    "themes",
-    "hooks",
-    "monitors",
-    "bin",
-    ".mcp.json",
-    ".lsp.json",
-    "settings.json",
-    # Not a component, but the root of a cached copy: a package.json beside a
-    # supported lockfile makes Claude Code run `npm ci --ignore-scripts` or
-    # `bun install --frozen-lockfile --ignore-scripts` inside every cached
-    # version (plugins-reference, "Node.js package dependencies"). Each half
-    # is listed so neither can arrive alone and wait for the other.
-    "package.json",
-    "bun.lock",
-    "bun.lockb",
-    "npm-shrinkwrap.json",
-    "package-lock.json",
-)
+# What plugins/adam-personal/ may contain at its top level. Anything else would
+# join the plugin (hooks/, agents/, .mcp.json, bin/, settings.json, a
+# package.json that triggers an install in every cached copy ...), so the folder
+# is closed. plugin.json is the Agent Plugins manifest every sibling bundle
+# carries, kept so check_agent_plugins.py treats it like one.
+ACCOUNT_PLUGIN_TOP_LEVEL = frozenset({".claude-plugin", "plugin.json", "skills"})
 SYNC_SKILLS_DIR = PLUGINS_DIR / "adam-local" / "skills" / "sync-skills"
 ACCOUNT_SKILLS_PATH = SYNC_SKILLS_DIR / "account-skills.txt"
 
@@ -187,13 +150,6 @@ def classify_source(entry: dict) -> Tuple[str, str]:
                                     outside FEDERATED_SOURCE_FIELDS is
                                     invalid, not federated. See that constant
                                     for why the set is exactly {source, repo}.
-      ("curated",   "./")           The marketplace root (CURATED_SOURCE). Not
-                                    a bundle: there is no plugins/<name>/ and
-                                    no manifest; the entry's `skills` list,
-                                    under "strict": false, is the plugin.
-                                    Kept apart from "local" so no caller treats
-                                    the repo root as a bundle directory — see
-                                    _check_curated_entry().
       ("invalid",   "<reason>")     Anything else, phrased as a sentence
                                     fragment to follow the entry's name. An
                                     entry nobody can classify must FAIL rather
@@ -208,8 +164,6 @@ def classify_source(entry: dict) -> Tuple[str, str]:
     if "source" not in entry:
         return ("invalid", "has no 'source'")
     source = entry["source"]
-    if source == CURATED_SOURCE:
-        return ("curated", source)
     if isinstance(source, str):
         return ("local", source)
     if not isinstance(source, dict):
@@ -248,13 +202,54 @@ def classify_source(entry: dict) -> Tuple[str, str]:
     return ("federated", repo)
 
 
+def is_linked_skill_entry(path: Path) -> bool:
+    """True when a plugins/<plugin>/skills/<name> entry is a LINK, not a skill.
+
+    Two spellings of the same git object (mode 120000): a real symlink where
+    the checkout has core.symlinks=true (Linux, macOS), and a small regular FILE
+    whose content is the link target where it has core.symlinks=false — the
+    Windows default, so both Windows CI and the owner's Windows clone see this
+    one. Every consumer that enumerates skills asks this before counting,
+    linking, zipping or locking an entry, so the one skill behind a link is
+    never seen twice.
+    """
+    return path.is_symlink() or path.is_file()
+
+
+def read_skill_link(path: Path) -> Optional[str]:
+    """The target a linked skill entry names, '/'-separated; None if `path` is
+    a real directory (a copy, not a link) or does not exist."""
+    if path.is_symlink():
+        return os.readlink(path).replace("\\", "/")
+    if path.is_file():
+        return path.read_text(encoding="utf-8").strip()
+    return None
+
+
+def linked_skill_entries(plugin_dir: Path) -> Dict[str, Optional[str]]:
+    """{name: link target, or None for a real directory} for every entry in
+    plugin_dir/skills/. The one reader of "what does a plugin of links hold",
+    shared with generate_readme_table.py and check_plugin_versions.py."""
+    skills_dir = plugin_dir / "skills"
+    if not skills_dir.is_dir():
+        return {}
+    return {entry.name: read_skill_link(entry) for entry in sorted(skills_dir.iterdir())}
+
+
 def _skill_basenames(plugins_dir: Path) -> Dict[str, List[str]]:
-    """Map skill directory basename -> ['<plugin>/<skill>', ...] locations."""
+    """Map skill directory basename -> ['<plugin>/<skill>', ...] locations.
+
+    A linked entry (is_linked_skill_entry) is skipped: on a symlink-capable
+    checkout the glob follows it into the target, and counting that would
+    report every account skill as a duplicate of itself.
+    """
     locations: Dict[str, List[str]] = {}
     if not plugins_dir.is_dir():
         return locations
     for skill_md in sorted(plugins_dir.glob("*/skills/*/SKILL.md")):
         skill_dir = skill_md.parent
+        if is_linked_skill_entry(skill_dir):
+            continue
         plugin_name = skill_dir.parent.parent.name
         locations.setdefault(skill_dir.name, []).append(f"{plugin_name}/{skill_dir.name}")
     return locations
@@ -336,113 +331,6 @@ def _check_federated_entry(name: str, repo: str, errors: List[str], plugins_dir:
         )
 
 
-def curated_skill_paths(entry: dict) -> List[str]:
-    """The `skills` list of a curated entry, as given; [] when absent or not a
-    list of strings. Validation is _check_curated_entry's job — this is the one
-    reader the other scripts (README table, version gate) use to ask "which
-    directories make up this plugin"."""
-    skills = entry.get("skills")
-    if not isinstance(skills, list):
-        return []
-    return [path for path in skills if isinstance(path, str)]
-
-
-def _curated_skill_dir(path: str, plugins_dir: Path) -> Optional[Path]:
-    """Resolve one curated `skills` path to its skill directory, or None when
-    it is not exactly ./<plugins>/<bundle>/skills/<skill>.
-
-    The shape is pinned, not merely "somewhere under the root": a skill served
-    from anywhere else would be outside every bundle, so setup.sh, the
-    basename-uniqueness rule and skills.lock would all be blind to it. Split on
-    "/" (the marketplace's own separator on every OS) rather than handed to
-    Path, so "..", "." and empty segments are rejected instead of normalised
-    away.
-    """
-    parts = path.split("/")
-    if len(parts) != 5 or parts[0] != "." or parts[1] != plugins_dir.name or parts[3] != "skills":
-        return None
-    bundle, skill = parts[2], parts[4]
-    if bundle in ("", ".", "..") or skill in ("", ".", ".."):
-        return None
-    return plugins_dir / bundle / "skills" / skill
-
-
-def _check_curated_entry(entry: dict, errors: List[str], plugins_dir: Path) -> None:
-    """A curated entry has no plugin root of its own: its `skills` list is the
-    plugin. Check that list against the filesystem, and the three settings that
-    make it a curated plugin rather than an accident.
-
-      * "strict": false — without it Claude Code expects a plugin.json at the
-        source (the repo root, which has none) to define the components;
-      * "defaultEnabled": false — the same opt-in rule every federated entry
-        follows: installing it must never switch skills on in a repo session
-        (repos install the bundles, ADR 0010);
-      * a "version" — ADR 0009: `plugin update` gates on it, and
-        check_plugin_versions.py enforces the bump against it. There is no
-        plugin.json to carry it, so the entry does.
-    """
-    name = entry["name"]
-    unknown = sorted(set(entry) - CURATED_ENTRY_KEYS)
-    if unknown:
-        errors.append(
-            f"marketplace.json entry '{name}' is curated but carries "
-            f"{', '.join(repr(key) for key in unknown)}; a curated entry may carry "
-            f"only {', '.join(sorted(CURATED_ENTRY_KEYS))} — anything else (hooks, "
-            "MCP/LSP servers, agents, commands ...) would join the plugin unchecked"
-        )
-    if entry.get("strict") is not False:
-        errors.append(
-            f"marketplace.json entry '{name}' has source '{CURATED_SOURCE}' but not "
-            '"strict": false; a marketplace-root entry must be its own whole '
-            "definition, since the root carries no plugin.json"
-        )
-    if entry.get("defaultEnabled") is not False:
-        errors.append(
-            f"marketplace.json entry '{name}' is curated from the marketplace root "
-            'but not "defaultEnabled": false; it must arrive switched off'
-        )
-    if not isinstance(entry.get("version"), str) or not entry["version"]:
-        errors.append(
-            f"marketplace.json entry '{name}' is curated but has no \"version\"; "
-            "with no plugin.json the entry must carry it (ADR 0009)"
-        )
-    skills = entry.get("skills")
-    if not isinstance(skills, list) or not skills:
-        errors.append(
-            f"marketplace.json entry '{name}' is curated but has no \"skills\" list; "
-            "with a marketplace-root source an empty list falls back to scanning "
-            "the whole root"
-        )
-        return
-    seen = set()
-    for path in skills:
-        if not isinstance(path, str):
-            errors.append(f"marketplace.json entry '{name}' has a non-string skills path {path!r}")
-            continue
-        if path in seen:
-            errors.append(f"marketplace.json entry '{name}' lists skills path '{path}' more than once")
-        seen.add(path)
-        skill_dir = _curated_skill_dir(path, plugins_dir)
-        if skill_dir is None:
-            errors.append(
-                f"marketplace.json entry '{name}' lists skills path '{path}'; a curated "
-                f"path must be exactly ./{plugins_dir.name}/<bundle>/skills/<skill>"
-            )
-        elif not (skill_dir / "SKILL.md").is_file():
-            errors.append(
-                f"marketplace.json entry '{name}' lists skills path '{path}', which has "
-                "no SKILL.md"
-            )
-    # Same ambiguity as a shadowed federated entry: a plugins/<name>/ beside a
-    # curated <name> would be a second, different definition of one plugin.
-    local_dir = plugins_dir / name
-    if local_dir.exists():
-        errors.append(
-            f"marketplace.json entry '{name}' is curated from the marketplace root but "
-            f"{_rel(local_dir)} also exists; a name cannot be both"
-        )
-
-
 class AccountDeclarationReaderMissing(Exception):
     """sync_skills.py, or its load_account_declaration(), could not be loaded."""
 
@@ -483,28 +371,22 @@ def _load_account_declaration(
     return reader(path)
 
 
-def expected_account_skill_paths(
-    declared: Set[str], plugins_dir: Path, errors: List[str]
-) -> Set[str]:
-    """Map each declared skill name to ./<plugins>/<bundle>/skills/<name>.
-
-    Found by searching every bundle rather than by a name->bundle table, so a
-    skill can never be listed under a bundle it does not live in. Basenames are
-    unique across the repo (check_unique_skill_basenames), so a name resolves
-    to at most one directory; zero is an error.
-    """
-    expected: Set[str] = set()
-    for name in sorted(declared):
-        matches = sorted(plugins_dir.glob(f"*/skills/{name}/SKILL.md"))
-        if len(matches) != 1:
-            errors.append(
-                f"account-skills.txt declares '{name}', which resolves to "
-                f"{len(matches)} plugins/*/skills/{name}/ directories; expected exactly 1"
-            )
-            continue
-        bundle = matches[0].parent.parent.parent.name
-        expected.add(f"./{plugins_dir.name}/{bundle}/skills/{name}")
-    return expected
+def skill_home(name: str, plugins_dir: Path, errors: List[str]) -> Optional[str]:
+    """The bundle that holds skill `name` as a real directory with SKILL.md, or
+    None (with an error) when there is not exactly one. Linked entries are
+    skipped, so the account plugin's own link never counts as a home."""
+    homes = [
+        skill_md.parent.parent.parent.name
+        for skill_md in sorted(plugins_dir.glob(f"*/skills/{name}/SKILL.md"))
+        if not is_linked_skill_entry(skill_md.parent)
+    ]
+    if len(homes) != 1:
+        errors.append(
+            f"account-skills.txt declares '{name}', which is a real skill directory "
+            f"in {len(homes)} bundles ({', '.join(homes) or 'none'}); expected exactly 1"
+        )
+        return None
+    return homes[0]
 
 
 def check_account_plugin(
@@ -513,11 +395,23 @@ def check_account_plugin(
     plugins_dir: Path = PLUGINS_DIR,
     declared: Optional[Set[str]] = None,
 ) -> None:
-    """ACCOUNT_PLUGIN lists exactly the skills account-skills.txt declares.
+    """ACCOUNT_PLUGIN is a folder of skill links equal to account-skills.txt.
 
-    The declaration file stays the single source (ADR 0012); the marketplace
-    entry is a copy that CI holds equal to it, so adding a skill to the account
-    is still one reviewed line there — plus this entry and a version bump.
+    The declaration file stays the single source (ADR 0012); the folder is a
+    copy that CI holds equal to it, so adding a skill to the account is still
+    one reviewed line there — plus one link and a version bump. Checked:
+
+      * the marketplace entry is local (./plugins/adam-personal), opt-in, and
+        carries only ACCOUNT_ENTRY_KEYS — no skills/hooks/... added on top;
+      * the folder holds only ACCOUNT_PLUGIN_TOP_LEVEL, and .claude-plugin/
+        only plugin.json;
+      * skills/ has exactly one entry per declared name, each a LINK (a
+        symlink, or on a core.symlinks=false checkout a file holding the
+        target) — a real directory there would be an unversioned second copy;
+      * each link's target is exactly ../../<bundle>/skills/<name>, where
+        <bundle> is the one bundle holding that skill as a real directory with
+        SKILL.md — so it resolves, and never to another link.
+
     `declared` is injectable for tests; by default it is read from the file.
     """
     entries = [e for e in marketplace.get("plugins", []) if e.get("name") == ACCOUNT_PLUGIN]
@@ -525,12 +419,45 @@ def check_account_plugin(
         errors.append(f"marketplace.json has no '{ACCOUNT_PLUGIN}' entry (ADR 0012)")
         return
     entry = entries[0]
-    if classify_source(entry)[0] != "curated":
+    expected_source = f"./{plugins_dir.name}/{ACCOUNT_PLUGIN}"
+    if entry.get("source") != expected_source:
         errors.append(
             f"marketplace.json entry '{ACCOUNT_PLUGIN}' must have source "
-            f"'{CURATED_SOURCE}' (ADR 0012)"
+            f"'{expected_source}' (ADR 0012): claude.ai does not list an entry "
+            "whose source folder has no plugin.json (E6 §3.7)"
         )
+    unknown = sorted(set(entry) - ACCOUNT_ENTRY_KEYS)
+    if unknown:
+        errors.append(
+            f"marketplace.json entry '{ACCOUNT_PLUGIN}' carries "
+            f"{', '.join(repr(key) for key in unknown)}; it may carry only "
+            f"{', '.join(sorted(ACCOUNT_ENTRY_KEYS))} — plugin.json and the skill "
+            "links define the plugin, and anything added on the entry (skills, "
+            "hooks, MCP servers, a version that plugin.json would mask) bypasses them"
+        )
+    if entry.get("defaultEnabled") is not False:
+        errors.append(
+            f"marketplace.json entry '{ACCOUNT_PLUGIN}' must be \"defaultEnabled\": "
+            "false; it must arrive switched off"
+        )
+
+    plugin_dir = plugins_dir / ACCOUNT_PLUGIN
+    if not plugin_dir.is_dir():
+        errors.append(f"{_rel(plugin_dir)} does not exist (ADR 0012)")
         return
+    for child in sorted(plugin_dir.iterdir()):
+        if child.name not in ACCOUNT_PLUGIN_TOP_LEVEL:
+            errors.append(
+                f"{_rel(child)} is not allowed in {ACCOUNT_PLUGIN}/: the folder holds "
+                f"only {', '.join(sorted(ACCOUNT_PLUGIN_TOP_LEVEL))}, since anything "
+                "else there would load as part of the account plugin"
+            )
+    manifest_dir = plugin_dir / ".claude-plugin"
+    if manifest_dir.is_dir():
+        for child in sorted(manifest_dir.iterdir()):
+            if child.name != "plugin.json":
+                errors.append(f"{_rel(child)} is not allowed; .claude-plugin/ holds only plugin.json")
+
     if declared is None:
         try:
             declared = _load_account_declaration(ACCOUNT_SKILLS_PATH)
@@ -540,40 +467,33 @@ def check_account_plugin(
     if declared is None:
         errors.append(f"{_rel(ACCOUNT_SKILLS_PATH)} is missing or unreadable")
         return
-    expected = expected_account_skill_paths(declared, plugins_dir, errors)
-    listed = set(curated_skill_paths(entry))
-    for path in sorted(expected - listed):
-        errors.append(
-            f"marketplace.json entry '{ACCOUNT_PLUGIN}' is missing '{path}', which "
-            "account-skills.txt declares"
-        )
-    for path in sorted(listed - expected):
-        errors.append(
-            f"marketplace.json entry '{ACCOUNT_PLUGIN}' lists '{path}', which "
-            "account-skills.txt does not declare"
-        )
 
-
-def check_curated_root_components(
-    marketplace: dict, errors: List[str], repo_root: Path = REPO_ROOT
-) -> None:
-    """No default plugin component may sit at the repo root while a curated
-    ("./") entry exists — see CURATED_ROOT_COMPONENTS."""
-    curated = [
-        entry.get("name") for entry in marketplace.get("plugins", [])
-        if isinstance(entry, dict) and classify_source(entry)[0] == "curated"
-    ]
-    if not curated:
-        return
-    for rel in CURATED_ROOT_COMPONENTS:
-        # lexists: a dangling symlink at one of these names is still something
-        # a loader might follow.
-        if os.path.lexists(repo_root / rel):
+    links = linked_skill_entries(plugin_dir)
+    for name in sorted(set(links) - declared):
+        errors.append(
+            f"{_rel(plugin_dir / 'skills' / name)} is not declared in account-skills.txt"
+        )
+    for name in sorted(declared - set(links)):
+        errors.append(
+            f"account-skills.txt declares '{name}' but {_rel(plugin_dir / 'skills')} "
+            "has no link for it"
+        )
+    for name in sorted(declared & set(links)):
+        target = links[name]
+        entry_path = plugin_dir / "skills" / name
+        if target is None:
             errors.append(
-                f"{rel} exists at the repository root, which is the plugin root of "
-                f"curated entr{'y' if len(curated) == 1 else 'ies'} "
-                f"{', '.join(repr(n) for n in curated)}; Claude Code may load it as "
-                "part of that plugin (ADR 0012) — move it or drop the curated entry"
+                f"{_rel(entry_path)} is a real directory; it must be a git symlink to "
+                "the bundle's skill (a copy would drift from it)"
+            )
+            continue
+        bundle = skill_home(name, plugins_dir, errors)
+        if bundle is None:
+            continue
+        expected_target = f"../../{bundle}/skills/{name}"
+        if target != expected_target:
+            errors.append(
+                f"{_rel(entry_path)} links to {target!r}; expected {expected_target!r}"
             )
 
 
@@ -596,8 +516,6 @@ def check_marketplace_entries(
             _check_local_entry(name, detail, errors, plugins_dir)
         elif kind == "federated":
             _check_federated_entry(name, detail, errors, plugins_dir)
-        elif kind == "curated":
-            _check_curated_entry(entry, errors, plugins_dir)
         else:
             errors.append(f"marketplace.json entry '{name}' {detail}")
 
@@ -725,7 +643,6 @@ def main() -> None:
     errors: List[str] = []
     check_marketplace_entries(marketplace, errors)
     check_account_plugin(marketplace, errors)
-    check_curated_root_components(marketplace, errors)
     check_skill_md_present(errors)
     check_renames(marketplace, errors)
     check_unique_skill_basenames(errors)

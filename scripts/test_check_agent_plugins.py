@@ -449,27 +449,6 @@ def test_an_unparseable_marketplace_fails(tmp_path):
     assert any("not valid JSON" in p for p in problems)
 
 
-def curated_entry(name="personal"):
-    return {"name": name, "source": "./", "strict": False,
-            "skills": ["./plugins/demo/skills/one"]}
-
-
-def test_a_curated_entry_is_named_not_failed(tmp_path):
-    # Source "./" is the marketplace root, not a bundle: there is no
-    # plugins/personal/ to discover and no manifest to validate (ADR 0012).
-    notices, problems = coverage([], write_marketplace(tmp_path, curated_entry()))
-    assert problems == []
-    assert len(notices) == 1
-    assert notices[0].startswith("personal: curated from the marketplace root")
-
-
-def test_a_curated_entry_shadowed_by_a_local_bundle_fails(plugins_dir, tmp_path):
-    bundle = write_bundle(plugins_dir, "personal")
-    notices, problems = coverage([bundle], write_marketplace(tmp_path, curated_entry()))
-    assert notices == []
-    assert len(problems) == 1 and "cannot be both" in problems[0]
-
-
 def test_coverage_reports_every_kind_at_once(plugins_dir, tmp_path):
     bundle = write_bundle(plugins_dir, "demo")
     path = write_marketplace(
@@ -550,7 +529,7 @@ def test_shipped_run_names_every_federated_entry_it_did_not_validate(capsys):
 
 def test_every_shipped_bundle_has_both_manifests():
     bundles = cap.discover_bundles()
-    assert {b.name for b in bundles} == {"adam", "adam-local", "fastmail"}
+    assert {b.name for b in bundles} == {"adam", "adam-local", "adam-personal", "fastmail"}
     for bundle in bundles:
         assert (bundle / "plugin.json").is_file()
         assert (bundle / ".claude-plugin" / "plugin.json").is_file()

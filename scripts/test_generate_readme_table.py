@@ -15,6 +15,7 @@ source that produced it.
 Run: python3 -m pytest scripts/test_generate_readme_table.py -q
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -147,20 +148,29 @@ def test_a_federated_bundle_renders_exactly_one_row_naming_its_repo(plugins_dir)
     assert cells[2] == "A remote bundle."
 
 
-def curated_entry(name="personal", skills=(), description="Curated skills. Extra."):
-    return {"name": name, "source": "./", "strict": False,
-            "skills": list(skills), "description": description}
+def _link(path: Path, target: str, real: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if real:
+        os.symlink(target, path, target_is_directory=True)
+    else:
+        path.write_text(target, encoding="utf-8")
 
 
-def test_a_curated_plugin_renders_one_row_naming_its_skills(plugins_dir):
-    # ADR 0012: its skills are bundle skills, already rendered once under the
-    # bundle, so one row per skill here would list each of them twice.
+@pytest.mark.parametrize("real", [False, True], ids=["text-file", "symlink"])
+def test_a_plugin_of_skill_links_renders_one_row_naming_them(plugins_dir, real):
+    # ADR 0012: its skills are bundle skills already rendered once under their
+    # bundle, so one row per link would list each twice — and on a
+    # core.symlinks=false checkout the links are files, so a per-SKILL.md scan
+    # would render NO rows there and a different README than on Linux.
     write_skill(plugins_dir, "demo", "alpha")
     write_skill(plugins_dir, "demo", "beta")
-    market = marketplace(
-        local_entry("demo"),
-        curated_entry(skills=["./plugins/demo/skills/alpha", "./plugins/demo/skills/beta"]),
-    )
+    try:
+        _link(plugins_dir / "personal" / "skills" / "beta", "../../demo/skills/beta", real)
+        _link(plugins_dir / "personal" / "skills" / "alpha", "../../demo/skills/alpha", real)
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine cannot create symlinks")
+    market = marketplace(local_entry("demo"),
+                         local_entry("personal", "Linked skills. Extra."))
     by_plugin, problems = collect(market, plugins_dir)
     assert problems == []
     rows = dict(by_plugin)
@@ -170,12 +180,7 @@ def test_a_curated_plugin_renders_one_row_naming_its_skills(plugins_dir):
     assert cells[0] == "`personal`"
     assert "`/personal:<skill>`" in cells[1]
     assert "`alpha`, `beta`" in cells[1]
-    assert cells[2] == "Curated skills."
-
-
-def test_a_curated_plugin_with_no_skills_is_a_problem(plugins_dir):
-    _, problems = collect(marketplace(curated_entry()), plugins_dir)
-    assert any("renders no table rows" in p for p in problems)
+    assert cells[2] == "Linked skills."
 
 
 def test_a_federated_bundle_does_not_invent_a_skill_list(plugins_dir):

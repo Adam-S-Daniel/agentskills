@@ -22,6 +22,8 @@ Run: python3 -m pytest scripts/test_check_consistency.py -q
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -333,143 +335,171 @@ def test_a_renames_key_naming_a_current_plugin_is_reported():
 
 
 # =================================================================================
-# Curated entries (ADR 0012) — source "./", "strict": false, a `skills` list
+# The account plugin (ADR 0012) — a folder of skill links
 # =================================================================================
 
 
-def curated_entry(name="personal", skills=("./plugins/alpha/skills/one",), **extra):
-    entry = {
-        "name": name, "source": "./", "strict": False, "version": "1.0.0",
-        "defaultEnabled": False, "skills": list(skills),
-    }
+def write_skill(plugins_dir: Path, bundle: str, skill: str) -> Path:
+    skill_dir = plugins_dir / bundle / "skills" / skill
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: %s\n---\n" % skill, encoding="utf-8")
+    return skill_dir
+
+
+def _can_symlink(tmp_path: Path) -> bool:
+    probe = tmp_path / "symlink-probe"
+    try:
+        os.symlink("target", probe)
+    except (OSError, NotImplementedError):
+        return False
+    probe.unlink()
+    return True
+
+
+def make_link(path: Path, target: str, real: bool) -> None:
+    """A skill link in either spelling git checks one out as: a real symlink
+    (core.symlinks=true) or a file holding the target (core.symlinks=false)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if real:
+        os.symlink(target, path, target_is_directory=True)
+    else:
+        path.write_text(target, encoding="utf-8")
+
+
+@pytest.fixture(params=["text-file", "symlink"])
+def link_spelling(request, tmp_path):
+    if request.param == "symlink" and not _can_symlink(tmp_path):
+        pytest.skip("this machine cannot create symlinks (Windows without Developer Mode)")
+    return request.param == "symlink"
+
+
+def account_entry(**extra):
+    entry = {"name": cc.ACCOUNT_PLUGIN, "source": f"./plugins/{cc.ACCOUNT_PLUGIN}",
+             "description": "d", "defaultEnabled": False}
     entry.update(extra)
     return entry
 
 
-def write_skill(plugins_dir: Path, bundle: str, skill: str) -> None:
-    skill_dir = plugins_dir / bundle / "skills" / skill
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text("---\nname: %s\n---\n" % skill, encoding="utf-8")
-
-
 @pytest.fixture
-def curated_tree(plugins_dir):
+def account_tree(plugins_dir, link_spelling):
+    """alpha holds skills one and two; the account plugin links both."""
     write_local_plugin(plugins_dir, "alpha")
     write_skill(plugins_dir, "alpha", "one")
     write_skill(plugins_dir, "alpha", "two")
+    write_local_plugin(plugins_dir, cc.ACCOUNT_PLUGIN)
+    for name in ("one", "two"):
+        make_link(plugins_dir / cc.ACCOUNT_PLUGIN / "skills" / name,
+                  f"../../alpha/skills/{name}", link_spelling)
     return plugins_dir
 
 
-def test_the_marketplace_root_source_is_curated():
-    assert cc.classify_source(curated_entry()) == ("curated", "./")
+def account_errors(plugins_dir, declared=frozenset({"one", "two"}), entry=None):
+    found = []
+    cc.check_account_plugin(marketplace(entry or account_entry()), found,
+                            plugins_dir=plugins_dir, declared=set(declared))
+    return found
 
 
-def test_a_well_formed_curated_entry_has_no_errors(curated_tree):
-    market = marketplace(local_entry("alpha"), curated_entry())
-    assert errors_for(market, curated_tree) == []
+def test_a_link_folder_matching_its_declaration_passes(account_tree):
+    assert account_errors(account_tree) == []
 
 
-@pytest.mark.parametrize("field, value, message", [
-    ("strict", True, '"strict": false'),
-    ("defaultEnabled", True, '"defaultEnabled": false'),
-    ("version", "", 'no "version"'),
-    ("skills", [], 'no "skills" list'),
-])
-def test_a_curated_entry_missing_a_required_setting_is_reported(curated_tree, field, value, message):
-    market = marketplace(local_entry("alpha"), curated_entry(**{field: value}))
-    assert any(message in e for e in errors_for(market, curated_tree))
+def test_both_link_spellings_read_the_same_target(account_tree):
+    links = cc.linked_skill_entries(account_tree / cc.ACCOUNT_PLUGIN)
+    assert links == {"one": "../../alpha/skills/one", "two": "../../alpha/skills/two"}
 
 
-def test_a_curated_entry_without_strict_at_all_is_reported(curated_tree):
-    entry = curated_entry()
-    del entry["strict"]
-    assert any('"strict": false' in e for e in errors_for(marketplace(local_entry("alpha"), entry), curated_tree))
+def test_a_declared_skill_with_no_link_is_reported(account_tree):
+    errors = account_errors(account_tree, declared={"one", "two", "three"})
+    assert any("declares 'three'" in e and "has no link" in e for e in errors), errors
 
 
-@pytest.mark.parametrize("path", [
-    "./",
-    "./plugins",
-    "./plugins/alpha",
-    "./plugins/alpha/skills",
-    "./plugins/alpha/skills/one/",
-    "./plugins/../skills/one",
-    "./plugins/alpha/skills/..",
-    "plugins/alpha/skills/one",
-    "./elsewhere/alpha/skills/one",
-])
-def test_a_curated_path_of_the_wrong_shape_is_reported(curated_tree, path):
-    market = marketplace(local_entry("alpha"), curated_entry(skills=[path]))
-    assert any("must be exactly" in e for e in errors_for(market, curated_tree))
+def test_an_undeclared_link_is_reported(account_tree):
+    errors = account_errors(account_tree, declared={"one"})
+    assert any("skills/two" in e and "not declared" in e for e in errors), errors
 
 
-def test_a_curated_path_with_no_skill_md_is_reported(curated_tree):
-    market = marketplace(local_entry("alpha"), curated_entry(skills=["./plugins/alpha/skills/missing"]))
-    assert any("has no SKILL.md" in e for e in errors_for(market, curated_tree))
+def remove_link(path: Path) -> None:
+    """Remove either link spelling; a directory symlink on Windows needs rmdir."""
+    try:
+        path.unlink()
+    except (IsADirectoryError, PermissionError):
+        os.rmdir(path)
 
 
-def test_a_curated_path_listed_twice_is_reported(curated_tree):
-    path = "./plugins/alpha/skills/one"
-    market = marketplace(local_entry("alpha"), curated_entry(skills=[path, path]))
-    assert any("more than once" in e for e in errors_for(market, curated_tree))
+def test_a_link_to_the_wrong_target_is_reported(account_tree, link_spelling):
+    link = account_tree / cc.ACCOUNT_PLUGIN / "skills" / "two"
+    remove_link(link)
+    make_link(link, "../../alpha/skills/one", link_spelling)
+    errors = account_errors(account_tree)
+    assert any("links to '../../alpha/skills/one'" in e for e in errors), errors
 
 
-def test_a_curated_entry_shadowed_by_a_plugin_directory_is_reported(curated_tree):
-    (curated_tree / "personal").mkdir()
-    market = marketplace(local_entry("alpha"), curated_entry())
-    assert any("cannot be both" in e for e in errors_for(market, curated_tree))
+def test_a_link_whose_target_is_gone_is_reported(account_tree):
+    import shutil
+    shutil.rmtree(account_tree / "alpha" / "skills" / "two")
+    errors = account_errors(account_tree)
+    assert any("'two'" in e and "in 0 bundles" in e for e in errors), errors
 
 
-@pytest.mark.parametrize("key", [
-    "hooks", "mcpServers", "lspServers", "agents", "commands", "workflows",
-    "outputStyles", "monitors", "experimental", "settings", "userConfig",
-    "channels", "dependencies", "headersHelper", "metadata", "not-a-real-key",
-])
-def test_a_curated_entry_carrying_a_non_allowlisted_key_is_reported(curated_tree, key):
-    market = marketplace(local_entry("alpha"), curated_entry(**{key: {}}))
-    errors = errors_for(market, curated_tree)
-    assert any("may carry only" in e and repr(key) in e for e in errors), errors
+def test_a_real_directory_instead_of_a_link_is_reported(account_tree):
+    link = account_tree / cc.ACCOUNT_PLUGIN / "skills" / "two"
+    remove_link(link)
+    write_skill(account_tree, cc.ACCOUNT_PLUGIN, "two")
+    errors = account_errors(account_tree)
+    assert any("is a real directory" in e for e in errors), errors
 
 
-def test_every_allowlisted_key_is_accepted(curated_tree):
-    display = {key: "x" for key in cc.CURATED_DISPLAY_KEYS}
-    market = marketplace(local_entry("alpha"), curated_entry(**display))
-    assert errors_for(market, curated_tree) == []
-
-
-@pytest.mark.parametrize("rel", cc.CURATED_ROOT_COMPONENTS)
-def test_a_root_component_beside_a_curated_entry_is_reported(tmp_path, rel):
-    path = tmp_path / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if "." in Path(rel).name:
+@pytest.mark.parametrize("extra", ["hooks", "agents", ".mcp.json", "bin", "settings.json",
+                                   "package.json", "SKILL.md", "README.md"])
+def test_anything_else_in_the_account_plugin_folder_is_reported(account_tree, extra):
+    path = account_tree / cc.ACCOUNT_PLUGIN / extra
+    if "." in extra:
         path.write_text("{}", encoding="utf-8")
     else:
         path.mkdir()
+    errors = account_errors(account_tree)
+    assert any(f"{extra} is not allowed" in e for e in errors), errors
+
+
+def test_a_second_file_in_its_manifest_folder_is_reported(account_tree):
+    (account_tree / cc.ACCOUNT_PLUGIN / ".claude-plugin" / "extra.json").write_text("{}", encoding="utf-8")
+    assert any(".claude-plugin/ holds only plugin.json" in e for e in account_errors(account_tree))
+
+
+@pytest.mark.parametrize("key", ["skills", "hooks", "mcpServers", "agents", "commands",
+                                 "strict", "version", "lspServers", "outputStyles"])
+def test_a_component_key_on_the_account_entry_is_reported(account_tree, key):
+    errors = account_errors(account_tree, entry=account_entry(**{key: []}))
+    assert any("may carry only" in e and repr(key) in e for e in errors), errors
+
+
+def test_every_display_key_on_the_account_entry_is_accepted(account_tree):
+    display = {key: "x" for key in cc.DISPLAY_KEYS}
+    assert account_errors(account_tree, entry=account_entry(**display)) == []
+
+
+def test_the_account_entry_must_be_opt_in(account_tree):
+    errors = account_errors(account_tree, entry=account_entry(defaultEnabled=True))
+    assert any('"defaultEnabled": false' in e for e in errors), errors
+
+
+@pytest.mark.parametrize("source", ["./", "./plugins", "./plugins/alpha"])
+def test_the_account_entry_must_source_its_own_folder(account_tree, source):
+    errors = account_errors(account_tree, entry=account_entry(source=source))
+    assert any("must have source './plugins/adam-personal'" in e for e in errors), errors
+
+
+def test_a_missing_account_plugin_is_reported(plugins_dir):
     found = []
-    cc.check_curated_root_components(marketplace(curated_entry()), found, repo_root=tmp_path)
-    assert len(found) == 1 and found[0].startswith(f"{rel} exists at the repository root")
+    cc.check_account_plugin(marketplace(), found, plugins_dir=plugins_dir, declared={"one"})
+    assert any("no 'adam-personal' entry" in e for e in found)
 
 
-def test_the_dependency_install_trigger_is_covered():
-    # plugins-reference: package.json plus one of these lockfiles at the plugin
-    # root makes Claude Code run an install in every cached copy. The root is
-    # the repo root, so each file is refused on its own (the parametrised test
-    # above proves each one is reported).
-    for name in ("package.json", "bun.lock", "bun.lockb",
-                 "npm-shrinkwrap.json", "package-lock.json"):
-        assert name in cc.CURATED_ROOT_COMPONENTS, name
-
-
-def test_root_components_are_fine_without_a_curated_entry(tmp_path):
-    (tmp_path / "hooks").mkdir()
-    found = []
-    cc.check_curated_root_components(marketplace(local_entry("alpha")), found, repo_root=tmp_path)
-    assert found == []
-
-
-def test_the_shipped_root_carries_no_default_component():
-    found = []
-    cc.check_curated_root_components(cc.load_marketplace(), found)
-    assert found == []
+def test_a_linked_entry_is_not_counted_as_a_second_skill(account_tree, link_spelling):
+    # The basename rule must not see the account plugin's link as a duplicate.
+    names = cc._skill_basenames(account_tree)
+    assert names["one"] == ["alpha/one"] and names["two"] == ["alpha/two"]
 
 
 def test_a_missing_declaration_reader_is_a_named_error(tmp_path):
@@ -484,59 +514,13 @@ def test_a_reader_without_the_function_is_a_named_error(tmp_path):
         cc._load_account_declaration(cc.ACCOUNT_SKILLS_PATH, reader_path=reader)
 
 
-def test_check_account_plugin_reports_a_missing_reader_instead_of_crashing(curated_tree, monkeypatch):
+def test_check_account_plugin_reports_a_missing_reader_instead_of_crashing(account_tree, monkeypatch):
     def missing(path):
         raise cc.AccountDeclarationReaderMissing("cannot load load_account_declaration()")
     monkeypatch.setattr(cc, "_load_account_declaration", missing)
-    market = marketplace(account_entry(["./plugins/alpha/skills/one"]))
     found = []
-    cc.check_account_plugin(market, found, plugins_dir=curated_tree)
+    cc.check_account_plugin(marketplace(account_entry()), found, plugins_dir=account_tree)
     assert found == ["cannot load load_account_declaration()"]
-
-
-def account_errors(market, plugins_dir, declared):
-    found = []
-    cc.check_account_plugin(market, found, plugins_dir=plugins_dir, declared=declared)
-    return found
-
-
-def account_entry(skills):
-    return curated_entry(name=cc.ACCOUNT_PLUGIN, skills=skills)
-
-
-def test_the_account_plugin_matching_its_declaration_passes(curated_tree):
-    market = marketplace(account_entry(["./plugins/alpha/skills/one", "./plugins/alpha/skills/two"]))
-    assert account_errors(market, curated_tree, {"one", "two"}) == []
-
-
-def test_a_declared_skill_missing_from_the_account_plugin_is_reported(curated_tree):
-    market = marketplace(account_entry(["./plugins/alpha/skills/one"]))
-    errors = account_errors(market, curated_tree, {"one", "two"})
-    assert errors == [
-        f"marketplace.json entry '{cc.ACCOUNT_PLUGIN}' is missing "
-        "'./plugins/alpha/skills/two', which account-skills.txt declares"
-    ]
-
-
-def test_an_undeclared_skill_in_the_account_plugin_is_reported(curated_tree):
-    market = marketplace(account_entry(["./plugins/alpha/skills/one", "./plugins/alpha/skills/two"]))
-    errors = account_errors(market, curated_tree, {"one"})
-    assert any("does not declare" in e and "skills/two" in e for e in errors)
-
-
-def test_a_declared_skill_with_no_directory_is_reported(curated_tree):
-    market = marketplace(account_entry(["./plugins/alpha/skills/one"]))
-    errors = account_errors(market, curated_tree, {"one", "ghost"})
-    assert any("'ghost'" in e and "expected exactly 1" in e for e in errors)
-
-
-def test_a_missing_account_plugin_is_reported(curated_tree):
-    assert any("no 'adam-personal' entry" in e for e in account_errors(marketplace(), curated_tree, {"one"}))
-
-
-def test_an_account_plugin_that_is_not_curated_is_reported(curated_tree):
-    market = marketplace(local_entry(cc.ACCOUNT_PLUGIN))
-    assert any("must have source './'" in e for e in account_errors(market, curated_tree, {"one"}))
 
 
 # =================================================================================
@@ -555,7 +539,7 @@ def test_shipped_repo_passes(capsys, monkeypatch):
 def test_every_shipped_entry_classifies():
     for entry in cc.load_marketplace()["plugins"]:
         kind, detail = cc.classify_source(entry)
-        assert kind in ("local", "federated", "curated"), "%s: %s" % (entry.get("name"), detail)
+        assert kind in ("local", "federated"), "%s: %s" % (entry.get("name"), detail)
 
 
 def _declared_account_skills():
@@ -569,38 +553,56 @@ def _declared_account_skills():
     return names
 
 
-def test_the_account_plugin_serves_exactly_the_declared_account_skills():
-    # ADR 0012: account-skills.txt is the one declaration; the marketplace
-    # entry must list exactly its skills, each resolved to the bundle it lives
-    # in, and nothing else.
-    raw = json.loads(cc.MARKETPLACE_PATH.read_text(encoding="utf-8"))
-    entries = [e for e in raw["plugins"] if e["name"] == "adam-personal"]
-    assert len(entries) == 1
-    entry = entries[0]
+def _committed_account_links():
+    """{name: (mode, target)} for plugins/adam-personal/skills/* as git records
+    them — the committed truth, independent of how this checkout spelled them.
+    `git ls-files -s` gives mode and blob; `git cat-file blob` gives a
+    symlink's target."""
+    listing = subprocess.run(
+        ["git", "-C", str(cc.REPO_ROOT), "ls-files", "-s", "--",
+         f"plugins/{cc.ACCOUNT_PLUGIN}/skills"],
+        capture_output=True, text=True, check=True).stdout
+    links = {}
+    for line in listing.splitlines():
+        meta, path = line.split("\t", 1)
+        mode, blob, _stage = meta.split()
+        target = subprocess.run(
+            ["git", "-C", str(cc.REPO_ROOT), "cat-file", "blob", blob],
+            capture_output=True, text=True, check=True).stdout
+        links[path.rsplit("/", 1)[-1]] = (mode, target)
+    return links
+
+
+def test_the_account_plugin_links_exactly_the_declared_account_skills():
+    # ADR 0012: account-skills.txt is the one declaration; the plugin holds
+    # exactly one git SYMLINK (mode 120000) per declared name, to that skill's
+    # real directory in the bundle it lives in, and nothing else.
     declared = _declared_account_skills()
     assert declared, "account-skills.txt declares nothing — this test would be vacuous"
+    links = _committed_account_links()
+    assert set(links) == declared
+    for name, (mode, target) in links.items():
+        assert mode == "120000", f"{name} is committed as {mode}, not a symlink"
+        homes = [
+            md.parent.parent.parent.name
+            for md in cc.PLUGINS_DIR.glob(f"*/skills/{name}/SKILL.md")
+            if md.parent.parent.parent.name != cc.ACCOUNT_PLUGIN
+        ]
+        assert len(homes) == 1, name
+        assert target == f"../../{homes[0]}/skills/{name}", name
 
-    expected = set()
-    for name in declared:
-        matches = sorted(cc.PLUGINS_DIR.glob(f"*/skills/{name}/SKILL.md"))
-        assert len(matches) == 1, name
-        expected.add(f"./plugins/{matches[0].parent.parent.parent.name}/skills/{name}")
 
-    assert len(entry["skills"]) == len(set(entry["skills"])), "duplicate skills path"
-    assert set(entry["skills"]) == expected
-    for path in entry["skills"]:
-        assert (cc.REPO_ROOT / path / "SKILL.md").is_file(), path
-
-
-def test_the_account_plugin_is_a_curated_opt_in_entry():
+def test_the_account_plugin_is_an_opt_in_local_entry():
     raw = json.loads(cc.MARKETPLACE_PATH.read_text(encoding="utf-8"))
     entry = next(e for e in raw["plugins"] if e["name"] == "adam-personal")
-    assert entry["source"] == "./"
-    assert entry["strict"] is False
+    assert entry["source"] == "./plugins/adam-personal"
     assert entry["defaultEnabled"] is False
-    assert cc.classify_source(entry) == ("curated", "./")
+    assert "strict" not in entry and "skills" not in entry and "version" not in entry
+    assert cc.classify_source(entry) == ("local", "./plugins/adam-personal")
     assert "adam-personal" not in raw.get("renames", {})
-    assert not (cc.PLUGINS_DIR / "adam-personal").exists()
+    manifest = json.loads((cc.PLUGINS_DIR / "adam-personal" / ".claude-plugin" / "plugin.json")
+                          .read_text(encoding="utf-8"))
+    assert manifest["name"] == "adam-personal"
 
 
 def test_the_checker_reads_account_skills_txt_as_sync_skills_does():
