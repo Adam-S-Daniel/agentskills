@@ -162,9 +162,9 @@ Enabling the three bundles would add 12 skills the account deliberately does not
 carry, about 2,970 extra tokens on every surface. `adam`'s six are exactly what
 ADR 0002 rejected putting on the account. Using this channel properly means a
 separate personal plugin. [ADR 0012](../decisions/0012-serve-the-account-skills-as-one-repo-synced-plugin.md)
-builds it as a curated marketplace entry that serves the existing skill
-directories in place, so no skill moves between bundles and the append-only
-`renames` map is untouched.
+builds it as its own plugin folder whose skill entries are git symlinks to the
+existing skill directories (the one shape §3.7 found claude.ai to serve), so no
+skill moves between bundles and the append-only `renames` map is untouched.
 
 ### 3.3 Still nothing repo-scoped
 
@@ -272,6 +272,36 @@ separately. So this repo could be the personal marketplace. Only a dedicated
 personal plugin would be enabled; the three existing bundles would sit there
 unused.
 
+### 3.7 Which plugin shapes claude.ai accepts (2026-09-24)
+
+Measured by Adam on claude.ai, in the same throwaway repo
+([`Adam-S-Daniel/e6-probe-marketplace`](https://github.com/Adam-S-Daniel/e6-probe-marketplace)),
+to choose the shape of the account plugin
+([ADR 0012](../decisions/0012-serve-the-account-skills-as-one-repo-synced-plugin.md)).
+Each variant is one marketplace entry over a bundle folder holding two
+skills, `shape-listed` and one other; "the list" is a `skills` list naming
+only `shape-listed`.
+
+| Variant | Entry | On claude.ai |
+|---|---|---|
+| `e6-shape` | `"source": "./"` (repo root, no `plugin.json`), `strict: false`, the list | **absent** — not listed at all |
+| `e6-sub` | `"source": "./plugins"` (no `plugin.json`), `strict: false`, the list | **absent** |
+| `e6-subset` | `"source": "./plugins/e6-bundle"`, `strict: false`, `"skills": ["./skills/shape-listed"]` | **present, with both skills** — the list is ignored |
+| `e6-link` | its own folder with `plugin.json`; `skills/shape-listed` is a git **symlink** (mode 120000) to `../../e6-bundle/skills/shape-listed` | **present, with only the linked skill**, and it runs: token returned in claude.ai chat, local Desktop Cowork on Windows (after a full Desktop restart) and iOS, control passing each time |
+
+In a Claude Code terminal on the Windows laptop, `e6-link`'s synced copy
+(`~/.claude/plugins/synced/<bucket>/e6-link/skills/shape-listed/SKILL.md`) is a
+**real directory with the real file**: claude.ai resolves the symlink
+server-side, so the terminal never sees a link.
+
+The Desktop app listed the new plugin only after a **full restart** (tray
+included), even after its marketplace reported the new commit.
+
+The terminal's synced manifest dropped `e6-probe` after its marketplace was
+removed on claude.ai, while `e6-probe`'s directory stayed on disk. When the
+drop happened is not known; a reading on the laptop's Windows home at
+2026-09-24 01:15 UTC still listed it (recorded in ADR 0012, phase 2 step 5).
+
 ## 4. What is still unknown
 
 1. Would a push arrive without a `version` bump? The test bumped it, and
@@ -354,8 +384,9 @@ control *is* found. Otherwise the result is void.
    Desktop app. The `sync-skills` drift check could be replaced by comparing
    the commit claude.ai reports against `main`. This repo can be the marketplace, because
    adding a marketplace enables nothing by itself. [ADR 0012](../decisions/0012-serve-the-account-skills-as-one-repo-synced-plugin.md)
-   is that switch: a curated marketplace entry serving the existing skill
-   directories in place, so no skill moves and the `renames` map is untouched.
+   is that switch: a plugin folder whose skill entries are git symlinks to the
+   existing skill directories (§3.7), so no skill moves and the `renames` map
+   is untouched.
    It goes through the adversarial review round in AGENTS.md before merge, and
    amends ADR 0002's "one-way door" consequence only after its phase 2 has
    measured removal.
