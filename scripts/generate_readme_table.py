@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # entry local or federated". A second copy of that classification here is
 # exactly how the README and the consistency gate would come to disagree about
 # which bundles exist.
-from check_consistency import classify_source, load_marketplace  # noqa: E402
+from check_consistency import classify_source, curated_skill_paths, load_marketplace  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGINS_DIR = REPO_ROOT / "plugins"
@@ -159,6 +159,19 @@ def federated_row(plugin: dict, repo: str) -> str:
     return _row(plugin_name, invocation, _first_sentence(plugin.get("description", "")))
 
 
+def curated_row(plugin: dict) -> str:
+    """The single row a curated plugin (source "./", ADR 0012) contributes.
+
+    Its skills are bundle skills already rendered once under their bundle, so
+    one row per skill here would list each of them twice. The row names them
+    instead, by directory basename, in the entry's order.
+    """
+    plugin_name = plugin["name"]
+    names = ", ".join(f"`{path.rstrip('/').rsplit('/', 1)[-1]}`" for path in curated_skill_paths(plugin))
+    invocation = f"`/{plugin_name}:<skill>` — serves, in place: {names}"
+    return _row(plugin_name, invocation, _first_sentence(plugin.get("description", "")))
+
+
 def collect_plugin_rows(
     marketplace: Optional[dict] = None, plugins_dir: Path = PLUGINS_DIR
 ) -> Tuple[List[Tuple[str, List[str]]], List[str]]:
@@ -181,6 +194,8 @@ def collect_plugin_rows(
             rows = local_rows(plugin, plugins_dir)
         elif kind == "federated":
             rows = [federated_row(plugin, detail)]
+        elif kind == "curated":
+            rows = [curated_row(plugin)] if curated_skill_paths(plugin) else []
         else:
             problems.append(
                 f"marketplace.json entry '{plugin_name}' {detail} — it cannot be "

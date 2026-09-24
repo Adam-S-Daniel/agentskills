@@ -17,7 +17,8 @@ It then cross-checks the set it validated against the marketplace, because
 publishes FEDERATED entries whose plugin root lives in another repo. Those are
 never discovered, so their manifests are never validated — and this script
 used to print OK anyway. It now names each one and the repo that lints it,
-fails on any marketplace entry that is neither validated here nor federated,
+fails on any marketplace entry that is neither validated here nor federated
+(nor curated — a "./" entry whose skills are bundle skills, ADR 0012),
 and fails on any that is BOTH (a federated entry shadowed by a local
 plugins/<name>/), so its verdict cannot disagree with check_consistency.py's
 on the same tree. See check_marketplace_coverage().
@@ -283,6 +284,23 @@ def check_marketplace_coverage(bundles, problems, marketplace_path=MARKETPLACE_P
             notices.append(
                 "%s: federated from %s — its Agent Plugins manifests are validated "
                 "by that repo's own CI, not here." % (name, detail)
+            )
+        elif kind == "curated" and name in local_names:
+            problems.append(
+                "%s: marketplace.json curates it from the marketplace root, but a "
+                "local bundle under %s/%s was also discovered; a name cannot be "
+                "both (check_consistency.py rejects the same shadowing)."
+                % (name, _rel(PLUGINS_DIR), name)
+            )
+        elif kind == "curated":
+            # Source "./" with "strict": false: no plugin root and no
+            # manifests of its own — the marketplace entry IS the plugin, and
+            # every skill it lists lives in a bundle validated above.
+            # check_consistency.py checks the entry itself (ADR 0012).
+            notices.append(
+                "%s: curated from the marketplace root — it has no Agent Plugins "
+                "manifest; its skills are served from bundles validated here."
+                % name
             )
         elif kind == "invalid":
             problems.append(

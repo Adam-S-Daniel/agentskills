@@ -333,6 +333,138 @@ def test_a_renames_key_naming_a_current_plugin_is_reported():
 
 
 # =================================================================================
+# Curated entries (ADR 0012) — source "./", "strict": false, a `skills` list
+# =================================================================================
+
+
+def curated_entry(name="personal", skills=("./plugins/alpha/skills/one",), **extra):
+    entry = {
+        "name": name, "source": "./", "strict": False, "version": "1.0.0",
+        "defaultEnabled": False, "skills": list(skills),
+    }
+    entry.update(extra)
+    return entry
+
+
+def write_skill(plugins_dir: Path, bundle: str, skill: str) -> None:
+    skill_dir = plugins_dir / bundle / "skills" / skill
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: %s\n---\n" % skill, encoding="utf-8")
+
+
+@pytest.fixture
+def curated_tree(plugins_dir):
+    write_local_plugin(plugins_dir, "alpha")
+    write_skill(plugins_dir, "alpha", "one")
+    write_skill(plugins_dir, "alpha", "two")
+    return plugins_dir
+
+
+def test_the_marketplace_root_source_is_curated():
+    assert cc.classify_source(curated_entry()) == ("curated", "./")
+
+
+def test_a_well_formed_curated_entry_has_no_errors(curated_tree):
+    market = marketplace(local_entry("alpha"), curated_entry())
+    assert errors_for(market, curated_tree) == []
+
+
+@pytest.mark.parametrize("field, value, message", [
+    ("strict", True, '"strict": false'),
+    ("defaultEnabled", True, '"defaultEnabled": false'),
+    ("version", "", 'no "version"'),
+    ("skills", [], 'no "skills" list'),
+])
+def test_a_curated_entry_missing_a_required_setting_is_reported(curated_tree, field, value, message):
+    market = marketplace(local_entry("alpha"), curated_entry(**{field: value}))
+    assert any(message in e for e in errors_for(market, curated_tree))
+
+
+def test_a_curated_entry_without_strict_at_all_is_reported(curated_tree):
+    entry = curated_entry()
+    del entry["strict"]
+    assert any('"strict": false' in e for e in errors_for(marketplace(local_entry("alpha"), entry), curated_tree))
+
+
+@pytest.mark.parametrize("path", [
+    "./",
+    "./plugins",
+    "./plugins/alpha",
+    "./plugins/alpha/skills",
+    "./plugins/alpha/skills/one/",
+    "./plugins/../skills/one",
+    "./plugins/alpha/skills/..",
+    "plugins/alpha/skills/one",
+    "./elsewhere/alpha/skills/one",
+])
+def test_a_curated_path_of_the_wrong_shape_is_reported(curated_tree, path):
+    market = marketplace(local_entry("alpha"), curated_entry(skills=[path]))
+    assert any("must be exactly" in e for e in errors_for(market, curated_tree))
+
+
+def test_a_curated_path_with_no_skill_md_is_reported(curated_tree):
+    market = marketplace(local_entry("alpha"), curated_entry(skills=["./plugins/alpha/skills/missing"]))
+    assert any("has no SKILL.md" in e for e in errors_for(market, curated_tree))
+
+
+def test_a_curated_path_listed_twice_is_reported(curated_tree):
+    path = "./plugins/alpha/skills/one"
+    market = marketplace(local_entry("alpha"), curated_entry(skills=[path, path]))
+    assert any("more than once" in e for e in errors_for(market, curated_tree))
+
+
+def test_a_curated_entry_shadowed_by_a_plugin_directory_is_reported(curated_tree):
+    (curated_tree / "personal").mkdir()
+    market = marketplace(local_entry("alpha"), curated_entry())
+    assert any("cannot be both" in e for e in errors_for(market, curated_tree))
+
+
+def account_errors(market, plugins_dir, declared):
+    found = []
+    cc.check_account_plugin(market, found, plugins_dir=plugins_dir, declared=declared)
+    return found
+
+
+def account_entry(skills):
+    return curated_entry(name=cc.ACCOUNT_PLUGIN, skills=skills)
+
+
+def test_the_account_plugin_matching_its_declaration_passes(curated_tree):
+    market = marketplace(account_entry(["./plugins/alpha/skills/one", "./plugins/alpha/skills/two"]))
+    assert account_errors(market, curated_tree, {"one", "two"}) == []
+
+
+def test_a_declared_skill_missing_from_the_account_plugin_is_reported(curated_tree):
+    market = marketplace(account_entry(["./plugins/alpha/skills/one"]))
+    errors = account_errors(market, curated_tree, {"one", "two"})
+    assert errors == [
+        f"marketplace.json entry '{cc.ACCOUNT_PLUGIN}' is missing "
+        "'./plugins/alpha/skills/two', which account-skills.txt declares"
+    ]
+
+
+def test_an_undeclared_skill_in_the_account_plugin_is_reported(curated_tree):
+    market = marketplace(account_entry(["./plugins/alpha/skills/one", "./plugins/alpha/skills/two"]))
+    errors = account_errors(market, curated_tree, {"one"})
+    assert any("does not declare" in e and "skills/two" in e for e in errors)
+
+
+def test_a_declared_skill_with_no_directory_is_reported(curated_tree):
+    market = marketplace(account_entry(["./plugins/alpha/skills/one"]))
+    errors = account_errors(market, curated_tree, {"one", "ghost"})
+    assert any("'ghost'" in e and "expected exactly 1" in e for e in errors)
+
+
+def test_a_missing_account_plugin_is_reported(curated_tree):
+    assert any("no 'adam-personal' entry" in e for e in account_errors(marketplace(), curated_tree, {"one"}))
+
+
+def test_an_account_plugin_that_is_not_curated_is_reported(curated_tree):
+    market = marketplace(local_entry(cc.ACCOUNT_PLUGIN))
+    assert any("must have source './'" in e for e in account_errors(market, curated_tree, {"one"}))
+
+
+# =================================================================================
 # Shipped artifacts — these read the real repo on purpose
 # =================================================================================
 
@@ -348,7 +480,58 @@ def test_shipped_repo_passes(capsys, monkeypatch):
 def test_every_shipped_entry_classifies():
     for entry in cc.load_marketplace()["plugins"]:
         kind, detail = cc.classify_source(entry)
-        assert kind in ("local", "federated"), "%s: %s" % (entry.get("name"), detail)
+        assert kind in ("local", "federated", "curated"), "%s: %s" % (entry.get("name"), detail)
+
+
+def _declared_account_skills():
+    """account-skills.txt, parsed here independently of the checker: one name
+    per line, `#` starts a comment, blanks ignored (the file's own header)."""
+    names = set()
+    for line in cc.ACCOUNT_SKILLS_PATH.read_text(encoding="utf-8").splitlines():
+        name = line.split("#", 1)[0].strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def test_the_account_plugin_serves_exactly_the_declared_account_skills():
+    # ADR 0012: account-skills.txt is the one declaration; the marketplace
+    # entry must list exactly its skills, each resolved to the bundle it lives
+    # in, and nothing else.
+    raw = json.loads(cc.MARKETPLACE_PATH.read_text(encoding="utf-8"))
+    entries = [e for e in raw["plugins"] if e["name"] == "adam-personal"]
+    assert len(entries) == 1
+    entry = entries[0]
+    declared = _declared_account_skills()
+    assert declared, "account-skills.txt declares nothing — this test would be vacuous"
+
+    expected = set()
+    for name in declared:
+        matches = sorted(cc.PLUGINS_DIR.glob(f"*/skills/{name}/SKILL.md"))
+        assert len(matches) == 1, name
+        expected.add(f"./plugins/{matches[0].parent.parent.parent.name}/skills/{name}")
+
+    assert len(entry["skills"]) == len(set(entry["skills"])), "duplicate skills path"
+    assert set(entry["skills"]) == expected
+    for path in entry["skills"]:
+        assert (cc.REPO_ROOT / path / "SKILL.md").is_file(), path
+
+
+def test_the_account_plugin_is_a_curated_opt_in_entry():
+    raw = json.loads(cc.MARKETPLACE_PATH.read_text(encoding="utf-8"))
+    entry = next(e for e in raw["plugins"] if e["name"] == "adam-personal")
+    assert entry["source"] == "./"
+    assert entry["strict"] is False
+    assert entry["defaultEnabled"] is False
+    assert cc.classify_source(entry) == ("curated", "./")
+    assert "adam-personal" not in raw.get("renames", {})
+    assert not (cc.PLUGINS_DIR / "adam-personal").exists()
+
+
+def test_the_checker_reads_account_skills_txt_as_sync_skills_does():
+    # The checker loads sync_skills.py's own reader; this pins that the two
+    # parses of the shipped file agree.
+    assert cc._load_account_declaration(cc.ACCOUNT_SKILLS_PATH) == _declared_account_skills()
 
 
 def _federated_shaped_entries():
