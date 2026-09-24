@@ -106,6 +106,23 @@ def test_the_machine_bound_bundle_is_enabled_from_the_marketplace(tmp_path):
     assert settings["enabledPlugins"]["adam-local@agentskills"] is True
 
 
+def test_the_account_plugin_is_off_in_terminals(tmp_path):
+    """ADR 0012: `adam-personal` is for claude.ai, the Desktop app, Chrome and
+    mobile. A terminal signed in with the account would sync it as
+    `adam-personal@synced` and load its skills a second time beside the pinned
+    bundles, so the durable machine turns it off by name.
+
+    `False`, the JSON boolean — `True` would be the opposite decision and a
+    missing key would leave the synced copy on."""
+    settings = converge(tmp_path)
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_an_operator_who_enabled_the_account_plugin_is_overridden(tmp_path):
+    settings = converge(tmp_path, {"enabledPlugins": {"adam-personal@synced": True}})
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
 def test_the_account_skill_sync_is_turned_off(tmp_path):
     """ADR 0010: pinned channels own the terminal.
 

@@ -391,9 +391,21 @@ TARGET_MARKETPLACES = {
 # has always had -- and it must land WITH the opt-out below, never after it:
 # opting a laptop out of the account sync while adam-local is not installed
 # takes sync-skills off that terminal altogether.
+#
+# adam-personal@synced is OFF (ADR 0012). The account plugin serves the account's
+# skills to claude.ai, the Desktop app, Chrome and mobile, but a terminal signed
+# in with the account downloads it too: a repo-synced plugin reached this
+# laptop's ~/.claude/plugins/synced/ during E6 (§3.6). Its name matches no
+# bundle, so nothing dedupes it; enabled, it would load 8 of its 9 skills a
+# second time beside adam@ and adam-local@, and bring back the account copy of
+# sync-skills that ADR 0010 took off terminals. `"<name>@synced": false` in
+# user enabledPlugins is the documented per-plugin off switch
+# (code.claude.com/docs/en/plugins-reference#synced-plugins). It must land on
+# every durable machine BEFORE the plugin is enabled on claude.ai.
 TARGET_ENABLED_PLUGINS = {
     "adam@agentskills": True,
     "adam-local@agentskills": True,
+    "adam-personal@synced": False,
 }
 
 # ADR 0010: pinned channels own the terminal.
