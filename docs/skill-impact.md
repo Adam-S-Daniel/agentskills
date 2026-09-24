@@ -84,7 +84,7 @@ no backfill is planned; the file adds the fields git does not capture.
 - Change: both launchers escape `;` as `\;` for `wt.exe`; the `.ps1` also
   quotes each argument, since `Start-Process -ArgumentList <array>` does not;
   dry-run hooks plus regression tests; one SKILL.md gotcha bullet
-  (PR_LINK_PENDING).
+  ([#188](https://github.com/Adam-S-Daniel/agentskills/pull/188)).
 - Eval: exempt (DESIGN.md non-coverage table) — "defer: machine-bound
   (WSL/WPF/browser surfaces)".
 - Outcome: open as of 2026-09-24.
