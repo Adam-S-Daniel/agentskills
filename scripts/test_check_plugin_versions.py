@@ -23,6 +23,7 @@ Run: python3 -m pytest scripts/test_check_plugin_versions.py -q
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -355,69 +356,86 @@ def test_no_bundles_found_fails(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# curated marketplace entries (ADR 0012) — source "./", "strict": false, a
-# `skills` list pointing into the bundles. Same rule as a bundle: content
-# changed => the entry's version in marketplace.json moved up.
+# a plugin of skill LINKS (ADR 0012's adam-personal): its skills/<name> are
+# git symlinks to other bundles' skills. Its content is its targets' content,
+# which `git diff -- plugins/personal` never sees.
 # ---------------------------------------------------------------------------
 
-def write_marketplace(repo_root: Path, curated_skills, version: str = "1.0.0", **extra) -> None:
-    """A marketplace.json with a local entry per bundle dir plus, when
-    curated_skills is not None, one curated entry named `personal` (with any
-    `extra` keys merged into it)."""
-    plugins = [
-        {"name": d.name, "source": f"./plugins/{d.name}"}
-        for d in sorted((repo_root / "plugins").iterdir())
-        if d.is_dir()
-    ]
-    if curated_skills is not None:
-        plugins.append({
-            "name": "personal", "source": "./", "strict": False,
-            "version": version, "defaultEnabled": False,
-            "skills": list(curated_skills),
-            **extra,
-        })
-    _write(repo_root / ".claude-plugin" / "marketplace.json",
-           {"name": "fixture", "plugins": plugins})
+def _symlinks_work(tmp_path: Path) -> bool:
+    probe = tmp_path / "symlink-probe"
+    try:
+        os.symlink("target", probe)
+    except (OSError, NotImplementedError):
+        return False
+    probe.unlink()
+    return True
 
 
-def curated_fixture(tmp_path: Path) -> tuple:
-    """Bundles alpha and beta at 1.0.0; `personal` serves alpha's skill x."""
+def write_link(repo: Path, rel: str, target: str, real: bool) -> None:
+    """Commit-ready link at `rel`: a real symlink, or (core.symlinks=false, the
+    Windows spelling) a file holding the target, staged as mode 120000."""
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if real:
+        # Native separators: a Windows symlink whose target uses '/' dangles.
+        os.symlink(target.replace("/", os.sep), path, target_is_directory=True)
+        return
+    _git(repo, "config", "core.symlinks", "false")
+    path.write_text(target, encoding="utf-8", newline="")
+    blob = _git_output(repo, "hash-object", "-w", rel)
+    _git(repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},{rel}")
+
+
+@pytest.fixture(params=["text-file", "symlink"])
+def linked_fixture(request, tmp_path):
+    """Bundles alpha and beta at 1.0.0 (skill x each); `personal` at 1.0.0
+    links alpha's x. Returns (repo, base)."""
+    real = request.param == "symlink"
+    if real and not _symlinks_work(tmp_path):
+        pytest.skip("this machine cannot create symlinks")
     repo = tmp_path / "repo"
     init_repo(repo)
     write_bundle(repo, "alpha", "1.0.0")
     write_bundle(repo, "beta", "1.0.0")
-    write_marketplace(repo, ["./plugins/alpha/skills/x"])
-    return repo, commit_all(repo, "base")
+    root, claude = _manifest_pair("personal", "1.0.0")
+    _write(repo / "plugins" / "personal" / "plugin.json", root)
+    _write(repo / "plugins" / "personal" / ".claude-plugin" / "plugin.json", claude)
+    write_link(repo, "plugins/personal/skills/x", "../../alpha/skills/x", real)
+    base = commit_all(repo, "base")
+    assert _git_output(repo, "ls-files", "-s", "plugins/personal/skills/x").startswith("120000 ")
+    return repo, base
 
 
-def bump_bundle(repo: Path, name: str, version: str) -> None:
+def bump(repo: Path, name: str, version: str) -> None:
     set_version(repo, name, "root", version)
     set_version(repo, name, "claude", version)
 
 
-def test_curated_skill_edited_without_entry_bump_fails(tmp_path):
-    """The curated twin of the load-bearing test: the bundle IS bumped, so
-    only the curated entry's missing bump can fail this run."""
-    repo, base = curated_fixture(tmp_path)
+def edit_alpha_x(repo: Path) -> None:
     (repo / "plugins" / "alpha" / "skills" / "x" / "SKILL.md").write_text(
-        "changed body\n", encoding="utf-8"
-    )
-    bump_bundle(repo, "alpha", "1.1.0")
+        "changed body\n", encoding="utf-8")
+
+
+def test_a_linked_skill_edited_without_the_linking_plugins_bump_fails(linked_fixture):
+    """THE LOAD-BEARING TEST for ADR 0012's version rule: alpha changed and IS
+    bumped, so only personal's missing bump can fail the run."""
+    repo, base = linked_fixture
+    edit_alpha_x(repo)
+    bump(repo, "alpha", "1.1.0")
 
     result = run_gate(base, repo)
 
     assert result.returncode != 0, result.stdout + result.stderr
     assert "FAIL: personal:" in result.stdout
     assert "FAIL: alpha" not in result.stdout
+    assert "linked skill content changed (plugins/alpha/skills/x/SKILL.md)" in result.stdout
 
 
-def test_curated_skill_edited_with_entry_bump_passes(tmp_path):
-    repo, base = curated_fixture(tmp_path)
-    (repo / "plugins" / "alpha" / "skills" / "x" / "SKILL.md").write_text(
-        "changed body\n", encoding="utf-8"
-    )
-    bump_bundle(repo, "alpha", "1.1.0")
-    write_marketplace(repo, ["./plugins/alpha/skills/x"], version="1.1.0")
+def test_a_linked_skill_edited_with_both_bumps_passes(linked_fixture):
+    repo, base = linked_fixture
+    edit_alpha_x(repo)
+    bump(repo, "alpha", "1.1.0")
+    bump(repo, "personal", "1.1.0")
 
     result = run_gate(base, repo)
 
@@ -425,12 +443,22 @@ def test_curated_skill_edited_with_entry_bump_passes(tmp_path):
     assert "personal: content changed" in result.stdout
 
 
-def test_curated_entry_unchanged_when_an_unlisted_skill_changes(tmp_path):
-    repo, base = curated_fixture(tmp_path)
+def test_the_linking_plugins_own_diff_stays_empty_when_a_target_changes(linked_fixture):
+    """Decided and pinned: the bundle-content detector sees only the plugin's
+    OWN files (git never follows a symlink), and the target's change arrives
+    through _linked_changes, reported as such."""
+    repo, base = linked_fixture
+    edit_alpha_x(repo)
+    assert cpv._changed_paths(repo, base, "plugins/personal") == []
+    assert cpv._linked_changes(repo, base, repo / "plugins" / "personal") == [
+        "plugins/alpha/skills/x/SKILL.md"]
+
+
+def test_an_unlinked_skill_change_needs_no_bump_of_the_linking_plugin(linked_fixture):
+    repo, base = linked_fixture
     (repo / "plugins" / "beta" / "skills" / "x" / "SKILL.md").write_text(
-        "changed body\n", encoding="utf-8"
-    )
-    bump_bundle(repo, "beta", "1.1.0")
+        "changed body\n", encoding="utf-8")
+    bump(repo, "beta", "1.1.0")
 
     result = run_gate(base, repo)
 
@@ -438,125 +466,14 @@ def test_curated_entry_unchanged_when_an_unlisted_skill_changes(tmp_path):
     assert "personal: unchanged" in result.stdout
 
 
-def test_curated_skills_list_changed_without_bump_fails(tmp_path):
-    # No file under any skill moved, only the list did: the plugin still
-    # serves different content, so the bump is still owed.
-    repo, base = curated_fixture(tmp_path)
-    write_marketplace(repo, ["./plugins/alpha/skills/x", "./plugins/beta/skills/x"])
+def test_a_link_added_without_a_bump_fails(linked_fixture, request):
+    repo, base = linked_fixture
+    real = request.node.callspec.params["linked_fixture"] == "symlink"
+    write_link(repo, "plugins/personal/skills/y", "../../beta/skills/x", real)
 
     result = run_gate(base, repo)
 
     assert result.returncode != 0, result.stdout + result.stderr
     assert "FAIL: personal:" in result.stdout
-    assert "skills list changed" in result.stdout
 
 
-@pytest.mark.parametrize("extra", [
-    {"hooks": {"SessionStart": []}},
-    {"mcpServers": {"x": {"command": "x"}}},
-    {"defaultEnabled": True},
-])
-def test_curated_entry_definition_changed_without_bump_fails(tmp_path, extra):
-    # No skill file and no list entry moved; the entry grew or flipped a key
-    # that changes what the plugin does, so the bump is owed.
-    repo, base = curated_fixture(tmp_path)
-    write_marketplace(repo, ["./plugins/alpha/skills/x"], **extra)
-
-    result = run_gate(base, repo)
-
-    assert result.returncode != 0, result.stdout + result.stderr
-    assert "FAIL: personal:" in result.stdout
-    assert "beyond display fields" in result.stdout
-
-
-def test_curated_entry_definition_changed_with_bump_passes(tmp_path):
-    repo, base = curated_fixture(tmp_path)
-    write_marketplace(repo, ["./plugins/alpha/skills/x"], version="1.1.0",
-                      hooks={"SessionStart": []})
-
-    result = run_gate(base, repo)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "personal: content changed" in result.stdout
-
-
-def test_curated_entry_display_fields_changed_needs_no_bump(tmp_path):
-    repo, base = curated_fixture(tmp_path)
-    write_marketplace(repo, ["./plugins/alpha/skills/x"],
-                      description="new words", category="c", keywords=["k"],
-                      tags=["t"], author={"name": "A"}, homepage="https://example.com",
-                      displayName="Personal", repository="https://example.com/r",
-                      license="MIT")
-
-    result = run_gate(base, repo)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "personal: unchanged" in result.stdout
-
-
-def test_curated_skills_reordered_needs_no_bump(tmp_path):
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    write_bundle(repo, "alpha", "1.0.0")
-    write_bundle(repo, "beta", "1.0.0")
-    write_marketplace(repo, ["./plugins/alpha/skills/x", "./plugins/beta/skills/x"])
-    base = commit_all(repo, "base")
-    write_marketplace(repo, ["./plugins/beta/skills/x", "./plugins/alpha/skills/x"])
-
-    result = run_gate(base, repo)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "personal: unchanged" in result.stdout
-
-
-def test_curated_entry_with_no_marketplace_at_base_is_newly_added(tmp_path):
-    # The file itself is absent at base: a normal "new" case, not an error.
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    write_bundle(repo, "alpha", "1.0.0")
-    base = commit_all(repo, "base")
-    write_marketplace(repo, ["./plugins/alpha/skills/x"])
-
-    result = run_gate(base, repo)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "personal: newly added" in result.stdout
-
-
-def _failing_git(fail_on):
-    """cpv._git, except the named subcommand fails like a broken git would."""
-    real = cpv._git
-
-    def fake(repo_root, *args):
-        if args and args[0] == fail_on:
-            return subprocess.CompletedProcess(
-                ["git", *args], 128, stdout=b"", stderr=b"fatal: simulated")
-        return real(repo_root, *args)
-    return fake
-
-
-@pytest.mark.parametrize("fail_on", ["ls-tree", "show"])
-def test_a_failed_base_read_is_an_error_not_newly_added(tmp_path, monkeypatch, fail_on):
-    repo, base = curated_fixture(tmp_path)
-    monkeypatch.setattr(cpv, "_git", _failing_git(fail_on))
-    problems, notices = [], []
-
-    checked = cpv.check_curated_entries(repo, base, problems, notices)
-
-    assert checked == 1
-    assert len(problems) == 1 and "simulated" in problems[0], problems
-    assert not any("newly added" in n for n in notices), notices
-
-
-def test_curated_entry_new_since_base_needs_no_bump(tmp_path):
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    write_bundle(repo, "alpha", "1.0.0")
-    write_marketplace(repo, None)
-    base = commit_all(repo, "base")
-    write_marketplace(repo, ["./plugins/alpha/skills/x"])
-
-    result = run_gate(base, repo)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "personal: newly added" in result.stdout

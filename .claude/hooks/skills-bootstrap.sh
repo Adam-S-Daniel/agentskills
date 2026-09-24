@@ -1318,6 +1318,9 @@ if not lock_paths:
 # Where a bundle's skills sit inside its own repo. This repo's shape is the
 # default; a federated source keeps them wherever it keeps them.
 DEFAULT_LAYOUT = "plugins/{bundle}/skills"
+# Bundles no lock may name (ADR 0012): the account plugin's skills are symlinks
+# to other bundles' skills. Mirrors generate_skills_lock.UNLOCKABLE_BUNDLES.
+UNLOCKABLE_BUNDLES = ("adam-personal",)
 SOURCE_FIELDS = ("registry", "ref", "bundles", "layout")
 
 # The four trust-boundary patterns. They are byte-identical to the generator's
@@ -1440,6 +1443,18 @@ def clean_ref(ref, where):
     return ref
 
 
+def refuse_unlockable(bundles, where):
+    """A lock naming the account plugin is refused wholesale (ADR 0012)."""
+    # Case-folded, like clean_layout: on a case-insensitive filesystem
+    # `Adam-Personal` names the same plugins/ directory.
+    named = sorted(bundle for bundle in set(bundles) if bundle.lower() in UNLOCKABLE_BUNDLES)
+    if named:
+        raise LockRejected(
+            "%s names %s, the claude.ai account plugin, whose skills are symlinks "
+            "to other bundles' skills; lock those bundles instead (ADR 0012)"
+            % (where, ", ".join(named)))
+
+
 def clean_layout(layout, where):
     """Validate a layout template and return it.
 
@@ -1459,6 +1474,11 @@ def clean_layout(layout, where):
     for segment in layout.split("/"):
         if segment in ("", ".", "..") or not re.fullmatch(r"[A-Za-z0-9._{}-]+", segment):
             raise LockRejected("lock: %s must be a relative path with no '..' segment" % where)
+        # A layout need not use '{bundle}', so it could reach the account
+        # plugin's links without the bundle name ever being claimed (ADR 0012).
+        if segment.lower() in UNLOCKABLE_BUNDLES:
+            raise LockRejected("lock: %s names %s, which no lock may read (ADR 0012)"
+                               % (where, segment))
     return layout
 
 
@@ -1544,6 +1564,7 @@ def read_lock(lock_path):
         raise LockRejected(
             "lock: 'bundles' must be a non-empty list of bundle names — it is what "
             "says which bundles come from 'registry', and nothing is assumed for it")
+    refuse_unlockable(primary_bundles, "lock: 'bundles'")
     claim = {bundle: 0 for bundle in primary_bundles}
 
     for position, raw in enumerate(extra, start=1):
@@ -1564,6 +1585,7 @@ def read_lock(lock_path):
         if not isinstance(bundles, list) or not bundles or not all(
                 isinstance(bundle, str) and re.fullmatch(NAME, bundle) for bundle in bundles):
             raise LockRejected("lock: %s.bundles must be a non-empty list of bundle names" % where)
+        refuse_unlockable(bundles, "lock: %s.bundles" % where)
         for bundle in bundles:
             # `len(sources)` is the index this source is about to take, so a
             # source listing the same bundle twice is not a collision with
@@ -2533,6 +2555,12 @@ digest_dir () {
   python3 -I - "$1" 2>>"$LOG" <<'DIGEST_PY'
 import hashlib, pathlib, sys
 
+# The skill directory ITSELF may not be a link either (ADR 0012): resolving it
+# first would digest the TARGET's bytes under this skill's name. Checked before
+# resolve(), which would erase the answer; the generator refuses the same in
+# collect_skills, and this side must be the stricter of the two.
+if pathlib.Path(sys.argv[1]).is_symlink():
+    sys.exit("symlinked skill directory: %s" % sys.argv[1])
 root = pathlib.Path(sys.argv[1]).resolve()
 if not root.is_dir():
     sys.exit("not a directory: %s" % sys.argv[1])
@@ -2781,7 +2809,20 @@ while IFS= read -r -d '' key \
   fi
 
   src="$tmp/reg-$index/$relpath"
-  if [ ! -f "$src/SKILL.md" ]; then
+  # A skill root that is a SYMLINK is refused here too, on the fetched tree,
+  # before anything is copied (ADR 0008, ADR 0012), and reported as absent: it
+  # is no skill directory. `digest_dir` refuses one as well, but it measures the
+  # COPY, and on Windows the copy is not a link: on PR #177's Windows run a link
+  # to a sibling skill installed as a verified copy of it with that refusal in
+  # place (measured), consistent with MSYS `cp -R` materialising a native
+  # symlink as a deep copy (inferred). With core.symlinks=false the link is a
+  # file, which the SKILL.md test already fails. Folded into this arm rather
+  # than given its own, so the install loop's deleting arms stay the ones
+  # skills-doctor's SKILL.md counts.
+  if [ ! -f "$src/SKILL.md" ] || [ -L "$src" ]; then
+    if [ -L "$src" ]; then
+      printf 'refused symlinked skill root: %s\n' "$relpath" >>"$LOG"
+    fi
     rm -rf "${DEST:?}/$name" >>"$LOG" 2>&1
     absent+=("$name")
     continue

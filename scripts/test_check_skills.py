@@ -103,6 +103,24 @@ def local_registry(tmp_path):
 # Clean baseline
 # =================================================================================
 
+def test_a_symlinked_skill_directory_is_not_scanned_twice(tmp_path):
+    """ADR 0012: plugins/adam-personal/skills/<name> is a git symlink to a
+    bundle's skill. On a symlink-capable checkout the layout glob follows it;
+    the census must count the skill once, through its real directory."""
+    write_skill(tmp_path, "plugins/alpha/skills/good-skill")
+    link = tmp_path / "plugins" / "personal" / "skills" / "good-skill"
+    link.parent.mkdir(parents=True)
+    try:
+        os.symlink(os.path.join("..", "..", "alpha", "skills", "good-skill"), link,
+                   target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine cannot create symlinks")
+    assert (link / "SKILL.md").is_file(), "the fixture link does not resolve"
+    report = run_tool(tmp_path, [registry_entry("alpha", ".", "plugins/*/skills/*/SKILL.md")])
+    assert report.errors == []
+    assert report.skills_scanned == 1
+
+
 def test_good_tree_produces_no_findings_and_exits_zero(tmp_path, local_registry):
     write_skill(tmp_path, "skills/good-skill")
     report = run_tool(tmp_path, local_registry)

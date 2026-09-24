@@ -383,6 +383,12 @@ def find_skills(registry: Registry) -> List[Skill]:
         if not skill_md.is_file():
             continue
         skill_dir = skill_md.parent
+        # A symlinked skill directory (agentskills' plugins/adam-personal, ADR
+        # 0012) is a second name for a skill the census already reaches through
+        # its real directory; counting it would report every account skill as
+        # a duplicate basename of itself.
+        if skill_dir.is_symlink():
+            continue
         skills.append(Skill(
             registry=registry.name,
             skill_dir=skill_dir,

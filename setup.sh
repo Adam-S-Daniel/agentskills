@@ -57,12 +57,19 @@ if [[ ! -d "$PLUGINS_DIR" ]]; then
   exit 1
 fi
 
+# >>> skill-collection
 # Collect every skill directory: plugins/<plugin>/skills/<skill>/SKILL.md
+# A SYMLINKED skill directory is skipped: plugins/adam-personal/skills/<name>
+# is a git symlink to the bundle's own skill (ADR 0012), and following it would
+# link each account skill twice under one basename. (A core.symlinks=false
+# checkout writes those entries as small files, which the glob never matches.)
 SKILL_DIRS=()
 for skill_md in "$PLUGINS_DIR"/*/skills/*/SKILL.md; do
   [[ -f "$skill_md" ]] || continue
+  [[ -L "$(dirname "$skill_md")" ]] && continue
   SKILL_DIRS+=("$(dirname "$skill_md")")
 done
+# <<< skill-collection
 
 if [[ ${#SKILL_DIRS[@]} -eq 0 ]]; then
   echo "ERROR: no skills found under $PLUGINS_DIR/*/skills/*" >&2
@@ -339,6 +346,8 @@ echo "=== Registering sync-skills pre-push hook ==="
 # which bundle plugin the skill lives in.
 SYNC_SKILLS_SETUP=""
 for candidate in "$PLUGINS_DIR"/*/skills/sync-skills/setup.sh; do
+  # Not through a symlinked skill entry (ADR 0012's adam-personal links it).
+  [[ -L "$(dirname "$candidate")" ]] && continue
   if [[ -f "$candidate" ]]; then
     SYNC_SKILLS_SETUP="$candidate"
     break

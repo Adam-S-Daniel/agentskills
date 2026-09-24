@@ -12049,3 +12049,157 @@ def test_the_subsumed_reason_really_is_answered_by_an_earlier_blocker(tmp_path):
     covering = _reason_ids(answer.reason, reasons)
     assert covering and all(name.startswith(_SUBSUMES_IT + ":") for name in covering), \
         answer.reason
+
+
+# =============================================================================
+# ADR 0012: the account plugin is never lockable
+# =============================================================================
+
+
+def _account_tree(tmp_path: Path) -> Path:
+    """plugins/alpha/skills/one, and plugins/adam-personal with a link to it
+    in the core.symlinks=false spelling (a file holding the target)."""
+    root = tmp_path / "tree"
+    skill = root / "plugins" / "alpha" / "skills" / "one"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: one\n---\n", encoding="utf-8")
+    link_dir = root / "plugins" / "adam-personal" / "skills"
+    link_dir.mkdir(parents=True)
+    (link_dir / "one").write_text("../../alpha/skills/one", encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize("spelling", ["adam-personal", "Adam-Personal", "ADAM-PERSONAL"])
+def test_the_generator_refuses_to_lock_the_account_plugin(tmp_path, spelling):
+    """Refused by NAME, whatever the checkout: on a core.symlinks=false tree
+    the links are files and a glob would silently lock NOTHING for the bundle,
+    so the refusal cannot depend on what the links look like on disk. Case-
+    folded: on a case-insensitive filesystem every spelling is that folder."""
+    root = _account_tree(tmp_path)
+    with pytest.raises(gsl.GeneratorError, match=f"{spelling}.*cannot be locked"):
+        gsl.collect_skills(root, ["alpha", spelling])
+    assert list(gsl.collect_skills(root, ["alpha"])) == ["alpha/one"]
+
+
+def test_the_generator_refuses_a_symlinked_skill_directory(tmp_path):
+    """ADR 0008 extended to the skill directory itself: digest_skill_dir
+    resolves its root, so a symlinked skill would be locked under the
+    TARGET's digest in a second bundle."""
+    root = _account_tree(tmp_path)
+    link = root / "plugins" / "beta" / "skills" / "one"
+    link.parent.mkdir(parents=True)
+    try:
+        # Native separators: a Windows symlink whose target uses '/' dangles.
+        os.symlink(os.path.join("..", "..", "alpha", "skills", "one"), link,
+                   target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine cannot create symlinks")
+    assert (link / "SKILL.md").is_file(), "the fixture link does not resolve"
+    with pytest.raises(gsl.GeneratorError, match="is a symlink"):
+        gsl.collect_skills(root, ["beta"])
+
+
+@pytest.mark.parametrize("spelling", ["adam-personal", "Adam-Personal", "ADAM-PERSONAL"])
+@pytest.mark.parametrize("where", ["primary", "source"])
+def test_the_hook_reader_refuses_a_lock_naming_the_account_plugin(tmp_path, where, spelling):
+    base = {"registry": "owner/repo", "ref": "0" * 40, "bundles": ["adam"], "skills": {}}
+    assert _hook_reader_accepts(dict(base), tmp_path)
+    lock = dict(base)
+    if where == "primary":
+        lock["bundles"] = ["adam", spelling]
+    else:
+        lock["sources"] = [{"registry": "owner/other", "ref": "1" * 40,
+                            "bundles": [spelling], "layout": "skills"}]
+    proc = _run_hook_reader(lock, tmp_path)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.returncode != 0
+    assert spelling in proc.stderr and "ADR 0012" in proc.stderr
+
+
+@pytest.mark.parametrize("layout", ["plugins/adam-personal/skills", "plugins/Adam-Personal/skills",
+                                    "adam-personal"])
+def test_a_layout_reaching_the_account_plugin_is_refused_by_both(tmp_path, layout):
+    """A source's layout need not use '{bundle}', so it could reach the links
+    without ever naming adam-personal as a bundle."""
+    with pytest.raises(gsl.GeneratorError, match="ADR 0012"):
+        gsl.validate_layout(layout, "sources[1].layout")
+    lock = {"registry": "owner/repo", "ref": "0" * 40, "bundles": ["adam"], "skills": {},
+            "sources": [{"registry": "owner/other", "ref": "1" * 40,
+                         "bundles": ["x"], "layout": layout}]}
+    proc = _run_hook_reader(lock, tmp_path)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.returncode != 0
+    assert "ADR 0012" in proc.stderr
+
+
+def test_the_generators_digest_refuses_a_symlinked_skill_root(tmp_path):
+    real = tmp_path / "real"
+    _write(real / "SKILL.md", "---\nname: real\n---\n")
+    link = tmp_path / "link"
+    _make_symlink(link, real, to_directory=True)
+    with pytest.raises(gsl.GeneratorError, match="symlinked skill directory"):
+        gsl.digest_skill_dir(link)
+
+
+def test_the_hook_refuses_a_symlinked_skill_root(tmp_path):
+    """The hook must be the stricter side (E4). `cp -R` copies a symlinked
+    skill root AS a symlink, so in ~/.claude/skills a link named `zeta` to the
+    sibling `alpha` resolves to the alpha this same run just installed. With
+    alpha's TRUE digest in the lock for zeta, digest_dir used to resolve the
+    link, measure alpha, and install zeta as a live link to another skill. It
+    must be refused."""
+    root = tmp_path / "registry"
+    first = make_registry(root, {"adam/alpha": SKILL_A})
+    project = tmp_path / "project"
+    project.mkdir()
+    # A REAL lock for alpha, the shape the hook reads — then edited below the
+    # way an attacker would, since our generator refuses the linked skill.
+    proc = run_generator("--repo", str(root), "--registry", root.resolve().as_uri(),
+                         "--ref", first, "--bundles", "adam",
+                         "-o", str(project / "skills.lock"))
+    assert proc.returncode == 0, proc.stderr
+    skills_root = root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam")
+    true_digest = gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(skills_root / "alpha")
+    link = skills_root / "zeta"
+    _make_symlink(link, "alpha", to_directory=True)
+    assert (link / "SKILL.md").is_file(), "the fixture link does not resolve"
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "a symlinked skill root")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         check=True, capture_output=True, text=True).stdout.strip()
+    modes = subprocess.run(["git", "-C", str(root), "ls-files", "-s"],
+                           check=True, capture_output=True, text=True).stdout
+    assert "120000" in modes, f"git did not record a symlink here:\n{modes}"
+
+    lock = json.loads((project / "skills.lock").read_text(encoding="utf-8"))
+    assert lock["skills"]["adam/alpha"] == true_digest
+    lock["ref"] = sha
+    lock["generated_from"] = sha
+    lock["skills"]["adam/zeta"] = true_digest
+    _write(project / "skills.lock", json.dumps(lock, indent=2) + "\n")
+    home = tmp_path / "home"
+    hook = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert hook.returncode == 0, hook.stderr
+    verdict = _verdict(hook)
+    installed = home / ".claude" / "skills"
+    assert (installed / "alpha" / "SKILL.md").is_file(), \
+        f"the real skill should install — else this test proves nothing: {verdict}"
+    assert not os.path.lexists(installed / "zeta"), \
+        f"a symlinked skill root was installed: {verdict}"
+    assert not verdict.startswith("skills: 2/2 "), verdict
+    # The verdict says "absent"; the log must say WHY, or the operator chases
+    # a missing directory that is present in the registry.
+    logs = _bootstrap_log(home)
+    assert "refused symlinked skill root: plugins/adam/skills/zeta" in logs, logs[-2000:]
+
+
+def test_the_two_unlockable_lists_agree():
+    """The generator's constant and the hook's are one rule in two programs."""
+    import ast
+    values = [
+        ast.literal_eval(node.value)
+        for node in ast.walk(ast.parse(_extract_hook_lock_reader()))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "UNLOCKABLE_BUNDLES" for t in node.targets)
+    ]
+    assert values == [gsl.UNLOCKABLE_BUNDLES]

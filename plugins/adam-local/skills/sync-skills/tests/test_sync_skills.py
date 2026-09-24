@@ -1004,6 +1004,23 @@ class TestPluginLayout:
         d = _skill_dir(repo_plugin_layout, "skill-a")
         assert d == repo_plugin_layout / "plugins" / "skill-a" / "skills" / "skill-a"
 
+    def test_a_symlinked_skill_entry_is_not_the_skill(self, repo_plugin_layout):
+        """ADR 0012: plugins/adam-personal/skills/<name> is a git symlink to a
+        bundle's skill, and "a-personal" sorts ahead of "skill-a" here as
+        adam-personal sorts ahead of fastmail in the registry. The uploader
+        must find the real directory, and list each skill once."""
+        link = repo_plugin_layout / "plugins" / "a-personal" / "skills" / "skill-a"
+        link.parent.mkdir(parents=True)
+        try:
+            os.symlink(os.path.join("..", "..", "skill-a", "skills", "skill-a"), link,
+                       target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("this machine cannot create symlinks")
+        assert (link / "SKILL.md").exists(), "the fixture link does not resolve"
+        d = _skill_dir(repo_plugin_layout, "skill-a")
+        assert d == repo_plugin_layout / "plugins" / "skill-a" / "skills" / "skill-a"
+        assert get_all_skills(repo_plugin_layout) == ["skill-a", "skill-b"]
+
     def test_skill_dir_missing(self, repo_plugin_layout):
         assert _skill_dir(repo_plugin_layout, "nope") is None
 

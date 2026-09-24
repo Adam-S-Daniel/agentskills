@@ -1,0 +1,6 @@
+{
+  "name": "adam-personal",
+  "version": "1.1.0",
+  "description": "The skills Adam's claude.ai account carries, for claude.ai chat and Cowork, the Desktop app, Claude in Chrome and mobile. Enable it on claude.ai and in the Desktop app; it is not meant for Claude Code sessions, where repos install the bundles.",
+  "author": { "name": "Adam Daniel" }
+}
