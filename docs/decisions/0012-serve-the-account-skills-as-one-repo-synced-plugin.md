@@ -101,7 +101,8 @@ claude.ai and in the Desktop app.
       `python3` and `python` there are the App Installer alias, exit 49), so
       setup.sh will now stop there with an error. Remedy: install Python 3
       from python.org or with `winget install Python.Python.3.12`, then re-run
-      `bash setup.sh`.
+      `bash setup.sh` in a **new** terminal (the install updates PATH only for
+      shells started after it).
    2. Add `Adam-S-Daniel/agentskills` at
       [claude.ai/customize/plugins](https://claude.ai/customize/plugins);
       enable only `adam-personal` there and in the Desktop app's plugin
