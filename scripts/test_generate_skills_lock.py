@@ -12146,8 +12146,15 @@ def test_the_hook_refuses_a_symlinked_skill_root(tmp_path):
     link, measure alpha, and install zeta as a live link to another skill. It
     must be refused."""
     root = tmp_path / "registry"
-    root.mkdir(parents=True)
-    make_registry(root, {"adam/alpha": SKILL_A})
+    first = make_registry(root, {"adam/alpha": SKILL_A})
+    project = tmp_path / "project"
+    project.mkdir()
+    # A REAL lock for alpha, the shape the hook reads — then edited below the
+    # way an attacker would, since our generator refuses the linked skill.
+    proc = run_generator("--repo", str(root), "--registry", root.resolve().as_uri(),
+                         "--ref", first, "--bundles", "adam",
+                         "-o", str(project / "skills.lock"))
+    assert proc.returncode == 0, proc.stderr
     skills_root = root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam")
     true_digest = gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(skills_root / "alpha")
     link = skills_root / "zeta"
@@ -12161,18 +12168,12 @@ def test_the_hook_refuses_a_symlinked_skill_root(tmp_path):
                            check=True, capture_output=True, text=True).stdout
     assert "120000" in modes, f"git did not record a symlink here:\n{modes}"
 
-    project = tmp_path / "project"
-    (project / ".git").mkdir(parents=True)
-    _write(project / "skills.lock", json.dumps({
-        "registry": "fixture/registry",
-        "ref": sha,
-        "bundles": ["adam"],
-        "skills": {"adam/alpha": true_digest, "adam/zeta": true_digest},
-        "generated_from": sha,
-        "sources": [{"name": "fixture/registry",
-                     "url": root.resolve().as_uri(),
-                     "ref": sha, "bundles": ["adam"]}],
-    }, indent=2) + "\n")
+    lock = json.loads((project / "skills.lock").read_text(encoding="utf-8"))
+    assert lock["skills"]["adam/alpha"] == true_digest
+    lock["ref"] = sha
+    lock["generated_from"] = sha
+    lock["skills"]["adam/zeta"] = true_digest
+    _write(project / "skills.lock", json.dumps(lock, indent=2) + "\n")
     home = tmp_path / "home"
     hook = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
     assert hook.returncode == 0, hook.stderr
