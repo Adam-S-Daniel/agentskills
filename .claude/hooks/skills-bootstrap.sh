@@ -2807,23 +2807,19 @@ while IFS= read -r -d '' key \
   fi
 
   src="$tmp/reg-$index/$relpath"
-  if [ ! -f "$src/SKILL.md" ]; then
+  # A skill root that is a SYMLINK is refused here too, on the fetched tree,
+  # before anything is copied (ADR 0008, ADR 0012), and reported as absent: it
+  # is no skill directory. `digest_dir` refuses one as well, but it measures the
+  # COPY, and on Windows the copy is not a link: on PR #177's Windows run a link
+  # to a sibling skill installed as a verified copy of it with that refusal in
+  # place (measured), consistent with MSYS `cp -R` materialising a native
+  # symlink as a deep copy (inferred). With core.symlinks=false the link is a
+  # file, which the SKILL.md test already fails. Folded into this arm rather
+  # than given its own, so the install loop's deleting arms stay the ones
+  # skills-doctor's SKILL.md counts.
+  if [ ! -f "$src/SKILL.md" ] || [ -L "$src" ]; then
     rm -rf "${DEST:?}/$name" >>"$LOG" 2>&1
     absent+=("$name")
-    continue
-  fi
-  # A skill root that is a SYMLINK is refused here, on the fetched tree, before
-  # anything is copied (ADR 0008, ADR 0012). `digest_dir` refuses one too, but
-  # it measures the COPY, and on Windows the copy is not a link: on PR #177's
-  # Windows run a link to a sibling skill installed as a verified copy of it
-  # with that refusal in place (measured), consistent with MSYS `cp -R`
-  # materialising a native symlink as a deep copy (inferred). (With
-  # core.symlinks=false the link is a file, so the SKILL.md test above has
-  # already reported it absent.)
-  if [ -L "$src" ]; then
-    rm -rf "${DEST:?}/$name" >>"$LOG" 2>&1
-    echo "symlinked skill directory refused: $relpath" >>"$LOG"
-    mismatch+=("$name")
     continue
   fi
   # Collision guard. Personal ~/.claude/skills shadows the project's
