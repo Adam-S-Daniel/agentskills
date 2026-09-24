@@ -516,8 +516,8 @@ def digest_skill_dir(path: Path, skip: frozenset = frozenset()) -> str:
 
 
 # Every git this script runs has EOL translation turned off. `git archive`
-# honours `core.autocrlf`, so on Windows -- where it is the default, and where
-# it is set on ZENDA -- `materialize` extracted the pinned ref with every LF
+# honours `core.autocrlf`, so on Windows -- where it is the default --
+# `materialize` extracted the pinned ref with every LF
 # rewritten to CRLF and digested THAT. The lock is the authoritative record of
 # what a skill's bytes are, and one generated here would have named a digest no
 # Linux run could ever reproduce, for content that never changed. It is not
