@@ -308,6 +308,17 @@ removed on claude.ai, while `e6-probe`'s directory stayed on disk. When the
 drop happened is not known; a reading on the laptop's Windows home at
 2026-09-24 01:15 UTC still listed it (recorded in ADR 0012, phase 2 step 5).
 
+**Removal of a repo-synced plugin, measured (2026-09-24).** Adam disabled
+`e6-link` and removed `e6-probe-marketplace` on claude.ai and in the Desktop
+app. A fresh Claude Code session on the laptop's Windows home then had no
+`e6-link` in its synced `manifest.json` and none in
+`claude plugin list --json`, so the terminal no longer loads it. Its directory
+`plugins/synced/<bucket>/e6-link/` was still on disk, as with `e6-probe`: the
+terminal drops a removed plugin from its manifest and stops loading it, but
+leaves the files. The probe repo itself was deleted afterwards. Whether the
+plugin also left claude.ai chat, local Cowork and iOS was reported by Adam as
+removed, without a per-surface token check.
+
 ## 4. What is still unknown
 
 1. Would a push arrive without a `version` bump? The test bumped it, and
