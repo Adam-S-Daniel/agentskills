@@ -352,3 +352,112 @@ def test_no_bundles_found_fails(tmp_path):
     result = run_gate(base, repo)
 
     assert result.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# curated marketplace entries (ADR 0012) — source "./", "strict": false, a
+# `skills` list pointing into the bundles. Same rule as a bundle: content
+# changed => the entry's version in marketplace.json moved up.
+# ---------------------------------------------------------------------------
+
+def write_marketplace(repo_root: Path, curated_skills, version: str = "1.0.0") -> None:
+    """A marketplace.json with a local entry per bundle dir plus, when
+    curated_skills is not None, one curated entry named `personal`."""
+    plugins = [
+        {"name": d.name, "source": f"./plugins/{d.name}"}
+        for d in sorted((repo_root / "plugins").iterdir())
+        if d.is_dir()
+    ]
+    if curated_skills is not None:
+        plugins.append({
+            "name": "personal", "source": "./", "strict": False,
+            "version": version, "defaultEnabled": False,
+            "skills": list(curated_skills),
+        })
+    _write(repo_root / ".claude-plugin" / "marketplace.json",
+           {"name": "fixture", "plugins": plugins})
+
+
+def curated_fixture(tmp_path: Path) -> tuple:
+    """Bundles alpha and beta at 1.0.0; `personal` serves alpha's skill x."""
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    write_bundle(repo, "alpha", "1.0.0")
+    write_bundle(repo, "beta", "1.0.0")
+    write_marketplace(repo, ["./plugins/alpha/skills/x"])
+    return repo, commit_all(repo, "base")
+
+
+def bump_bundle(repo: Path, name: str, version: str) -> None:
+    set_version(repo, name, "root", version)
+    set_version(repo, name, "claude", version)
+
+
+def test_curated_skill_edited_without_entry_bump_fails(tmp_path):
+    """The curated twin of the load-bearing test: the bundle IS bumped, so
+    only the curated entry's missing bump can fail this run."""
+    repo, base = curated_fixture(tmp_path)
+    (repo / "plugins" / "alpha" / "skills" / "x" / "SKILL.md").write_text(
+        "changed body\n", encoding="utf-8"
+    )
+    bump_bundle(repo, "alpha", "1.1.0")
+
+    result = run_gate(base, repo)
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "FAIL: personal:" in result.stdout
+    assert "FAIL: alpha" not in result.stdout
+
+
+def test_curated_skill_edited_with_entry_bump_passes(tmp_path):
+    repo, base = curated_fixture(tmp_path)
+    (repo / "plugins" / "alpha" / "skills" / "x" / "SKILL.md").write_text(
+        "changed body\n", encoding="utf-8"
+    )
+    bump_bundle(repo, "alpha", "1.1.0")
+    write_marketplace(repo, ["./plugins/alpha/skills/x"], version="1.1.0")
+
+    result = run_gate(base, repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "personal: content changed" in result.stdout
+
+
+def test_curated_entry_unchanged_when_an_unlisted_skill_changes(tmp_path):
+    repo, base = curated_fixture(tmp_path)
+    (repo / "plugins" / "beta" / "skills" / "x" / "SKILL.md").write_text(
+        "changed body\n", encoding="utf-8"
+    )
+    bump_bundle(repo, "beta", "1.1.0")
+
+    result = run_gate(base, repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "personal: unchanged" in result.stdout
+
+
+def test_curated_skills_list_changed_without_bump_fails(tmp_path):
+    # No file under any skill moved, only the list did: the plugin still
+    # serves different content, so the bump is still owed.
+    repo, base = curated_fixture(tmp_path)
+    write_marketplace(repo, ["./plugins/alpha/skills/x", "./plugins/beta/skills/x"])
+
+    result = run_gate(base, repo)
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "FAIL: personal:" in result.stdout
+    assert "skills list changed" in result.stdout
+
+
+def test_curated_entry_new_since_base_needs_no_bump(tmp_path):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    write_bundle(repo, "alpha", "1.0.0")
+    write_marketplace(repo, None)
+    base = commit_all(repo, "base")
+    write_marketplace(repo, ["./plugins/alpha/skills/x"])
+
+    result = run_gate(base, repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "personal: newly added" in result.stdout
