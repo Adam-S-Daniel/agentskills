@@ -5,8 +5,8 @@
 # schemas/ is pinned the same way, by SCHEMA_SHA256 in check_agent_plugins.py.
 #
 # That only works if a checkout's bytes are the same on every platform. They
-# are not by default: with `core.autocrlf=true` -- the Windows default, and set
-# on ZENDA -- git rewrites LF to CRLF on the way out, so every digest computed
+# are not by default: with `core.autocrlf=true` -- the Windows default --
+# git rewrites LF to CRLF on the way out, so every digest computed
 # on Windows disagreed with the one committed from Linux. The vendored schema
 # reported "sha256 mismatch ... the vendored schema was modified" on every
 # Windows clone, which is the worst possible failure mode for an integrity
@@ -28,7 +28,8 @@
 #
 #     git ls-files -z | xargs -0 rm -f && git checkout -- .
 #
-# Two more obvious commands do NOT work, both measured on ZENDA:
+# Two more obvious commands do NOT work, both measured on a since-retired
+# Windows laptop:
 #
 #   * `git reset --hard` (and `git checkout-index -a -f`) leave the CRLF files
 #     exactly as they are. Git decides a file is up to date from the index's
