@@ -2812,6 +2812,20 @@ while IFS= read -r -d '' key \
     absent+=("$name")
     continue
   fi
+  # A skill root that is a SYMLINK is refused here, on the fetched tree, before
+  # anything is copied (ADR 0008, ADR 0012). `digest_dir` refuses one too, but
+  # it measures the COPY, and on Windows the copy is not a link: on PR #177's
+  # Windows run a link to a sibling skill installed as a verified copy of it
+  # with that refusal in place (measured), consistent with MSYS `cp -R`
+  # materialising a native symlink as a deep copy (inferred). (With
+  # core.symlinks=false the link is a file, so the SKILL.md test above has
+  # already reported it absent.)
+  if [ -L "$src" ]; then
+    rm -rf "${DEST:?}/$name" >>"$LOG" 2>&1
+    echo "symlinked skill directory refused: $relpath" >>"$LOG"
+    mismatch+=("$name")
+    continue
+  fi
   # Collision guard. Personal ~/.claude/skills shadows the project's
   # .claude/skills (C3), so a stale personal copy would keep shadowing the
   # repo-owned skill. Remove it so repo-owned actually wins; the skip is
