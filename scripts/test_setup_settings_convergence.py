@@ -135,10 +135,11 @@ def test_the_account_skill_sync_is_turned_off(tmp_path):
 
 
 def test_the_plugin_sync_is_left_alone(tmp_path):
-    """ADR 0010 defers this to E6 (#160), and a deferral has to be visible in
-    the artefact: writing `syncClaudeAiPlugins` either way here would settle a
-    question nothing has measured. The bucket under ~/.claude/plugins/synced/
-    is empty today, so there is nothing to decide from."""
+    """ADR 0010 deferred this to E6 (#160). E6 found the account's plugins
+    syncing (Anthropic's six since 2026-09-20), and ADR 0012 turns off only
+    the one this repo owns, `adam-personal@synced`, by name. Writing
+    `syncClaudeAiPlugins` either way would switch every account plugin at
+    once, so the key stays absent."""
     assert "syncClaudeAiPlugins" not in converge(tmp_path)
 
 

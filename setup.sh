@@ -427,11 +427,12 @@ TARGET_ENABLED_PLUGINS = {
 # docx/pptx/xlsx/pdf skills from laptop terminals. The pinned way back is
 # Anthropic's own marketplace plugin; that is an owner call, not this script's.
 #
-# syncClaudeAiPlugins is deliberately NOT set. The plugin bucket under
-# ~/.claude/plugins/synced/ is empty -- nothing is enabled on the account --
-# so there is nothing measured to decide from, and E6 (#160) exists to measure
-# it. A deferral has to be visible in the artefact, so the key is absent
-# rather than written either way.
+# syncClaudeAiPlugins is deliberately NOT set. `false` would turn off every
+# plugin the account enables, in every terminal, including Anthropic's
+# (E6 #160 §3.1 measured six syncing since 2026-09-20). The one account plugin
+# this repo owns, adam-personal, is turned off by name in
+# TARGET_ENABLED_PLUGINS instead (ADR 0012). The key stays absent rather than
+# written either way.
 TARGET_SETTINGS = {"syncClaudeAiSkills": False}
 
 

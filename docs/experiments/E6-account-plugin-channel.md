@@ -3,27 +3,23 @@
 **Status: answered (2026-09-23).** Next step: a switch proposal with its own
 ADR (§6).
 
-**Short answer: yes, through a marketplace synced from a repo.** A plugin in a
-repo-synced personal marketplace reached local Cowork too (§3.6), so one
-channel covers every surface the ZIP uploads serve. It can be deleted. It
-updates by hand, but in two clicks rather than one ZIP per skill: push, press
-"Check for updates" on claude.ai, restart the Desktop app (§5 step 5). The
-history of how we got there: On 2026-09-23 Adam
-uploaded a throwaway personal plugin, `e6-probe`. Its skill returned its unique
-token in the iOS app, the Claude in Chrome side panel, claude.ai chat,
-claude.ai Cowork and the Desktop Chat tab (§3.5). Those include both surfaces
-the ZIP uploads exist for
-([ADR 0002](../decisions/0002-limit-account-store-to-repo-independent-skills.md)).
-Deleting it on claude.ai removed it (checked on iOS). The account also accepted
-this repo as a personal marketplace.
+**Short answer: very likely yes, through a marketplace synced from a repo.**
+Two probes, and it matters which one measured what:
 
-The gap is **Desktop Cowork, the local Cowork tab**. It does not get a
-personally uploaded plugin. It does get Anthropic's marketplace plugins and
-uploaded skills (§3.5). Local Cowork is where the PDF skills would actually be
-used, since they work on local files. So `sync-skills` stays until a plugin
-delivered through a *marketplace synced from a repo* has been tested there
-(§5 step 4). That route is what Anthropic's plugins use, and it is the one that
-already reaches local Cowork.
+- **An uploaded plugin** (§3.5) reached iOS, the Claude in Chrome side panel,
+  claude.ai chat and Cowork, and the Desktop Chat tab, and deleting it removed
+  it (checked on iOS). It did **not** reach local Cowork, the Desktop app's
+  Cowork tab, where the PDF skills are used.
+- **A plugin from a repo-synced marketplace** (§3.6) reached local Cowork,
+  claude.ai chat, one more surface and a Claude Code terminal. It updates by
+  hand: push, press "Check for updates" on claude.ai, restart the Desktop app
+  (§5 step 5). Chrome, iOS and deleting were **not** re-measured with it.
+
+Chrome and iOS demonstrably load account plugins (§3.4–§3.5), so the
+repo-synced route very likely reaches them too, but that is inferred. The
+switch this points to is [ADR 0012](../decisions/0012-serve-the-account-skills-as-one-repo-synced-plugin.md);
+its phase 2 measures the remaining surfaces and removal before anything is
+retired.
 
 Tracked in [#160](https://github.com/Adam-S-Daniel/agentskills/issues/160).
 [#158](https://github.com/Adam-S-Daniel/agentskills/issues/158) waits on the
