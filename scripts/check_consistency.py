@@ -54,7 +54,8 @@ PLUGINS_DIR = REPO_ROOT / "plugins"
 # The account plugin (ADR 0012): the skills the owner's claude.ai account
 # carries, as a real plugin folder whose skills/<name> entries are git symlinks
 # (mode 120000) to ../../<bundle>/skills/<name>. claude.ai builds the plugin from
-# GitHub and resolves the links server-side (measured 2026-09-24, E6 §3.7); its
+# GitHub and serves the linked skills (measured 2026-09-24, E6 §3.7; that it
+# resolves the links server-side is inferred from a terminal's synced copy); its
 # skill set is DERIVED — it must equal the names in ACCOUNT_SKILLS_PATH, which
 # stays the single declaration of account membership that sync_skills.py
 # --verify reads.
