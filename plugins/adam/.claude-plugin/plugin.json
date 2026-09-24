@@ -1,6 +1,6 @@
 {
   "name": "adam",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Adam's general-purpose skills, safe anywhere including cloud sessions: writing voice, GitHub Actions debugging and hardening, ADRs, resolving task ambiguity.",
   "author": { "name": "Adam Daniel" }
 }
