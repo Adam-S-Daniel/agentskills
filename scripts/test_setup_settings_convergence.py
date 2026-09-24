@@ -37,7 +37,12 @@ SETUP = REPO / "setup.sh"
 
 # The heredoc's own delimiters. Named here so the one test that cares about
 # the extraction can say what it is pinning.
-OPEN, CLOSE = "\"$PYTHON_BIN\" - <<'PYEOF'\n", "\nPYEOF\n"
+OPEN, CLOSE = "\"${PYTHON_CMD[@]}\" - <<'PYEOF'\n", "\nPYEOF\n"
+
+# The shell section around it: interpreter selection, the heredoc, and the
+# exit-code check. Run as shipped (see run_section) so "setup.sh fails instead
+# of printing Setup complete." is asserted on the real text.
+SECTION_OPEN, SECTION_CLOSE = "# >>> settings-convergence\n", "# <<< settings-convergence\n"
 
 
 def convergence_block() -> str:
@@ -197,6 +202,125 @@ def test_invalid_json_is_left_untouched(tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text('{"model": "claude-opus-5",,}', encoding="utf-8")
     assert run_convergence(tmp_path) == '{"model": "claude-opus-5",,}'
+
+
+def run_block(home: Path, existing) -> subprocess.CompletedProcess:
+    """`run_convergence` without the success assertion, for the failure cases."""
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    return subprocess.run([sys.executable, "-c", convergence_block()],
+                          env={"HOME": str(home), "USERPROFILE": str(home),
+                               "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+
+
+@pytest.mark.parametrize("container", ["enabledPlugins", "extraKnownMarketplaces"])
+@pytest.mark.parametrize("value", [["adam@agentskills"], "on", None, 1])
+def test_a_non_object_container_fails_clearly_and_writes_nothing(tmp_path, container, value):
+    existing = {"model": "claude-opus-5", container: value}
+    path = tmp_path / ".claude" / "settings.json"
+    proc = run_block(tmp_path, existing)
+    before = json.dumps(existing, indent=2) + "\n"
+    assert proc.returncode != 0
+    assert "AttributeError" not in proc.stderr
+    assert f"'{container}' is {type(value).__name__}, not a JSON object" in proc.stderr
+    assert path.read_text(encoding="utf-8") == before
+
+
+# --- the shell section: interpreter choice and exit-code propagation --------
+
+def _posix_bash():
+    """A POSIX bash, never Windows' System32 WSL launcher — the same resolver
+    test_generate_skills_lock.py uses, for the same reason."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_generate_skills_lock import BASH
+    return BASH
+
+
+def section() -> str:
+    text = SETUP.read_text(encoding="utf-8")
+    start = text.index(SECTION_OPEN)
+    end = text.index(SECTION_CLOSE, start) + len(SECTION_CLOSE)
+    return text[start:end]
+
+
+def tail() -> str:
+    """Everything setup.sh runs after the section — where "Setup complete." is."""
+    text = SETUP.read_text(encoding="utf-8")
+    return text[text.index(SECTION_CLOSE) + len(SECTION_CLOSE):]
+
+
+def write_stub(bin_dir: Path, name: str, body: str) -> None:
+    path = bin_dir / name
+    path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8", newline="\n")
+    path.chmod(0o755)
+
+
+STORE_STUB = 'echo "Python was not found; run without arguments to install from the Microsoft Store" >&2\nexit 49'
+
+
+def run_section(home: Path, bin_dir: Path) -> subprocess.CompletedProcess:
+    """The shipped section followed by the shipped tail, with PATH holding
+    ONLY bin_dir — so the stubs placed there are the only interpreters found,
+    on a Linux runner with a real python3 in /usr/bin as much as on Windows."""
+    bash = _posix_bash()
+    if bash is None:
+        pytest.skip("no POSIX bash on this machine")
+    return subprocess.run([bash, "-c", section() + tail()],
+                          env={"HOME": str(home), "USERPROFILE": str(home),
+                               "PATH": str(bin_dir)},
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+
+
+def test_the_section_markers_are_the_shipped_ones():
+    text = SETUP.read_text(encoding="utf-8")
+    assert text.count(SECTION_OPEN) == 1 and text.count(SECTION_CLOSE) == 1
+    assert OPEN in section()
+    assert "Setup complete." in tail() and "Setup complete." not in section()
+
+
+def test_a_store_stub_interpreter_fails_setup_instead_of_completing(tmp_path):
+    """Measured 2026-09-24 on a Windows home: python3 resolved to the
+    WindowsApps stub, exited 49, and setup.sh still printed "Setup complete."
+    with nothing written."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("python3", "python", "py"):
+        write_stub(bin_dir, name, STORE_STUB)
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode != 0
+    assert "Setup complete." not in proc.stdout
+    assert "Microsoft Store stub" in proc.stderr
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_a_working_interpreter_after_a_stub_is_chosen(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "python3", STORE_STUB)
+    write_stub(bin_dir, "python", 'exec "%s" "$@"' % Path(sys.executable).as_posix())
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "Setup complete." in proc.stdout
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_a_failing_convergence_fails_setup(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "python3", 'exec "%s" "$@"' % Path(sys.executable).as_posix())
+    path = tmp_path / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"enabledPlugins": []}\n', encoding="utf-8")
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode != 0
+    assert "Setup complete." not in proc.stdout
+    assert "convergence failed" in proc.stderr
+    assert path.read_text(encoding="utf-8") == '{"enabledPlugins": []}\n'
 
 
 def test_the_adr_that_decided_this_is_on_disk_and_accepted():

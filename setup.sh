@@ -350,23 +350,42 @@ if [[ -z "$SYNC_SKILLS_SETUP" ]]; then
 fi
 bash "$SYNC_SKILLS_SETUP"
 
+# >>> settings-convergence
+# scripts/test_setup_settings_convergence.py runs this section, as shipped, in
+# a throwaway HOME. Keep both marker lines.
 echo ""
 echo "=== Converging ~/.claude/settings.json (marketplace + plugin enablement) ==="
-PYTHON_BIN=""
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="python"
+# The interpreter is chosen by RUNNING it, not by `command -v`. On Windows,
+# python3/python on PATH can be the Microsoft Store stub under WindowsApps: it
+# resolves, prints "Python was not found" and exits 49. Picking it by name made
+# this whole block a silent no-op on a Windows home while the script went on to
+# print "Setup complete." (measured 2026-09-24: that home's settings.json never
+# received ADR 0010's keys). `py -3` is the Windows launcher's spelling.
+PYTHON_CMD=()
+for candidate in "python3" "python" "py -3"; do
+  read -r -a cmd <<< "$candidate"
+  command -v "${cmd[0]}" >/dev/null 2>&1 || continue
+  if "${cmd[@]}" -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
+    PYTHON_CMD=("${cmd[@]}")
+    break
+  fi
+done
+
+if [[ ${#PYTHON_CMD[@]} -eq 0 ]]; then
+  echo "ERROR    no working Python found (tried: python3, python, py -3), so" >&2
+  echo "         ~/.claude/settings.json was NOT converged. On Windows, a" >&2
+  echo "         python3/python that prints 'Python was not found' is the" >&2
+  echo "         Microsoft Store stub (…/WindowsApps): install Python or turn" >&2
+  echo "         off its App execution aliases, then re-run setup.sh." >&2
+  exit 1
 fi
 
-if [[ -z "$PYTHON_BIN" ]]; then
-  echo "  WARNING  no python3/python on PATH — skipping settings.json convergence"
-else
-  "$PYTHON_BIN" - <<'PYEOF'
+"${PYTHON_CMD[@]}" - <<'PYEOF'
 import copy
 import io
 import json
 import os
+import sys
 
 SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
 
@@ -401,7 +420,14 @@ TARGET_MARKETPLACES = {
 # sync-skills that ADR 0010 took off terminals. `"<name>@synced": false` in
 # user enabledPlugins is the documented per-plugin off switch
 # (code.claude.com/docs/en/plugins-reference#synced-plugins). It must land on
-# every durable machine BEFORE the plugin is enabled on claude.ai.
+# every durable machine, in EACH home (Windows and WSL), BEFORE the plugin is
+# enabled on claude.ai.
+#
+# Two side effects, stated where they happen. This writes `false` on EVERY
+# run, so a manual `claude plugin enable adam-personal@synced` lasts only until
+# setup.sh next runs. And these are the user settings the Desktop app's Code
+# tab reads too, so the plugin is off there as well — the Desktop app's Chat
+# and Cowork tabs are enabled separately, in its own plugin settings.
 TARGET_ENABLED_PLUGINS = {
     "adam@agentskills": True,
     "adam-local@agentskills": True,
@@ -466,6 +492,16 @@ if os.path.exists(SETTINGS_PATH):
                 settings = None
 
 if settings is not None:
+    # A container this block merges into must be a JSON object. Anything else
+    # (a list, a string, null) is refused before any write, with its name,
+    # rather than surfacing as an AttributeError from deep_merge.
+    for container in ("extraKnownMarketplaces", "enabledPlugins"):
+        if container in settings and not isinstance(settings[container], dict):
+            sys.exit(
+                "settings: ERROR %s: %r is %s, not a JSON object - left untouched; "
+                "fix it by hand and re-run" % (
+                    SETTINGS_PATH, container, type(settings[container]).__name__))
+
     original = copy.deepcopy(settings)
 
     settings.setdefault("extraKnownMarketplaces", {})
@@ -491,7 +527,12 @@ if settings is not None:
         os.rename(tmp_path, SETTINGS_PATH)
         print("settings: updated")
 PYEOF
+converge_rc=$?
+if [[ $converge_rc -ne 0 ]]; then
+  echo "ERROR    settings.json convergence failed (exit $converge_rc); ~/.claude/settings.json was NOT converged" >&2
+  exit "$converge_rc"
 fi
+# <<< settings-convergence
 
 echo ""
 echo "Setup complete."
