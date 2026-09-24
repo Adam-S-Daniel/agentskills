@@ -389,7 +389,7 @@ jobs:
       # this comment's opening paragraph says goes wrong.
       - name: Run every test suite in the repo
         if: steps.salient.outputs.run == 'true'
-        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q
+        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q -rs
 
   # The same suites on Windows, because until #98 they could not run there at
   # all — 72 failures, every one of them a platform fault rather than a real
@@ -484,9 +484,12 @@ jobs:
             echo "::error::README.md checked out with CRLF — .gitattributes did not apply."
             exit 1
           fi
+      # -rs (here and in the ubuntu job) lists every skipped test and its
+      # reason in the log, so "this test ran on Windows" is readable from the
+      # run rather than inferred from a skip count.
       - name: Run every test suite in the repo
         if: steps.salient.outputs.run == 'true'
-        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q
+        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q -rs
 
   shellcheck:
     if: github.event_name != 'schedule'
