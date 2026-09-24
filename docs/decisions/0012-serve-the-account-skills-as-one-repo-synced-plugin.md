@@ -197,10 +197,14 @@ carries no status change; this section is the carve-out.
       minutes, and launch one again — the docs say terminal sync removes
       plugins "in the background" after start, so a single launch can race
       it — and only then check that it is no longer offered on a surface and
-      is gone from the terminal's synced bucket
-      (`~/.claude/plugins/synced/`). **If it is still
-      offered anywhere, or still in `~/.claude/plugins/synced/`, phase 3's
-      premise fails and ADR 0002's one-way-door consequence stays.** Then
+      is gone from the terminal: absent from the synced
+      `~/.claude/plugins/synced/<bucket>/manifest.json` and from
+      `claude plugin list --json`. **Judge by those two, not by the
+      directory:** the terminal leaves a removed plugin's directory on disk
+      (measured for `e6-probe` and `e6-link`, E6 §3.7), so a leftover
+      directory is not a failed removal. **If it is still offered anywhere,
+      still in the synced manifest, or still in `claude plugin list`, phase
+      3's premise fails and ADR 0002's one-way-door consequence stays.** Then
       re-enable it on **both** claude.ai and the Desktop app. This
       measurement, not E6's deletion of the uploaded probe, is what phase 3
       rests on. The bound is not arbitrary caution: on the Windows home of
