@@ -111,6 +111,7 @@ Available skills:
 | Plugin | Invocation | Description |
 | --- | --- | --- |
 | `adam` | `/adam:adam-writing-style` | Write in Adam Daniel's voice — professional but warm, direct, em-dash-friendly, free of corporate buzzwords. |
+| `adam` | `/adam:ci-job-performance` | Speed up a slow GitHub Actions job or test step using measurements, not guesses. |
 | `adam` | `/adam:debug-github-workflows` | Debugging GitHub Actions workflow failures. |
 | `adam` | `/adam:disarm-inherited-reach` | Sever a scratch tree's inherited push path to the real repository the moment the tree exists, before anything runs in it. |
 | `adam` | `/adam:finding-unknowns` | Surface and resolve the ambiguities in a task before, during, and after implementation — the blind-spot pass, the self-interview, reference-driven specs, implementation notes, and a post-hoc explainer or quiz. |
