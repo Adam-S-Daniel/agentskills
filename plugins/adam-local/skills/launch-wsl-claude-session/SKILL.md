@@ -151,6 +151,12 @@ the script encodes them:
   just with the right PATH.
 - **`--cd <wsl-path>` sets the working directory** for the session; pass a WSL path
   (`/home/...`), not a Windows path.
+- **Escape every literal `;` in a prompt or remote-control name as `\;` before handing
+  it to `wt.exe`.** `wt` re-parses its own command line and treats an unescaped `;` as
+  a subcommand separator (opens a bogus new tab) even when it sits inside an already-
+  quoted argument — a prompt like `Work issue #5; it has evidence...` truncates at the
+  `;` and the stray tab errors with `0x80070002`. Both scripts do this automatically;
+  if you ever build the `wt.exe` command by hand, escape it yourself.
 
 ## Manual one-liners (fallback if the script isn't available)
 

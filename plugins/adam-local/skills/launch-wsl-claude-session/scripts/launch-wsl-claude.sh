@@ -38,12 +38,24 @@ fi
 WT="$(command -v wt.exe || true)"
 [ -n "$WT" ] || { echo "wt.exe not found — needs WSL with Windows interop + Windows Terminal installed" >&2; exit 1; }
 
+# wt.exe re-parses its OWN command line and treats an unescaped ';' as a
+# subcommand separator (new-tab) — even when the ';' sits inside a single
+# argv element that already arrived pre-quoted via exec. Shell/exec argv
+# boundaries don't protect it; only wt's own documented escape does, a
+# literal backslash before the semicolon (`\;`). So a prompt like
+# "Work issue #5; it has evidence" splits: the real tab gets the prompt
+# truncated at the ';', plus a stray tab trying to run the remainder as a
+# command (error 0x80070002). Escape every argument handed to wt.exe, not
+# just the prompt — uniform is simpler than guessing which ones could
+# contain ';'.
+wt_escape() { printf '%s' "${1//;/\\;}"; }
+
 claude_args=()
-[ -n "$RC_NAME" ] && claude_args+=(--remote-control "$RC_NAME")
+[ -n "$RC_NAME" ] && claude_args+=(--remote-control "$(wt_escape "$RC_NAME")")
 if [ -n "$PROMPT" ]; then
   # Initial-prompt mode: the WHOLE prompt is ONE argument or Claude gets only the first
   # word. No -p/--print, so the session stays interactive after the first turn.
-  claude_args+=("$PROMPT")
+  claude_args+=("$(wt_escape "$PROMPT")")
   MODE="initial-prompt"
 else
   # Default: open a fresh session directly by id (skips the agents-view landing).
@@ -60,6 +72,22 @@ fi
 # exits immediately. `env` is a transparent exec, so claude stays a direct child holding
 # the ConPTY (exactly like the bare-claude launch that works) — just with the right PATH.
 LOGIN_PATH="$(bash -lic 'printf %s "$PATH"' 2>/dev/null)"
-"$WT" wsl.exe -d "$DISTRO" --cd "$DIR" -- env "PATH=${LOGIN_PATH:-$PATH}" "$CLAUDE" "${claude_args[@]}" &
+
+wt_args=(
+  "$WT" wsl.exe -d "$(wt_escape "$DISTRO")" --cd "$(wt_escape "$DIR")" -- env \
+  "PATH=$(wt_escape "${LOGIN_PATH:-$PATH}")" "$(wt_escape "$CLAUDE")" "${claude_args[@]}"
+)
+
+if [ -n "${LAUNCH_WSL_CLAUDE_DRY_RUN:-}" ]; then
+  # Test hook: print the exact argv wt.exe would receive, one per line, and
+  # stop before launching. The real launch backgrounds wt.exe with `&` and
+  # `disown`s it, which makes the resulting process undeterministic to wait
+  # on from a test; this prints the already-escaped argv instead so the
+  # escaping can be asserted on deterministically.
+  printf '%s\n' "${wt_args[@]}"
+  exit 0
+fi
+
+"${wt_args[@]}" &
 disown 2>/dev/null || true
 echo "Launched detached Claude ($MODE) in ${DISTRO}:${DIR}"
