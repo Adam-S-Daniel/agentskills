@@ -25,7 +25,9 @@ silently testing nothing.
 """
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,7 +39,12 @@ SETUP = REPO / "setup.sh"
 
 # The heredoc's own delimiters. Named here so the one test that cares about
 # the extraction can say what it is pinning.
-OPEN, CLOSE = "\"$PYTHON_BIN\" - <<'PYEOF'\n", "\nPYEOF\n"
+OPEN, CLOSE = "\"${PYTHON_CMD[@]}\" - <<'PYEOF'\n", "\nPYEOF\n"
+
+# The shell section around it: interpreter selection, the heredoc, and the
+# exit-code check. Run as shipped (see run_section) so "setup.sh fails instead
+# of printing Setup complete." is asserted on the real text.
+SECTION_OPEN, SECTION_CLOSE = "# >>> settings-convergence\n", "# <<< settings-convergence\n"
 
 
 def convergence_block() -> str:
@@ -106,6 +113,23 @@ def test_the_machine_bound_bundle_is_enabled_from_the_marketplace(tmp_path):
     assert settings["enabledPlugins"]["adam-local@agentskills"] is True
 
 
+def test_the_account_plugin_is_off_in_terminals(tmp_path):
+    """ADR 0012: `adam-personal` is for claude.ai, the Desktop app, Chrome and
+    mobile. A terminal signed in with the account would sync it as
+    `adam-personal@synced` and load its skills a second time beside the pinned
+    bundles, so the durable machine turns it off by name.
+
+    `False`, the JSON boolean — `True` would be the opposite decision and a
+    missing key would leave the synced copy on."""
+    settings = converge(tmp_path)
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_an_operator_who_enabled_the_account_plugin_is_overridden(tmp_path):
+    settings = converge(tmp_path, {"enabledPlugins": {"adam-personal@synced": True}})
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
 def test_the_account_skill_sync_is_turned_off(tmp_path):
     """ADR 0010: pinned channels own the terminal.
 
@@ -118,10 +142,11 @@ def test_the_account_skill_sync_is_turned_off(tmp_path):
 
 
 def test_the_plugin_sync_is_left_alone(tmp_path):
-    """ADR 0010 defers this to E6 (#160), and a deferral has to be visible in
-    the artefact: writing `syncClaudeAiPlugins` either way here would settle a
-    question nothing has measured. The bucket under ~/.claude/plugins/synced/
-    is empty today, so there is nothing to decide from."""
+    """ADR 0010 deferred this to E6 (#160). E6 found the account's plugins
+    syncing (Anthropic's six since 2026-09-20), and ADR 0012 turns off only
+    the one this repo owns, `adam-personal@synced`, by name. Writing
+    `syncClaudeAiPlugins` either way would switch every account plugin at
+    once, so the key stays absent."""
     assert "syncClaudeAiPlugins" not in converge(tmp_path)
 
 
@@ -171,14 +196,287 @@ def test_an_operator_who_turned_sync_back_on_is_overridden(tmp_path):
     assert settings["syncClaudeAiSkills"] is False
 
 
-def test_invalid_json_is_left_untouched(tmp_path):
-    """Pre-existing behaviour, pinned because the new keys must not become a
-    reason to overwrite a file we could not read. A settings file that fails to
-    parse is more likely mid-edit than corrupt."""
+# Raw BYTES, so a case can be something that is not UTF-8 at all.
+UNREADABLE = {
+    "invalid-json": ('{"model": "claude-opus-5",,}'.encode("utf-8"), "invalid JSON"),
+    "non-object-top-level": ('["model", "claude-opus-5"]\n'.encode("utf-8"),
+                             "does not contain a JSON object"),
+    # UTF-16 with its BOM: a plausible Windows save that no UTF-8 reader can
+    # decode. Must be the same named error, not a UnicodeDecodeError traceback.
+    "utf-16": ('{"model": "claude-opus-5"}\n'.encode("utf-16"), "invalid JSON"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(UNREADABLE))
+def test_an_unreadable_file_is_left_untouched_and_fails(tmp_path, case):
+    """A settings file we cannot read is left byte-for-byte alone — it is more
+    likely mid-edit than corrupt — AND the block exits non-zero, because a file
+    left alone is a file not converged. This used to be a WARNING and exit 0,
+    and setup.sh then reported success."""
+    raw, message = UNREADABLE[case]
     path = tmp_path / ".claude" / "settings.json"
     path.parent.mkdir(parents=True)
-    path.write_text('{"model": "claude-opus-5",,}', encoding="utf-8")
-    assert run_convergence(tmp_path) == '{"model": "claude-opus-5",,}'
+    path.write_bytes(raw)
+    proc = subprocess.run([sys.executable, "-c", convergence_block()],
+                          env={"HOME": str(tmp_path), "USERPROFILE": str(tmp_path),
+                               "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+    assert proc.returncode != 0
+    assert "settings: ERROR" in proc.stderr and message in proc.stderr
+    assert path.read_bytes() == raw
+
+
+BOM = b"\xef\xbb\xbf"
+
+
+def _run_block_on_bytes(home: Path, data: bytes) -> subprocess.CompletedProcess:
+    path = home / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return subprocess.run([sys.executable, "-c", convergence_block()],
+                          env={"HOME": str(home), "USERPROFILE": str(home),
+                               "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+
+
+def test_a_bom_prefixed_file_converges_and_keeps_its_bom(tmp_path):
+    """The sync-cc-settings skill preserves a UTF-8 BOM on these files, so a
+    Windows home can legitimately carry one. It must converge — it is not an
+    unreadable file — and the BOM is written back: the operator's encoding
+    choice is kept rather than silently stripped."""
+    proc = _run_block_on_bytes(tmp_path, BOM + b'{"model": "claude-opus-5"}\n')
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    data = (tmp_path / ".claude" / "settings.json").read_bytes()
+    assert data.startswith(BOM) and not data.startswith(BOM + BOM)
+    settings = json.loads(data[len(BOM):].decode("utf-8"))
+    assert settings["model"] == "claude-opus-5"
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_a_file_without_a_bom_does_not_gain_one(tmp_path):
+    proc = _run_block_on_bytes(tmp_path, b'{"model": "claude-opus-5"}\n')
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert not (tmp_path / ".claude" / "settings.json").read_bytes().startswith(BOM)
+
+
+def test_the_probe_ships_the_3_3_floor():
+    """Pins the number the Python 2 test relies on: the probe in the shipped
+    section rejects exactly `sys.version_info < (3, 3)`."""
+    probes = re.findall(r"-c '([^']*version_info[^']*)'", section())
+    assert probes == ["import sys; sys.exit(sys.version_info < (3, 3))"]
+
+
+def test_the_write_is_one_atomic_replace():
+    """The update must never leave a moment with no settings.json. Asserted on
+    the parsed Python of the block (not a text scan): os.replace is called and
+    neither os.remove nor os.rename is. A timing test for a window this small
+    would be flaky by construction, so the call itself is what is pinned."""
+    import ast
+    calls = set()
+    for node in ast.walk(ast.parse(convergence_block())):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
+            calls.add(node.func.attr)
+    assert "replace" in calls
+    assert not calls & {"remove", "rename", "unlink"}
+
+
+def run_block(home: Path, existing) -> subprocess.CompletedProcess:
+    """`run_convergence` without the success assertion, for the failure cases."""
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    return subprocess.run([sys.executable, "-c", convergence_block()],
+                          env={"HOME": str(home), "USERPROFILE": str(home),
+                               "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+
+
+@pytest.mark.parametrize("container", ["enabledPlugins", "extraKnownMarketplaces"])
+@pytest.mark.parametrize("value", [["adam@agentskills"], "on", None, 1])
+def test_a_non_object_container_fails_clearly_and_writes_nothing(tmp_path, container, value):
+    existing = {"model": "claude-opus-5", container: value}
+    path = tmp_path / ".claude" / "settings.json"
+    proc = run_block(tmp_path, existing)
+    before = json.dumps(existing, indent=2) + "\n"
+    assert proc.returncode != 0
+    assert "AttributeError" not in proc.stderr
+    assert f"'{container}' is {type(value).__name__}, not a JSON object" in proc.stderr
+    assert path.read_text(encoding="utf-8") == before
+
+
+# --- the shell section: interpreter choice and exit-code propagation --------
+
+def _posix_bash():
+    """A POSIX bash, never Windows' System32 WSL launcher — the same resolver
+    test_generate_skills_lock.py uses, for the same reason."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_generate_skills_lock import BASH
+    # Off Windows that helper returns the bare name, which subprocess would
+    # look up on the child's PATH — and run_section's PATH holds only stubs.
+    return shutil.which(BASH) if BASH and os.name != "nt" else BASH
+
+
+def section() -> str:
+    text = SETUP.read_text(encoding="utf-8")
+    start = text.index(SECTION_OPEN)
+    end = text.index(SECTION_CLOSE, start) + len(SECTION_CLOSE)
+    return text[start:end]
+
+
+def tail() -> str:
+    """Everything setup.sh runs after the section — where "Setup complete." is."""
+    text = SETUP.read_text(encoding="utf-8")
+    return text[text.index(SECTION_CLOSE) + len(SECTION_CLOSE):]
+
+
+def write_stub(bin_dir: Path, name: str, body: str) -> None:
+    path = bin_dir / name
+    path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8", newline="\n")
+    path.chmod(0o755)
+
+
+STORE_STUB = 'echo "Python was not found; run without arguments to install from the Microsoft Store" >&2\nexit 49'
+
+
+def run_section(home: Path, bin_dir: Path) -> subprocess.CompletedProcess:
+    """The shipped section followed by the shipped tail, with PATH holding
+    ONLY bin_dir — so the stubs placed there are the only interpreters found,
+    on a Linux runner with a real python3 in /usr/bin as much as on Windows."""
+    bash = _posix_bash()
+    if bash is None:
+        pytest.skip("no POSIX bash on this machine")
+    # A file, not `bash -c <text>`: on Windows the argument crosses
+    # CreateProcess quoting, which mangles a script this full of double quotes.
+    script = home / "section.sh"
+    # `set -u` first: the section runs under setup.sh's own options (its line
+    # `set -u`), so an unset variable fails here exactly as it would there.
+    script.write_text("set -u\n" + section() + tail(), encoding="utf-8", newline="\n")
+    return subprocess.run([bash, script.as_posix()],
+                          env={"HOME": str(home), "USERPROFILE": str(home),
+                               "PATH": str(bin_dir)},
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+
+
+def test_setup_sets_the_options_run_section_assumes():
+    assert re.search(r"^set -u$", SETUP.read_text(encoding="utf-8"), re.M)
+
+
+def real_python_stub(bin_dir: Path, name: str, guard: str = "") -> None:
+    """A stub that runs the test's own Python, optionally only when `guard`
+    (a shell condition) holds — otherwise it behaves like the Store stub."""
+    run = 'exec "%s" "$@"' % Path(sys.executable).as_posix()
+    if guard:
+        run = "if %s; then shift; %s; fi\n%s" % (guard, run, STORE_STUB)
+    write_stub(bin_dir, name, run)
+
+
+@pytest.mark.parametrize("case", sorted(UNREADABLE))
+def test_an_unreadable_file_fails_setup(tmp_path, case):
+    raw, _ = UNREADABLE[case]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_python_stub(bin_dir, "python3")
+    path = tmp_path / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(raw)
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode != 0
+    assert "Setup complete." not in proc.stdout
+    assert path.read_bytes() == raw
+
+
+def test_python_2_is_skipped_for_a_later_candidate(tmp_path):
+    """A `python3` that answers ONLY the version probe with 1 (what Python 2
+    does with `sys.exit(sys.version_info < (3, 3))`) and otherwise works is
+    passed over. It must otherwise work: a stub that failed everything would
+    be skipped by any probe at all, and this test would prove nothing about
+    the version floor (the round-3 negative control caught exactly that)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_python_stub(bin_dir, "python3")
+    path = bin_dir / "python3"
+    body = path.read_text(encoding="utf-8").replace(
+        "#!/bin/sh\n",
+        '#!/bin/sh\ncase "$2" in *"version_info < (3, 3)"*) exit 1 ;; esac\n', 1)
+    path.write_text(body, encoding="utf-8", newline="\n")
+    real_python_stub(bin_dir, "python")
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "settings: probing python3" in proc.stdout
+    assert "settings: probing python..." in proc.stdout
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_py_dash_3_is_chosen_and_passed_as_two_words(tmp_path):
+    """python3 and python are Store stubs; `py` works ONLY when its first
+    argument is exactly `-3`. So success proves `py -3` was split into two
+    words for both the probe and the heredoc call — a single word "py -3" or a
+    dropped flag would hit the stub branch and exit 49."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "python3", STORE_STUB)
+    write_stub(bin_dir, "python", STORE_STUB)
+    real_python_stub(bin_dir, "py", guard='[ "$1" = "-3" ]')
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "settings: probing py -3" in proc.stdout
+    assert "Setup complete." in proc.stdout
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_the_section_markers_are_the_shipped_ones():
+    text = SETUP.read_text(encoding="utf-8")
+    assert text.count(SECTION_OPEN) == 1 and text.count(SECTION_CLOSE) == 1
+    assert OPEN in section()
+    assert "Setup complete." in tail() and "Setup complete." not in section()
+
+
+def test_a_store_stub_interpreter_fails_setup_instead_of_completing(tmp_path):
+    """Measured 2026-09-24 on a Windows home: python3 resolved to the
+    WindowsApps stub, exited 49, and setup.sh still printed "Setup complete."
+    with nothing written."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("python3", "python", "py"):
+        write_stub(bin_dir, name, STORE_STUB)
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode != 0
+    assert "Setup complete." not in proc.stdout
+    assert "Microsoft Store stub" in proc.stderr
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_a_working_interpreter_after_a_stub_is_chosen(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "python3", STORE_STUB)
+    write_stub(bin_dir, "python", 'exec "%s" "$@"' % Path(sys.executable).as_posix())
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "Setup complete." in proc.stdout
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_a_failing_convergence_fails_setup(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "python3", 'exec "%s" "$@"' % Path(sys.executable).as_posix())
+    path = tmp_path / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"enabledPlugins": []}\n', encoding="utf-8")
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode != 0
+    assert "Setup complete." not in proc.stdout
+    assert "convergence failed" in proc.stderr
+    assert path.read_text(encoding="utf-8") == '{"enabledPlugins": []}\n'
 
 
 def test_the_adr_that_decided_this_is_on_disk_and_accepted():

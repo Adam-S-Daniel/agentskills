@@ -147,6 +147,37 @@ def test_a_federated_bundle_renders_exactly_one_row_naming_its_repo(plugins_dir)
     assert cells[2] == "A remote bundle."
 
 
+def curated_entry(name="personal", skills=(), description="Curated skills. Extra."):
+    return {"name": name, "source": "./", "strict": False,
+            "skills": list(skills), "description": description}
+
+
+def test_a_curated_plugin_renders_one_row_naming_its_skills(plugins_dir):
+    # ADR 0012: its skills are bundle skills, already rendered once under the
+    # bundle, so one row per skill here would list each of them twice.
+    write_skill(plugins_dir, "demo", "alpha")
+    write_skill(plugins_dir, "demo", "beta")
+    market = marketplace(
+        local_entry("demo"),
+        curated_entry(skills=["./plugins/demo/skills/alpha", "./plugins/demo/skills/beta"]),
+    )
+    by_plugin, problems = collect(market, plugins_dir)
+    assert problems == []
+    rows = dict(by_plugin)
+    assert len(rows["demo"]) == 2
+    assert len(rows["personal"]) == 1
+    cells = table_cells(grt.build_table(rows["personal"]))[0]
+    assert cells[0] == "`personal`"
+    assert "`/personal:<skill>`" in cells[1]
+    assert "`alpha`, `beta`" in cells[1]
+    assert cells[2] == "Curated skills."
+
+
+def test_a_curated_plugin_with_no_skills_is_a_problem(plugins_dir):
+    _, problems = collect(marketplace(curated_entry()), plugins_dir)
+    assert any("renders no table rows" in p for p in problems)
+
+
 def test_a_federated_bundle_does_not_invent_a_skill_list(plugins_dir):
     # There is no offline way to know the remote skill names, so the row must
     # carry a visible placeholder rather than anything that reads as real.

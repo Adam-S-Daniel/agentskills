@@ -350,23 +350,50 @@ if [[ -z "$SYNC_SKILLS_SETUP" ]]; then
 fi
 bash "$SYNC_SKILLS_SETUP"
 
+# >>> settings-convergence
+# scripts/test_setup_settings_convergence.py runs this section, as shipped, in
+# a throwaway HOME. Keep both marker lines.
 echo ""
 echo "=== Converging ~/.claude/settings.json (marketplace + plugin enablement) ==="
-PYTHON_BIN=""
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="python"
+# The interpreter is chosen by RUNNING it, not by `command -v`. On Windows,
+# python3/python on PATH can be the Microsoft Store stub under WindowsApps: it
+# resolves, prints "Python was not found" and exits 49. Picking it by name made
+# this whole block a silent no-op on a Windows home while the script went on to
+# report success (measured 2026-09-24: that home's settings.json never
+# received ADR 0010's keys). `py -3` is the Windows launcher's spelling.
+#
+# The probe also refuses Python 2 and anything before 3.3: the floor for
+# correctness (os.replace, 3.3); key order is only preserved from 3.7, so an
+# older 3.x converges correctly but may reorder keys. Each probe is announced and reads
+# /dev/null for stdin: the Windows Python install manager may try to INSTALL a
+# runtime when none exists (docs.python.org/3/using/windows.html), and that
+# should show up as a named step, not as a mute stall.
+PYTHON_CMD=()
+for candidate in "python3" "python" "py -3"; do
+  read -r -a cmd <<< "$candidate"
+  command -v "${cmd[0]}" >/dev/null 2>&1 || continue
+  echo "settings: probing $candidate..."
+  if "${cmd[@]}" -c 'import sys; sys.exit(sys.version_info < (3, 3))' </dev/null >/dev/null 2>&1; then
+    PYTHON_CMD=("${cmd[@]}")
+    break
+  fi
+done
+
+if [[ ${#PYTHON_CMD[@]} -eq 0 ]]; then
+  echo "ERROR    no working Python 3 found (tried: python3, python, py -3), so" >&2
+  echo "         ~/.claude/settings.json was NOT converged. On Windows, a" >&2
+  echo "         python3/python that prints 'Python was not found' is the" >&2
+  echo "         Microsoft Store stub (…/WindowsApps): install Python or turn" >&2
+  echo "         off its App execution aliases, then re-run setup.sh." >&2
+  exit 1
 fi
 
-if [[ -z "$PYTHON_BIN" ]]; then
-  echo "  WARNING  no python3/python on PATH — skipping settings.json convergence"
-else
-  "$PYTHON_BIN" - <<'PYEOF'
+"${PYTHON_CMD[@]}" - <<'PYEOF'
 import copy
 import io
 import json
 import os
+import sys
 
 SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
 
@@ -391,9 +418,28 @@ TARGET_MARKETPLACES = {
 # has always had -- and it must land WITH the opt-out below, never after it:
 # opting a laptop out of the account sync while adam-local is not installed
 # takes sync-skills off that terminal altogether.
+#
+# adam-personal@synced is OFF (ADR 0012). The account plugin serves the account's
+# skills to claude.ai, the Desktop app, Chrome and mobile, but a terminal signed
+# in with the account downloads it too: a repo-synced plugin reached this
+# laptop's ~/.claude/plugins/synced/ during E6 (§3.6). Its name matches no
+# bundle, so nothing dedupes it; enabled, it would load 8 of its 9 skills a
+# second time beside adam@ and adam-local@, and bring back the account copy of
+# sync-skills that ADR 0010 took off terminals. `"<name>@synced": false` in
+# user enabledPlugins is the documented per-plugin off switch
+# (code.claude.com/docs/en/plugins-reference#synced-plugins). It must land on
+# every durable machine, in EACH home (Windows and WSL), BEFORE the plugin is
+# enabled on claude.ai.
+#
+# Two side effects, stated where they happen. This writes `false` on EVERY
+# run, so a manual `claude plugin enable adam-personal@synced` lasts only until
+# setup.sh next runs. And these are the user settings the Desktop app's Code
+# tab reads too, so the plugin is off there as well — the Desktop app's Chat
+# and Cowork tabs are enabled separately, in its own plugin settings.
 TARGET_ENABLED_PLUGINS = {
     "adam@agentskills": True,
     "adam-local@agentskills": True,
+    "adam-personal@synced": False,
 }
 
 # ADR 0010: pinned channels own the terminal.
@@ -415,11 +461,12 @@ TARGET_ENABLED_PLUGINS = {
 # docx/pptx/xlsx/pdf skills from laptop terminals. The pinned way back is
 # Anthropic's own marketplace plugin; that is an owner call, not this script's.
 #
-# syncClaudeAiPlugins is deliberately NOT set. The plugin bucket under
-# ~/.claude/plugins/synced/ is empty -- nothing is enabled on the account --
-# so there is nothing measured to decide from, and E6 (#160) exists to measure
-# it. A deferral has to be visible in the artefact, so the key is absent
-# rather than written either way.
+# syncClaudeAiPlugins is deliberately NOT set. `false` would turn off every
+# plugin the account enables, in every terminal, including Anthropic's
+# (E6 #160 §3.1 measured six syncing since 2026-09-20). The one account plugin
+# this repo owns, adam-personal, is turned off by name in
+# TARGET_ENABLED_PLUGINS instead (ADR 0012). The key stays absent rather than
+# written either way.
 TARGET_SETTINGS = {"syncClaudeAiSkills": False}
 
 
@@ -436,49 +483,71 @@ def deep_merge(dst, src):
 
 
 settings = {}
+# A UTF-8 BOM is legitimate here: the sync-cc-settings skill preserves one on
+# these files, so a Windows home can carry it. It is read past (utf-8-sig) and
+# written back if it was there — the operator's encoding choice is kept, not
+# silently stripped. Anything that is not UTF-8 at all (a UTF-16 file, say) is
+# an unreadable file like invalid JSON: named, left untouched, non-zero exit.
+had_bom = False
 if os.path.exists(SETTINGS_PATH):
-    with io.open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-        raw = f.read()
-    if raw.strip():
-        try:
-            loaded = json.loads(raw)
-        except ValueError as exc:
-            print("settings: WARNING invalid JSON in %s (%s) - left untouched" % (SETTINGS_PATH, exc))
-            settings = None
-        else:
-            if isinstance(loaded, dict):
-                settings = loaded
-            else:
-                print("settings: WARNING %s does not contain a JSON object - left untouched" % SETTINGS_PATH)
-                settings = None
+    with io.open(SETTINGS_PATH, "rb") as f:
+        data = f.read()
+    had_bom = data.startswith(b"\xef\xbb\xbf")
+    try:
+        raw = data.decode("utf-8-sig")
+        loaded = json.loads(raw) if raw.strip() else {}
+    except ValueError as exc:
+        # UnicodeDecodeError is a ValueError too. An error, not a warning: a
+        # file we cannot read is a file we did not converge, and setup.sh must
+        # not then report success.
+        sys.exit("settings: ERROR invalid JSON in %s (%s) - left untouched; "
+                 "fix it by hand and re-run" % (SETTINGS_PATH, exc))
+    if not isinstance(loaded, dict):
+        sys.exit("settings: ERROR %s does not contain a JSON object - left "
+                 "untouched; fix it by hand and re-run" % SETTINGS_PATH)
+    settings = loaded
 
-if settings is not None:
-    original = copy.deepcopy(settings)
+# A container this block merges into must be a JSON object. Anything else
+# (a list, a string, null) is refused before any write, with its name,
+# rather than surfacing as an AttributeError from deep_merge.
+for container in ("extraKnownMarketplaces", "enabledPlugins"):
+    if container in settings and not isinstance(settings[container], dict):
+        sys.exit(
+            "settings: ERROR %s: %r is %s, not a JSON object - left untouched; "
+            "fix it by hand and re-run" % (
+                SETTINGS_PATH, container, type(settings[container]).__name__))
 
-    settings.setdefault("extraKnownMarketplaces", {})
-    deep_merge(settings["extraKnownMarketplaces"], TARGET_MARKETPLACES)
+original = copy.deepcopy(settings)
 
-    settings.setdefault("enabledPlugins", {})
-    deep_merge(settings["enabledPlugins"], TARGET_ENABLED_PLUGINS)
+settings.setdefault("extraKnownMarketplaces", {})
+deep_merge(settings["extraKnownMarketplaces"], TARGET_MARKETPLACES)
 
-    deep_merge(settings, TARGET_SETTINGS)
+settings.setdefault("enabledPlugins", {})
+deep_merge(settings["enabledPlugins"], TARGET_ENABLED_PLUGINS)
 
-    if settings == original:
-        print("settings: unchanged")
-    else:
-        settings_dir = os.path.dirname(SETTINGS_PATH)
-        if settings_dir and not os.path.isdir(settings_dir):
-            os.makedirs(settings_dir)
-        tmp_path = SETTINGS_PATH + ".tmp"
-        with io.open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(settings, indent=2))
-            f.write("\n")
-        if os.path.exists(SETTINGS_PATH):
-            os.remove(SETTINGS_PATH)
-        os.rename(tmp_path, SETTINGS_PATH)
-        print("settings: updated")
+deep_merge(settings, TARGET_SETTINGS)
+
+if settings == original:
+    print("settings: unchanged")
+else:
+    settings_dir = os.path.dirname(SETTINGS_PATH)
+    if settings_dir and not os.path.isdir(settings_dir):
+        os.makedirs(settings_dir)
+    tmp_path = SETTINGS_PATH + ".tmp"
+    with io.open(tmp_path, "w", encoding="utf-8-sig" if had_bom else "utf-8") as f:
+        f.write(json.dumps(settings, indent=2))
+        f.write("\n")
+    # One atomic step on POSIX and Windows alike: there is never a moment
+    # with no settings.json, which the remove-then-rename it replaces had.
+    os.replace(tmp_path, SETTINGS_PATH)
+    print("settings: updated")
 PYEOF
+converge_rc=$?
+if [[ $converge_rc -ne 0 ]]; then
+  echo "ERROR    settings.json convergence failed (exit $converge_rc); ~/.claude/settings.json was NOT converged" >&2
+  exit "$converge_rc"
 fi
+# <<< settings-convergence
 
 echo ""
 echo "Setup complete."

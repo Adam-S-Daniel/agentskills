@@ -76,6 +76,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # manifests live.
 from check_agent_plugins import CLAUDE_MANIFEST, ROOT_MANIFEST, discover_bundles  # noqa: E402
 
+# Same reuse for the curated entries (ADR 0012): "is this entry curated" and
+# "which directories make it up" have one answer, in check_consistency.py.
+from check_consistency import (  # noqa: E402
+    CURATED_DISPLAY_KEYS,
+    classify_source,
+    curated_skill_paths,
+)
+
+MARKETPLACE_REL = ".claude-plugin/marketplace.json"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Same rationale as generate_skills_lock.py's identical constant: every git
@@ -305,6 +315,160 @@ def check_bundle(
         notices.append(f"{bundle.name}: content changed since {base} and version bumped — OK")
 
 
+def _marketplace_plugins(raw_bytes: bytes, location: str) -> dict:
+    """{name: entry} for a marketplace.json's plugins, or raise _CheckError."""
+    try:
+        data = json.loads(raw_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise _CheckError(f"{location}: not valid JSON ({exc})")
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, list):
+        raise _CheckError(f'{location}: has no "plugins" list')
+    return {
+        entry["name"]: entry
+        for entry in plugins
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    }
+
+
+def _entry_version(entry: dict, location: str) -> Tuple[str, Tuple[int, int, int]]:
+    raw_version = entry.get("version")
+    if raw_version is None:
+        raise _CheckError(f'{location}: has no "version" field')
+    parsed = parse_semver(raw_version)
+    if parsed is None:
+        raise _CheckError(f"{location}: version {raw_version!r} is not X.Y.Z semver")
+    return raw_version, parsed
+
+
+def _definition(entry: dict) -> dict:
+    """The part of a curated entry that decides what the plugin loads: every
+    key but the display keys, `version` and `skills` (compared separately, as
+    a set)."""
+    ignored = CURATED_DISPLAY_KEYS | {"version", "skills"}
+    return {key: value for key, value in entry.items() if key not in ignored}
+
+
+def check_curated_entries(
+    repo_root: Path, base: str, problems: List[str], notices: List[str]
+) -> int:
+    """The bundle rule, applied to curated marketplace entries (ADR 0012).
+
+    A curated entry (source "./", "strict": false) has no plugin directory, so
+    discover_bundles() never sees it — but `plugin update` gates on its version
+    exactly as it does on a bundle's (ADR 0009). Its content is the skill
+    directories it lists plus the entry's own non-display keys, so: if any
+    listed directory changed since `base`, or the list itself did (a skill
+    added or dropped), or any key outside CURATED_DISPLAY_KEYS and `version`
+    did (strict, defaultEnabled, a component field), the entry's `version` in
+    marketplace.json must be strictly above its value at `base`. An entry that
+    was not curated at `base` is new and needs no bump. Returns how many
+    curated entries were checked.
+    """
+    path = repo_root / MARKETPLACE_REL
+    if not path.is_file():
+        return 0
+    try:
+        current = _marketplace_plugins(path.read_bytes(), MARKETPLACE_REL)
+    except _CheckError as exc:
+        problems.append(str(exc))
+        return 0
+    curated = [e for e in current.values() if classify_source(e)[0] == "curated"]
+    if not curated:
+        return 0
+
+    # "Absent at base" and "git could not read base" must not look alike: the
+    # first means every curated entry is new (no bump owed), the second means
+    # nothing is known — and reading it as the first would pass exactly the
+    # change this gate exists to stop. ls-tree answers "is it there" with an
+    # exit 0 either way; only a real git failure exits non-zero.
+    at_base: dict = {}
+    listing = _git(repo_root, "ls-tree", "--name-only", base, "--", MARKETPLACE_REL)
+    if listing.returncode != 0:
+        problems.append(
+            f"cannot tell whether {MARKETPLACE_REL} existed at {base}: git ls-tree "
+            f"failed ({listing.stderr.decode('utf-8', 'replace').strip()})"
+        )
+        return len(curated)
+    if listing.stdout.strip():
+        proc = _git(repo_root, "show", f"{base}:{MARKETPLACE_REL}")
+        if proc.returncode != 0:
+            problems.append(
+                f"{MARKETPLACE_REL} exists at {base} but git show failed "
+                f"({proc.stderr.decode('utf-8', 'replace').strip()})"
+            )
+            return len(curated)
+        try:
+            at_base = _marketplace_plugins(proc.stdout, f"{MARKETPLACE_REL} at {base}")
+        except _CheckError as exc:
+            problems.append(str(exc))
+            return len(curated)
+
+    for entry in curated:
+        name = entry["name"]
+        base_entry = at_base.get(name)
+        if base_entry is None or classify_source(base_entry)[0] != "curated":
+            notices.append(f"{name}: newly added since {base} — no bump required")
+            continue
+
+        cur_paths = set(curated_skill_paths(entry))
+        base_paths = set(curated_skill_paths(base_entry))
+        membership_changed = cur_paths != base_paths
+        # Any other change to what the entry DEFINES — strict, defaultEnabled,
+        # or a component key check_consistency.py would refuse anyway — is a
+        # change to the plugin too. Only display keys and the version itself
+        # are exempt; the skills list is compared as a set above, so a reorder
+        # alone is not a change.
+        definition_changed = _definition(entry) != _definition(base_entry)
+        changed: List[str] = []
+        entry_problems: List[str] = []
+        for skill_path in sorted(cur_paths | base_paths):
+            rel = skill_path[2:] if skill_path.startswith("./") else skill_path
+            # Never diff the repo root: an empty or dot-led path would make
+            # every change anywhere read as this plugin's change.
+            if not rel or rel.startswith("."):
+                entry_problems.append(
+                    f"{name}: skills path {skill_path!r} is not a skill directory "
+                    "(check_consistency.py rejects it too)"
+                )
+                continue
+            try:
+                changed.extend(_changed_paths(repo_root, base, rel))
+            except _CheckError as exc:
+                entry_problems.append(f"{name}: {exc}")
+        if entry_problems:
+            problems.extend(entry_problems)
+            continue
+
+        if not changed and not membership_changed and not definition_changed:
+            notices.append(f"{name}: unchanged since {base} — no bump required")
+            continue
+
+        try:
+            base_raw, base_parsed = _entry_version(
+                base_entry, f"{MARKETPLACE_REL} entry '{name}' at {base}"
+            )
+            cur_raw, cur_parsed = _entry_version(entry, f"{MARKETPLACE_REL} entry '{name}'")
+        except _CheckError as exc:
+            problems.append(f"{name}: {exc}")
+            continue
+        if not (cur_parsed > base_parsed):
+            if membership_changed:
+                what = "its skills list changed"
+            elif definition_changed:
+                what = "its entry changed beyond display fields"
+            else:
+                what = "a listed skill changed"
+            problems.append(
+                f"{name}: {MARKETPLACE_REL} version did not increase although "
+                f"{what} — {base} has {base_raw!r}, working tree has {cur_raw!r}. "
+                "Bump the entry's version strictly above its base value (ADR 0009, ADR 0012)."
+            )
+        else:
+            notices.append(f"{name}: content changed since {base} and version bumped — OK")
+    return len(curated)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -331,6 +495,7 @@ def main() -> int:
     notices: List[str] = []
     for bundle in bundles:
         check_bundle(repo_root, args.base, bundle, problems, notices)
+    curated_count = check_curated_entries(repo_root, args.base, problems, notices)
 
     # Printed before the verdict, and on the failure path too — a passing
     # bundle's status is only useful if it is visible in the run someone
@@ -345,8 +510,9 @@ def main() -> int:
         return 1
 
     print(
-        f"OK: {len(bundles)} bundle(s) checked against {args.base} — every "
-        "bundle whose content changed also raised its version (ADR 0009)."
+        f"OK: {len(bundles)} bundle(s) and {curated_count} curated plugin(s) "
+        f"checked against {args.base} — every one whose content changed also "
+        "raised its version (ADR 0009)."
     )
     return 0
 

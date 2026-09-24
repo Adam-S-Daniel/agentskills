@@ -33,6 +33,27 @@
       "category": "email",
       "keywords": ["fastmail", "email", "jmap", "identities", "from-address", "browser", "claude-in-chrome"],
       "defaultEnabled": false
+    },
+    {
+      "name": "adam-personal",
+      "source": "./",
+      "strict": false,
+      "version": "1.0.0",
+      "description": "The skills Adam's claude.ai account carries, for claude.ai chat and Cowork, the Desktop app, Claude in Chrome and mobile. Enable it on claude.ai and in the Desktop app; it is not meant for Claude Code sessions, where repos install the bundles.",
+      "category": "productivity",
+      "keywords": ["claude-ai", "cowork", "desktop", "chrome", "mobile", "writing", "adr", "requirements", "pdf", "ocr", "fastmail", "sync"],
+      "defaultEnabled": false,
+      "skills": [
+        "./plugins/adam/skills/adam-writing-style",
+        "./plugins/fastmail/skills/fastmail",
+        "./plugins/adam/skills/finding-unknowns",
+        "./plugins/adam-local/skills/ocr-pdfs",
+        "./plugins/adam-local/skills/pdf-ocr-audit",
+        "./plugins/adam-local/skills/rename-pdfs",
+        "./plugins/adam-local/skills/sync-cc-settings-between-wsl-and-windows",
+        "./plugins/adam-local/skills/sync-skills",
+        "./plugins/adam/skills/writing-adrs"
+      ]
     }
   ],
   "renames": {
