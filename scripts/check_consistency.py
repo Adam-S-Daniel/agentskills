@@ -291,10 +291,22 @@ def committed_link_entries(plugin_dir: Path) -> Optional[Dict[str, Tuple[str, Op
     if not plugin_dir.is_dir():
         return None
     inside = _git_out(plugin_dir, "rev-parse", "--is-inside-work-tree")
-    if not inside or inside.strip() != b"true":
-        return None
-    listing = _git_out(plugin_dir, "ls-files", "-s", "-z", "--", "skills")
+    listing = None
+    if inside and inside.strip() == b"true":
+        listing = _git_out(plugin_dir, "ls-files", "-s", "-z", "--", "skills")
     if listing is None:
+        # Outside git the filesystem answer is the valid one. But a `.git` up
+        # the tree with git failing (not installed, not on PATH, a broken repo)
+        # means the index check was SKIPPED here while CI runs it — say so
+        # rather than pass quietly on a weaker check.
+        if any((parent / ".git").exists() for parent in (plugin_dir, *plugin_dir.parents)):
+            print(
+                f"WARNING: {_rel(plugin_dir)} is inside a git work tree but git could "
+                "not be run, so the account plugin's links were checked on the "
+                "filesystem only, not their committed modes (ADR 0012) — CI may "
+                "disagree with this result",
+                file=sys.stderr,
+            )
         return None
     entries: Dict[str, Tuple[str, Optional[str]]] = {}
     for record in listing.decode("utf-8").split("\0"):

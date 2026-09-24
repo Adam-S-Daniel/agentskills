@@ -23,6 +23,7 @@ Run: python3 -m pytest scripts/test_check_consistency.py -q
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -640,6 +641,55 @@ def test_a_backslash_link_target_is_reported(git_account_tree):
     _stage_link(repo, f"plugins/{cc.ACCOUNT_PLUGIN}/skills/one", "..\\..\\alpha\\skills\\one")
     errors = account_errors(plugins_dir, declared={"one"})
     assert any("uses '/' only" in e for e in errors), errors
+
+
+ADR_0012 = cc.REPO_ROOT / "docs" / "decisions" / \
+    "0012-serve-the-account-skills-as-one-repo-synced-plugin.md"
+
+
+def _adr_link_recipe() -> str:
+    """The fenced bash block that follows ADR 0012's '**Adding a link.**', as
+    written — so the documented recipe and this test cannot drift apart."""
+    text = ADR_0012.read_text(encoding="utf-8")
+    after = text[text.index("**Adding a link.**"):]
+    start = after.index("```bash\n") + len("```bash\n")
+    return after[start:after.index("```", start)]
+
+
+def test_the_adr_link_recipe_keeps_mode_120000(git_account_tree):
+    """Run the ADR's Windows recipe in a core.symlinks=false repo, then the
+    `git add -A` a user runs next: the link must survive as mode 120000 (the
+    recipe without its `git checkout` line lost it — measured in review)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_generate_skills_lock import BASH
+    bash = shutil.which(BASH) if BASH and os.name != "nt" else BASH
+    if bash is None:
+        pytest.skip("no POSIX bash on this machine")
+    repo, plugins_dir = git_account_tree
+    recipe = _adr_link_recipe().replace("<bundle>", "alpha").replace("<name>", "one")
+    assert "update-index" in recipe and "checkout" in recipe, recipe
+    script = repo.parent / "recipe.sh"
+    script.write_text("set -eu\n" + recipe, encoding="utf-8", newline="\n")
+    proc = subprocess.run([bash, script.as_posix()], cwd=repo, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    _git(repo, "add", "-A")
+    listing = _git(repo, "ls-files", "-s", "--", f"plugins/{cc.ACCOUNT_PLUGIN}/skills/one")
+    assert listing.startswith("120000 "), listing
+    assert account_errors(plugins_dir, declared={"one"}) == []
+
+
+def test_a_failing_git_inside_a_work_tree_is_warned_about(monkeypatch, capsys):
+    monkeypatch.setattr(cc, "_git_out", lambda *args, **kwargs: None)
+    assert cc.committed_link_entries(cc.PLUGINS_DIR / cc.ACCOUNT_PLUGIN) is None
+    assert "WARNING" in capsys.readouterr().err
+
+
+def test_no_warning_outside_git(tmp_path, monkeypatch, capsys):
+    plugin = tmp_path / "plugins" / cc.ACCOUNT_PLUGIN
+    plugin.mkdir(parents=True)
+    monkeypatch.setattr(cc, "_git_out", lambda *args, **kwargs: None)
+    assert cc.committed_link_entries(plugin) is None
+    assert "WARNING" not in capsys.readouterr().err
 
 
 def test_the_real_tree_passes_in_a_core_symlinks_false_clone(tmp_path):

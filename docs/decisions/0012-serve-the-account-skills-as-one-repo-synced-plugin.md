@@ -99,7 +99,14 @@ plain file claude.ai would serve as-is, so stage the symlink by hand:
 ```bash
 git update-index --add --cacheinfo \
   120000,$(printf '%s' ../../<bundle>/skills/<name> | git hash-object -w --stdin),plugins/adam-personal/skills/<name>
+git checkout -- plugins/adam-personal/skills/<name>
 ```
+
+The `checkout` matters: `update-index` stages the link without writing it to
+disk (`git status` shows `AD`), and a later `git add -A` would then drop it
+from the index. Checked out, it is the small text file this clone keeps for a
+link, and later `git add`s keep its mode 120000.
+`test_the_adr_link_recipe_keeps_mode_120000` runs this block as written.
 
 `check_consistency.py` reads each link's mode and target from git's index
 whenever it runs inside a work tree, so a 100644 entry or a `\` in a target
