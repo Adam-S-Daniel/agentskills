@@ -67,4 +67,11 @@ pytest==9.1.1
 # across four parallel runs. 3.8.0 was published 2025-07-01, clears the
 # 7-day cooling-off and is the newest release; its one runtime dependency,
 # execnet, is left unpinned like the other packages' transitive dependencies.
+#
+# skills-evals runs its unittest suite on these same two pins
+# (https://github.com/Adam-S-Daniel/skills-evals/issues/182). Keep the pytest
+# and pytest-xdist versions in step with it: a bump here wants a matching bump
+# there, and the reverse. How each repo invokes xdist differs on purpose; the
+# comment above the pytest-windows job's `-n auto` run line in
+# .github/workflows/ci.yml says why.
 pytest-xdist==3.8.0
