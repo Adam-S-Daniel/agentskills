@@ -509,6 +509,45 @@ def test_curated_skills_reordered_needs_no_bump(tmp_path):
     assert "personal: unchanged" in result.stdout
 
 
+def test_curated_entry_with_no_marketplace_at_base_is_newly_added(tmp_path):
+    # The file itself is absent at base: a normal "new" case, not an error.
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    write_bundle(repo, "alpha", "1.0.0")
+    base = commit_all(repo, "base")
+    write_marketplace(repo, ["./plugins/alpha/skills/x"])
+
+    result = run_gate(base, repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "personal: newly added" in result.stdout
+
+
+def _failing_git(fail_on):
+    """cpv._git, except the named subcommand fails like a broken git would."""
+    real = cpv._git
+
+    def fake(repo_root, *args):
+        if args and args[0] == fail_on:
+            return subprocess.CompletedProcess(
+                ["git", *args], 128, stdout=b"", stderr=b"fatal: simulated")
+        return real(repo_root, *args)
+    return fake
+
+
+@pytest.mark.parametrize("fail_on", ["ls-tree", "show"])
+def test_a_failed_base_read_is_an_error_not_newly_added(tmp_path, monkeypatch, fail_on):
+    repo, base = curated_fixture(tmp_path)
+    monkeypatch.setattr(cpv, "_git", _failing_git(fail_on))
+    problems, notices = [], []
+
+    checked = cpv.check_curated_entries(repo, base, problems, notices)
+
+    assert checked == 1
+    assert len(problems) == 1 and "simulated" in problems[0], problems
+    assert not any("newly added" in n for n in notices), notices
+
+
 def test_curated_entry_new_since_base_needs_no_bump(tmp_path):
     repo = tmp_path / "repo"
     init_repo(repo)

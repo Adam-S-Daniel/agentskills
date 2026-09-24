@@ -109,6 +109,16 @@ CURATED_ROOT_COMPONENTS = (
     ".mcp.json",
     ".lsp.json",
     "settings.json",
+    # Not a component, but the root of a cached copy: a package.json beside a
+    # supported lockfile makes Claude Code run `npm ci --ignore-scripts` or
+    # `bun install --frozen-lockfile --ignore-scripts` inside every cached
+    # version (plugins-reference, "Node.js package dependencies"). Each half
+    # is listed so neither can arrive alone and wait for the other.
+    "package.json",
+    "bun.lock",
+    "bun.lockb",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
 )
 SYNC_SKILLS_DIR = PLUGINS_DIR / "adam-local" / "skills" / "sync-skills"
 ACCOUNT_SKILLS_PATH = SYNC_SKILLS_DIR / "account-skills.txt"

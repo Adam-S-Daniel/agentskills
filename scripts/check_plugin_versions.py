@@ -377,9 +377,27 @@ def check_curated_entries(
     if not curated:
         return 0
 
-    proc = _git(repo_root, "show", f"{base}:{MARKETPLACE_REL}")
+    # "Absent at base" and "git could not read base" must not look alike: the
+    # first means every curated entry is new (no bump owed), the second means
+    # nothing is known — and reading it as the first would pass exactly the
+    # change this gate exists to stop. ls-tree answers "is it there" with an
+    # exit 0 either way; only a real git failure exits non-zero.
     at_base: dict = {}
-    if proc.returncode == 0:
+    listing = _git(repo_root, "ls-tree", "--name-only", base, "--", MARKETPLACE_REL)
+    if listing.returncode != 0:
+        problems.append(
+            f"cannot tell whether {MARKETPLACE_REL} existed at {base}: git ls-tree "
+            f"failed ({listing.stderr.decode('utf-8', 'replace').strip()})"
+        )
+        return len(curated)
+    if listing.stdout.strip():
+        proc = _git(repo_root, "show", f"{base}:{MARKETPLACE_REL}")
+        if proc.returncode != 0:
+            problems.append(
+                f"{MARKETPLACE_REL} exists at {base} but git show failed "
+                f"({proc.stderr.decode('utf-8', 'replace').strip()})"
+            )
+            return len(curated)
         try:
             at_base = _marketplace_plugins(proc.stdout, f"{MARKETPLACE_REL} at {base}")
         except _CheckError as exc:

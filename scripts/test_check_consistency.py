@@ -449,6 +449,16 @@ def test_a_root_component_beside_a_curated_entry_is_reported(tmp_path, rel):
     assert len(found) == 1 and found[0].startswith(f"{rel} exists at the repository root")
 
 
+def test_the_dependency_install_trigger_is_covered():
+    # plugins-reference: package.json plus one of these lockfiles at the plugin
+    # root makes Claude Code run an install in every cached copy. The root is
+    # the repo root, so each file is refused on its own (the parametrised test
+    # above proves each one is reported).
+    for name in ("package.json", "bun.lock", "bun.lockb",
+                 "npm-shrinkwrap.json", "package-lock.json"):
+        assert name in cc.CURATED_ROOT_COMPONENTS, name
+
+
 def test_root_components_are_fine_without_a_curated_entry(tmp_path):
     (tmp_path / "hooks").mkdir()
     found = []
