@@ -295,7 +295,7 @@ jobs:
       # test_ci_reports_on_every_pull_request guards the trigger, and this step
       # is where the salience decision is allowed to live instead. The check
       # still reports on every PR; a docs-only one just reports in runner-boot
-      # time instead of the ~17 minutes the Windows suite costs.
+      # time instead of the several minutes the Windows suite costs.
       #
       # The inert list is an ALLOWLIST and the polarity fails open: the suites
       # run in full unless EVERY changed file matches. Measured 2026-08-31
@@ -389,7 +389,7 @@ jobs:
       # this comment's opening paragraph says goes wrong.
       - name: Run every test suite in the repo
         if: steps.salient.outputs.run == 'true'
-        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q -rfEs
+        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q -rfEs -n auto
 
   # The same suites on Windows, because until #98 they could not run there at
   # all — 72 failures, every one of them a platform fault rather than a real
@@ -489,9 +489,15 @@ jobs:
       # run rather than inferred from a skip count. It must be -rfEs, not -rs:
       # -r REPLACES pytest's default `fE`, so a bare -rs drops failures and
       # errors from the short summary (observed on run 35949072744).
+      #
+      # -n auto (pytest-xdist, pinned in requirements-dev.txt) spreads the
+      # suite over one worker per CPU. Both hosted runners have 4 CPUs, so on
+      # them it is the same as -n 4. It must stay in both jobs' step together:
+      # scripts/test_ci_workflow.py pins the two run lines equal, so an edit
+      # to one that misses the other fails the suite rather than drifting.
       - name: Run every test suite in the repo
         if: steps.salient.outputs.run == 'true'
-        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q -rfEs
+        run: python3 -m pytest scripts/ plugins/*/skills/*/tests/ plugins/*/skills/*/scripts/ -q -rfEs -n auto
 
   shellcheck:
     if: github.event_name != 'schedule'

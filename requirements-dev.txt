@@ -55,3 +55,16 @@ jsonschema==4.26.0
 # cooling-off, and was still the newest release when it was pinned, so pinning
 # it changed no version CI was already resolving to.
 pytest==9.1.1
+
+# ci.yml's `pytest` and `pytest-windows` jobs both pass `-n auto`, so the
+# runner needs xdist installed just to start — pytest treats `-n` as unknown
+# without it and fails before collecting anything.
+#
+# The required `pytest-windows` check ran serially in ~17 minutes (issue #176:
+# run 35950312865, `2124 passed, 36 skipped in 1017.58s`) against ubuntu's
+# ~4.5. Measured locally 2026-09-24 on a 24-core Linux box: serial 161s,
+# `-n auto` 28-40s, `-n 4` 52s, identical counts (2149 passed, 11 skipped)
+# across four parallel runs. 3.8.0 was published 2025-07-01, clears the
+# 7-day cooling-off and is the newest release; its one runtime dependency,
+# execnet, is left unpinned like the other packages' transitive dependencies.
+pytest-xdist==3.8.0
