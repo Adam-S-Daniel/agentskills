@@ -291,8 +291,14 @@ only `shape-listed`.
 
 In a Claude Code terminal on the Windows laptop, `e6-link`'s synced copy
 (`~/.claude/plugins/synced/<bucket>/e6-link/skills/shape-listed/SKILL.md`) is a
-**real directory with the real file**: claude.ai resolves the symlink
-server-side, so the terminal never sees a link.
+**real directory with the real file**, from which we **infer** that claude.ai
+resolves the symlink server-side; claude.ai does not say so.
+
+What this probe did not cover: one link only, to a skill holding nothing but
+`SKILL.md`, in a plugin without an Agent Plugins root `plugin.json`. Whether
+nested files (`scripts/`, `references/`) arrive through a link, and whether
+"Check for updates" notices a change that lands only in a link's target, are
+unmeasured; ADR 0012's phase 2 checks both.
 
 The Desktop app listed the new plugin only after a **full restart** (tray
 included), even after its marketplace reported the new commit.

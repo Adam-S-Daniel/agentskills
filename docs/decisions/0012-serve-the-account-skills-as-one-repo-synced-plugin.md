@@ -49,7 +49,13 @@ one showed matters here, because they are not interchangeable:
     Cowork on Windows (after a full Desktop restart) and on iOS, each with the
     control passing. In a Claude Code terminal on the Windows laptop the
     synced copy's `skills/<name>/SKILL.md` is a **real directory holding the
-    real file** — claude.ai resolves the symlink server-side.
+    real file**. That claude.ai resolves the symlink server-side is an
+    **inference** from that synced copy, not something claude.ai states.
+  - What the probe covered: **one** link, to a skill holding only `SKILL.md`,
+    in a plugin with no Agent Plugins root `plugin.json`. Production is nine
+    links into skills with `scripts/`, `tests/`, `references/` and `hooks/`,
+    plus that root manifest — so the probe validated the **shape**, not
+    production (phase 2 step 3 checks the rest).
   - The Desktop app listed a newly added plugin only after a **full restart**
     (tray included), even after its marketplace reported the new commit.
 - **Deletion was measured only for the uploaded probe**: deleting it on
@@ -83,7 +89,21 @@ This is the one shape claude.ai was measured to list with exactly the intended
 skills and to run (E6 §3.7). No skill moves; the `renames` map is untouched.
 
 `account-skills.txt` stays the single declaration of what the account carries;
-CI holds the links equal to it. Durable machines turn the plugin off in their
+CI holds the links equal to it.
+
+**Adding a link.** On Linux or macOS: `ln -s ../../<bundle>/skills/<name>
+plugins/adam-personal/skills/<name>` and `git add` it. On a Windows clone
+(`core.symlinks=false`) `git add` of a text file records mode **100644**, a
+plain file claude.ai would serve as-is, so stage the symlink by hand:
+
+```bash
+git update-index --add --cacheinfo \
+  120000,$(printf '%s' ../../<bundle>/skills/<name> | git hash-object -w --stdin),plugins/adam-personal/skills/<name>
+```
+
+`check_consistency.py` reads each link's mode and target from git's index
+whenever it runs inside a work tree, so a 100644 entry or a `\` in a target
+fails locally exactly as it fails in CI. Durable machines turn the plugin off in their
 terminals (`"adam-personal@synced": false`, converged by `setup.sh`). The owner
 adds this repo as a personal marketplace and enables only `adam-personal`, on
 claude.ai and in the Desktop app.
@@ -97,8 +117,10 @@ whole **skill entry**, pointing at a real skill directory that itself contains
 no symlink. The plugin is never locked — the lock generator and the bootstrap
 hook both refuse to lock `adam-personal` by name, and the generator also
 refuses any symlinked skill directory in a locked bundle — so no digest is ever
-taken through a link. claude.ai resolves the links server-side when it builds
-the plugin from GitHub. ADR 0008's text does not forbid this shape, so it
+taken through a link — and both the generator's `digest_skill_dir` and the
+hook's `digest_dir` refuse a skill directory that is itself a symlink, checked
+before resolving it. claude.ai appears to resolve the links when it builds the
+plugin from GitHub (inferred from the terminal's synced copy, E6 §3.7). ADR 0008's text does not forbid this shape, so it
 carries no status change; this section is the carve-out.
 
 ## Rollout
@@ -117,7 +139,9 @@ carries no status change; this section is the carve-out.
       the throwaway repo: only the linked skill loaded, and it ran in
       claude.ai chat, local Desktop Cowork and iOS; the terminal's synced copy
       was a resolved real directory (E6 §3.7). The curated `./` shape this
-      phase first called for failed the same probe — it never appeared.
+      phase first called for failed the same probe — it never appeared. This
+      validated the **shape** with one `SKILL.md`-only link, not production:
+      step 3 checks the nested files.
    1. Run `bash setup.sh` in **each home** (Windows Git Bash and WSL) on each
       durable machine, so `"adam-personal@synced": false` is in place
       **before** the plugin is enabled anywhere. The pass condition is reading
@@ -148,8 +172,19 @@ carries no status change; this section is the carve-out.
       is **not** offered; and none of `adam`, `adam-local`, `fastmail` or
       `cms-platform` is enabled anywhere. The uploaded ZIP copies still exist
       in this phase, so each account skill appears twice; that is expected.
+      **Nested files arrive:** ask `adam-personal:rename-pdfs` to list its
+      `scripts/` on a surface, and in a Claude Code cloud session (which syncs
+      account plugins and cannot opt out) look for
+      `adam-personal/skills/rename-pdfs/scripts/` under
+      `~/.claude/plugins/synced/` — the shape probe's skill had no
+      subdirectories at all.
    4. A terminal on a durable machine, after a fresh launch: `claude plugin
       list --json` shows `adam-personal@synced` as disabled.
+   4a. **An update through a link arrives.** After the first real edit to a
+      linked skill (and the `adam-personal` bump the version gate asks for),
+      press "Check for updates" on claude.ai, restart the Desktop app, and
+      confirm the edit is visible on a surface. Whether claude.ai notices a
+      change that lands only in a link's target is unmeasured.
    5. **Removal.** Disable `adam-personal` on claude.ai. Then, within 24
       hours: fully restart the Desktop app; launch a terminal, wait a few
       minutes, and launch one again — the docs say terminal sync removes
@@ -192,12 +227,18 @@ carries no status change; this section is the carve-out.
   the `consistency` job, but `main`'s only required status check is
   `pytest-windows` (ruleset 18877850), so a missed bump is not merge-blocking
   unless `consistency` becomes a required check in repo-settings' `fleet.yml`.
-- **Windows checkouts see the links as text files.** With `core.symlinks=false`
-  (the Windows default) each `skills/<name>` is a small file holding its
-  target. That is harmless for the account: claude.ai builds the plugin from
-  GitHub, where they are symlinks, and the Desktop app installs from
-  claude.ai's build — measured working in local Cowork on Windows (E6 §3.7).
-  Every check here reads both spellings as the same link.
+- **A `core.symlinks=false` checkout sees the links as text files.** That is
+  the Git for Windows default, so the owner's Windows clone; the GitHub
+  Windows runners, measured on PR #177, check them out as real symlinks. It is
+  harmless for the account: claude.ai builds the plugin from GitHub, where
+  they are symlinks, and the Desktop app installs from claude.ai's build —
+  measured working in local Cowork on Windows (E6 §3.7). Every check here
+  reads both spellings as the same link, and the account check reads modes
+  from git's index; `test_the_real_tree_passes_in_a_core_symlinks_false_clone`
+  clones this repo that way on every CI run and runs the checker there. The
+  one place it is not harmless: installed **by Claude Code** from such a clone
+  the plugin would carry no skills, which is why the README row says it is not
+  for installing in Claude Code.
 - **Every skill enumerator has to skip the links.** On a symlink-capable
   checkout `plugins/*/skills/*/SKILL.md` follows them, so `setup.sh`, the
   consistency basename rule, `check_skills.py`'s census and `sync_skills.py`
@@ -233,7 +274,12 @@ carries no status change; this section is the carve-out.
   `plugins/adam-personal/` holds anything but `.claude-plugin/plugin.json`,
   `plugin.json` and `skills/`, since anything else there (`hooks/`, `.mcp.json`,
   `bin/`, `settings.json`, a `package.json` that triggers an install in every
-  cached copy) would load as part of the account plugin. Its marketplace entry
+  cached copy) would load as part of the account plugin. Both manifests may
+  carry metadata only (name, version, description, author, homepage,
+  repository, license, keywords, and `$schema` on the Agent Plugins one): a
+  manifest can declare hooks, MCP/LSP servers, commands, agents, output styles
+  or extra skills paths inline. A link counts only if it targets a real bundle
+  — a `plugins/<bundle>` that is not itself a symlink and has its manifest. Its marketplace entry
   may carry only display fields, `name`, `source` and `defaultEnabled`: with
   the default strict mode an entry can still add skills, hooks or MCP servers
   on top of `plugin.json`, and a `version` there would be masked by
@@ -290,8 +336,15 @@ carries no status change; this section is the carve-out.
   `scripts/test_check_consistency.py`, run in both link spellings, including
   `test_the_account_plugin_links_exactly_the_declared_account_skills` (which
   reads modes and targets from git, independently of the checker),
-  `test_a_link_to_the_wrong_target_is_reported` and
-  `test_anything_else_in_the_account_plugin_folder_is_reported`.
+  `test_a_link_to_the_wrong_target_is_reported`,
+  `test_anything_else_in_the_account_plugin_folder_is_reported`,
+  `test_a_component_in_either_manifest_is_reported`,
+  `test_a_two_hop_home_is_not_a_home`,
+  `test_a_link_committed_as_a_regular_file_is_reported` and
+  `test_the_real_tree_passes_in_a_core_symlinks_false_clone`.
+- The hook refuses a symlinked skill root (`test_the_hook_refuses_a_symlinked_skill_root`)
+  and, with the generator, a layout that reaches the account plugin without
+  naming it as a bundle (`test_a_layout_reaching_the_account_plugin_is_refused_by_both`).
 - `scripts/check_plugin_versions.py` fails a PR that changes a linked skill
   without raising `adam-personal`'s version
   (`test_a_linked_skill_edited_without_the_linking_plugins_bump_fails`), and
