@@ -527,6 +527,138 @@ def test_check_account_plugin_reports_a_missing_reader_instead_of_crashing(accou
     assert found == ["cannot load load_account_declaration()"]
 
 
+COMPONENT_KEYS = ["hooks", "mcpServers", "lspServers", "commands", "agents", "skills",
+                  "outputStyles", "monitors"]
+
+
+@pytest.mark.parametrize("key", COMPONENT_KEYS)
+@pytest.mark.parametrize("manifest", ["claude", "root"])
+def test_a_component_in_either_manifest_is_reported(account_tree, key, manifest):
+    """The closed-folder rule never sees a component declared INLINE in a
+    manifest, so the manifests are closed too."""
+    plugin_dir = account_tree / cc.ACCOUNT_PLUGIN
+    path = (plugin_dir / ".claude-plugin" / "plugin.json") if manifest == "claude" \
+        else (plugin_dir / "plugin.json")
+    data = {"name": cc.ACCOUNT_PLUGIN, "version": "1.0.0"}
+    if manifest == "root":
+        data["$schema"] = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+    data[key] = {} if key in ("hooks", "mcpServers", "lspServers") else ["./x"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    errors = account_errors(account_tree)
+    assert any("may carry only" in e and repr(key) in e for e in errors), errors
+
+
+def test_the_shipped_manifests_carry_only_metadata():
+    found = []
+    cc.check_account_plugin(cc.load_marketplace(), found)
+    assert not [e for e in found if "may carry only" in e], found
+
+
+def test_a_two_hop_home_is_not_a_home(account_tree, link_spelling):
+    """A plugins/<x> without its manifest (or itself a link) is not a bundle,
+    so a skill inside it gives a link no home."""
+    write_skill(account_tree, "evil", "three")   # no .claude-plugin/plugin.json
+    make_link(account_tree / cc.ACCOUNT_PLUGIN / "skills" / "three",
+              "../../evil/skills/three", link_spelling)
+    errors = account_errors(account_tree, declared={"one", "two", "three"})
+    assert any("'three'" in e and "in 0 bundles" in e for e in errors), errors
+
+
+def test_a_symlinked_bundle_directory_is_not_a_home(account_tree, tmp_path):
+    if not _can_symlink(tmp_path):
+        pytest.skip("this machine cannot create symlinks")
+    outside = tmp_path / "outside"
+    write_local_plugin(outside, "real")
+    write_skill(outside, "real", "three")
+    os.symlink(str(outside / "real"), account_tree / "evil", target_is_directory=True)
+    make_link(account_tree / cc.ACCOUNT_PLUGIN / "skills" / "three",
+              "../../evil/skills/three", False)
+    errors = account_errors(account_tree, declared={"one", "two", "three"})
+    assert any("'three'" in e and "in 0 bundles" in e for e in errors), errors
+
+
+def test_a_stray_file_under_a_real_bundle_is_not_a_link(account_tree):
+    stray = account_tree / "alpha" / "skills" / "README.md"
+    stray.write_text("notes\n", encoding="utf-8")
+    assert not cc.is_linked_skill_entry(stray)
+    assert cc.linked_skill_entries(account_tree / "alpha") == {"one": None, "two": None}
+
+
+# --- the committed truth: modes and targets read from git's index -----------
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-c", "core.autocrlf=false", "-C", str(repo), *args],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def git_account_tree(tmp_path):
+    """A git repo whose plugins/ holds alpha (skill one) and the account plugin,
+    checked out with core.symlinks=false. Returns (repo, plugins_dir)."""
+    repo = tmp_path / "repo"
+    plugins_dir = repo / "plugins"
+    write_local_plugin(plugins_dir, "alpha")
+    write_skill(plugins_dir, "alpha", "one")
+    write_local_plugin(plugins_dir, cc.ACCOUNT_PLUGIN)
+    (plugins_dir / cc.ACCOUNT_PLUGIN / "skills").mkdir()
+    _git(repo.parent, "init", "-q", str(repo))
+    _git(repo, "config", "core.symlinks", "false")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    return repo, plugins_dir
+
+
+def _stage_link(repo: Path, rel: str, target: str, mode: str = "120000") -> None:
+    path = repo / rel
+    path.write_text(target, encoding="utf-8", newline="")
+    if mode == "120000":
+        blob = _git(repo, "hash-object", "-w", rel)
+        _git(repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},{rel}")
+    else:
+        _git(repo, "add", rel)   # what `git add` gives a text file: 100644
+
+
+def test_a_link_committed_as_a_symlink_passes(git_account_tree):
+    repo, plugins_dir = git_account_tree
+    _stage_link(repo, f"plugins/{cc.ACCOUNT_PLUGIN}/skills/one", "../../alpha/skills/one")
+    assert account_errors(plugins_dir, declared={"one"}) == []
+
+
+def test_a_link_committed_as_a_regular_file_is_reported(git_account_tree):
+    """On a core.symlinks=false clone `git add` of the target text records mode
+    100644: claude.ai would serve a text file, not the skill. The filesystem
+    cannot tell; the index can."""
+    repo, plugins_dir = git_account_tree
+    _stage_link(repo, f"plugins/{cc.ACCOUNT_PLUGIN}/skills/one", "../../alpha/skills/one",
+                mode="100644")
+    errors = account_errors(plugins_dir, declared={"one"})
+    assert any("committed as mode 100644" in e for e in errors), errors
+
+
+def test_a_backslash_link_target_is_reported(git_account_tree):
+    repo, plugins_dir = git_account_tree
+    _stage_link(repo, f"plugins/{cc.ACCOUNT_PLUGIN}/skills/one", "..\\..\\alpha\\skills\\one")
+    errors = account_errors(plugins_dir, declared={"one"})
+    assert any("uses '/' only" in e for e in errors), errors
+
+
+def test_the_real_tree_passes_in_a_core_symlinks_false_clone(tmp_path):
+    """The owner's Windows clone checks the links out as text files. Clone this
+    repo's HEAD that way and run the checker there, as a user would."""
+    head = _git(cc.REPO_ROOT, "rev-parse", "HEAD")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "-c", "core.symlinks=false", "clone", "-q", "--no-checkout",
+                    str(cc.REPO_ROOT), str(clone)], check=True, capture_output=True)
+    _git(clone, "config", "core.symlinks", "false")
+    _git(clone, "checkout", "-q", head)
+    link = clone / "plugins" / cc.ACCOUNT_PLUGIN / "skills" / "rename-pdfs"
+    assert link.is_file() and not link.is_symlink(), "the clone did not write text-file links"
+    proc = subprocess.run([sys.executable, str(clone / "scripts" / "check_consistency.py")],
+                          cwd=clone, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "OK: consistency checks passed." in proc.stdout
+
+
 # =================================================================================
 # Shipped artifacts — these read the real repo on purpose
 # =================================================================================

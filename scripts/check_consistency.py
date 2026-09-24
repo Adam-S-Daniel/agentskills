@@ -42,6 +42,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -83,6 +84,15 @@ ACCOUNT_ENTRY_KEYS = DISPLAY_KEYS | {"name", "source", "defaultEnabled"}
 # is closed. plugin.json is the Agent Plugins manifest every sibling bundle
 # carries, kept so check_agent_plugins.py treats it like one.
 ACCOUNT_PLUGIN_TOP_LEVEL = frozenset({".claude-plugin", "plugin.json", "skills"})
+
+# Every key the account plugin's two MANIFESTS may carry: metadata only, the
+# set every sibling bundle uses (plus homepage/license, still metadata), and
+# `$schema` on the Agent Plugins root manifest, which the spec requires there.
+ACCOUNT_MANIFEST_KEYS = frozenset({
+    "name", "version", "description", "author", "homepage", "repository",
+    "license", "keywords",
+})
+ACCOUNT_ROOT_MANIFEST_KEYS = ACCOUNT_MANIFEST_KEYS | {"$schema"}
 SYNC_SKILLS_DIR = PLUGINS_DIR / "adam-local" / "skills" / "sync-skills"
 ACCOUNT_SKILLS_PATH = SYNC_SKILLS_DIR / "account-skills.txt"
 
@@ -202,18 +212,41 @@ def classify_source(entry: dict) -> Tuple[str, str]:
     return ("federated", repo)
 
 
+def _git_out(cwd: Path, *args: str) -> Optional[bytes]:
+    """stdout of `git -C cwd <args>`, or None when git fails or is absent."""
+    try:
+        proc = subprocess.run(["git", "-C", str(cwd), *args],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    except OSError:
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _tracked_as_symlink(path: Path) -> bool:
+    """True when git's index records `path` as a symlink (mode 120000)."""
+    out = _git_out(path.parent, "ls-files", "-s", "--", path.name)
+    return bool(out) and out.startswith(b"120000 ")
+
+
 def is_linked_skill_entry(path: Path) -> bool:
     """True when a plugins/<plugin>/skills/<name> entry is a LINK, not a skill.
 
     Two spellings of the same git object (mode 120000): a real symlink where
-    the checkout has core.symlinks=true (Linux, macOS), and a small regular FILE
-    whose content is the link target where it has core.symlinks=false — the
-    Windows default, so both Windows CI and the owner's Windows clone see this
-    one. Every consumer that enumerates skills asks this before counting,
-    linking, zipping or locking an entry, so the one skill behind a link is
-    never seen twice.
+    the checkout materialises symlinks (Linux, macOS, and — measured on PR
+    #177's runs — the GitHub Windows runners), and a small regular FILE holding
+    the link target where it has core.symlinks=false (the Git for Windows
+    default, so the owner's Windows clone). A regular file counts only where it
+    can BE a link: inside the account plugin's skills/, or recorded by git as
+    mode 120000 — so a stray README.md under a real bundle's skills/ is not
+    mistaken for one. Every consumer that enumerates skills asks this before
+    counting, linking, zipping or locking an entry, so the one skill behind a
+    link is never seen twice.
     """
-    return path.is_symlink() or path.is_file()
+    if path.is_symlink():
+        return True
+    if not path.is_file():
+        return False
+    return path.parent.parent.name == ACCOUNT_PLUGIN or _tracked_as_symlink(path)
 
 
 def read_skill_link(path: Path) -> Optional[str]:
@@ -227,13 +260,56 @@ def read_skill_link(path: Path) -> Optional[str]:
 
 
 def linked_skill_entries(plugin_dir: Path) -> Dict[str, Optional[str]]:
-    """{name: link target, or None for a real directory} for every entry in
-    plugin_dir/skills/. The one reader of "what does a plugin of links hold",
-    shared with generate_readme_table.py and check_plugin_versions.py."""
+    """{name: link target, or None for a real directory} for every skill entry
+    in plugin_dir/skills/; a regular file that is not a link (is_linked_skill_entry)
+    is no skill entry at all and is left out. The one filesystem reader of
+    "what does a plugin of links hold", shared with generate_readme_table.py and
+    check_plugin_versions.py."""
     skills_dir = plugin_dir / "skills"
     if not skills_dir.is_dir():
         return {}
-    return {entry.name: read_skill_link(entry) for entry in sorted(skills_dir.iterdir())}
+    entries: Dict[str, Optional[str]] = {}
+    for entry in sorted(skills_dir.iterdir()):
+        if is_linked_skill_entry(entry):
+            entries[entry.name] = read_skill_link(entry)
+        elif entry.is_dir():
+            entries[entry.name] = None
+    return entries
+
+
+def committed_link_entries(plugin_dir: Path) -> Optional[Dict[str, Tuple[str, Optional[str]]]]:
+    """{name: (mode, raw target or None)} for plugin_dir/skills/* as git's INDEX
+    records them, or None when plugin_dir is not inside a git work tree.
+
+    The committed truth, whatever this checkout wrote to disk. It is what CI's
+    test reads, so the checker reads it too: on a core.symlinks=false clone a
+    link that was `git add`ed as a text file is mode 100644 — a regular file
+    claude.ai would serve as-is — and only the index can say so. A tracked
+    skill DIRECTORY (files below skills/<name>/) is reported as mode "tree".
+    """
+    if not plugin_dir.is_dir():
+        return None
+    inside = _git_out(plugin_dir, "rev-parse", "--is-inside-work-tree")
+    if not inside or inside.strip() != b"true":
+        return None
+    listing = _git_out(plugin_dir, "ls-files", "-s", "-z", "--", "skills")
+    if listing is None:
+        return None
+    entries: Dict[str, Tuple[str, Optional[str]]] = {}
+    for record in listing.decode("utf-8").split("\0"):
+        if not record:
+            continue
+        meta, path = record.split("\t", 1)
+        mode, blob, _stage = meta.split()
+        parts = path.split("/")
+        if len(parts) < 2:
+            continue
+        if len(parts) > 2:
+            entries[parts[1]] = ("tree", None)
+            continue
+        raw = _git_out(plugin_dir, "cat-file", "blob", blob)
+        entries[parts[1]] = (mode, raw.decode("utf-8") if raw is not None else None)
+    return entries
 
 
 def _skill_basenames(plugins_dir: Path) -> Dict[str, List[str]]:
@@ -373,13 +449,23 @@ def _load_account_declaration(
 
 def skill_home(name: str, plugins_dir: Path, errors: List[str]) -> Optional[str]:
     """The bundle that holds skill `name` as a real directory with SKILL.md, or
-    None (with an error) when there is not exactly one. Linked entries are
-    skipped, so the account plugin's own link never counts as a home."""
-    homes = [
-        skill_md.parent.parent.parent.name
-        for skill_md in sorted(plugins_dir.glob(f"*/skills/{name}/SKILL.md"))
-        if not is_linked_skill_entry(skill_md.parent)
-    ]
+    None (with an error) when there is not exactly one.
+
+    A home is a real BUNDLE: a plugins/<bundle> directory that is not itself a
+    symlink and carries its Claude Code manifest. Linked skill entries are
+    skipped, so the account plugin's own link never counts — and neither does
+    a two-hop path like a committed `plugins/evil -> elsewhere` holding
+    skills/<name>/SKILL.md, which would otherwise give ../../evil/skills/<name>
+    a "home" outside every bundle this repo validates.
+    """
+    homes = []
+    for skill_md in sorted(plugins_dir.glob(f"*/skills/{name}/SKILL.md")):
+        bundle_dir = skill_md.parent.parent.parent
+        if is_linked_skill_entry(skill_md.parent) or bundle_dir.is_symlink():
+            continue
+        if not (bundle_dir / ".claude-plugin" / "plugin.json").is_file():
+            continue
+        homes.append(bundle_dir.name)
     if len(homes) != 1:
         errors.append(
             f"account-skills.txt declares '{name}', which is a real skill directory "
@@ -457,6 +543,28 @@ def check_account_plugin(
         for child in sorted(manifest_dir.iterdir()):
             if child.name != "plugin.json":
                 errors.append(f"{_rel(child)} is not allowed; .claude-plugin/ holds only plugin.json")
+    # The manifests are closed too: a Claude Code plugin.json may declare hooks,
+    # MCP/LSP servers, commands, agents, output styles or extra skills paths
+    # INLINE, which the closed-folder rule above never sees.
+    for manifest, allowed in ((manifest_dir / "plugin.json", ACCOUNT_MANIFEST_KEYS),
+                              (plugin_dir / "plugin.json", ACCOUNT_ROOT_MANIFEST_KEYS)):
+        if not manifest.is_file():
+            continue
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            errors.append(f"{_rel(manifest)} is not valid JSON: {exc}")
+            continue
+        if not isinstance(data, dict):
+            errors.append(f"{_rel(manifest)} is not a JSON object")
+            continue
+        extra = sorted(set(data) - allowed)
+        if extra:
+            errors.append(
+                f"{_rel(manifest)} carries {', '.join(repr(key) for key in extra)}; the "
+                f"account plugin's manifest may carry only {', '.join(sorted(allowed))} — "
+                "components declared there would load on every surface the account reaches"
+            )
 
     if declared is None:
         try:
@@ -468,7 +576,29 @@ def check_account_plugin(
         errors.append(f"{_rel(ACCOUNT_SKILLS_PATH)} is missing or unreadable")
         return
 
-    links = linked_skill_entries(plugin_dir)
+    committed = committed_link_entries(plugin_dir)
+    if committed is None:
+        # Outside a git work tree only the filesystem can answer.
+        links = linked_skill_entries(plugin_dir)
+    else:
+        links = {}
+        for name, (mode, target) in committed.items():
+            entry_path = plugin_dir / "skills" / name
+            if mode == "tree":
+                links[name] = None
+            elif mode != "120000":
+                errors.append(
+                    f"{_rel(entry_path)} is committed as mode {mode}, not as a symlink "
+                    "(120000): claude.ai would serve that file, not the skill. On a "
+                    "core.symlinks=false checkout add it with `git update-index --add "
+                    "--cacheinfo 120000,...` (ADR 0012)"
+                )
+            elif target is None or "\\" in target:
+                errors.append(
+                    f"{_rel(entry_path)} links to {target!r}; a link target uses '/' only"
+                )
+            else:
+                links[name] = target
     for name in sorted(set(links) - declared):
         errors.append(
             f"{_rel(plugin_dir / 'skills' / name)} is not declared in account-skills.txt"

@@ -165,23 +165,36 @@ def test_a_plugin_of_skill_links_renders_one_row_naming_them(plugins_dir, real):
     # would render NO rows there and a different README than on Linux.
     write_skill(plugins_dir, "demo", "alpha")
     write_skill(plugins_dir, "demo", "beta")
+    name = cc.ACCOUNT_PLUGIN
     try:
-        _link(plugins_dir / "personal" / "skills" / "beta", "../../demo/skills/beta", real)
-        _link(plugins_dir / "personal" / "skills" / "alpha", "../../demo/skills/alpha", real)
+        _link(plugins_dir / name / "skills" / "beta", "../../demo/skills/beta", real)
+        _link(plugins_dir / name / "skills" / "alpha", "../../demo/skills/alpha", real)
     except (OSError, NotImplementedError):
         pytest.skip("this machine cannot create symlinks")
     market = marketplace(local_entry("demo"),
-                         local_entry("personal", "Linked skills. Extra."))
+                         local_entry(name, "Linked skills. Extra."))
     by_plugin, problems = collect(market, plugins_dir)
     assert problems == []
     rows = dict(by_plugin)
     assert len(rows["demo"]) == 2
-    assert len(rows["personal"]) == 1
-    cells = table_cells(grt.build_table(rows["personal"]))[0]
-    assert cells[0] == "`personal`"
-    assert "`/personal:<skill>`" in cells[1]
+    assert len(rows[name]) == 1
+    cells = table_cells(grt.build_table(rows[name]))[0]
+    assert cells[0] == f"`{name}`"
+    assert f"`/{name}:<skill>`" in cells[1]
+    assert "not for installing in Claude Code" in cells[1]
     assert "`alpha`, `beta`" in cells[1]
     assert cells[2] == "Linked skills."
+
+
+def test_a_stray_file_under_a_bundles_skills_does_not_collapse_its_rows(plugins_dir):
+    """Only the account plugin's entries (or real symlinks) are links; a stray
+    README.md under a real bundle's skills/ must not turn it into one row."""
+    write_skill(plugins_dir, "demo", "alpha")
+    write_skill(plugins_dir, "demo", "beta")
+    (plugins_dir / "demo" / "skills" / "README.md").write_text("notes\n", encoding="utf-8")
+    by_plugin, problems = collect(marketplace(local_entry("demo")), plugins_dir)
+    assert problems == []
+    assert len(dict(by_plugin)["demo"]) == 2
 
 
 def test_a_federated_bundle_does_not_invent_a_skill_list(plugins_dir):

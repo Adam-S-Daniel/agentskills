@@ -170,7 +170,12 @@ def linked_row(plugin: dict, names: List[str]) -> str:
     """
     plugin_name = plugin["name"]
     listed = ", ".join(f"`{name}`" for name in names)
-    invocation = f"`/{plugin_name}:<skill>` — serves, in place: {listed}"
+    # The caveat is part of the row because the row is the one place a reader
+    # browsing the marketplace meets this plugin: installed by Claude Code from
+    # a core.symlinks=false (Windows) clone its links are text files, so it
+    # would carry no skills there.
+    invocation = (f"`/{plugin_name}:<skill>` — for claude.ai and the Desktop app, not "
+                  f"for installing in Claude Code; serves, in place: {listed}")
     return _row(plugin_name, invocation, _first_sentence(plugin.get("description", "")))
 
 

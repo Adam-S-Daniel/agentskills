@@ -132,7 +132,7 @@ Available skills:
 | `fastmail` | `/fastmail:add-from-address` | Add one or more email addresses to a Fastmail account as selectable "From" (sending) identities by triggering the add-from-address GitHub Actions workflow in the Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the FASTMAIL_API_TOKEN repo secret). |
 | `fastmail` | `/fastmail:add-received-from-addresses` | Discover which of a Fastmail account's own alias addresses are worth being able to send from, and add them as "From" identities, by triggering the add-received-from-addresses GitHub Actions workflow in the Adam-S-Daniel/fastmail-actions repo (which does the JMAP work with the FASTMAIL_API_TOKEN repo secret). |
 | `fastmail` | `/fastmail:fastmail` | Automate Fastmail email workflows via a local browser session. |
-| `adam-personal` | `/adam-personal:<skill>` — serves, in place: `adam-writing-style`, `fastmail`, `finding-unknowns`, `ocr-pdfs`, `pdf-ocr-audit`, `rename-pdfs`, `sync-cc-settings-between-wsl-and-windows`, `sync-skills`, `writing-adrs` | The skills Adam's claude.ai account carries, for claude.ai chat and Cowork, the Desktop app, Claude in Chrome and mobile. |
+| `adam-personal` | `/adam-personal:<skill>` — for claude.ai and the Desktop app, not for installing in Claude Code; serves, in place: `adam-writing-style`, `fastmail`, `finding-unknowns`, `ocr-pdfs`, `pdf-ocr-audit`, `rename-pdfs`, `sync-cc-settings-between-wsl-and-windows`, `sync-skills`, `writing-adrs` | The skills Adam's claude.ai account carries, for claude.ai chat and Cowork, the Desktop app, Claude in Chrome and mobile. |
 <!-- END GENERATED PLUGIN TABLE -->
 
 ## Install — Codex, Cursor, and local use
