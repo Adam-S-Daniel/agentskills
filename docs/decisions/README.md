@@ -101,3 +101,4 @@ Optional sections for high-impact decisions:
 | [0009](0009-bump-bundle-versions-on-every-release.md) | Bump bundle versions on every release so `plugin update` can fire | Proposed |
 | [0010](0010-let-pinned-channels-own-the-terminal.md) | Let pinned channels own the terminal and leave the account channel the surfaces with nothing else | Accepted |
 | [0011](0011-remove-wj-next-break-from-registry-and-account.md) | Remove `wj-next-break` from the registry and the account store | Accepted |
+| [0012](0012-serve-the-account-skills-as-one-repo-synced-plugin.md) | Serve the account's skills as one repo-synced plugin | Proposed |
