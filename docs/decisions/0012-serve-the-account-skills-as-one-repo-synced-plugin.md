@@ -96,7 +96,12 @@ claude.ai and in the Desktop app.
       Store `python3` stub by name and never checked the exit code (measured
       2026-09-24; that home's settings.json had none of ADR 0010's keys). It
       now chooses an interpreter by running it and fails when convergence
-      does.
+      does. **Prerequisite: each home needs a working Python 3 on PATH** for
+      setup.sh's settings step. This laptop's Windows home has none (measured:
+      `python3` and `python` there are the App Installer alias, exit 49), so
+      setup.sh will now stop there with an error. Remedy: install Python 3
+      from python.org or with `winget install Python.Python.3.12`, then re-run
+      `bash setup.sh`.
    2. Add `Adam-S-Daniel/agentskills` at
       [claude.ai/customize/plugins](https://claude.ai/customize/plugins);
       enable only `adam-personal` there and in the Desktop app's plugin
@@ -110,10 +115,13 @@ claude.ai and in the Desktop app.
       in this phase, so each account skill appears twice; that is expected.
    4. A terminal on a durable machine, after a fresh launch: `claude plugin
       list --json` shows `adam-personal@synced` as disabled.
-   5. **Removal.** Disable `adam-personal` on claude.ai and confirm, after a
-      fresh terminal launch and a full Desktop restart and within 24 hours,
-      that it is no longer offered on a surface and is gone from the
-      terminal's synced bucket (`~/.claude/plugins/synced/`). **If it is still
+   5. **Removal.** Disable `adam-personal` on claude.ai. Then, within 24
+      hours: fully restart the Desktop app; launch a terminal, wait a few
+      minutes, and launch one again — the docs say terminal sync removes
+      plugins "in the background" after start, so a single launch can race
+      it — and only then check that it is no longer offered on a surface and
+      is gone from the terminal's synced bucket
+      (`~/.claude/plugins/synced/`). **If it is still
       offered anywhere, or still in `~/.claude/plugins/synced/`, phase 3's
       premise fails and ADR 0002's one-way-door consequence stays.** Then
       re-enable it on **both** claude.ai and the Desktop app. This
