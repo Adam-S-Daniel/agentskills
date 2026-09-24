@@ -12069,13 +12069,15 @@ def _account_tree(tmp_path: Path) -> Path:
     return root
 
 
-def test_the_generator_refuses_to_lock_the_account_plugin(tmp_path):
+@pytest.mark.parametrize("spelling", ["adam-personal", "Adam-Personal", "ADAM-PERSONAL"])
+def test_the_generator_refuses_to_lock_the_account_plugin(tmp_path, spelling):
     """Refused by NAME, whatever the checkout: on a core.symlinks=false tree
     the links are files and a glob would silently lock NOTHING for the bundle,
-    so the refusal cannot depend on what the links look like on disk."""
+    so the refusal cannot depend on what the links look like on disk. Case-
+    folded: on a case-insensitive filesystem every spelling is that folder."""
     root = _account_tree(tmp_path)
-    with pytest.raises(gsl.GeneratorError, match="adam-personal.*cannot be locked"):
-        gsl.collect_skills(root, ["alpha", "adam-personal"])
+    with pytest.raises(gsl.GeneratorError, match=f"{spelling}.*cannot be locked"):
+        gsl.collect_skills(root, ["alpha", spelling])
     assert list(gsl.collect_skills(root, ["alpha"])) == ["alpha/one"]
 
 
@@ -12097,20 +12099,21 @@ def test_the_generator_refuses_a_symlinked_skill_directory(tmp_path):
         gsl.collect_skills(root, ["beta"])
 
 
+@pytest.mark.parametrize("spelling", ["adam-personal", "Adam-Personal", "ADAM-PERSONAL"])
 @pytest.mark.parametrize("where", ["primary", "source"])
-def test_the_hook_reader_refuses_a_lock_naming_the_account_plugin(tmp_path, where):
+def test_the_hook_reader_refuses_a_lock_naming_the_account_plugin(tmp_path, where, spelling):
     base = {"registry": "owner/repo", "ref": "0" * 40, "bundles": ["adam"], "skills": {}}
     assert _hook_reader_accepts(dict(base), tmp_path)
     lock = dict(base)
     if where == "primary":
-        lock["bundles"] = ["adam", "adam-personal"]
+        lock["bundles"] = ["adam", spelling]
     else:
         lock["sources"] = [{"registry": "owner/other", "ref": "1" * 40,
-                            "bundles": ["adam-personal"], "layout": "skills"}]
+                            "bundles": [spelling], "layout": "skills"}]
     proc = _run_hook_reader(lock, tmp_path)
     assert "Traceback" not in proc.stderr, proc.stderr
     assert proc.returncode != 0
-    assert "adam-personal" in proc.stderr and "ADR 0012" in proc.stderr
+    assert spelling in proc.stderr and "ADR 0012" in proc.stderr
 
 
 @pytest.mark.parametrize("layout", ["plugins/adam-personal/skills", "plugins/Adam-Personal/skills",
@@ -12184,6 +12187,10 @@ def test_the_hook_refuses_a_symlinked_skill_root(tmp_path):
     assert not os.path.lexists(installed / "zeta"), \
         f"a symlinked skill root was installed: {verdict}"
     assert not verdict.startswith("skills: 2/2 "), verdict
+    # The verdict says "absent"; the log must say WHY, or the operator chases
+    # a missing directory that is present in the registry.
+    logs = _bootstrap_log(home)
+    assert "refused symlinked skill root: plugins/adam/skills/zeta" in logs, logs[-2000:]
 
 
 def test_the_two_unlockable_lists_agree():

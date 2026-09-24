@@ -787,7 +787,7 @@ def collect_skills(
     """
     skills: Dict[str, str] = {}
     for bundle in bundles:
-        if bundle in UNLOCKABLE_BUNDLES:
+        if bundle.lower() in UNLOCKABLE_BUNDLES:  # case-folded, as validate_layout
             raise GeneratorError(
                 f"bundle {bundle!r} cannot be locked: it is ADR 0012's account "
                 "plugin, whose skills/ entries are symlinks to other bundles' "

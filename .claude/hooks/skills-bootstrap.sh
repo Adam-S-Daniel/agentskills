@@ -1445,7 +1445,9 @@ def clean_ref(ref, where):
 
 def refuse_unlockable(bundles, where):
     """A lock naming the account plugin is refused wholesale (ADR 0012)."""
-    named = sorted(set(bundles) & set(UNLOCKABLE_BUNDLES))
+    # Case-folded, like clean_layout: on a case-insensitive filesystem
+    # `Adam-Personal` names the same plugins/ directory.
+    named = sorted(bundle for bundle in set(bundles) if bundle.lower() in UNLOCKABLE_BUNDLES)
     if named:
         raise LockRejected(
             "%s names %s, the claude.ai account plugin, whose skills are symlinks "
@@ -2818,6 +2820,9 @@ while IFS= read -r -d '' key \
   # than given its own, so the install loop's deleting arms stay the ones
   # skills-doctor's SKILL.md counts.
   if [ ! -f "$src/SKILL.md" ] || [ -L "$src" ]; then
+    if [ -L "$src" ]; then
+      printf 'refused symlinked skill root: %s\n' "$relpath" >>"$LOG"
+    fi
     rm -rf "${DEST:?}/$name" >>"$LOG" 2>&1
     absent+=("$name")
     continue
