@@ -338,18 +338,18 @@ reusable-workflow ref is for review to catch.
 - Don't write code in the main loop: implement in a subagent on a lower-power
   model — haiku-class for exactly-specified edits, sonnet-class for
   implementation from a clear spec; escalate rather than ship a wrong diff on
-  anything subtle. The main loop keeps root-cause investigation,
-  architecture, the spec and diff review. Explore/Plan agents and SDK
+  anything subtle. The main loop keeps root cause, architecture, the spec
+  and diff review. Explore/Plan agents and SDK
   harnesses with `settingSources: []` never see this file — restate
   load-bearing constraints in the prompt.
-- Delegated work is done when a **verifier exits 0**, not when the report
-  reads finished: name the exact command and require its exit code back;
-  "cannot run it" is BLOCKED, a count that disagrees with the spec is
-  stop-and-report. **Prove the verifier can fail first:** `python3
-  test_foo.py` on a pytest module with no `__main__` block exits 0 having run
-  zero assertions (2026-08-22). Name the RUNNER
-  (`python3 -m pytest <paths> -q`), never the file, and require the test
-  COUNT beside the exit code.
+- Delegated work is done when a **verifier exits 0**: name the exact
+  command, run LAST (after a trailing `echo $?` the tool's exit code is the
+  echo's), and require its code back. "Cannot run it" is BLOCKED; a count
+  off-spec, stop-and-report; a self-contradicting report ("2 failed",
+  "exit 0"), re-run it. **Prove the verifier can fail first:**
+  `python3 test_foo.py` with no `__main__` block exits 0 having asserted
+  nothing (2026-08-22). Name the RUNNER (`python3 -m pytest <paths> -q`),
+  never the file, and require the test COUNT beside the exit code.
 - **A working subagent OWNS the tree — do not commit or push under it.** A
   push mid-flight plus its `git commit --amend` diverges a published branch
   (2026-08-22; recover by reset and fresh commit, never force-push),
@@ -369,11 +369,10 @@ reusable-workflow ref is for review to catch.
 - **A live-test prompt states the credential boundary** — which
   `HOME`/profile, what it may read, and that it must not copy real
   credentials to make the test pass (a reviewer once did, unasked). Supply a
-  throwaway credential or scope the test to run unauthenticated; anything
-  else is the operator's call.
+  throwaway credential or run unauthenticated; else it's the operator's call.
 - **A scratch tree can still reach production.** `cp -a` copies
-  `.git/config`, so a copy inherits `origin` (one copy pushed 14 commits to
-  a real default branch); but `git remote remove origin` inside a
+  `.git/config`, so a copy inherits `origin` (one pushed 14 commits to a
+  default branch); but `git remote remove origin` inside a
   `git worktree` strips the PARENT's remote. Before disarming anything, run
   **`/adam:disarm-inherited-reach`**.
 
