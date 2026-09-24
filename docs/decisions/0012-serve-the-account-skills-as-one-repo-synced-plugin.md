@@ -202,7 +202,10 @@ carries no status change; this section is the carve-out.
   checkout `plugins/*/skills/*/SKILL.md` follows them, so `setup.sh`, the
   consistency basename rule, `check_skills.py`'s census and `sync_skills.py`
   skip symlinked skill entries; the README renders `adam-personal` as one row
-  naming its skills. skills-doctor's `registry_copy` was left as it is: for
+  naming its skills; and a repo-root `conftest.py` keeps pytest from
+  collecting the linked skills' tests a second time through the suite's
+  `plugins/*/skills/*/tests/` glob (measured on this PR's first CI runs, where
+  Windows runners materialise the links too). skills-doctor's `registry_copy` was left as it is: for
   `fastmail` alone it may name the link path instead of `plugins/fastmail`,
   reaching the same bytes, and changing it would move the `adam` bundle's
   locked digest.
