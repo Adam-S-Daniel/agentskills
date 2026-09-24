@@ -196,9 +196,14 @@ def test_an_operator_who_turned_sync_back_on_is_overridden(tmp_path):
     assert settings["syncClaudeAiSkills"] is False
 
 
+# Raw BYTES, so a case can be something that is not UTF-8 at all.
 UNREADABLE = {
-    "invalid-json": ('{"model": "claude-opus-5",,}', "invalid JSON"),
-    "non-object-top-level": ('["model", "claude-opus-5"]\n', "does not contain a JSON object"),
+    "invalid-json": ('{"model": "claude-opus-5",,}'.encode("utf-8"), "invalid JSON"),
+    "non-object-top-level": ('["model", "claude-opus-5"]\n'.encode("utf-8"),
+                             "does not contain a JSON object"),
+    # UTF-16 with its BOM: a plausible Windows save that no UTF-8 reader can
+    # decode. Must be the same named error, not a UnicodeDecodeError traceback.
+    "utf-16": ('{"model": "claude-opus-5"}\n'.encode("utf-16"), "invalid JSON"),
 }
 
 
@@ -211,7 +216,7 @@ def test_an_unreadable_file_is_left_untouched_and_fails(tmp_path, case):
     raw, message = UNREADABLE[case]
     path = tmp_path / ".claude" / "settings.json"
     path.parent.mkdir(parents=True)
-    path.write_bytes(raw.encode("utf-8"))
+    path.write_bytes(raw)
     proc = subprocess.run([sys.executable, "-c", convergence_block()],
                           env={"HOME": str(tmp_path), "USERPROFILE": str(tmp_path),
                                "PATH": "/usr/bin:/bin"},
@@ -219,7 +224,48 @@ def test_an_unreadable_file_is_left_untouched_and_fails(tmp_path, case):
                           errors="replace")
     assert proc.returncode != 0
     assert "settings: ERROR" in proc.stderr and message in proc.stderr
-    assert path.read_bytes() == raw.encode("utf-8")
+    assert path.read_bytes() == raw
+
+
+BOM = b"\xef\xbb\xbf"
+
+
+def _run_block_on_bytes(home: Path, data: bytes) -> subprocess.CompletedProcess:
+    path = home / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return subprocess.run([sys.executable, "-c", convergence_block()],
+                          env={"HOME": str(home), "USERPROFILE": str(home),
+                               "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+
+
+def test_a_bom_prefixed_file_converges_and_keeps_its_bom(tmp_path):
+    """The sync-cc-settings skill preserves a UTF-8 BOM on these files, so a
+    Windows home can legitimately carry one. It must converge — it is not an
+    unreadable file — and the BOM is written back: the operator's encoding
+    choice is kept rather than silently stripped."""
+    proc = _run_block_on_bytes(tmp_path, BOM + b'{"model": "claude-opus-5"}\n')
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    data = (tmp_path / ".claude" / "settings.json").read_bytes()
+    assert data.startswith(BOM) and not data.startswith(BOM + BOM)
+    settings = json.loads(data[len(BOM):].decode("utf-8"))
+    assert settings["model"] == "claude-opus-5"
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_a_file_without_a_bom_does_not_gain_one(tmp_path):
+    proc = _run_block_on_bytes(tmp_path, b'{"model": "claude-opus-5"}\n')
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert not (tmp_path / ".claude" / "settings.json").read_bytes().startswith(BOM)
+
+
+def test_the_probe_ships_the_3_3_floor():
+    """Pins the number the Python 2 test relies on: the probe in the shipped
+    section rejects exactly `sys.version_info < (3, 3)`."""
+    probes = re.findall(r"-c '([^']*version_info[^']*)'", section())
+    assert probes == ["import sys; sys.exit(sys.version_info < (3, 3))"]
 
 
 def test_the_write_is_one_atomic_replace():
@@ -337,11 +383,11 @@ def test_an_unreadable_file_fails_setup(tmp_path, case):
     real_python_stub(bin_dir, "python3")
     path = tmp_path / ".claude" / "settings.json"
     path.parent.mkdir(parents=True)
-    path.write_bytes(raw.encode("utf-8"))
+    path.write_bytes(raw)
     proc = run_section(tmp_path, bin_dir)
     assert proc.returncode != 0
     assert "Setup complete." not in proc.stdout
-    assert path.read_bytes() == raw.encode("utf-8")
+    assert path.read_bytes() == raw
 
 
 def test_python_2_is_skipped_for_a_later_candidate(tmp_path):
@@ -356,7 +402,7 @@ def test_python_2_is_skipped_for_a_later_candidate(tmp_path):
     path = bin_dir / "python3"
     body = path.read_text(encoding="utf-8").replace(
         "#!/bin/sh\n",
-        '#!/bin/sh\ncase "$2" in *version_info*) exit 1 ;; esac\n', 1)
+        '#!/bin/sh\ncase "$2" in *"version_info < (3, 3)"*) exit 1 ;; esac\n', 1)
     path.write_text(body, encoding="utf-8", newline="\n")
     real_python_stub(bin_dir, "python")
     proc = run_section(tmp_path, bin_dir)

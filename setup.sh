@@ -362,8 +362,9 @@ echo "=== Converging ~/.claude/settings.json (marketplace + plugin enablement) =
 # report success (measured 2026-09-24: that home's settings.json never
 # received ADR 0010's keys). `py -3` is the Windows launcher's spelling.
 #
-# The probe also refuses Python 2 and anything before 3.3, the true floor of the
-# block below (it needs os.replace). Each probe is announced and reads
+# The probe also refuses Python 2 and anything before 3.3: the floor for
+# correctness (os.replace, 3.3); key order is only preserved from 3.7, so an
+# older 3.x converges correctly but may reorder keys. Each probe is announced and reads
 # /dev/null for stdin: the Windows Python install manager may try to INSTALL a
 # runtime when none exists (docs.python.org/3/using/windows.html), and that
 # should show up as a named step, not as a mute stall.
@@ -482,57 +483,64 @@ def deep_merge(dst, src):
 
 
 settings = {}
+# A UTF-8 BOM is legitimate here: the sync-cc-settings skill preserves one on
+# these files, so a Windows home can carry it. It is read past (utf-8-sig) and
+# written back if it was there — the operator's encoding choice is kept, not
+# silently stripped. Anything that is not UTF-8 at all (a UTF-16 file, say) is
+# an unreadable file like invalid JSON: named, left untouched, non-zero exit.
+had_bom = False
 if os.path.exists(SETTINGS_PATH):
-    with io.open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-        raw = f.read()
-    if raw.strip():
-        try:
-            loaded = json.loads(raw)
-        except ValueError as exc:
-            # An error, not a warning: a file we cannot read is a file we did
-            # not converge, and setup.sh must not then report success.
-            sys.exit("settings: ERROR invalid JSON in %s (%s) - left untouched; "
-                     "fix it by hand and re-run" % (SETTINGS_PATH, exc))
-        if not isinstance(loaded, dict):
-            sys.exit("settings: ERROR %s does not contain a JSON object - left "
-                     "untouched; fix it by hand and re-run" % SETTINGS_PATH)
-        settings = loaded
+    with io.open(SETTINGS_PATH, "rb") as f:
+        data = f.read()
+    had_bom = data.startswith(b"\xef\xbb\xbf")
+    try:
+        raw = data.decode("utf-8-sig")
+        loaded = json.loads(raw) if raw.strip() else {}
+    except ValueError as exc:
+        # UnicodeDecodeError is a ValueError too. An error, not a warning: a
+        # file we cannot read is a file we did not converge, and setup.sh must
+        # not then report success.
+        sys.exit("settings: ERROR invalid JSON in %s (%s) - left untouched; "
+                 "fix it by hand and re-run" % (SETTINGS_PATH, exc))
+    if not isinstance(loaded, dict):
+        sys.exit("settings: ERROR %s does not contain a JSON object - left "
+                 "untouched; fix it by hand and re-run" % SETTINGS_PATH)
+    settings = loaded
 
-if settings is not None:
-    # A container this block merges into must be a JSON object. Anything else
-    # (a list, a string, null) is refused before any write, with its name,
-    # rather than surfacing as an AttributeError from deep_merge.
-    for container in ("extraKnownMarketplaces", "enabledPlugins"):
-        if container in settings and not isinstance(settings[container], dict):
-            sys.exit(
-                "settings: ERROR %s: %r is %s, not a JSON object - left untouched; "
-                "fix it by hand and re-run" % (
-                    SETTINGS_PATH, container, type(settings[container]).__name__))
+# A container this block merges into must be a JSON object. Anything else
+# (a list, a string, null) is refused before any write, with its name,
+# rather than surfacing as an AttributeError from deep_merge.
+for container in ("extraKnownMarketplaces", "enabledPlugins"):
+    if container in settings and not isinstance(settings[container], dict):
+        sys.exit(
+            "settings: ERROR %s: %r is %s, not a JSON object - left untouched; "
+            "fix it by hand and re-run" % (
+                SETTINGS_PATH, container, type(settings[container]).__name__))
 
-    original = copy.deepcopy(settings)
+original = copy.deepcopy(settings)
 
-    settings.setdefault("extraKnownMarketplaces", {})
-    deep_merge(settings["extraKnownMarketplaces"], TARGET_MARKETPLACES)
+settings.setdefault("extraKnownMarketplaces", {})
+deep_merge(settings["extraKnownMarketplaces"], TARGET_MARKETPLACES)
 
-    settings.setdefault("enabledPlugins", {})
-    deep_merge(settings["enabledPlugins"], TARGET_ENABLED_PLUGINS)
+settings.setdefault("enabledPlugins", {})
+deep_merge(settings["enabledPlugins"], TARGET_ENABLED_PLUGINS)
 
-    deep_merge(settings, TARGET_SETTINGS)
+deep_merge(settings, TARGET_SETTINGS)
 
-    if settings == original:
-        print("settings: unchanged")
-    else:
-        settings_dir = os.path.dirname(SETTINGS_PATH)
-        if settings_dir and not os.path.isdir(settings_dir):
-            os.makedirs(settings_dir)
-        tmp_path = SETTINGS_PATH + ".tmp"
-        with io.open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(settings, indent=2))
-            f.write("\n")
-        # One atomic step on POSIX and Windows alike: there is never a moment
-        # with no settings.json, which the remove-then-rename it replaces had.
-        os.replace(tmp_path, SETTINGS_PATH)
-        print("settings: updated")
+if settings == original:
+    print("settings: unchanged")
+else:
+    settings_dir = os.path.dirname(SETTINGS_PATH)
+    if settings_dir and not os.path.isdir(settings_dir):
+        os.makedirs(settings_dir)
+    tmp_path = SETTINGS_PATH + ".tmp"
+    with io.open(tmp_path, "w", encoding="utf-8-sig" if had_bom else "utf-8") as f:
+        f.write(json.dumps(settings, indent=2))
+        f.write("\n")
+    # One atomic step on POSIX and Windows alike: there is never a moment
+    # with no settings.json, which the remove-then-rename it replaces had.
+    os.replace(tmp_path, SETTINGS_PATH)
+    print("settings: updated")
 PYEOF
 converge_rc=$?
 if [[ $converge_rc -ne 0 ]]; then
