@@ -1,11 +1,14 @@
 # E6 — Can plugins on the claude.ai account replace the skill ZIP uploads?
 
-**Status: open — only the update-speed test is left** (§5 step 5).
+**Status: answered (2026-09-23).** Next step: a switch proposal with its own
+ADR (§6).
 
 **Short answer: yes, through a marketplace synced from a repo.** A plugin in a
 repo-synced personal marketplace reached local Cowork too (§3.6), so one
-channel now covers every surface the ZIP uploads serve. The history of how we
-got there: On 2026-09-23 Adam
+channel covers every surface the ZIP uploads serve. It can be deleted. It
+updates by hand, but in two clicks rather than one ZIP per skill: push, press
+"Check for updates" on claude.ai, restart the Desktop app (§5 step 5). The
+history of how we got there: On 2026-09-23 Adam
 uploaded a throwaway personal plugin, `e6-probe`. Its skill returned its unique
 token in the iOS app, the Claude in Chrome side panel, claude.ai chat,
 claude.ai Cowork and the Desktop Chat tab (§3.5). Those include both surfaces
@@ -257,10 +260,10 @@ unused.
 
 ## 4. What is still unknown
 
-1. How fast does a push to the repo arrive on each surface, and does it need
-   a `version` bump? (§5 step 5)
-2. Does the Desktop app's enabled state survive an update of the plugin, or
-   does each update need re-enabling?
+1. Would a push arrive without a `version` bump? The test bumped it, and
+   version pinning is documented for Claude Code (§2.4).
+2. Would the Claude GitHub App, if it covered the repo, make claude.ai's sync
+   automatic?
 3. Does `syncClaudeAiPlugins: false` move plugins to `.trash`? This is
    documented but not yet witnessed; it isn't needed for the decision.
 4. What the four `backingPluginId`s on uploaded skills are. Nothing depends on
@@ -279,7 +282,8 @@ control *is* found. Otherwise the result is void.
 4. **Repo-synced probe in local Cowork** — **done 2026-09-23: found**, after
    enabling it in the Desktop app too (§3.6). It used a separate throwaway
    repo, so that this repo's three bundles never reached the account.
-5. **Update speed — in progress.** At 2026-09-23 19:41:55 UTC the probe's
+5. **Update speed** — **done 2026-09-23**: updates only by hand (readings
+   below). At 2026-09-23 19:41:55 UTC the probe's
    token was changed to `E6-PUSH-9P3RFBY2` and its version bumped from 0.0.1
    to 0.0.2 (commits `2e8b50f`, `404f7dd`). Record when each surface first
    returns the new token, and whether local Cowork kept `e6-probe` enabled.
@@ -297,6 +301,7 @@ control *is* found. Otherwise the result is void.
 
    | 23:49 | 4 h 7 min | claude.ai chat | **new** (`E6-PUSH-9P3RFBY2`), after "Check for updates" on claude.ai |
    | 23:51 | 4 h 9 min | local Cowork | old; the Desktop app's "Check for updates" failed ("Couldn't check for updates. Try again.") |
+   | 23:58 | 4 h 16 min | local Cowork | **new**, after fully quitting the Desktop app (tray included) and reopening it; `e6-probe` stayed enabled |
 
    The push is on the repo's default branch (checked through the GitHub API),
    and the repo has no webhooks. **Automatic sync did not deliver a push within
@@ -304,7 +309,16 @@ control *is* found. Otherwise the result is void.
    marketplace works: it reported "Updated to 404f7dd", the exact commit
    pushed, and the next chat returned the new token. So claude.ai's copy
    follows a commit and needs a manual check to move. The Desktop app keeps
-   its own copy, and its check failed.
+   its own copy, and its check failed. **A full restart of the Desktop app
+   picked up the update**, and the plugin stayed enabled.
+
+   **The update routine, as measured:** push to `main` → press "Check for
+   updates" on the marketplace at claude.ai → fully restart the Desktop app.
+   Nothing needs re-enabling.
+
+   A Claude/Anthropic GitHub App is installed on the account (Adam,
+   2026-09-23). Whether it covers this repo wasn't checked, and it didn't make
+   the sync automatic.
 
 | Step 4 result | Meaning | Action |
 |---|---|---|
@@ -320,8 +334,11 @@ control *is* found. Otherwise the result is void.
    on every surface.
 2. **Switch to a dedicated personal plugin in a repo-synced marketplace.** It
    would hold exactly the skills the account carries today (§3.2), sync from
-   the repo, update on push, and be deletable. Enable it once on claude.ai and
-   once in the Desktop app (§3.6). This repo can be the marketplace, because
+   the repo, and be deletable. Enable it once on claude.ai and once in the
+   Desktop app (§3.6). Every release then means: bump its `version` (ADR
+   0009), merge, press "Check for updates" on claude.ai, and restart the
+   Desktop app. The `sync-skills` drift check could be replaced by comparing
+   the commit claude.ai reports against `main`. This repo can be the marketplace, because
    adding a marketplace enables nothing by itself. Creating the plugin moves
    skills between bundles, which touches the append-only `renames` map. So it
    needs its own ADR, amending ADR 0002's "one-way door" consequence, and the
