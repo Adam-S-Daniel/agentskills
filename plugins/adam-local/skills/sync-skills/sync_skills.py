@@ -603,6 +603,13 @@ def _skill_dir(repo_path: Path, name: str) -> Optional[Path]:
     Plugin layout:  ``<repo>/plugins/<plugin>/skills/<name>/SKILL.md``
 
     Returns the skill directory, or None if not found.
+
+    A symlinked entry is skipped (ADR 0012): ``plugins/adam-personal/skills/<name>``
+    is a git symlink to the bundle's own directory, and on a symlink-capable
+    checkout it sorts ahead of ``plugins/fastmail`` — returning it would zip
+    and upload the skill through a second path to the same bytes. (A
+    core.symlinks=false checkout writes it as a small file, which the
+    ``SKILL.md`` test already skips.)
     """
     legacy = repo_path / "skills" / name
     if (legacy / "SKILL.md").exists():
@@ -611,6 +618,8 @@ def _skill_dir(repo_path: Path, name: str) -> Optional[Path]:
     if plugins_dir.is_dir():
         for plugin in sorted(plugins_dir.iterdir()):
             cand = plugin / "skills" / name
+            if cand.is_symlink():
+                continue
             if (cand / "SKILL.md").exists():
                 return cand
     return None
@@ -663,7 +672,8 @@ def get_all_skills(repo_path: Path) -> List[str]:
             sk = plugin / "skills"
             if sk.is_dir():
                 for d in sk.iterdir():
-                    if d.is_dir() and (d / "SKILL.md").exists():
+                    # Symlinked entries are second names, not skills (ADR 0012).
+                    if d.is_dir() and not d.is_symlink() and (d / "SKILL.md").exists():
                         names.add(d.name)
     return sorted(names)
 

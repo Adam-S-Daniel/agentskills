@@ -75,6 +75,19 @@ no backfill is planned; the file adds the fields git does not capture.
 
 ---
 
+## 2026-09-24 — adam-local/sync-skills — edit
+
+- Motivation: ADR 0012 adds `plugins/adam-personal/skills/<name>` as git
+  symlinks to the bundles' skill directories; on a symlink-capable checkout
+  `sync_skills.py` found `fastmail` through the link first (it sorts ahead of
+  `plugins/fastmail`) and would zip and upload it through that second path.
+- Change: `_skill_dir` and `get_all_skills` skip symlinked skill entries;
+  script only, SKILL.md unchanged (PR link in the next entry's correction if
+  needed; see the PR that adds `plugins/adam-personal`).
+- Eval: exempt (DESIGN.md non-coverage table) — "defer: machine-bound
+  (WSL/WPF/browser surfaces)".
+- Outcome: open as of 2026-09-24.
+
 ## 2026-09-23 — adam-local/sync-skills — edit
 
 - Motivation: the SKILL.md uploaded to the claude.ai account still named the

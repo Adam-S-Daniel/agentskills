@@ -12049,3 +12049,68 @@ def test_the_subsumed_reason_really_is_answered_by_an_earlier_blocker(tmp_path):
     covering = _reason_ids(answer.reason, reasons)
     assert covering and all(name.startswith(_SUBSUMES_IT + ":") for name in covering), \
         answer.reason
+
+
+# =============================================================================
+# ADR 0012: the account plugin is never lockable
+# =============================================================================
+
+
+def _account_tree(tmp_path: Path) -> Path:
+    """plugins/alpha/skills/one, and plugins/adam-personal with a link to it
+    in the core.symlinks=false spelling (a file holding the target)."""
+    root = tmp_path / "tree"
+    skill = root / "plugins" / "alpha" / "skills" / "one"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: one\n---\n", encoding="utf-8")
+    link_dir = root / "plugins" / "adam-personal" / "skills"
+    link_dir.mkdir(parents=True)
+    (link_dir / "one").write_text("../../alpha/skills/one", encoding="utf-8")
+    return root
+
+
+def test_the_generator_refuses_to_lock_the_account_plugin(tmp_path):
+    """Refused by NAME, whatever the checkout: on a core.symlinks=false tree
+    the links are files and a glob would silently lock NOTHING for the bundle,
+    so the refusal cannot depend on what the links look like on disk."""
+    root = _account_tree(tmp_path)
+    with pytest.raises(gsl.GeneratorError, match="adam-personal.*cannot be locked"):
+        gsl.collect_skills(root, ["alpha", "adam-personal"])
+    assert list(gsl.collect_skills(root, ["alpha"])) == ["alpha/one"]
+
+
+def test_the_generator_refuses_a_symlinked_skill_directory(tmp_path):
+    """ADR 0008 extended to the skill directory itself: digest_skill_dir
+    resolves its root, so a symlinked skill would be locked under the
+    TARGET's digest in a second bundle."""
+    root = _account_tree(tmp_path)
+    link = root / "plugins" / "beta" / "skills" / "one"
+    link.parent.mkdir(parents=True)
+    try:
+        os.symlink("../../alpha/skills/one", link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine cannot create symlinks")
+    with pytest.raises(gsl.GeneratorError, match="is a symlink"):
+        gsl.collect_skills(root, ["beta"])
+
+
+@pytest.mark.parametrize("where", ["primary", "source"])
+def test_the_hook_reader_refuses_a_lock_naming_the_account_plugin(tmp_path, where):
+    base = {"registry": "owner/repo", "ref": "0" * 40, "bundles": ["adam"], "skills": {}}
+    assert _hook_reader_accepts(dict(base), tmp_path)
+    lock = dict(base)
+    if where == "primary":
+        lock["bundles"] = ["adam", "adam-personal"]
+    else:
+        lock["sources"] = [{"registry": "owner/other", "ref": "1" * 40,
+                            "bundles": ["adam-personal"], "layout": "skills"}]
+    proc = _run_hook_reader(lock, tmp_path)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.returncode != 0
+    assert "adam-personal" in proc.stderr and "ADR 0012" in proc.stderr
+
+
+def test_the_two_unlockable_lists_agree():
+    """The generator's constant and the hook's are one rule in two programs."""
+    block = _extract_hook_lock_reader()
+    assert f"UNLOCKABLE_BUNDLES = {gsl.UNLOCKABLE_BUNDLES!r}" in block

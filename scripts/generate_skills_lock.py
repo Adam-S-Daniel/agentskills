@@ -361,6 +361,12 @@ DEFAULT_LOCK = REPO_ROOT / "skills.lock"
 # This repo's own shape, and therefore the layout a source that does not say
 # otherwise is assumed to have.
 DEFAULT_LAYOUT = "plugins/{bundle}/skills"
+
+# Bundles no lock may name (ADR 0012). `adam-personal` is the claude.ai account
+# plugin: its skills/ entries are git symlinks to skills other bundles own, so
+# locking it would install those skills a second time. Mirrored in the
+# bootstrap hook's lock reader, which refuses a lock that names one.
+UNLOCKABLE_BUNDLES = ("adam-personal",)
 # Field order of the emitted document. Explicit so a regenerated lock is a
 # stable, reviewable diff rather than a reshuffle. `sources` is listed here for
 # its POSITION only — it is dropped from a lock that has none (see the module
@@ -772,11 +778,29 @@ def collect_skills(
     """
     skills: Dict[str, str] = {}
     for bundle in bundles:
+        if bundle in UNLOCKABLE_BUNDLES:
+            raise GeneratorError(
+                f"bundle {bundle!r} cannot be locked: it is ADR 0012's account "
+                "plugin, whose skills/ entries are symlinks to other bundles' "
+                "skills — claude.ai resolves them for the account, and a repo "
+                "session gets the same skills from the bundles themselves. Lock "
+                "those bundles instead"
+            )
         skills_root = tree_root / layout_dir(layout, bundle)
         if not skills_root.is_dir():
             continue
         for skill_md in sorted(skills_root.glob("*/SKILL.md")):
             skill_dir = skill_md.parent
+            # A symlinked skill DIRECTORY is refused like a symlink inside one
+            # (ADR 0008): digest_skill_dir resolves its root, so the lock would
+            # record the TARGET's digest under this bundle's key and the hook
+            # would install the same skill twice under two bundles.
+            if skill_dir.is_symlink():
+                raise GeneratorError(
+                    f"{skill_dir.relative_to(tree_root).as_posix()}: is a symlink; "
+                    "a skill directory in a locked bundle must be a real directory "
+                    "(ADR 0008, ADR 0012)"
+                )
             if not _NAME_RE.fullmatch(skill_dir.name):
                 # Named relative to the tree root: content is digested out of a
                 # scratch `git archive` extraction, and a /tmp/skills-lock-XXXX

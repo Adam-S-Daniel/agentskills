@@ -1318,6 +1318,9 @@ if not lock_paths:
 # Where a bundle's skills sit inside its own repo. This repo's shape is the
 # default; a federated source keeps them wherever it keeps them.
 DEFAULT_LAYOUT = "plugins/{bundle}/skills"
+# Bundles no lock may name (ADR 0012): the account plugin's skills are symlinks
+# to other bundles' skills. Mirrors generate_skills_lock.UNLOCKABLE_BUNDLES.
+UNLOCKABLE_BUNDLES = ("adam-personal",)
 SOURCE_FIELDS = ("registry", "ref", "bundles", "layout")
 
 # The four trust-boundary patterns. They are byte-identical to the generator's
@@ -1440,6 +1443,16 @@ def clean_ref(ref, where):
     return ref
 
 
+def refuse_unlockable(bundles, where):
+    """A lock naming the account plugin is refused wholesale (ADR 0012)."""
+    named = sorted(set(bundles) & set(UNLOCKABLE_BUNDLES))
+    if named:
+        raise LockRejected(
+            "%s names %s, the claude.ai account plugin, whose skills are symlinks "
+            "to other bundles' skills; lock those bundles instead (ADR 0012)"
+            % (where, ", ".join(named)))
+
+
 def clean_layout(layout, where):
     """Validate a layout template and return it.
 
@@ -1544,6 +1557,7 @@ def read_lock(lock_path):
         raise LockRejected(
             "lock: 'bundles' must be a non-empty list of bundle names — it is what "
             "says which bundles come from 'registry', and nothing is assumed for it")
+    refuse_unlockable(primary_bundles, "lock: 'bundles'")
     claim = {bundle: 0 for bundle in primary_bundles}
 
     for position, raw in enumerate(extra, start=1):
@@ -1564,6 +1578,7 @@ def read_lock(lock_path):
         if not isinstance(bundles, list) or not bundles or not all(
                 isinstance(bundle, str) and re.fullmatch(NAME, bundle) for bundle in bundles):
             raise LockRejected("lock: %s.bundles must be a non-empty list of bundle names" % where)
+        refuse_unlockable(bundles, "lock: %s.bundles" % where)
         for bundle in bundles:
             # `len(sources)` is the index this source is about to take, so a
             # source listing the same bundle twice is not a collision with
