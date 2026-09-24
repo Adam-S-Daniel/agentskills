@@ -75,6 +75,20 @@ no backfill is planned; the file adds the fields git does not capture.
 
 ---
 
+## 2026-09-24 — adam-local/launch-wsl-claude-session — edit
+
+- Motivation: prompts containing `;` opened the session with the prompt
+  truncated at the `;` plus a stray Windows Terminal tab failing with
+  `0x80070002`, because `wt.exe` treats an unescaped `;` as a new-tab
+  separator even inside a quoted argument.
+- Change: both launchers escape `;` as `\;` for `wt.exe`; the `.ps1` also
+  quotes each argument, since `Start-Process -ArgumentList <array>` does not;
+  dry-run hooks plus regression tests; one SKILL.md gotcha bullet
+  (PR_LINK_PENDING).
+- Eval: exempt (DESIGN.md non-coverage table) — "defer: machine-bound
+  (WSL/WPF/browser surfaces)".
+- Outcome: open as of 2026-09-24.
+
 ## 2026-09-24 — adam-local/sync-skills — edit
 
 - Motivation: ADR 0012 adds `plugins/adam-personal/skills/<name>` as git
