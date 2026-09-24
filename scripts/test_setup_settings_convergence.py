@@ -196,14 +196,45 @@ def test_an_operator_who_turned_sync_back_on_is_overridden(tmp_path):
     assert settings["syncClaudeAiSkills"] is False
 
 
-def test_invalid_json_is_left_untouched(tmp_path):
-    """Pre-existing behaviour, pinned because the new keys must not become a
-    reason to overwrite a file we could not read. A settings file that fails to
-    parse is more likely mid-edit than corrupt."""
+UNREADABLE = {
+    "invalid-json": ('{"model": "claude-opus-5",,}', "invalid JSON"),
+    "non-object-top-level": ('["model", "claude-opus-5"]\n', "does not contain a JSON object"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(UNREADABLE))
+def test_an_unreadable_file_is_left_untouched_and_fails(tmp_path, case):
+    """A settings file we cannot read is left byte-for-byte alone — it is more
+    likely mid-edit than corrupt — AND the block exits non-zero, because a file
+    left alone is a file not converged. This used to be a WARNING and exit 0,
+    and setup.sh then reported success."""
+    raw, message = UNREADABLE[case]
     path = tmp_path / ".claude" / "settings.json"
     path.parent.mkdir(parents=True)
-    path.write_text('{"model": "claude-opus-5",,}', encoding="utf-8")
-    assert run_convergence(tmp_path) == '{"model": "claude-opus-5",,}'
+    path.write_bytes(raw.encode("utf-8"))
+    proc = subprocess.run([sys.executable, "-c", convergence_block()],
+                          env={"HOME": str(tmp_path), "USERPROFILE": str(tmp_path),
+                               "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+    assert proc.returncode != 0
+    assert "settings: ERROR" in proc.stderr and message in proc.stderr
+    assert path.read_bytes() == raw.encode("utf-8")
+
+
+def test_the_write_is_one_atomic_replace():
+    """The update must never leave a moment with no settings.json. Asserted on
+    the parsed Python of the block (not a text scan): os.replace is called and
+    neither os.remove nor os.rename is. A timing test for a window this small
+    would be flaky by construction, so the call itself is what is pinned."""
+    import ast
+    calls = set()
+    for node in ast.walk(ast.parse(convergence_block())):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
+            calls.add(node.func.attr)
+    assert "replace" in calls
+    assert not calls & {"remove", "rename", "unlink"}
 
 
 def run_block(home: Path, existing) -> subprocess.CompletedProcess:
@@ -275,12 +306,75 @@ def run_section(home: Path, bin_dir: Path) -> subprocess.CompletedProcess:
     # A file, not `bash -c <text>`: on Windows the argument crosses
     # CreateProcess quoting, which mangles a script this full of double quotes.
     script = home / "section.sh"
-    script.write_text(section() + tail(), encoding="utf-8", newline="\n")
+    # `set -u` first: the section runs under setup.sh's own options (its line
+    # `set -u`), so an unset variable fails here exactly as it would there.
+    script.write_text("set -u\n" + section() + tail(), encoding="utf-8", newline="\n")
     return subprocess.run([bash, script.as_posix()],
                           env={"HOME": str(home), "USERPROFILE": str(home),
                                "PATH": str(bin_dir)},
                           capture_output=True, text=True, encoding="utf-8",
                           errors="replace")
+
+
+def test_setup_sets_the_options_run_section_assumes():
+    assert re.search(r"^set -u$", SETUP.read_text(encoding="utf-8"), re.M)
+
+
+def real_python_stub(bin_dir: Path, name: str, guard: str = "") -> None:
+    """A stub that runs the test's own Python, optionally only when `guard`
+    (a shell condition) holds — otherwise it behaves like the Store stub."""
+    run = 'exec "%s" "$@"' % Path(sys.executable).as_posix()
+    if guard:
+        run = "if %s; then shift; %s; fi\n%s" % (guard, run, STORE_STUB)
+    write_stub(bin_dir, name, run)
+
+
+@pytest.mark.parametrize("case", sorted(UNREADABLE))
+def test_an_unreadable_file_fails_setup(tmp_path, case):
+    raw, _ = UNREADABLE[case]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_python_stub(bin_dir, "python3")
+    path = tmp_path / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(raw.encode("utf-8"))
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode != 0
+    assert "Setup complete." not in proc.stdout
+    assert path.read_bytes() == raw.encode("utf-8")
+
+
+def test_python_2_is_skipped_for_a_later_candidate(tmp_path):
+    """A `python3` that answers the version probe with 1 (what Python 2 does
+    with `sys.exit(sys.version_info < (3, 3))`) is passed over."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "python3", 'echo "python3 was run" >&2\nexit 1')
+    real_python_stub(bin_dir, "python")
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "settings: probing python3" in proc.stdout
+    assert "settings: probing python..." in proc.stdout
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
+
+
+def test_py_dash_3_is_chosen_and_passed_as_two_words(tmp_path):
+    """python3 and python are Store stubs; `py` works ONLY when its first
+    argument is exactly `-3`. So success proves `py -3` was split into two
+    words for both the probe and the heredoc call — a single word "py -3" or a
+    dropped flag would hit the stub branch and exit 49."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_stub(bin_dir, "python3", STORE_STUB)
+    write_stub(bin_dir, "python", STORE_STUB)
+    real_python_stub(bin_dir, "py", guard='[ "$1" = "-3" ]')
+    proc = run_section(tmp_path, bin_dir)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "settings: probing py -3" in proc.stdout
+    assert "Setup complete." in proc.stdout
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["enabledPlugins"]["adam-personal@synced"] is False
 
 
 def test_the_section_markers_are_the_shipped_ones():

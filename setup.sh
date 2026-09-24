@@ -361,18 +361,25 @@ echo "=== Converging ~/.claude/settings.json (marketplace + plugin enablement) =
 # this whole block a silent no-op on a Windows home while the script went on to
 # report success (measured 2026-09-24: that home's settings.json never
 # received ADR 0010's keys). `py -3` is the Windows launcher's spelling.
+#
+# The probe also refuses Python 2 and anything before 3.3, the true floor of the
+# block below (it needs os.replace). Each probe is announced and reads
+# /dev/null for stdin: the Windows Python install manager may try to INSTALL a
+# runtime when none exists (docs.python.org/3/using/windows.html), and that
+# should show up as a named step, not as a mute stall.
 PYTHON_CMD=()
 for candidate in "python3" "python" "py -3"; do
   read -r -a cmd <<< "$candidate"
   command -v "${cmd[0]}" >/dev/null 2>&1 || continue
-  if "${cmd[@]}" -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
+  echo "settings: probing $candidate..."
+  if "${cmd[@]}" -c 'import sys; sys.exit(sys.version_info < (3, 3))' </dev/null >/dev/null 2>&1; then
     PYTHON_CMD=("${cmd[@]}")
     break
   fi
 done
 
 if [[ ${#PYTHON_CMD[@]} -eq 0 ]]; then
-  echo "ERROR    no working Python found (tried: python3, python, py -3), so" >&2
+  echo "ERROR    no working Python 3 found (tried: python3, python, py -3), so" >&2
   echo "         ~/.claude/settings.json was NOT converged. On Windows, a" >&2
   echo "         python3/python that prints 'Python was not found' is the" >&2
   echo "         Microsoft Store stub (…/WindowsApps): install Python or turn" >&2
@@ -482,14 +489,14 @@ if os.path.exists(SETTINGS_PATH):
         try:
             loaded = json.loads(raw)
         except ValueError as exc:
-            print("settings: WARNING invalid JSON in %s (%s) - left untouched" % (SETTINGS_PATH, exc))
-            settings = None
-        else:
-            if isinstance(loaded, dict):
-                settings = loaded
-            else:
-                print("settings: WARNING %s does not contain a JSON object - left untouched" % SETTINGS_PATH)
-                settings = None
+            # An error, not a warning: a file we cannot read is a file we did
+            # not converge, and setup.sh must not then report success.
+            sys.exit("settings: ERROR invalid JSON in %s (%s) - left untouched; "
+                     "fix it by hand and re-run" % (SETTINGS_PATH, exc))
+        if not isinstance(loaded, dict):
+            sys.exit("settings: ERROR %s does not contain a JSON object - left "
+                     "untouched; fix it by hand and re-run" % SETTINGS_PATH)
+        settings = loaded
 
 if settings is not None:
     # A container this block merges into must be a JSON object. Anything else
@@ -522,9 +529,9 @@ if settings is not None:
         with io.open(tmp_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(settings, indent=2))
             f.write("\n")
-        if os.path.exists(SETTINGS_PATH):
-            os.remove(SETTINGS_PATH)
-        os.rename(tmp_path, SETTINGS_PATH)
+        # One atomic step on POSIX and Windows alike: there is never a moment
+        # with no settings.json, which the remove-then-rename it replaces had.
+        os.replace(tmp_path, SETTINGS_PATH)
         print("settings: updated")
 PYEOF
 converge_rc=$?
