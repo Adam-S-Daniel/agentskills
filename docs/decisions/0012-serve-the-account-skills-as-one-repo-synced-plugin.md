@@ -86,9 +86,17 @@ claude.ai and in the Desktop app.
       probed in a throwaway repo. Its result must show that **only the listed
       skills** load on claude.ai, in local Cowork and in a terminal. If
       anything unlisted loads, stop: this decision's premise is wrong.
-   1. Run `bash setup.sh` on each durable machine, so
-      `"adam-personal@synced": false` is in place **before** the plugin is
-      enabled anywhere.
+   1. Run `bash setup.sh` in **each home** (Windows Git Bash and WSL) on each
+      durable machine, so `"adam-personal@synced": false` is in place
+      **before** the plugin is enabled anywhere. The pass condition is reading
+      each home's `~/.claude/settings.json` and seeing
+      `enabledPlugins["adam-personal@synced"] == false`, **not** setup.sh's
+      output: before this change setup.sh could print "Setup complete." on a
+      Windows home having written nothing, because it picked the Microsoft
+      Store `python3` stub by name and never checked the exit code (measured
+      2026-09-24; that home's settings.json had none of ADR 0010's keys). It
+      now chooses an interpreter by running it and fails when convergence
+      does.
    2. Add `Adam-S-Daniel/agentskills` at
       [claude.ai/customize/plugins](https://claude.ai/customize/plugins);
       enable only `adam-personal` there and in the Desktop app's plugin
@@ -102,10 +110,18 @@ claude.ai and in the Desktop app.
       in this phase, so each account skill appears twice; that is expected.
    4. A terminal on a durable machine, after a fresh launch: `claude plugin
       list --json` shows `adam-personal@synced` as disabled.
-   5. **Removal.** Disable `adam-personal` on claude.ai and confirm it
-      disappears from one surface and from the terminal's synced bucket
-      (`~/.claude/plugins/synced/`); then re-enable it. This measurement, not
-      E6's deletion of the uploaded probe, is what phase 3 rests on.
+   5. **Removal.** Disable `adam-personal` on claude.ai and confirm, after a
+      fresh terminal launch and a full Desktop restart and within 24 hours,
+      that it is no longer offered on a surface and is gone from the
+      terminal's synced bucket (`~/.claude/plugins/synced/`). **If it is still
+      offered anywhere, or still in `~/.claude/plugins/synced/`, phase 3's
+      premise fails and ADR 0002's one-way-door consequence stays.** Then
+      re-enable it on **both** claude.ai and the Desktop app. This
+      measurement, not E6's deletion of the uploaded probe, is what phase 3
+      rests on. The bound is not arbitrary caution: on the Windows home of
+      this laptop the synced bucket still listed `e6-probe` at 2026-09-24
+      01:15 UTC, after its marketplace had been removed on claude.ai (how long
+      the terminal sync takes to drop a plugin is unknown).
 3. **Phase 3 — the owner, then a follow-up change.** Delete the uploaded ZIP
    skills on claude.ai. A follow-up change then retires `sync-skills`' upload
    path and replaces ADR 0006's drift loop with comparing the commit claude.ai
@@ -126,7 +142,11 @@ claude.ai and in the Desktop app.
   "Check for updates" does is unknown (its synced manifest records its own
   counter). `check_plugin_versions.py` requires the bump whenever a listed
   skill's directory, the list, or any non-display key of the entry changes
-  against the PR base. A skill that also lives in a bundle needs that bundle's
+  against the PR base. **That gate is advisory today:** it fails the
+  `consistency` job, but `main`'s only required status check is
+  `pytest-windows` (ruleset 18877850), so a missed bump is not
+  merge-blocking unless `consistency` becomes a required check in
+  repo-settings' `fleet.yml`. A skill that also lives in a bundle needs that bundle's
   bump too, so one skill edit can mean two bumps.
 - **Terminals would receive it — measured — so durable machines opt out.** A
   repo-synced plugin reached the laptop's terminal in E6 (§3.6), and Claude
@@ -137,6 +157,11 @@ claude.ai and in the Desktop app.
   terminals. `setup.sh` therefore converges `"adam-personal@synced": false` in
   user `enabledPlugins`, the documented per-plugin off switch
   ([synced plugins](https://code.claude.com/docs/en/plugins-reference#synced-plugins)).
+  It writes `false` on every run, so a manual
+  `claude plugin enable adam-personal@synced` lasts only until setup.sh next
+  runs. These user settings also govern the Desktop app's Code tab, so the
+  plugin is off there too; the Desktop app's Chat and Cowork tabs are enabled
+  in its own plugin settings.
 - **Cloud sessions cannot opt out at user level.** They sync the account's
   plugins into the session and have no user settings `setup.sh` can reach. The
   only lever is a repo's committed `.claude/settings.json` with
@@ -154,7 +179,10 @@ claude.ai and in the Desktop app.
   the repository root. The docs give `skills` a marketplace-root exception but
   do not say `strict: false` stops default discovery of `hooks/`, `.mcp.json`,
   `agents/`, `bin/`, `settings.json` and the rest, so `check_consistency.py`
-  fails if any default component location exists at the root. None does today.
+  fails if any default component location exists at the root. The same goes
+  for `package.json` and the npm/bun lockfiles: together at a plugin root they
+  make Claude Code run a package install in every cached copy. None exists
+  today.
 - **The entry's keys are closed.** A `strict: false` entry is the plugin's
   whole definition, so `check_consistency.py` refuses any key outside display
   fields, `name`, `source`, `strict`, `version`, `defaultEnabled` and `skills`.
@@ -213,10 +241,20 @@ claude.ai and in the Desktop app.
   (`test_curated_skill_edited_without_entry_bump_fails`,
   `test_curated_skills_list_changed_without_bump_fails`,
   `test_curated_entry_definition_changed_without_bump_fails` in
-  `scripts/test_check_plugin_versions.py`).
+  `scripts/test_check_plugin_versions.py`), and a base it cannot read is an
+  error, not "newly added"
+  (`test_a_failed_base_read_is_an_error_not_newly_added`). This fails the
+  `consistency` job; it is **not merge-blocking** unless `consistency` becomes
+  a required check in repo-settings' `fleet.yml` (today only `pytest-windows`
+  is required, ruleset 18877850). The tests themselves run in
+  `pytest-windows`, so a regression in the gate's logic is merge-blocking; a
+  missed bump on a real PR is not.
 - `setup.sh` converges `"adam-personal@synced": false`
   (`test_the_account_plugin_is_off_in_terminals` in
-  `scripts/test_setup_settings_convergence.py`, which parses the JSON).
+  `scripts/test_setup_settings_convergence.py`, which parses the JSON), and
+  fails rather than printing "Setup complete." when no interpreter works or
+  convergence fails (`test_a_store_stub_interpreter_fails_setup_instead_of_completing`,
+  `test_a_failing_convergence_fails_setup`).
 - `claude plugin validate . --strict` (CI job `plugin-validate`) accepts the
   entry.
 

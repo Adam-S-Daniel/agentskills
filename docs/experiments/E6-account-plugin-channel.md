@@ -23,8 +23,11 @@ retired.
 
 Tracked in [#160](https://github.com/Adam-S-Daniel/agentskills/issues/160).
 [#158](https://github.com/Adam-S-Daniel/agentskills/issues/158) waits on the
-`syncClaudeAiPlugins` recommendation in §6. Nothing was uploaded, enabled or
-added on the account to produce this document.
+`syncClaudeAiPlugins` recommendation in §6. What was done on the account to
+produce this document was throwaway probes only: an uploaded test plugin,
+since deleted, and a separate probe marketplace added, enabled and later
+removed (see §3.5–§3.6). None of this repo's plugins was enabled on the
+account.
 
 ---
 
@@ -37,7 +40,7 @@ added on the account to produce this document.
 | **Claude in Chrome** | yes | **yes**, including a personal upload (measured 2026-09-23) |
 | **Mobile app (iOS)** | yes | **yes**, including a personal upload (measured 2026-09-23) |
 | **Desktop Cowork (local)** | yes (`rename-pdfs`, measured 2026-09-23) | **no** for an uploaded plugin; **yes** for a plugin from a repo-synced marketplace, once enabled in the Desktop app too (measured 2026-09-23, §3.6) |
-| Can be deleted | only by hand in the UI; the uploader has no delete | yes, at four layers (§2.3) |
+| Can be deleted | only by hand in the UI; the uploader has no delete | yes, at four layers — documented (§2.3); measured only for an uploaded plugin (§3.5) |
 | Needs an uploader | yes — a browser session, one skill at a time | no — a public repo is accepted as a personal marketplace (measured 2026-09-23) |
 | Pinned to a commit | no — whatever was last uploaded | no — follows the latest version (§2.4) |
 | Scoped to a repo | no | no (§3.3) |
@@ -158,9 +161,10 @@ plugin channel.
 Enabling the three bundles would add 12 skills the account deliberately does not
 carry, about 2,970 extra tokens on every surface. `adam`'s six are exactly what
 ADR 0002 rejected putting on the account. Using this channel properly means a
-separate personal bundle. Creating one moves skills between bundles, which
-touches the append-only `renames` map and needs an adversarial review round
-(AGENTS.md).
+separate personal plugin. [ADR 0012](../decisions/0012-serve-the-account-skills-as-one-repo-synced-plugin.md)
+builds it as a curated marketplace entry that serves the existing skill
+directories in place, so no skill moves between bundles and the append-only
+`renames` map is untouched.
 
 ### 3.3 Still nothing repo-scoped
 
@@ -349,10 +353,12 @@ control *is* found. Otherwise the result is void.
    0009), merge, press "Check for updates" on claude.ai, and restart the
    Desktop app. The `sync-skills` drift check could be replaced by comparing
    the commit claude.ai reports against `main`. This repo can be the marketplace, because
-   adding a marketplace enables nothing by itself. Creating the plugin moves
-   skills between bundles, which touches the append-only `renames` map. So it
-   needs its own ADR, amending ADR 0002's "one-way door" consequence, and the
-   adversarial review round in AGENTS.md before merge.
+   adding a marketplace enables nothing by itself. [ADR 0012](../decisions/0012-serve-the-account-skills-as-one-repo-synced-plugin.md)
+   is that switch: a curated marketplace entry serving the existing skill
+   directories in place, so no skill moves and the `renames` map is untouched.
+   It goes through the adversarial review round in AGENTS.md before merge, and
+   amends ADR 0002's "one-way door" consequence only after its phase 2 has
+   measured removal.
 3. **Do not enable this repo's bundles on the account** (§3.2).
 4. **For #158: leave `syncClaudeAiPlugins` unset, but not because it is free.**
    [ADR 0010](../decisions/0010-let-pinned-channels-own-the-terminal.md)
