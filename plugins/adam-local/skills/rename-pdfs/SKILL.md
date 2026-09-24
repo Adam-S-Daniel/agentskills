@@ -30,8 +30,8 @@ Four hyphen-separated fields, in this exact order, **no spaces around the hyphen
    **Date range variant.** For documents that summarize a span of dates rather than a single moment — superbills, multi-month statements, range receipts — use `YYYYMMDD-YYYYMMDD` (earliest–latest). The internal hyphen is intentional; downstream parsing rules below handle it.
 
 2. **Document type** — a short noun for what the document _is_, in Title Case. Examples: `Statement`, `Invoice`, `Bill`, `Receipt`, `Letter`, `Contract`, `Form 1099`, `Form W-2`, `Closing Disclosure`, `Lease`, `Policy`, `Report`, `Tax Return`, `Superbill`. Keep it canonical so similar documents sort together.
-3. **Document issuer** — the organization or person who produced the document. Title Case. Examples: `Bank of America`, `Verizon Wireless`, `Acme Corp`, `Fidelity`, `IRS`, `Dr Patel`, `Harry H Huang MD`. Use a recognizable short form (`BofA` is fine if that's what the user calls it; ask if unsure). Keep credential suffixes uppercase (`MD`, `DDS`, `CPA`, `LLC`).
-4. **Document title / specifier** — a concise identifier that distinguishes this doc from other same-type/same-issuer docs. Examples: `Checking Account`, `Account 555 1234`, `Year End Summary`, `Invoice 4471`, `Sophia Daniel`, `Jonah Daniel Rx $284.68`. Use a space (not a hyphen) between words.
+3. **Document issuer** — the organization or person who produced the document. Title Case. Examples: `Bank of America`, `Verizon Wireless`, `Acme Corp`, `Fidelity`, `IRS`, `Dr Patel`, `Morgan T Nguyen MD`. Use a recognizable short form (`BofA` is fine if that's what the user calls it; ask if unsure). Keep credential suffixes uppercase (`MD`, `DDS`, `CPA`, `LLC`).
+4. **Document title / specifier** — a concise identifier that distinguishes this doc from other same-type/same-issuer docs. Examples: `Checking Account`, `Account 555 1234`, `Year End Summary`, `Invoice 4471`, `Alex Rivera`, `Sam Rivera Rx $58.30`. Use a space (not a hyphen) between words.
 
 **Critical: the field separator is a single hyphen with no surrounding spaces.** The date is `YYYYMMDD` (or `YYYYMMDD-YYYYMMDD` for ranges); it is purely numeric, so it never accidentally captures a hyphen meant as a field separator. Inside the type/issuer/title fields, **never introduce a hyphen** — use a space, em dash (`—`), or word like "and" instead. E.g. write `Year End` or `Year—End`, not `Year-End`.
 
@@ -47,15 +47,15 @@ Parsing reference: split on `-`. The first token is the date. If the next token 
 20241231-Form 1099 INT-Fidelity-Brokerage Year End Summary.pdf
 20240630-Closing Disclosure-First American Title-123 Main St.pdf
 20240214-Letter-Dr Patel-Lab Results Follow Up.pdf
-20260130-Receipt-Millbrook Pharmacy-Jonah Daniel Rx $195.07.pdf
-20260107-Statement-Harry H Huang MD-Statement For Jodi Daniel.pdf
+20260130-Receipt-Lakeside Pharmacy-Sam Rivera Rx $42.15.pdf
+20260107-Statement-Morgan T Nguyen MD-Statement For Jamie Rivera.pdf
 ```
 
 **Examples (date range):**
 
 ```
-20260114-20260119-Superbill-Center for Anxiety and Behavioral Change-Sophia Daniel.pdf
-20260202-20260223-Superbill-Center for Anxiety and Behavioral Change-Sophia Daniel.pdf
+20260114-20260119-Superbill-Northside Counseling Associates-Alex Rivera.pdf
+20260202-20260223-Superbill-Northside Counseling Associates-Alex Rivera.pdf
 ```
 
 If the document genuinely lacks one of the fields (e.g. a published report with no clear issuer), use `Unknown` for that slot and surface it to the user during the per-file confirmation so they can fill it in.

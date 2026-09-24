@@ -75,6 +75,17 @@ no backfill is planned; the file adds the fields git does not capture.
 
 ---
 
+## 2026-09-24 — adam-local/rename-pdfs — edit
+
+- Motivation: example filenames contained real personal details; a public
+  repo must not.
+- Change: replaced them with fictional examples; no behaviour change (PR
+  [#190](https://github.com/Adam-S-Daniel/agentskills/pull/190)).
+- Eval: an eval exists (`evals/rename-pdfs/` in skills-evals, issue #82,
+  Class A "workspace transforms"), but it lives in a separate repo and
+  could not be run from this worktree/task.
+- Outcome: pending merge.
+
 ## 2026-09-24 — adam-local/launch-wsl-claude-session — edit
 
 - Motivation: prompts containing `;` opened the session with the prompt
