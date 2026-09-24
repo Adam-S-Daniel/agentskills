@@ -12113,6 +12113,78 @@ def test_the_hook_reader_refuses_a_lock_naming_the_account_plugin(tmp_path, wher
     assert "adam-personal" in proc.stderr and "ADR 0012" in proc.stderr
 
 
+@pytest.mark.parametrize("layout", ["plugins/adam-personal/skills", "plugins/Adam-Personal/skills",
+                                    "adam-personal"])
+def test_a_layout_reaching_the_account_plugin_is_refused_by_both(tmp_path, layout):
+    """A source's layout need not use '{bundle}', so it could reach the links
+    without ever naming adam-personal as a bundle."""
+    with pytest.raises(gsl.GeneratorError, match="ADR 0012"):
+        gsl.validate_layout(layout, "sources[1].layout")
+    lock = {"registry": "owner/repo", "ref": "0" * 40, "bundles": ["adam"], "skills": {},
+            "sources": [{"registry": "owner/other", "ref": "1" * 40,
+                         "bundles": ["x"], "layout": layout}]}
+    proc = _run_hook_reader(lock, tmp_path)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.returncode != 0
+    assert "ADR 0012" in proc.stderr
+
+
+def test_the_generators_digest_refuses_a_symlinked_skill_root(tmp_path):
+    real = tmp_path / "real"
+    _write(real / "SKILL.md", "---\nname: real\n---\n")
+    link = tmp_path / "link"
+    _make_symlink(link, real, to_directory=True)
+    with pytest.raises(gsl.GeneratorError, match="symlinked skill directory"):
+        gsl.digest_skill_dir(link)
+
+
+def test_the_hook_refuses_a_symlinked_skill_root(tmp_path):
+    """The hook must be the stricter side (E4). `cp -R` copies a symlinked
+    skill root AS a symlink, so in ~/.claude/skills a link named `zeta` to the
+    sibling `alpha` resolves to the alpha this same run just installed. With
+    alpha's TRUE digest in the lock for zeta, digest_dir used to resolve the
+    link, measure alpha, and install zeta as a live link to another skill. It
+    must be refused."""
+    root = tmp_path / "registry"
+    root.mkdir(parents=True)
+    make_registry(root, {"adam/alpha": SKILL_A})
+    skills_root = root / gsl.layout_dir(gsl.DEFAULT_LAYOUT, "adam")
+    true_digest = gsl.LOCK_DIGEST_PREFIX + gsl.digest_skill_dir(skills_root / "alpha")
+    link = skills_root / "zeta"
+    _make_symlink(link, "alpha", to_directory=True)
+    assert (link / "SKILL.md").is_file(), "the fixture link does not resolve"
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "a symlinked skill root")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         check=True, capture_output=True, text=True).stdout.strip()
+    modes = subprocess.run(["git", "-C", str(root), "ls-files", "-s"],
+                           check=True, capture_output=True, text=True).stdout
+    assert "120000" in modes, f"git did not record a symlink here:\n{modes}"
+
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    _write(project / "skills.lock", json.dumps({
+        "registry": "fixture/registry",
+        "ref": sha,
+        "bundles": ["adam"],
+        "skills": {"adam/alpha": true_digest, "adam/zeta": true_digest},
+        "generated_from": sha,
+        "sources": [{"name": "fixture/registry",
+                     "url": root.resolve().as_uri(),
+                     "ref": sha, "bundles": ["adam"]}],
+    }, indent=2) + "\n")
+    home = tmp_path / "home"
+    hook = _run_hook(home, project, {"SKILLS_BOOTSTRAP_FORCE": "1"})
+    assert hook.returncode == 0, hook.stderr
+    verdict = _verdict(hook)
+    installed = home / ".claude" / "skills"
+    assert (installed / "alpha" / "SKILL.md").is_file(), \
+        f"the real skill should install — else this test proves nothing: {verdict}"
+    assert not os.path.lexists(installed / "zeta"), \
+        f"a symlinked skill root was installed: {verdict}"
+    assert not verdict.startswith("skills: 2/2 "), verdict
+
+
 def test_the_two_unlockable_lists_agree():
     """The generator's constant and the hook's are one rule in two programs."""
     import ast

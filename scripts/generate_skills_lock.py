@@ -465,6 +465,11 @@ def digest_skill_dir(path: Path, skip: frozenset = frozenset()) -> str:
     ALGORITHM the two share — walk, sort, concatenate, hash — is untouched by
     any of this; `skip` only prunes what is handed to it.
     """
+    # The directory ITSELF may not be a link (ADR 0012): resolve() would digest
+    # the target's bytes under this skill's name. Mirrored in the hook's
+    # `digest_dir`, and checked before resolve(), which erases the answer.
+    if Path(path).is_symlink():
+        raise GeneratorError(f"symlinked skill directory: {path}")
     root = Path(path).resolve()
     if not root.is_dir():
         raise GeneratorError(f"not a directory: {path}")
@@ -746,6 +751,10 @@ def validate_layout(layout: str, where: str) -> str:
             raise GeneratorError(
                 f"{where}: must be a relative path with no '..' segment, got {layout!r}"
             )
+        # Mirrored in the hook's clean_layout: a '{bundle}'-free layout could
+        # reach the account plugin's links without naming it as a bundle.
+        if segment.lower() in UNLOCKABLE_BUNDLES:
+            raise GeneratorError(f"{where}: names {segment}, which no lock may read (ADR 0012)")
     return layout
 
 

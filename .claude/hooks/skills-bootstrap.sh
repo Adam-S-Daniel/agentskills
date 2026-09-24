@@ -1472,6 +1472,11 @@ def clean_layout(layout, where):
     for segment in layout.split("/"):
         if segment in ("", ".", "..") or not re.fullmatch(r"[A-Za-z0-9._{}-]+", segment):
             raise LockRejected("lock: %s must be a relative path with no '..' segment" % where)
+        # A layout need not use '{bundle}', so it could reach the account
+        # plugin's links without the bundle name ever being claimed (ADR 0012).
+        if segment.lower() in UNLOCKABLE_BUNDLES:
+            raise LockRejected("lock: %s names %s, which no lock may read (ADR 0012)"
+                               % (where, segment))
     return layout
 
 
@@ -2548,6 +2553,12 @@ digest_dir () {
   python3 -I - "$1" 2>>"$LOG" <<'DIGEST_PY'
 import hashlib, pathlib, sys
 
+# The skill directory ITSELF may not be a link either (ADR 0012): resolving it
+# first would digest the TARGET's bytes under this skill's name. Checked before
+# resolve(), which would erase the answer; the generator refuses the same in
+# collect_skills, and this side must be the stricter of the two.
+if pathlib.Path(sys.argv[1]).is_symlink():
+    sys.exit("symlinked skill directory: %s" % sys.argv[1])
 root = pathlib.Path(sys.argv[1]).resolve()
 if not root.is_dir():
     sys.exit("not a directory: %s" % sys.argv[1])
