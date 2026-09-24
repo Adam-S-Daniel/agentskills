@@ -18,6 +18,7 @@ id from the same word in one of ci.yml's comments — which is most of the file.
 Run: python3 -m pytest scripts/test_ci_workflow.py -q
 """
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -180,6 +181,36 @@ def test_the_heavy_steps_are_gated_on_the_salience_verdict(job_id):
         f"job `{job_id}` must gate both its pip install and its pytest run "
         f"on `{gate}`; the gated steps found were: "
         f"{[s.get('name', '<unnamed>') for s in gated]}"
+    )
+
+
+def test_the_pytest_jobs_run_the_suite_in_parallel_and_identically():
+    """The serial Windows suite was ~17 minutes on `pytest-windows` — the only
+    required status check this repo has (issue #176) — against ubuntu's ~4.5.
+    -n auto (pytest-xdist) is what closes that gap. A one-job edit would let
+    the lanes drift silently: the required Windows check testing at a
+    different parallelism than ubuntu, or `-n auto` landing in only one of
+    them while the other quietly stays serial."""
+    doc = load_ci()
+    runs = {}
+    for job_id in PYTEST_JOBS:
+        steps = [s for s in doc["jobs"][job_id].get("steps", [])
+                 if s.get("name") == "Run every test suite in the repo"]
+        assert len(steps) == 1, (
+            f"job `{job_id}` must carry exactly one step named "
+            f"`Run every test suite in the repo`; found {len(steps)}."
+        )
+        runs[job_id] = steps[0]["run"]
+    ubuntu, windows = (runs[job_id] for job_id in PYTEST_JOBS)
+    assert ubuntu == windows, (
+        "the `Run every test suite in the repo` run lines in `pytest` and "
+        "`pytest-windows` differ — edit them together, byte for byte."
+    )
+    tokens = shlex.split(ubuntu)
+    pairs = list(zip(tokens, tokens[1:]))
+    assert ("-n", "auto") in pairs, (
+        f"the `Run every test suite in the repo` run line must pass `-n auto` "
+        f"to pytest so the suite runs in parallel; got: {ubuntu!r}"
     )
 
 
