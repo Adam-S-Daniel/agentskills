@@ -359,7 +359,7 @@ echo "=== Converging ~/.claude/settings.json (marketplace + plugin enablement) =
 # python3/python on PATH can be the Microsoft Store stub under WindowsApps: it
 # resolves, prints "Python was not found" and exits 49. Picking it by name made
 # this whole block a silent no-op on a Windows home while the script went on to
-# print "Setup complete." (measured 2026-09-24: that home's settings.json never
+# report success (measured 2026-09-24: that home's settings.json never
 # received ADR 0010's keys). `py -3` is the Windows launcher's spelling.
 PYTHON_CMD=()
 for candidate in "python3" "python" "py -3"; do

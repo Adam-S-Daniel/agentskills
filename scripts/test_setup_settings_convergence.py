@@ -25,7 +25,9 @@ silently testing nothing.
 """
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -236,7 +238,9 @@ def _posix_bash():
     test_generate_skills_lock.py uses, for the same reason."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from test_generate_skills_lock import BASH
-    return BASH
+    # Off Windows that helper returns the bare name, which subprocess would
+    # look up on the child's PATH — and run_section's PATH holds only stubs.
+    return shutil.which(BASH) if BASH and os.name != "nt" else BASH
 
 
 def section() -> str:
@@ -268,7 +272,11 @@ def run_section(home: Path, bin_dir: Path) -> subprocess.CompletedProcess:
     bash = _posix_bash()
     if bash is None:
         pytest.skip("no POSIX bash on this machine")
-    return subprocess.run([bash, "-c", section() + tail()],
+    # A file, not `bash -c <text>`: on Windows the argument crosses
+    # CreateProcess quoting, which mangles a script this full of double quotes.
+    script = home / "section.sh"
+    script.write_text(section() + tail(), encoding="utf-8", newline="\n")
+    return subprocess.run([bash, script.as_posix()],
                           env={"HOME": str(home), "USERPROFILE": str(home),
                                "PATH": str(bin_dir)},
                           capture_output=True, text=True, encoding="utf-8",
