@@ -345,11 +345,19 @@ def test_an_unreadable_file_fails_setup(tmp_path, case):
 
 
 def test_python_2_is_skipped_for_a_later_candidate(tmp_path):
-    """A `python3` that answers the version probe with 1 (what Python 2 does
-    with `sys.exit(sys.version_info < (3, 3))`) is passed over."""
+    """A `python3` that answers ONLY the version probe with 1 (what Python 2
+    does with `sys.exit(sys.version_info < (3, 3))`) and otherwise works is
+    passed over. It must otherwise work: a stub that failed everything would
+    be skipped by any probe at all, and this test would prove nothing about
+    the version floor (the round-3 negative control caught exactly that)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    write_stub(bin_dir, "python3", 'echo "python3 was run" >&2\nexit 1')
+    real_python_stub(bin_dir, "python3")
+    path = bin_dir / "python3"
+    body = path.read_text(encoding="utf-8").replace(
+        "#!/bin/sh\n",
+        '#!/bin/sh\ncase "$2" in *version_info*) exit 1 ;; esac\n', 1)
+    path.write_text(body, encoding="utf-8", newline="\n")
     real_python_stub(bin_dir, "python")
     proc = run_section(tmp_path, bin_dir)
     assert proc.returncode == 0, proc.stderr + proc.stdout
