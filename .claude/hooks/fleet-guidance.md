@@ -63,25 +63,12 @@ new domain or subjective criteria.
 
 Repo locations are host-specific (on Windows, check `$env:COMPUTERNAME`).
 
-- **`ZENDA`** (Windows): clones live under
+- **`BOXY`** (Windows): clones live under
   `D:\repos\<github-owner-or-org>\<repo>` (e.g.
   `D:\repos\adam-s-daniel\wsl-automation`), never `C:\Users\<user>\...`.
 - **Any Windows host with WSL**: PowerShell run from WSL inherits the launching
   session's elevation, and an agent's is not elevated — see the
   `windows-elevation-from-wsl` skill (`adam-local`).
-
-## Sessions get cut off
-
-**`ZENDA` drops sessions mid-task, frequently** — any run can end between
-tool calls.
-
-- **Commit and push as you go**, on a branch; a conversation, a dirty tree and
-  a worktree do not survive the laptop.
-- **Persist the expensive part** (root cause, baseline test result, the option
-  ruled out) in the commit message, PR body or an ADR.
-- **Say where things stand before a long step** (full suite, CI watch, wide
-  refactor).
-- **Report a resume pointer:** branch, PR number, worktree path, next command.
 
 ## Security
 
@@ -428,7 +415,7 @@ marketplace add Adam-S-Daniel/agentskills` and install the bundles wanted;
 The clone (`~/.claude/plugins/marketplaces/<name>/` — find it, never assume
 the path) auto-updates while the installed bundle
 (`~/.claude/plugins/cache/<marketplace>/<bundle>/<version>/`) never moves, so
-check the INSTALL (`ZENDA`, 2026-08-31: **381 commits** behind):
+check the INSTALL (`WINDOWSLAPTOP`, 2026-01-01: **100 commits** behind):
 `~/.claude/plugins/installed_plugins.json` carries a `gitCommitSha` per
 entry; `git -C <clone> merge-base --is-ancestor <that sha> HEAD` succeeding
 means behind, `git -C <clone> rev-list --count <sha>..HEAD` says by how far.
