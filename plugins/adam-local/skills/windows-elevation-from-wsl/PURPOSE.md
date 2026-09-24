@@ -5,7 +5,7 @@ Maintenance context only; never loaded at inference.
 ## The incident it packages
 
 `wsl-automation`'s `AGENTS.md` recorded, in its repo-specific section, that an
-agent working in WSL on `ZENDA` drives Windows through `powershell.exe` /
+agent working in WSL drives Windows through `powershell.exe` /
 `pwsh.exe` and that this process holds a filtered, non-elevated token: reads
 (`Get-ScheduledTask`, `Get-Service`, the registry) succeed, so the surface looks
 fully available, while writes that need elevation (`Register-ScheduledTask` /
@@ -24,12 +24,12 @@ tightened in [#113](https://github.com/Adam-S-Daniel/_agent-guidance/pull/113)).
 [_agent-guidance#114](https://github.com/Adam-S-Daniel/_agent-guidance/issues/114)
 assessed it against that repo's ADR 0002 three-part test for `base.md` —
 unconditional rule, failure mode is non-recognition, enforced somewhere in
-code — and it clears none: it applies only on ZENDA when changing Windows
+code — and it clears none: it applies only on local Windows when changing Windows
 state; the failure mode is a loud `Access is denied`, which a symptom-keyed
 description matches on; and nothing enforces it. ADR 0002's reach objection
 ("a skill only applies in a session that loaded it") cuts the other way here:
 the ~18 cloud-only fleet repos cannot run `powershell.exe`, so `base.md` would
-ship the text to every session that can never use it, while ZENDA sessions are
+ship the text to every session that can never use it, while local Windows sessions are
 durable and install `adam-local` from the marketplace. `base.md` keeps a
 one-clause pointer; this skill carries the procedure.
 
