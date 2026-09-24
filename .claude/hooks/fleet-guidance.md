@@ -449,7 +449,7 @@ refresh does not move a federated bundle. Neither check belongs in a repo's
   `jodidaniel.com`), kept for Decap publishing. Squash strands commits a
   lockfile pins by sha (2026-08-15: `cannot resolve ref`).
 - **A closing keyword before `#N` or an issue/PR URL, any repo, closes it,
-  PRs too**, from a PR body or any commit message (`--body`, `PR_BODY`);
-  don't count on backticks, and linked issues won't show it
-  (cms-platform#283 via `78617e1`, _agent-guidance#136 by cms-platform#434).
-  Keep the keyword off both; after merging, check what should stay open is.
+  PRs too**, from a PR body or any commit message; backticks don't help,
+  and linked issues won't show it (cms-platform#283 via `78617e1`,
+  _agent-guidance#136 by cms-platform#434). To close: `Closes #N`, not
+  `For #N`; else omit it. After merging, check what should stay open is.
