@@ -75,6 +75,35 @@ no backfill is planned; the file adds the fields git does not capture.
 
 ---
 
+## 2026-09-24 — adam/ci-job-performance — create
+
+- Motivation: CI performance fixes (caching browser downloads, worker counts,
+  sharding, nektos/act as an inner loop) kept getting redone from intuition
+  across cms-platform, adamdaniel.ai and jodidaniel.com, and the intuitive
+  fix was often wrong (e.g. caching Playwright's firefox download makes the
+  job slower, not faster).
+- Change: new skill, adam 1.2.0 -> 1.3.0
+  ([#180](https://github.com/Adam-S-Daniel/agentskills/pull/180)).
+- Eval: none — no eval exists yet.
+- Outcome: opened 2026-09-24 as draft #180; merge is a human step (skill
+  graduation), so the merge date is not recorded here.
+
+## 2026-09-24 — adam/debug-github-workflows — edit
+
+- Motivation: GitHub's per-workflow runs listing intermittently returned a
+  ~3-week-old snapshot while the repo-wide listing, queried seconds later,
+  already held the recent runs — not reproducible afterward (15/15 calls
+  came back current) — which produced false "no recent success" alerts
+  ([jodidaniel.com#264](https://github.com/jodidaniel/jodidaniel.com/issues/264)).
+- Change: adds "A Runs Listing Can Return a Stale Snapshot" — cross-check a
+  second, independent listing before asserting absence
+  ([#180](https://github.com/Adam-S-Daniel/agentskills/pull/180), fixed
+  upstream in
+  [cms-platform#459](https://github.com/Adam-S-Daniel/cms-platform/pull/459)).
+- Eval: none — no eval exists yet.
+- Outcome: opened 2026-09-24 as draft #180 (same PR as the ci-job-performance
+  creation above).
+
 ## 2026-09-23 — adam-local/sync-skills — edit
 
 - Motivation: the SKILL.md uploaded to the claude.ai account still named the
