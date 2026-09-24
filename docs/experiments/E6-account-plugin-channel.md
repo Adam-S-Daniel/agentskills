@@ -37,7 +37,7 @@ added on the account to produce this document.
 | | ZIP uploads (`sync-skills`, today) | Account plugins |
 |---|---|---|
 | chat (web), Desktop Chat tab, Cowork | yes | yes — documented |
-| Claude Code terminal and cloud sessions | yes | yes — documented and measured |
+| Claude Code terminal and cloud sessions | yes | yes — documented; measured for a repo-synced plugin in a terminal (§3.6), not for an uploaded one (§3.5) |
 | **Claude in Chrome** | yes | **yes**, including a personal upload (measured 2026-09-23) |
 | **Mobile app (iOS)** | yes | **yes**, including a personal upload (measured 2026-09-23) |
 | **Desktop Cowork (local)** | yes (`rename-pdfs`, measured 2026-09-23) | **no** for an uploaded plugin; **yes** for a plugin from a repo-synced marketplace, once enabled in the Desktop app too (measured 2026-09-23, §3.6) |
@@ -200,13 +200,14 @@ contain exactly one top-level folder.
 | claude.ai Cowork | **yes** |
 | Claude Desktop, Chat tab | **yes** |
 | Claude Desktop, Cowork tab (local) | **no**. This counts: in the same sitting both controls, `design:design-critique` and `rename-pdfs`, were offered there |
-| Claude Code terminal (laptop) | not in the regular sync: at 18:16 UTC `claude plugin list` still showed only the six Anthropic plugins |
+| Claude Code terminal (laptop) | not in the regular sync: at 18:16 UTC `claude plugin list` still showed only the six Anthropic plugins. This row is the **uploaded** probe; the repo-synced one did reach the terminal (§3.6) |
 
 **Where personal uploads live.** Since 2026-09-21 the command line has listed a
 claude.ai-hosted `My Uploads` marketplace (`claudeai-my-uploads`, "not added"),
-which the web UI does not show (§3). This test explains it: personal uploads
-sit in that marketplace, and the regular sync does not bring them to Claude
-Code. A machine gets them by adding it with
+which the web UI does not show (§3). This test explains it: personal
+*uploads* sit in that marketplace, and the regular sync does not bring them to
+Claude Code. A plugin from a repo-synced marketplace is different: it does
+sync to a terminal (§3.6). A machine gets them by adding it with
 `claude plugin marketplace add --claudeai claudeai-my-uploads` — **inferred**,
 not yet run. For Claude Code this matters little, because repos already install
 this registry's bundles through the marketplace, pinned (ADR 0010).
@@ -225,7 +226,7 @@ this settles only that the route exists.
 likeliest explanation, **inferred**, is that local Cowork loads plugins from
 marketplaces and skills from the skill store, while a personally uploaded
 plugin lives in the `My Uploads` marketplace, which local Cowork doesn't read.
-That is also how Claude Code behaves (above). The support article says the
+That is also how a Claude Code terminal treats an *uploaded* plugin (above). The support article says the
 Cowork tab "sources its skills, plugins, and connectors from this Customize
 configuration", but it doesn't say which marketplaces.
 
@@ -247,6 +248,19 @@ Adam added the repo at
   list is shared.
 - The control (`rename-pdfs`) and a second surface also passed in the same
   sitting.
+- **It reached the laptop's Claude Code terminal too.** Unlike the uploaded
+  probe (§3.5), the repo-synced `e6-probe` was downloaded by the terminal's
+  plugin sync: `~/.claude/plugins/synced/<bucket>/manifest.json` lists
+  `e6-probe` with `marketplaceName: e6-probe-marketplace`, and its files were
+  written at 2026-09-23 19:35:56 UTC. That manifest carries claude.ai's own
+  revision counter (`"0001"`, `"0041"`), not the entry's semver. It still
+  listed `e6-probe` after Adam removed the marketplace on claude.ai, so
+  removal of a repo-synced plugin from a terminal is **not** measured.
+
+Only local Cowork, claude.ai chat, one more surface and the terminal were
+checked for the repo-synced probe. iOS, Chrome, claude.ai Cowork and the
+Desktop Chat tab were measured with the uploaded probe (§3.5) or Anthropic's
+plugins (§3.4), not with this one.
 
 This is why the uploaded plugin in §3.5 never reached local Cowork: it lives
 in the `My Uploads` marketplace, which the Desktop app doesn't list, so there
