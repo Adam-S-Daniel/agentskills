@@ -63,12 +63,25 @@ new domain or subjective criteria.
 
 Repo locations are host-specific (on Windows, check `$env:COMPUTERNAME`).
 
-- **`BOXY`** (Windows): clones live under
+- **The owner's Windows laptop**: clones live under
   `D:\repos\<github-owner-or-org>\<repo>` (e.g.
   `D:\repos\adam-s-daniel\wsl-automation`), never `C:\Users\<user>\...`.
 - **Any Windows host with WSL**: PowerShell run from WSL inherits the launching
   session's elevation, and an agent's is not elevated — see the
-  `windows-elevation-from-wsl` skill (`adam-local`).
+  `windows-elevation-from-wsl` skill.
+
+## Sessions get cut off
+
+**The owner's laptop drops sessions mid-task, often** — any run can end
+between tool calls.
+
+- **Commit and push as you go**, on a branch; a conversation, a dirty tree and
+  a worktree do not survive the laptop.
+- **Persist the expensive part** (root cause, baseline test result, the option
+  ruled out) in a commit message, PR body or ADR.
+- **Say where things stand before a long step** (full suite, CI watch, wide
+  refactor).
+- **Report a resume pointer:** branch, PR number, worktree path, next command.
 
 ## Security
 
@@ -355,44 +368,44 @@ reusable-workflow ref is for review to catch.
   agent looked in-flight for an hour).
 - **A live-test prompt states the credential boundary** — which
   `HOME`/profile, what it may read, and that it must not copy real
-  credentials to make the test pass (a reviewer once did, unasked). Supply a
+  credentials to make the test pass (a reviewer once did). Supply a
   throwaway credential or run unauthenticated; else it's the operator's call.
 - **A scratch tree can still reach production.** `cp -a` copies
   `.git/config`, so a copy inherits `origin` (one pushed 14 commits to a
   default branch); but `git remote remove origin` inside a
   `git worktree` strips the PARENT's remote. Before disarming anything, run
-  **`/adam:disarm-inherited-reach`**.
+  **`/adam-coding-anywhere:disarm-inherited-reach`**.
 
 ## Skills ecosystem
 
-- The registry is `Adam-S-Daniel/agentskills`: bundles `adam`
-  (general-purpose, cloud-safe; default-on), `adam-local` (machine-bound)
-  and `fastmail`, each with `skills/<skill>/`; invoke as `/adam:<skill>`;
-  its `setup.sh` sets up a machine.
+- The registry is `Adam-S-Daniel/adam-agentskills`: plugins
+  `adam-anything-anywhere`, `adam-coding-anywhere` (cloud-safe, default-on),
+  `adam-coding-local`, `adam-non-coding-local` (machine-bound); invoke
+  `/<plugin>:<skill>`; `setup.sh` sets up a machine.
 - **A `git push` failing in EVERY repo** means `setup.sh`'s GLOBAL
   sync-skills pre-push hook is stale: re-run `bash setup.sh` in the registry.
 - Cloud/ephemeral sessions get **no** plugins from repo-declared settings
-  (agentskills' ADR 0001): the repo's `skills.lock` and `skills-bootstrap`
+  (registry ADR 0001): the repo's `skills.lock` and `skills-bootstrap`
   SessionStart hook install the bundles, digest-verified; read the
-  `skills:` verdict at session start.
+  `skills:` verdict at start.
 - **Adoption is opt-in and double-keyed:** an entry in `_agent-guidance`'s
   `repos.yml` AND a `skills.lock` the repo committed itself (the sync never
   writes one). Bundles cost always-on context, so a repo may be deliberately
   out — check for `skills.lock`, don't guess.
 - **Terminals (CLI 2.1.273+) load the claude.ai account store too**, as
   `anthropic-skills:<name>`; `setup.sh` opts a machine out
-  (`syncClaudeAiSkills: false`), cloud sessions can't (agentskills' ADR 0010).
-- New reusable skills graduate **into** the registry (sensitive ones into
-  `agentskills-private`); a long skill splits across files.
+  (`syncClaudeAiSkills: false`), cloud sessions can't (registry ADR 0010).
+- New reusable skills graduate **into** the registry (sensitive ones in
+  `adam-agentskills-private`); a long skill splits across files.
 
 ## Two setup gaps you may close, and must not nag about
 
 Two setup gaps no repo can commit, both silent when missing. **Detect first,
-and say nothing when the check passes.** Run it once per session, not as a
-greeting and not only for skills work.
+and say nothing when the check passes.** Once per session, not as a
+greeting, not only for skills work.
 
 **Cloud (claude.ai) — PROMPT, never act.** Resolve `$project` first:
-`$CLAUDE_PROJECT_DIR` when set (**unset** here — `remote_mobile`,
+`$CLAUDE_PROJECT_DIR` when set (**unset** in `remote_mobile`,
 2026-08-25), else the nearest ancestor of the cwd holding more than one repo
 checkout; an empty value probes `/` and silently suppresses the prompt.
 Prompt only when **all four** hold:
@@ -404,23 +417,23 @@ Prompt only when **all four** hold:
    `skills-bootstrap` SessionStart hook;
 4. some child ships `.claude/hooks/skills-bootstrap.sh`.
 
-Then say it once, name the snippet's home (`docs/multi-repo-delivery.md` in
-agentskills — do not paraphrase it), and drop it.
+Then say it once, name the snippet's home (adam-agentskills'
+`docs/multi-repo-delivery.md` — do not paraphrase it), and drop it.
 
 **Durable machine — ACT, then one line.** `claude plugin marketplace list
 --json` returns `[]` when nothing is configured: **absent** → `claude plugin
-marketplace add Adam-S-Daniel/agentskills` and install the bundles wanted;
-**marketplace behind** → `claude plugin marketplace update agentskills`;
+marketplace add Adam-S-Daniel/adam-agentskills` and install the plugins wanted;
+**marketplace behind** → `claude plugin marketplace update adam-agentskills`;
 **install behind** → below; **both current** → silence.
 The clone (`~/.claude/plugins/marketplaces/<name>/` — find it, never assume
-the path) auto-updates while the installed bundle
+it) auto-updates while the installed bundle
 (`~/.claude/plugins/cache/<marketplace>/<bundle>/<version>/`) never moves, so
-check the INSTALL (`WINDOWSLAPTOP`, 2026-01-01: **100 commits** behind):
+check the INSTALL (the owner's laptop, 2026-08-31: **381 commits** behind):
 `~/.claude/plugins/installed_plugins.json` carries a `gitCommitSha` per
 entry; `git -C <clone> merge-base --is-ancestor <that sha> HEAD` succeeding
 means behind, `git -C <clone> rev-list --count <sha>..HEAD` says by how far.
-**`claude plugin update` may not fix it, and will say it did** (it gates on
-the `version` string alone; agentskills' ADR 0009) — uninstall and reinstall
+**`claude plugin update` may not fix it, yet says it did** (it gates on
+the `version` string alone; registry ADR 0009) — uninstall and reinstall
 instead. An update changes what loads **next** session; a marketplace
 refresh does not move a federated bundle. Neither check belongs in a repo's
 `AGENTS.md`.
