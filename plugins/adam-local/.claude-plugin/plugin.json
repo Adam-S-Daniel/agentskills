@@ -1,6 +1,6 @@
 {
   "name": "adam-local",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "description": "Adam's machine-bound skills that need local resources (WSL/Windows homes, local files, a signed-in browser): PDF tooling, Claude Code session/settings/memory management, skill sync.",
   "author": { "name": "Adam Daniel" }
 }

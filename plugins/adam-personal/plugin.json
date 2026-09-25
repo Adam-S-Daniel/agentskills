@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "adam-personal",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "The skills Adam's claude.ai account carries, for claude.ai chat and Cowork, the Desktop app, Claude in Chrome and mobile. Enable it on claude.ai and in the Desktop app; it is not meant for Claude Code sessions, where repos install the bundles.",
   "author": { "name": "Adam Daniel" },
   "repository": "https://github.com/Adam-S-Daniel/agentskills",
